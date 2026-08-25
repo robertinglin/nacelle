@@ -22,6 +22,7 @@ function streamChunk(value) {
 
 function toBytes(value) {
   if (value instanceof StreamChunk) return value;
+  if (value.constructor?.isBuffer?.(value)) return value;
   if (value instanceof Uint8Array) return streamChunk(value);
   if (typeof value === 'string') return streamChunk(new TextEncoder().encode(value));
   if (value instanceof ArrayBuffer) return streamChunk(new Uint8Array(value.slice(0)));
@@ -762,7 +763,8 @@ class WritableImpl extends EventEmitter {
 export function Writable(options = {}) {
   if (new.target) return Reflect.construct(WritableImpl, [options], new.target);
   const initialized = new WritableImpl(options);
-  Object.assign(this, initialized);
+  if (this === undefined || this === null) return initialized;
+  return Object.assign(this, initialized);
 }
 
 Writable.prototype = WritableImpl.prototype;

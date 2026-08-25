@@ -365,8 +365,10 @@ export class Readable extends EventEmitter {
 
   resume() {
     if (this._destroyed) return this;
+    const wasFlowing = this._flowing;
     this._flowing = true;
     this._readableState.flowing = true;
+    if (!wasFlowing) this.emit('resume');
     while (this._buffer.length) this.emit('data', this.read());
     this._maybeEmitEnd();
     this._readOnce();
@@ -374,8 +376,10 @@ export class Readable extends EventEmitter {
   }
 
   pause() {
+    const wasFlowing = this._flowing;
     this._flowing = false;
     this._readableState.flowing = false;
+    if (wasFlowing) this.emit('pause');
     return this;
   }
 

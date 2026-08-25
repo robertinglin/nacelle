@@ -385,11 +385,15 @@ export class Readable extends EventEmitter {
     };
     const onEnd = () => destination.end();
     const onDrain = () => this.resume();
-    this._pipes.set(destination, { onData, onEnd, onDrain });
+    const onUnpipe = (source) => {
+      if (source === this) this.unpipe(destination);
+    };
+    this._pipes.set(destination, { onData, onEnd, onDrain, onUnpipe });
     this._readableState.pipes.push(destination);
     this.on('data', onData);
     this.on('end', onEnd);
     destination.on?.('drain', onDrain);
+    destination.on?.('unpipe', onUnpipe);
     this.resume();
     return destination;
   }
@@ -401,7 +405,11 @@ export class Readable extends EventEmitter {
         this.off('data', pipe.onData);
         this.off('end', pipe.onEnd);
         destination.off?.('drain', pipe.onDrain);
+        destination.off?.('unpipe', pipe.onUnpipe);
         this._pipes.delete(destination);
+        const index = this._readableState.pipes.indexOf(destination);
+        if (index !== -1) this._readableState.pipes.splice(index, 1);
+        destination.emit?.('unpipe', this);
       }
     } else {
       for (const target of this._pipes.keys()) this.unpipe(target);

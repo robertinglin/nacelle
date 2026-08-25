@@ -817,8 +817,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           return processObject.send({ type: 'bnh-cluster-listening', address });
         }
       : undefined;
-    const net = createBrowserNet({ network: virtualNetwork, dns, BufferClass: Buffer, trackTask, onListening: notifyClusterListening });
-    const dgram = createBrowserDgram({ network: virtualNetwork, BufferClass: Buffer, trackTask });
+    const clusterGroupId = processObject._bnhClusterGroupId;
+    const processOwner = runtimeOptions.processObject || processObject;
+    const net = createBrowserNet({ network: virtualNetwork, dns, BufferClass: Buffer, trackTask, onListening: notifyClusterListening, clusterGroupId, processOwner });
+    const dgram = createBrowserDgram({ network: virtualNetwork, BufferClass: Buffer, trackTask, clusterGroupId, processOwner });
+    processOwner.on?.('disconnect', () => virtualNetwork.unbindProcess?.(processOwner));
     const activeProxy = proxyCapability.mode === 'proxy' && proxyCapability.enabled
       && proxyCapability.capabilityGranted && proxyCapability.adapter
       ? proxyCapability
@@ -1880,6 +1883,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           processObject.exitCode = (injectedProcess.exitCode !== undefined) ? injectedProcess.exitCode : processObject.exitCode;
           processObject.env = injectedProcess.env || processObject.env;
           processObject.argv = injectedProcess.argv || processObject.argv;
+          processObject._bnhClusterGroupId = injectedProcess._bnhClusterGroupId;
           processObject.cwd = (injectedProcess.cwd) ? (() => injectedProcess.cwd()) : processObject.cwd;
           processObject.chdir = (value) => { if (injectedProcess.chdir) return injectedProcess.chdir(value); processObject.cwd = () => normalizePath(value, processObject.cwd()); };
           processObject.config = BROWSER_PROCESS_CONFIG;

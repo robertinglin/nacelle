@@ -7,6 +7,18 @@ function schedule(callback) {
   queueMicrotask(callback);
 }
 
+export function virtualNetworkError(code, syscall, address, port, cause = undefined) {
+  const endpoint = port === undefined ? address : `${address}:${port}`;
+  const error = new Error(`${syscall} ${code} ${endpoint}`);
+  error.code = code;
+  error.errno = code;
+  error.syscall = syscall;
+  error.address = address;
+  if (port !== undefined) error.port = port;
+  if (cause !== undefined) error.cause = cause;
+  return error;
+}
+
 function networkError(code, syscall, address, port) {
   const endpoint = port === undefined ? address : `${address}:${port}`;
   const error = new Error(`${syscall} ${code} ${endpoint}`);
@@ -34,6 +46,7 @@ function isIPv4(value) {
 
 function isIPv6(value) {
   const text = String(value).toLowerCase();
+  if (text === '::') return true;
   if (!text || text.includes(':::')) return false;
   const [head, tail, ...extra] = text.split('::');
   if (extra.length) return false;
@@ -68,9 +81,15 @@ function isWildcard(address) {
 }
 
 function addressesOverlap(left, right) {
-  return left === right || isWildcard(left) || isWildcard(right)
-    ? virtualAddressFamily(left) === virtualAddressFamily(right)
-    : false;
+  const leftAddress = typeof left === 'string' ? left : left.address;
+  const rightAddress = typeof right === 'string' ? right : right.address;
+  if (leftAddress === rightAddress) return true;
+  const leftFamily = virtualAddressFamily(leftAddress);
+  const rightFamily = virtualAddressFamily(rightAddress);
+  if (leftFamily === rightFamily) return isWildcard(leftAddress) || isWildcard(rightAddress);
+  const leftDualStack = leftAddress === ANY_V6 && left.ipv6Only !== true;
+  const rightDualStack = rightAddress === ANY_V6 && right.ipv6Only !== true;
+  return (leftDualStack && rightFamily === 4) || (rightDualStack && leftFamily === 4);
 }
 
 function endpointKey(address, port) {
@@ -85,9 +104,9 @@ function validatePort(port) {
   return value;
 }
 
-function findBinding(bindings, address, port) {
+function findBinding(bindings, address, port, options = {}) {
   const candidates = [...bindings.values()].filter((binding) => binding.port === port
-    && addressesOverlap(binding.address, address));
+    && addressesOverlap(binding, { address, ...options }));
   return candidates.find((binding) => binding.address === address) || candidates[0];
 }
 
@@ -103,7 +122,7 @@ export function createVirtualNetwork({ transport } = {}) {
   let nextTcpPort = 41000;
   let nextUdpPort = 51000;
 
-  function allocatePort(bindings, address, kind) {
+  function allocatePort(bindings, address, kind, options) {
     for (let attempt = 0; attempt < 24576; attempt += 1) {
       const candidate = kind === 'tcp' ? nextTcpPort : nextUdpPort;
       if (kind === 'tcp') {
@@ -113,24 +132,58 @@ export function createVirtualNetwork({ transport } = {}) {
         nextUdpPort += 1;
         if (nextUdpPort > 60000) nextUdpPort = 51000;
       }
-      if (!findBinding(bindings, address, candidate)) return candidate;
+      if (!findBinding(bindings, address, candidate, options)) return candidate;
     }
     throw networkError('EADDRINUSE', 'bind', address, 0);
   }
 
-  function bind(bindings, owner, address, requestedPort, kind) {
+  function bind(bindings, owner, address, requestedPort, kind, options = {}) {
     const port = validatePort(requestedPort);
-    const actualPort = port || allocatePort(bindings, address, kind);
-    const existing = findBinding(bindings, address, actualPort);
-    if (existing && existing.owner !== owner) throw networkError('EADDRINUSE', 'bind', address, actualPort);
-    const binding = { owner, address, port: actualPort, key: endpointKey(address, actualPort) };
+    const clusterGroupId = options.clusterGroupId;
+    const shared = clusterGroupId && [...bindings.values()].find((binding) => binding.clusterGroupId === clusterGroupId
+      && binding.address === address);
+    const actualPort = port || shared?.port || allocatePort(bindings, address, kind, options);
+    const existing = findBinding(bindings, address, actualPort, options);
+    if (existing) {
+      if (existing.owner === owner) return { address: existing.address, port: existing.port };
+      if (clusterGroupId && existing.clusterGroupId === clusterGroupId) {
+        existing.owners.add(owner);
+        existing.processOwners.set(owner, options.processOwner);
+        return { address: existing.address, port: existing.port };
+      }
+      throw networkError('EADDRINUSE', 'bind', address, actualPort);
+    }
+    const binding = {
+      owner,
+      owners: new Set([owner]),
+      processOwners: new Map([[owner, options.processOwner]]),
+      address,
+      port: actualPort,
+      key: endpointKey(address, actualPort),
+      clusterGroupId,
+      ipv6Only: options.ipv6Only === true,
+    };
     bindings.set(binding.key, binding);
     return { address, port: actualPort };
   }
 
   function unbind(bindings, owner) {
     for (const [key, binding] of bindings) {
-      if (binding.owner === owner) bindings.delete(key);
+      if (!binding.owners?.delete(owner)) continue;
+      binding.processOwners?.delete(owner);
+      if (!binding.owners.size) bindings.delete(key);
+    }
+  }
+
+  function unbindProcess(bindings, processOwner) {
+    for (const [key, binding] of bindings) {
+      const removed = [...binding.owners].filter((owner) => binding.processOwners?.get(owner) === processOwner);
+      for (const owner of removed) {
+        binding.owners.delete(owner);
+        binding.processOwners.delete(owner);
+        owner._networkClosed?.();
+      }
+      if (!binding.owners.size) bindings.delete(key);
     }
   }
 
@@ -164,8 +217,8 @@ export function createVirtualNetwork({ transport } = {}) {
         remotePort: port,
       };
       connection.serverSocket = serverSocket || server.owner._createAcceptedSocket(connection);
-      server.owner._acceptConnection(connection);
       onConnected(connection);
+      server.owner._acceptConnection(connection);
     };
 
     const hook = transport && (transport.connect || (typeof transport === 'function' ? transport : null));
@@ -256,13 +309,17 @@ export function createVirtualNetwork({ transport } = {}) {
   }
 
   return {
-    bindTcp: (owner, address, port) => bind(tcpBindings, owner, address, port, 'tcp'),
+    bindTcp: (owner, address, port, options) => bind(tcpBindings, owner, address, port, 'tcp', options),
     unbindTcp: (owner) => unbind(tcpBindings, owner),
+    unbindProcess: (processOwner) => {
+      unbindProcess(tcpBindings, processOwner);
+      unbindProcess(udpBindings, processOwner);
+    },
     connectTcp,
     bindPipe,
     unbindPipe,
     connectPipe,
-    bindUdp: (owner, address, port) => bind(udpBindings, owner, address, port, 'udp'),
+    bindUdp: (owner, address, port, options) => bind(udpBindings, owner, address, port, 'udp', options),
     unbindUdp: (owner) => unbind(udpBindings, owner),
     sendUdp,
     reset() {

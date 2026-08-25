@@ -69,9 +69,26 @@ function parseSendArguments(sendHandle, options, callback) {
     sendOptions = undefined;
   }
   if (handle !== undefined && handle !== null) {
-    if (typeof handle !== 'object' || !('keepOpen' in handle)) throw unsupportedHandleError();
+    const virtualHandle = handle && typeof handle === 'object' && handle._network
+      && (typeof handle.destroy === 'function'
+        || (typeof handle.close === 'function' && 'boundPort' in handle));
+    if (!virtualHandle && (typeof handle !== 'object' || !('keepOpen' in handle))) throw unsupportedHandleError();
   }
   return { options: sendOptions, callback: done };
+}
+
+function sendVirtualHandle(processHandle, message, handle, callback) {
+  const childProcess = processHandle?.process;
+  if (!childProcess || typeof childProcess.emit !== 'function') return false;
+  queueMicrotask(() => {
+    if (!processHandle.connected) {
+      callback?.(errorWithCode('ERR_IPC_CLOSED', 'IPC channel is closed'));
+      return;
+    }
+    childProcess.emit('message', message, handle);
+    callback?.(null);
+  });
+  return true;
 }
 
 function callbackFromArguments(...values) {
@@ -79,6 +96,18 @@ function callbackFromArguments(...values) {
     if (typeof values[index] === 'function') return values[index];
   }
   return null;
+}
+
+function normalizeListeningAddress(address) {
+  if (address === null || typeof address !== 'object' || Array.isArray(address)) return address;
+  const family = address.family;
+  const addressType = address.addressType === 6 || family === 6 || family === 'IPv6'
+    || String(address.address || '').includes(':') ? 6 : 4;
+  return {
+    ...address,
+    addressType,
+    family: addressType === 6 ? 'IPv6' : 'IPv4',
+  };
 }
 
 class ClusterWorker extends BrowserEventEmitter {
@@ -91,6 +120,7 @@ class ClusterWorker extends BrowserEventEmitter {
     this._child = child;
     this.exitedAfterDisconnect = false;
     this._disconnected = false;
+    this._exited = false;
   }
 
   get suicide() {
@@ -102,7 +132,7 @@ class ClusterWorker extends BrowserEventEmitter {
   }
 
   isDead() {
-    return Boolean(this.process?.terminal || ['exited', 'failed'].includes(this.process?.state));
+    return Boolean(this._exited || this.process?.terminal || ['exited', 'failed'].includes(this.process?.state));
   }
 
   send(message, sendHandle, options, callback) {
@@ -119,6 +149,7 @@ class ClusterWorker extends BrowserEventEmitter {
       throw errorWithCode('ERR_INVALID_ARG_TYPE', 'worker send options must be an object');
     }
     try {
+      if (sendHandle && sendVirtualHandle(this.process, message, sendHandle, parsed.callback)) return true;
       return this.process.send(message, parsed.callback ? (error) => parsed.callback(error) : undefined);
     } catch (error) {
       if (parsed.callback) {
@@ -204,6 +235,8 @@ function makeWorkerCluster(options) {
     emitter.emit('disconnect', worker);
   });
   processObject.on?.('exit', (code, signal) => {
+    worker._disconnected = true;
+    worker._exited = true;
     worker.emit('exit', code, signal);
     emitter.emit('exit', worker, code, signal);
   });
@@ -215,6 +248,7 @@ function makePrimaryCluster(options) {
   const processObject = options.process || null;
   const processFactory = options.processFactory || createVirtualProcess;
   const primaryState = { workers: Object.create(null), nextWorkerId: 1, closed: false };
+  const clusterGroupId = String(options.clusterGroupId || options.runId || `cluster-${Date.now()}`);
   const processStates = new WeakMap();
   if (processObject && typeof processObject === 'object') processStates.set(processObject, primaryState);
   let settings = cloneSettings(options.settings);
@@ -329,6 +363,7 @@ function makePrimaryCluster(options) {
         stdout: settings.silent ? undefined : options.stdout,
         stderr: settings.silent ? undefined : options.stderr,
       });
+      processHandle.process._bnhClusterGroupId = clusterGroupId;
       const worker = new ClusterWorker(INTERNAL, processHandle, id, cluster);
       state.workers[id] = worker;
       emitter.emit('fork', worker);
@@ -342,8 +377,9 @@ function makePrimaryCluster(options) {
       processHandle.on?.('message', (message, handle) => {
         runInProcessContext(parentProcess, () => {
           if (message?.type === 'bnh-cluster-listening') {
-            worker.emit('listening', message.address);
-            emitter.emit('listening', worker, message.address);
+            const address = normalizeListeningAddress(message.address);
+            worker.emit('listening', address);
+            emitter.emit('listening', worker, address);
             return;
           }
           worker.emit('message', message, handle);
@@ -362,6 +398,7 @@ function makePrimaryCluster(options) {
       processHandle.on?.('exit', (code, signal) => {
         runInProcessContext(parentProcess, () => {
           worker._disconnected = true;
+          worker._exited = true;
           worker.emit('exit', code, signal);
           emitter.emit('exit', worker, code, signal);
           delete state.workers[id];

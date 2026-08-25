@@ -403,7 +403,11 @@ export class Server extends EventEmitter {
     schedule(() => {
       if (this.listening) return;
       try {
-        const result = this._network.bindTcp(this, address, port);
+        const result = this._network.bindTcp(this, address, port, {
+          clusterGroupId: this._config.clusterGroupId,
+          processOwner: this._config.processOwner,
+          ipv6Only: options.ipv6Only === true,
+        });
         this._boundPort = result.port;
         this._boundAddress = result.address;
         this._taskRelease = this._config.trackTask?.() || null;
@@ -477,6 +481,17 @@ export class Server extends EventEmitter {
     return this;
   }
 
+  _networkClosed() {
+    if (!this.listening) return;
+    this.listening = false;
+    this._boundPort = null;
+    this._boundAddress = null;
+    this._taskRelease?.();
+    this._taskRelease = null;
+    for (const socket of [...this._activeSockets]) socket.destroy();
+    schedule(() => this.emit('close'));
+  }
+
   getConnections(callback) {
     schedule(() => callback?.(null, this._activeSockets.size));
   }
@@ -528,9 +543,9 @@ class BrowserBlockList {
 
 const defaultConfig = { network: sharedVirtualNetwork, dns: createBrowserDns() };
 
-export function createBrowserNet({ network = sharedVirtualNetwork, dns = createBrowserDns(), transport, BufferClass, trackTask, onListening } = {}) {
+export function createBrowserNet({ network = sharedVirtualNetwork, dns = createBrowserDns(), transport, BufferClass, trackTask, onListening, clusterGroupId, processOwner } = {}) {
   const configuredNetwork = transport && network === sharedVirtualNetwork ? createVirtualNetwork({ transport }) : network;
-  const config = { network: configuredNetwork, dns, transport, BufferClass, trackTask, onListening };
+  const config = { network: configuredNetwork, dns, transport, BufferClass, trackTask, onListening, clusterGroupId, processOwner };
   const ConfiguredSocket = class BrowserNetSocket extends Socket {
     constructor(options = {}) { super(options, config); }
   };

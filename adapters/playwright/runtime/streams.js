@@ -197,6 +197,7 @@ export class Readable extends EventEmitter {
     this._preserveStrings = Boolean(options.preserveStrings);
     this._decoder = null;
     this._flowing = false;
+    this._readableState = { pipes: [], flowing: false };
     this._reading = false;
     this._pipes = new Map();
     this._sourceWaiter = null;
@@ -365,6 +366,7 @@ export class Readable extends EventEmitter {
   resume() {
     if (this._destroyed) return this;
     this._flowing = true;
+    this._readableState.flowing = true;
     while (this._buffer.length) this.emit('data', this.read());
     this._maybeEmitEnd();
     this._readOnce();
@@ -373,6 +375,7 @@ export class Readable extends EventEmitter {
 
   pause() {
     this._flowing = false;
+    this._readableState.flowing = false;
     return this;
   }
 
@@ -383,6 +386,7 @@ export class Readable extends EventEmitter {
     const onEnd = () => destination.end();
     const onDrain = () => this.resume();
     this._pipes.set(destination, { onData, onEnd, onDrain });
+    this._readableState.pipes.push(destination);
     this.on('data', onData);
     this.on('end', onEnd);
     destination.on?.('drain', onDrain);

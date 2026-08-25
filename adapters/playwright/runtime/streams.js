@@ -399,6 +399,7 @@ export class Readable extends EventEmitter {
     this.on('end', onEnd);
     destination.on?.('drain', onDrain);
     destination.on?.('unpipe', onUnpipe);
+    destination.emit?.('pipe', this);
     this.resume();
     return destination;
   }

@@ -1,0 +1,4 @@
+# .maxtokens — maxtokens role routing
+implementer: codex:gpt-5.6-luna:high
+orchestrator: gpt-5.6-terra
+architect: gpt-5.6-sol

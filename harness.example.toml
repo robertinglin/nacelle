@@ -1,0 +1,249 @@
+version = 1
+
+[project]
+# Target checkout. It is cloned from Node.js GitHub automatically and shared
+# across variants so converted work can move from v22 to v24.
+target_repo = ".bnh-state/target"
+target_repo_url = "https://github.com/nodejs/node.git"
+target_repo_ref = "main"
+# Node.js source is cloned and updated automatically per selected variant.
+node_repo = ".bnh-state/{variant}/node"
+node_repo_url = "https://github.com/nodejs/node.git"
+node_repo_ref = "main"
+# Keep every database, checkout, log, patch, and worktree inside this project.
+state_dir = ".bnh-state/{variant}"
+base_ref = "main"
+integration_branch = "bnh/integration"
+default_variant = "v22"
+# Build the checkout at the exact revision under test, then point here.
+node_binary = "./out/Release/node"
+
+[variants.v22]
+node_ref = "v22.x"
+target_ref = "v22.x"
+target_branch = "bnh/integration-v22"
+
+[variants.v24]
+node_ref = "v24.x"
+target_ref = "v24.x"
+base_variant = "v22"
+target_branch = "bnh/integration-v24"
+
+[discovery]
+include = [
+  # All JavaScript testpy suites, including ESM and special suite layouts.
+  "test/*/test-*.js",
+  "test/*/test-*.mjs",
+  "test/*/test-*.cjs",
+  "test/message/*.js",
+  "test/message/*.mjs",
+  "test/pseudo-tty/*.js",
+  "test/pseudo-tty/*.mjs",
+  "test/addons/*/*.js",
+  "test/addons/*/*.mjs",
+  "test/js-native-api/*/*.js",
+  "test/js-native-api/*/*.mjs",
+  "test/node-api/*/*.js",
+  "test/node-api/*/*.mjs",
+  "test/sqlite/*/*.js",
+  "test/sqlite/*/*.mjs",
+]
+exclude = [
+  # These are imported by tests, not standalone Node test cases.
+  "test/common/**",
+  "test/fixtures/**",
+  "test/testpy/**",
+]
+limit = 0
+max_source_chars_in_prompt = 24000
+
+[target]
+# The adapter is outside the agent-editable target repository.
+command = ["node", "{config_dir}/adapters/playwright/daemon.mjs"]
+cwd = "{worktree}"
+protocol = "jsonl"
+timeout_seconds = 120
+inherit_env = false
+max_output_chars = 120000
+
+[target.env]
+# Double braces survive the harness's TOML placeholder pass and are then
+# replaced by the Playwright adapter after it allocates a port.
+BNH_SERVER_COMMAND = '["npm","run","dev","--","--host","127.0.0.1","--port","{{port}}"]'
+BNH_BROWSER_URL = "http://127.0.0.1:{{port}}/harness.html"
+BNH_SERVER_START_TIMEOUT_MS = "60000"
+BNH_BROWSER = "chromium"
+BNH_REUSE_PAGE = "1"
+BNH_BUNDLE_MODE = "common"
+BNH_BUNDLE_MAX_BYTES = "100663296"
+
+# Browser-native virtual networking is the default. A target bridge may expose
+# an adapter, and this optional selection lets a user explicitly opt into it.
+[target.proxy]
+mode = "virtual"
+enabled = false
+capability = { proxy = false }
+
+[oracle]
+enabled = true
+command = ["python3", "-m", "browser_node_harness", "adapter", "reference-node", "{request}"]
+cwd = "{node_repo}"
+timeout_seconds = 120
+inherit_env = false
+max_output_chars = 120000
+
+[oracle.env]
+PYTHONPATH = "{config_dir}/src"
+
+[agent]
+# Any coding-agent CLI works. This launcher runs OpenCode Zen's free models
+# first, then zero-priced OpenRouter and NVIDIA NIM models, and moves to the
+# next free model after a quota or rate-limit response. It never falls back to
+# a paid model. NIM uses the NVIDIA credential already configured in OpenCode, or NVIDIA_API_KEY when provided.
+command = ["python3", "-m", "browser_node_harness.opencode_agent"]
+provider = "opencode"
+model = "auto"
+core_features = [
+  "globals",
+  "console",
+  "buffer-encoding",
+  "assert",
+  "structured-clone",
+  "promise-microtasks",
+  "abort-signal",
+  "event-emitter",
+  "error-lifecycle",
+  "stdout",
+  "stderr",
+  "vfs",
+  "vfs-io",
+  "network",
+  "http-fetch",
+  "ipc",
+  "streams",
+  "streams-backpressure",
+  "workers-communication",
+  "transferables",
+  "process",
+  "timers",
+  "module-loader",
+  "crypto",
+  "os-platform",
+  "diagnostics",
+  "compression",
+  "wasm",
+  "native-boundaries",
+]
+cwd = "{worktree}"
+prompt_transport = "stdin"
+timeout_seconds = 1800
+inherit_env = true
+max_output_chars = 200000
+
+[agent.env]
+PYTHONPATH = "{config_dir}/src"
+BNH_OPENCODE_AGENT = "build"
+BNH_OPENCODE_MODELS_URL = "https://opencode.ai/zen/v1/models"
+BNH_OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+BNH_OPENCODE_INCLUDE_OPENROUTER = "true"
+BNH_OPENCODE_INCLUDE_NIM = "true"
+BNH_NIM_MODELS_URL = "https://integrate.api.nvidia.com/v1/models"
+BNH_NIM_FREE_MODELS = "deepseek-ai/deepseek-v4-flash-0731"
+BNH_OPENCODE_CATALOG_CACHE = "{state_dir}/opencode-model-catalog.json"
+BNH_OPENCODE_REFRESH_CATALOG = "false"
+BNH_OPENCODE_MAX_MODELS = "6"
+BNH_OPENCODE_MODEL_IDLE_TIMEOUT_SECONDS = "600"
+
+[primitives]
+# Agents establish these shared browser capabilities before upstream test work begins.
+enabled = true
+items = [
+  "stdout-stderr",
+  "vfs",
+  "network",
+  "ipc",
+  "streams",
+  "process",
+  "timers",
+  "module-loader",
+  "globals",
+  "console",
+  "buffer-encoding",
+  "assert",
+  "structured-clone",
+  "promise-microtasks",
+  "abort-signal",
+  "event-emitter",
+  "uncaught-exception",
+  "unhandled-rejection",
+  "exit-behavior",
+  "data-encoding-serialization",
+  "vfs-io",
+  "http-fetch",
+  "streams-backpressure",
+  "workers-communication",
+  "system-platform-process",
+  "system-platform-module-loading",
+  "system-platform-crypto",
+  "system-platform-os-platform",
+  "system-platform-diagnostics",
+  "system-platform-compression",
+  "system-platform-wasm",
+  "system-platform-unsupported-boundaries",
+]
+max_rounds = 3
+
+[workspace]
+# For repositories that need dependencies in every worktree, add:
+# [workspace.setup]
+# command = ["npm", "ci", "--ignore-scripts"]
+# cwd = "{worktree}"
+# timeout_seconds = 600
+# inherit_env = false
+
+[loop]
+workers = 3
+# Canonical baseline/refresh concurrency. Candidate validation is intentionally serial per agent.
+target_concurrency = 3
+# Stop target scans after 500 actionable failures so shared fixes can be applied
+# before repeating the entire suite.
+scan_failure_limit = 500
+scan_timeout_seconds = 15
+# Keep a backlog of tasks ready to replace agents as they finish.
+queue_depth = 12
+batch_size = 2
+# Keep candidate validation meaningful without making every patch wait on a
+# dozen browser sessions before the next subsystem can start.
+guard_tests = 4
+mutation_tests = 1
+# Zero means continue until green or manually interrupted.
+max_iterations = 0
+# After this many consecutive rounds with no accepted patch, refresh the full
+# eligible target set before continuing with another strategy rotation.
+stall_iterations = 5
+refresh_all_every = 5
+random_seed = 7
+accept_partial = true
+# Zero means no per-test attempt ceiling.
+max_attempts_per_test = 0
+
+[validation]
+max_patch_bytes = 1500000
+max_changed_files = 80
+require_source_override = true
+forbidden_globs = [
+  # Protect the fixed page-side test bridge and any target-owned adapter entry
+  # points after initial integration. Adjust these to your repository layout.
+  "**/harness.html",
+  "**/harness-bridge.*",
+  "**/target-bridge.*",
+  "**/run-browser-test*",
+  "**/test-adapter*",
+]
+
+# Add the target repository's own build/lint/unit-test gate:
+# [validation.check]
+# command = ["npm", "test"]
+# cwd = "{worktree}"
+# timeout_seconds = 600
+# inherit_env = false

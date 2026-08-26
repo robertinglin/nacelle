@@ -146,6 +146,26 @@ const runtimeExternalAssets = [
   },
 ];
 
+// The host addon-build pipeline maps each expected build/Release/*.node path
+// to a compiled wasm32 artifact. Those artifacts are not in either checkout,
+// so they are registered directly against their virtual .node paths.
+async function loadAddonManifest(request) {
+  const explicit = process.env.BNH_ADDON_MANIFEST;
+  const candidate = explicit
+    ? path.resolve(explicit)
+    : path.resolve(request.paths.state_dir || '.', 'addon-manifest.json');
+  let raw;
+  try {
+    raw = await readFile(candidate, 'utf8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+  const parsed = JSON.parse(raw);
+  if (!parsed || Number(parsed.version) !== 1 || !Array.isArray(parsed.artifacts)) return null;
+  return parsed;
+}
+
 export async function collectBundle(request) {
   const root = path.resolve(request.paths.node_repo);
   const targetRoot = path.resolve(request.paths.worktree);
@@ -231,6 +251,31 @@ export async function collectBundle(request) {
   }
 
   await dependencies(entry, request.test.source_override ?? undefined);
+  const addonManifest = await loadAddonManifest(request);
+  if (addonManifest) {
+    for (const artifact of addonManifest.artifacts) {
+      if (!artifact?.node || !artifact?.wasm) continue;
+      const safe = normalizeRelative(artifact.node);
+      if (included.has(safe)) continue;
+      const absolute = path.resolve(String(artifact.wasm));
+      let size;
+      try {
+        size = (await stat(absolute)).size;
+      } catch {
+        omitted.push({ path: safe, reason: 'addon-artifact-missing', bytes: 0 });
+        continue;
+      }
+      if (size > maxFileBytes) {
+        omitted.push({ path: safe, reason: 'file-too-large', bytes: size });
+        continue;
+      }
+      if (totalBytes + size > maxBundleBytes) {
+        throw new Error(`test bundle exceeded BNH_BUNDLE_MAX_BYTES=${maxBundleBytes}`);
+      }
+      totalBytes += size;
+      included.set(safe, { relative: safe, absolute, size, override: undefined });
+    }
+  }
   if (bundleMode !== 'entry') {
     await walk('test/common');
     await walk('test/fixtures');

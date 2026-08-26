@@ -216,6 +216,22 @@ class Database:
                     FOREIGN KEY(run_id) REFERENCES runs(id),
                     FOREIGN KEY(attempt_id) REFERENCES attempts(id)
                 );
+
+                CREATE TABLE IF NOT EXISTS gaps (
+                    id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    module TEXT NOT NULL,
+                    symbols_json TEXT NOT NULL DEFAULT '[]',
+                    affected_count INTEGER NOT NULL DEFAULT 0,
+                    affected_paths_json TEXT NOT NULL DEFAULT '[]',
+                    acceptance_json TEXT NOT NULL DEFAULT '[]',
+                    evidence_json TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL DEFAULT 'open',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS gaps_status_idx ON gaps(status, affected_count DESC);
                 """
             )
             run_columns = {
@@ -1044,3 +1060,116 @@ class Database:
         except sqlite3.OperationalError:
             return []
         return [dict(row) for row in rows]
+
+    def latest_target_evidence(self) -> list[dict[str, Any]]:
+        """Latest canonical-target output for every enabled non-passing test.
+
+        stderr/stdout are capped in SQL: the full text lives in results, and
+        gap classification only needs the leading error frames.
+        """
+
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT t.path, t.suite, t.modules_json, t.target_status,
+                       t.failure_fingerprint, t.size_bytes,
+                       substr(r.stderr, 1, 8000) AS stderr,
+                       substr(r.stdout, 1, 4000) AS stdout
+                FROM tests t
+                JOIN (
+                    SELECT test_path, MAX(id) AS id
+                    FROM results
+                    WHERE phase LIKE 'canonical-target%'
+                    GROUP BY test_path
+                ) latest ON latest.test_path = t.path
+                JOIN results r ON r.id = latest.id
+                WHERE t.enabled = 1 AND t.target_status != 'pass'
+                ORDER BY t.path
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def replace_gaps(self, gaps: Iterable[Any]) -> int:
+        now = utc_now()
+        rows = [
+            (
+                gap.gap_id,
+                gap.kind,
+                gap.module,
+                json.dumps(list(gap.symbols)),
+                gap.affected_count,
+                json.dumps(list(gap.affected_paths)),
+                json.dumps(list(gap.acceptance_paths)),
+                json.dumps(gap.evidence, default=str),
+                now,
+                now,
+            )
+            for gap in gaps
+        ]
+        if not rows:
+            return 0
+        with self.connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO gaps(
+                    id, kind, module, symbols_json, affected_count,
+                    affected_paths_json, acceptance_json, evidence_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    kind=excluded.kind,
+                    module=excluded.module,
+                    symbols_json=excluded.symbols_json,
+                    affected_count=excluded.affected_count,
+                    affected_paths_json=excluded.affected_paths_json,
+                    acceptance_json=excluded.acceptance_json,
+                    evidence_json=excluded.evidence_json,
+                    status=CASE
+                        WHEN gaps.symbols_json = excluded.symbols_json THEN gaps.status
+                        ELSE 'open'
+                    END,
+                    updated_at=excluded.updated_at
+                """,
+                rows,
+            )
+            # Re-extraction is the whole truth about open work: gaps that no
+            # longer exist are retired, filled ones remain as history.
+            placeholders = ",".join("?" for _ in rows)
+            conn.execute(
+                f"UPDATE gaps SET status='closed', updated_at=? "
+                f"WHERE status='open' AND id NOT IN ({placeholders})",
+                (now, *[row[0] for row in rows]),
+            )
+        return len(rows)
+
+    def list_gaps(self, *, status: str | None = None, limit: int = 0) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM gaps"
+        args: list[Any] = []
+        if status is not None:
+            sql += " WHERE status=?"
+            args.append(status)
+        sql += " ORDER BY affected_count DESC, kind, module"
+        if limit > 0:
+            sql += " LIMIT ?"
+            args.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        parsed: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["symbols"] = json.loads(item.pop("symbols_json") or "[]")
+            item["affected_paths"] = json.loads(item.pop("affected_paths_json") or "[]")
+            item["acceptance_paths"] = json.loads(item.pop("acceptance_json") or "[]")
+            item["evidence"] = json.loads(item.pop("evidence_json") or "{}")
+            parsed.append(item)
+        return parsed
+
+    def set_gap_status(self, gap_id: str, status: str) -> bool:
+        if status not in {"open", "filled", "closed"}:
+            raise ValueError(f"unsupported gap status: {status}")
+        with self.connect() as conn:
+            result = conn.execute(
+                "UPDATE gaps SET status=?, updated_at=? WHERE id=?",
+                (status, utc_now(), gap_id),
+            )
+        return result.rowcount == 1

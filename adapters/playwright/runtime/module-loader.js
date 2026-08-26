@@ -1,6 +1,7 @@
 import { posix } from './path.js';
 import { fileURLToPath } from './vfs.js';
 import { unsupportedNativeAddon } from './errors.js';
+import { isWasmModuleBytes, loadWasmAddon } from './addon-napi.js';
 
 const RESERVED_EXPORT_NAMES = new Set([
   'await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default',
@@ -235,9 +236,22 @@ export function createModuleLoader({
     return resolveFileOrDirectory(base) || base;
   };
 
+  // A .node file whose bytes carry the WASM magic is a wasm32 addon built by
+  // the host pipeline; it loads through the N-API layer. Any other .node file
+  // is a real native binary and keeps the unsupported-browser boundary.
+  const addonBytes = (path) => {
+    const value = readFile(path);
+    if (value instanceof Uint8Array) return value;
+    return new TextEncoder().encode(sourceText(value));
+  };
+  const isWasmAddon = (path) => isWasmModuleBytes(addonBytes(path));
+  const wasmAddonExports = (path) => loadWasmAddon(addonBytes(path), { name: path });
+
   const read = (specifier, importer) => {
     const resolved = resolve(specifier, importer);
-    if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) unsupportedNativeAddon(resolved);
+    if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved) && !isWasmAddon(resolved)) {
+      unsupportedNativeAddon(resolved);
+    }
     let value;
     try {
       value = readFile(resolved);
@@ -278,12 +292,12 @@ export function createModuleLoader({
     ].join('\n');
   };
 
-  const cjsModuleSource = (resolved) => {
+  const cjsModuleSource = (resolved, loadValue) => {
     let evaluated = false;
     let exports;
     const load = () => {
       if (!evaluated) {
-        exports = evaluateCommonJS(resolved, resolved);
+        exports = loadValue ? loadValue() : evaluateCommonJS(resolved, resolved);
         evaluated = true;
       }
       return exports;
@@ -349,7 +363,11 @@ export function createModuleLoader({
       throw error;
     }
     if (resolved.startsWith('data:')) return dataModuleSource(resolved);
-    if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) return nativeAddonModuleSource(resolved);
+    if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) {
+      return isWasmAddon(resolved)
+        ? cjsModuleSource(resolved, () => wasmAddonExports(resolved))
+        : nativeAddonModuleSource(resolved);
+    }
     let value;
     try {
       value = read(resolved, resolved).value;
@@ -385,7 +403,15 @@ export function createModuleLoader({
       throw error;
     }
     if (resolved.startsWith('data:')) return importData(resolved);
-    if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) unsupportedNativeAddon(resolved);
+    if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) {
+      if (isWasmAddon(resolved)) {
+        if (cache.has(resolved)) return cache.get(resolved).exports;
+        const wasmExports = wasmAddonExports(resolved);
+        cache.set(resolved, { exports: wasmExports, id: resolved, filename: resolved, loaded: true });
+        return wasmExports;
+      }
+      unsupportedNativeAddon(resolved);
+    }
     if (cache.has(resolved)) return cache.get(resolved).exports;
     if (evaluateCommonJS && !resolved.endsWith('.mjs') && !resolved.endsWith('.json')) {
       const exports = evaluateCommonJS(resolved, importer);
@@ -488,7 +514,9 @@ export function createModuleLoader({
     const resolved = resolve(specifier, importer);
     if (resolved.startsWith('data:')) return importData(resolved, options);
     validateImportAttributes(resolved, options);
-    if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) unsupportedNativeAddon(resolved);
+    if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved) && !isWasmAddon(resolved)) {
+      unsupportedNativeAddon(resolved);
+    }
     if (resolved.endsWith('.mjs') || builtin(resolved) !== undefined) return importNative(resolved);
     const exports = evaluate(resolved, importer, globals);
     const module = cache.get(resolved);

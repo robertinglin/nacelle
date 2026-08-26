@@ -273,6 +273,74 @@ bnh --config harness.toml status --json
 bnh --config harness.toml report --output bnh-report.json
 ```
 
+## Gap-driven work
+
+Failing tests are symptoms, not specifications. `bnh gaps` translates the
+compatibility state into named capability gaps and finite build cards:
+
+```bash
+# Probe the oracle and target API surfaces, diff them, cluster failure
+# evidence, and store ranked gaps.
+bnh --config harness.toml gaps
+
+# Emit one task-card directory per gap plus WORKLIST.md.
+bnh --config harness.toml gaps --emit .bnh-state/v22/gap-worklist
+
+# Re-probe the target and mark filled missing-api gaps.
+bnh --config harness.toml gaps --verify
+
+# List stored gaps without re-probing.
+bnh --config harness.toml gaps --list
+```
+
+Gap kinds:
+
+- `missing-api`: symbols the oracle exports that the browser runtime does not
+  (surface probe diff, confirmed by failing-test stderr).
+- `missing-validation`: argument-validation error codes the runtime does not
+  raise yet, grouped per module.
+- `native-addon-wasm`: native addons that need a WASM replacement. The card
+  carries a symbol-usage histogram from the failing addons' C/C++ sources.
+- `host-network`: network egress that must flow through the proxy capability.
+
+Each card's `prompt.md` states the capability to build with Node's own
+implementation as the reference spec; the acceptance tests are downstream
+evidence, not the definition. Re-extraction retires stale open gaps and keeps
+filled ones as history; the dashboard shows open gaps.
+
+## Native addons via WASM
+
+Native addon suites are in scope: the host pipeline compiles Node-API addon
+sources to wasm32 with Emscripten and the runtime instantiates them through a
+WASM N-API import layer (`adapters/playwright/runtime/addon-napi.js`).
+
+```bash
+# One-time toolchain install under the state dir.
+bnh --config harness.toml addon-build --bootstrap test/node-api/1_hello_world/test.js
+
+# Compile the addons of failing native tests and write addon-manifest.json.
+bnh --config harness.toml addon-build
+```
+
+The manifest maps each expected `build/Release/binding.node` path to its wasm
+artifact. The Playwright adapter serves those artifacts at the virtual `.node`
+paths (`BNH_ADDON_MANIFEST` or `<state_dir>/addon-manifest.json`), and the
+module loader instantiates any `.node` file whose bytes carry the WASM magic.
+Real native binaries keep the explicit unsupported-browser boundary. The
+compile step prefers Node's own wasm registration symbol
+(`napi_register_wasm_v1`) with a fallback to `napi_register_module_v1`.
+
+## Prune old run logs
+
+Each execution writes four files under `logs/<run>/`. Prune everything but the
+most recent runs:
+
+```bash
+bnh --config harness.toml prune --keep 20 --dry-run
+bnh --config harness.toml prune --keep 20
+```
+
+
 The loop command exits `0` only for a green run and nonzero for a bounded, stalled, exhausted, or failed run.
 
 ## Agent command contract

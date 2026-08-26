@@ -69,6 +69,7 @@ _PAGE = r"""<!doctype html>
     <section class="panel full"><div class="section-head"><h2>Recent agent attempts</h2><button id="clear-attempts">Clear</button></div><div id="attempts"></div></section>
     <section class="panel"><h2>Accepted patches</h2><div id="merges"></div></section>
     <section class="panel"><h2>Failure clusters</h2><div id="clusters"></div></section>
+    <section class="panel full"><h2>Open gaps</h2><div id="gaps"></div></section>
   </div>
 </main>
 <script>
@@ -181,6 +182,9 @@ function render(data) {
 
   const clusters = data.failure_clusters || [];
   document.querySelector('#clusters').innerHTML = clusters.length ? `<table><thead><tr><th>Count</th><th>Suite</th><th>Example</th></tr></thead><tbody>${clusters.map(c => `<tr><td class="fail">${esc(c.count)}</td><td>${esc(c.suite)}</td><td><code>${esc(c.example)}</code><br><span class="muted">${esc(c.failure_fingerprint || 'unknown')}</span></td></tr>`).join('')}</tbody></table>` : empty('No unresolved failure clusters.');
+
+  const gaps = (data.gaps || []).filter(g => g.status === 'open');
+  document.querySelector('#gaps').innerHTML = gaps.length ? `<table><thead><tr><th>Affected tests</th><th>Kind</th><th>Module</th><th>Symbols</th><th>Gap</th></tr></thead><tbody>${gaps.map(g => `<tr><td class="fail">${esc(g.affected_count)}</td><td>${esc(g.kind)}</td><td><code>${esc(g.module)}</code></td><td>${esc((g.symbols || []).slice(0,6).join(', '))}${(g.symbols || []).length > 6 ? '…' : ''}</td><td><code>${esc(g.id)}</code></td></tr>`).join('')}</tbody></table>` : empty('No open gaps; run `bnh gaps` to extract them.');
   restoreScroll();
 }
 async function refresh() { try { const response = await fetch('/api/status', {cache:'no-store'}); if (!response.ok) throw new Error(`${response.status}`); render(await response.json()); } catch (error) { document.querySelector('#updated').textContent = `Dashboard error: ${error}`; } }
@@ -296,6 +300,7 @@ def dashboard_snapshot(db: Database, *, variant: str | None = None) -> dict[str,
         "attempts": attempts,
         "merges": merges,
         "failure_clusters": db.top_failure_clusters(12),
+        "gaps": db.list_gaps(limit=24) if hasattr(db, "list_gaps") else [],
     }
 
 

@@ -268,6 +268,31 @@ function responseHeaders(value) {
   return { headers, rawHeaders };
 }
 
+const INCOMING_COMMA_HEADERS = new Set([
+  'accept', 'accept-encoding', 'accept-language', 'cache-control', 'connection',
+  'content-encoding', 'date', 'expect', 'if-match', 'if-none-match',
+  'transfer-encoding', 'upgrade', 'vary', 'x-forwarded-for', 'x-forwarded-host',
+  'x-forwarded-proto',
+]);
+
+function addIncomingHeaderLine(message, field, value, destination) {
+  const name = String(field).toLowerCase();
+  const headerValue = String(value);
+  if (name === 'set-cookie') {
+    (destination[name] ||= []).push(headerValue);
+  } else if (name === 'cookie') {
+    destination[name] = destination[name] === undefined
+      ? headerValue
+      : `${destination[name]}; ${headerValue}`;
+  } else if (INCOMING_COMMA_HEADERS.has(name) || name.startsWith('x-') || message.joinDuplicateHeaders) {
+    destination[name] = destination[name] === undefined
+      ? headerValue
+      : `${destination[name]}, ${headerValue}`;
+  } else if (destination[name] === undefined) {
+    destination[name] = headerValue;
+  }
+}
+
 function protocolName(value, fallback) {
   const protocol = String(value || fallback);
   return protocol.endsWith(':') ? protocol : `${protocol}:`;
@@ -1839,11 +1864,17 @@ class IncomingMessage extends Readable {
   constructor(response = {}, owner, scope = globalThis, BufferClass = scope.Buffer) {
     super({ preserveStrings: true });
     response ||= {};
-    const { headers, rawHeaders } = responseHeaders(response.headers);
+    const { rawHeaders } = responseHeaders(response.headers);
     this.statusCode = Number(response.status ?? 0);
     this.statusMessage = response.statusText || STATUS_CODES[this.statusCode] || '';
-    this.headers = headers;
     this.rawHeaders = rawHeaders;
+    this._headersCount = rawHeaders.length;
+    this._headers = null;
+    this._headersDistinct = null;
+    this.rawTrailers = [];
+    this._trailersCount = 0;
+    this._trailers = null;
+    this.joinDuplicateHeaders = false;
     this.httpVersion = '1.1';
     this.url = response.url || '';
     this.complete = false;
@@ -1999,6 +2030,50 @@ class IncomingMessage extends Readable {
   }
 }
 
+Object.defineProperties(IncomingMessage.prototype, {
+  connection: {
+    get() { return this.socket; },
+    set(value) { this.socket = value; },
+  },
+  headers: {
+    get() {
+      if (!this._headers) {
+        this._headers = {};
+        for (let index = 0; index < this._headersCount; index += 2) {
+          addIncomingHeaderLine(this, this.rawHeaders[index], this.rawHeaders[index + 1], this._headers);
+        }
+      }
+      return this._headers;
+    },
+    set(value) { this._headers = value; },
+  },
+  headersDistinct: {
+    get() {
+      if (!this._headersDistinct) {
+        this._headersDistinct = Object.create(null);
+        for (let index = 0; index < this._headersCount; index += 2) {
+          const name = String(this.rawHeaders[index]).toLowerCase();
+          (this._headersDistinct[name] ||= []).push(String(this.rawHeaders[index + 1]));
+        }
+      }
+      return this._headersDistinct;
+    },
+    set(value) { this._headersDistinct = value; },
+  },
+  trailers: {
+    get() {
+      if (!this._trailers) {
+        this._trailers = {};
+        for (let index = 0; index < this._trailersCount; index += 2) {
+          addIncomingHeaderLine(this, this.rawTrailers[index], this.rawTrailers[index + 1], this._trailers);
+        }
+      }
+      return this._trailers;
+    },
+    set(value) { this._trailers = value; },
+  },
+});
+
 function proxyResponse(result, url, scope) {
   if (result && typeof result.arrayBuffer === 'function' && result.status !== undefined) return result;
   const statusCode = Number(result?.statusCode ?? result?.status ?? 200);
@@ -2092,6 +2167,48 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       return this._resource?.runInAsyncScope
         ? this._resource.runInAsyncScope(callback, this)
         : callback.call(this);
+    }
+
+    _finish() {
+      OutgoingMessage.prototype._finish.call(this);
+    }
+
+    _implicitHeader() {
+      if (this._header) {
+        const error = new Error('Cannot render headers after they are sent');
+        error.code = 'ERR_HTTP_HEADERS_SENT';
+        throw error;
+      }
+      this._header = `${this.method} ${this.path} HTTP/1.1\r\n`;
+    }
+
+    onSocket(socket, error = undefined) {
+      if (socket && !error) {
+        socket._httpMessage = this;
+        socket.on?.('error', (socketError) => this.destroy(socketError));
+      }
+      schedule(scope, () => {
+        if (this.destroyed || error) {
+          if (error && !this.destroyed) this.destroy(error);
+          return;
+        }
+        this.socket = socket;
+        this.connection = socket;
+        this.emit('socket', socket);
+        this._flush?.();
+      });
+    }
+
+    _deferToConnect(method, arguments_) {
+      const callSocketMethod = () => {
+        if (method) Reflect.apply(this.socket[method], this.socket, arguments_);
+      };
+      const onSocket = () => {
+        if (this.socket.writable) callSocketMethod();
+        else this.socket.once('connect', callSocketMethod);
+      };
+      if (!this.socket) this.once('socket', onSocket);
+      else onSocket();
     }
 
     _ensureAsyncResources(requestURL = this._url) {

@@ -63,10 +63,13 @@ const DNS_ERROR_CODES = Object.freeze({
   BADQUERY: 'EBADQUERY',
   BADRESP: 'EBADRESP',
   BADSTR: 'EBADSTR',
+  TIMEOUT: 'ETIMEOUT',
   SERVFAIL: 'ESERVFAIL',
 });
 
 const RESOLVER_TYPES = Object.freeze({
+  CAA: 'resolveCaa',
+  CNAME: 'resolveCname',
   MX: 'resolveMx',
   NS: 'resolveNs',
   TLSA: 'resolveTlsa',
@@ -223,6 +226,8 @@ function normalizeQueryRecords(records) {
       }
       const type = item.exchange !== undefined || item.priority !== undefined
         ? 'MX'
+        : item.critical !== undefined || item.issue !== undefined || item.issuewild !== undefined || item.iodef !== undefined
+          ? 'CAA'
         : item.name !== undefined && item.port !== undefined
           ? 'SRV'
           : item.nsname !== undefined || item.hostmaster !== undefined
@@ -246,6 +251,16 @@ function cloneArrayBuffer(value) {
 }
 
 function normalizeQueryResult(type, value) {
+  if (type === 'CAA') {
+    const result = { critical: Number(value?.critical) };
+    for (const property of ['issue', 'issuewild', 'iodef']) {
+      if (value?.[property] !== undefined) result[property] = String(value[property]);
+    }
+    return result;
+  }
+  if (type === 'CNAME') {
+    return String(typeof value === 'object' ? value.name || value.value || value.target : value);
+  }
   if (type === 'MX') return { exchange: String(value.exchange), priority: Number(value.priority) };
   if (type === 'NS' || type === 'PTR') return String(typeof value === 'object' ? value.name || value.value || value.target : value);
   if (type === 'SRV') {
@@ -720,6 +735,8 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     const request = caresRequest('QUERYWRAP');
     request.ttl = Boolean(options?.ttl);
     const metadata = {
+      CAA: { binding: 'queryCaa' },
+      CNAME: { binding: 'queryCname' },
       MX: { binding: 'queryMx' },
       NS: { binding: 'queryNs' },
       TLSA: { binding: 'queryTlsa' },
@@ -780,6 +797,16 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
   }
 
   function resolveMx(hostname, callback, resolverHandle) { return queryRecords(hostname, 'MX', callback, resolverHandle); }
+  function resolveCaa(hostname, callback) {
+    const options = arguments.length > 2 ? callback : undefined;
+    const actualCallback = arguments.length > 2 ? arguments[2] : callback;
+    return queryRecords(hostname, 'CAA', actualCallback, undefined, options);
+  }
+  function resolveCname(hostname, callback) {
+    const options = arguments.length > 2 ? callback : undefined;
+    const actualCallback = arguments.length > 2 ? arguments[2] : callback;
+    return queryRecords(hostname, 'CNAME', actualCallback, undefined, options);
+  }
   function resolveNs(hostname, callback, resolverHandle) { return queryRecords(hostname, 'NS', callback, resolverHandle); }
   function resolveTlsa(hostname, callback) {
     const options = arguments.length > 2 ? callback : undefined;
@@ -896,6 +923,8 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     resolve6(hostname) { return promiseFor(() => [lookupAddress(hostname, 6).address], synchronous); },
     resolveAny(hostname) { return new Promise((resolveValue, reject) => resolveAny(hostname, (error, value) => error ? reject(error) : resolveValue(value))); },
     resolveTxt(hostname) { return new Promise((resolveValue, reject) => resolveTxt(hostname, (error, value) => error ? reject(error) : resolveValue(value))); },
+    resolveCaa(hostname, options) { return queryPromise(hostname, 'CAA', undefined, options); },
+    resolveCname(hostname, options) { return queryPromise(hostname, 'CNAME', undefined, options); },
     resolveMx(hostname) { return queryPromise(hostname, 'MX'); },
     resolveNs(hostname) { return queryPromise(hostname, 'NS'); },
     resolveTlsa(hostname, options) { return queryPromise(hostname, 'TLSA', undefined, options); },
@@ -968,6 +997,16 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     resolve6(...args) { return resolveFamily(args[0], 6, args[1]); }
     resolveAny(...args) { return resolveAny(...args); }
     resolveTxt(...args) { return resolveTxt(...args); }
+    resolveCaa(hostname, callback) {
+      const options = arguments.length > 2 ? callback : undefined;
+      const actualCallback = arguments.length > 2 ? arguments[2] : callback;
+      return queryRecords(hostname, 'CAA', actualCallback, this._handle, options);
+    }
+    resolveCname(hostname, callback) {
+      const options = arguments.length > 2 ? callback : undefined;
+      const actualCallback = arguments.length > 2 ? arguments[2] : callback;
+      return queryRecords(hostname, 'CNAME', actualCallback, this._handle, options);
+    }
     resolveMx(...args) { return resolveMx(...args, this._handle); }
     resolveNs(...args) { return resolveNs(...args, this._handle); }
     resolveTlsa(hostname, callback) {
@@ -1009,6 +1048,8 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     resolve6(hostname) { return promises.resolve6(hostname); }
     resolveAny(hostname) { return promises.resolveAny(hostname); }
     resolveTxt(hostname) { return promises.resolveTxt(hostname); }
+    resolveCaa(hostname, options) { return queryPromise(hostname, 'CAA', this._handle, options); }
+    resolveCname(hostname, options) { return queryPromise(hostname, 'CNAME', this._handle, options); }
     resolveMx(hostname) { return queryPromise(hostname, 'MX', this._handle); }
     resolveNs(hostname) { return queryPromise(hostname, 'NS', this._handle); }
     resolveTlsa(hostname, options) { return queryPromise(hostname, 'TLSA', this._handle, options); }
@@ -1030,6 +1071,8 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     resolve,
     resolveAny,
     resolveTxt,
+    resolveCaa,
+    resolveCname,
     resolveMx,
     resolveNs,
     resolveTlsa,

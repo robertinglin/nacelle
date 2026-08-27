@@ -146,12 +146,13 @@ export class Socket extends Duplex {
     this.autoSelectFamilyAttemptedAddresses = undefined;
     this.path = undefined;
     this._bytesRead = 0;
-    this.bytesWritten = 0;
+    this._bytesWritten = 0;
     this._peer = null;
     this._transportPeer = null;
     this._tcpResource = null;
     this._tcpConnectResource = null;
     this._pendingWrite = null;
+    this._writeDispatched = false;
     this._timeout = null;
     this._closing = false;
     this._writable._write = (bytes, encoding, callback) => this._write(bytes, encoding, callback);
@@ -402,6 +403,20 @@ export class Socket extends Duplex {
     return this._writeGeneric(false, bytes, encoding, callback);
   }
 
+  _writev(chunks, callback) {
+    const values = chunks.map(({ chunk }) => chunk instanceof Uint8Array
+      ? chunk
+      : new TextEncoder().encode(String(chunk)));
+    const total = values.reduce((size, value) => size + value.byteLength, 0);
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const value of values) {
+      bytes.set(value, offset);
+      offset += value.byteLength;
+    }
+    this._write(bytes, 'buffer', callback);
+  }
+
   end(...args) {
     if (!this.destroyed && this.readyState === 'open') this._readyState = 'readOnly';
     return super.end(...args);
@@ -410,19 +425,23 @@ export class Socket extends Duplex {
   _send(bytes, callback) {
     const peer = this._peer;
     const transport = this._transportPeer;
+    this._writeDispatched = false;
     schedule(() => {
       if (peer) {
         if (peer.destroyed) {
           callback(socketError('EPIPE', 'write', this.remoteAddress || 'socket', this.remotePort || 0));
           return;
         }
-        this.bytesWritten += bytes.byteLength;
+        this._bytesWritten += bytes.byteLength;
+        this._writeDispatched = true;
         peer._bytesRead += bytes.byteLength;
         peer._runTcpResource?.(() => peer.push(nodeBytes(bytes, peer._bufferClass)));
         callback();
         return;
       }
       if (transport?.write) {
+        this._bytesWritten += bytes.byteLength;
+        this._writeDispatched = true;
         try {
           const result = transport.write(bytes, callback);
           if (result && typeof result.then === 'function') result.then(() => callback(), callback);
@@ -639,6 +658,19 @@ export class Socket extends Duplex {
   }
 
   get bytesRead() { return this._handle ? this._handle.bytesRead : this._bytesRead; }
+  get _bytesDispatched() { return this._handle ? this._handle.bytesWritten : this._bytesWritten; }
+  get bytesWritten() {
+    let bytes = this._bytesDispatched;
+    const current = this._writable?._current;
+    if (this._pendingWrite) bytes += this._pendingWrite.bytes?.byteLength ?? this._pendingWrite.bytes?.length ?? 0;
+    else if (current && !current.settled && !this._writeDispatched) {
+      bytes += current.bytes?.byteLength ?? current.bytes?.length ?? 0;
+    }
+    for (const request of this._writable?._queue || []) {
+      bytes += request.bytes?.byteLength ?? request.bytes?.length ?? 0;
+    }
+    return bytes;
+  }
   get remoteAddress() { return this._getpeername().address; }
   get remoteFamily() { return this._getpeername().family; }
   get remotePort() { return this._getpeername().port; }
@@ -1086,6 +1118,9 @@ function createDetachedServerHandle(network, config, address, port, addressType,
 }
 
 const blockListCloneMarker = Symbol.for('bnh.messaging.cloneablePrototype');
+const socketAddressAddress = Symbol('socketAddressAddress');
+const socketAddressPort = Symbol('socketAddressPort');
+const socketAddressFamily = Symbol('socketAddressFamily');
 const socketAddressFlowlabel = Symbol('socketAddressFlowlabel');
 
 class BrowserSocketAddress {
@@ -1097,25 +1132,29 @@ class BrowserSocketAddress {
     if (typeof family !== 'string' || !['ipv4', 'ipv6'].includes(family.toLowerCase())) {
       throw blockListError('ERR_INVALID_ARG_VALUE', `invalid address family: ${family}`);
     }
-    this.family = family.toLowerCase();
-    const defaultAddress = this.family === 'ipv6' ? '::' : '127.0.0.1';
+    this[socketAddressFamily] = family.toLowerCase();
+    const defaultAddress = this[socketAddressFamily] === 'ipv6' ? '::' : '127.0.0.1';
     const address = options.address === undefined ? defaultAddress : options.address;
     if (typeof address !== 'string'
-      || (this.family === 'ipv4' ? !isIPv4Literal(address) : !isIPv6Literal(address))) {
+      || (this[socketAddressFamily] === 'ipv4' ? !isIPv4Literal(address) : !isIPv6Literal(address))) {
       throw blockListError('ERR_INVALID_ARG_TYPE', 'address must be a valid IP address');
     }
-    this.address = address;
+    this[socketAddressAddress] = address;
     const port = options.port === undefined ? 0 : options.port;
     if (!Number.isInteger(port) || port < 0 || port > 65535) {
       throw blockListError('ERR_SOCKET_BAD_PORT', `port must be between 0 and 65535: ${port}`, RangeError);
     }
-    this.port = port;
+    this[socketAddressPort] = port;
     const flowlabel = options.flowlabel === undefined ? 0 : options.flowlabel;
     if (!Number.isInteger(flowlabel) || flowlabel < 0 || flowlabel > 0xfffff) {
       throw blockListError('ERR_OUT_OF_RANGE', `flowlabel must be between 0 and 1048575: ${flowlabel}`, RangeError);
     }
     this[socketAddressFlowlabel] = flowlabel;
   }
+
+  get address() { return this[socketAddressAddress]; }
+  get port() { return this[socketAddressPort]; }
+  get family() { return this[socketAddressFamily]; }
 
   get flowlabel() { return this[socketAddressFlowlabel]; }
 
@@ -1369,6 +1408,34 @@ export function createBrowserNet({ network = sharedVirtualNetwork, dns = createB
     constructor(options = {}) { super(options, config); }
   };
   Object.defineProperties(ConfiguredSocket.prototype, {
+    _writev: {
+      value: Socket.prototype._writev,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+    _write: {
+      value: Socket.prototype._write,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+    _bytesDispatched: {
+      get: Object.getOwnPropertyDescriptor(Socket.prototype, '_bytesDispatched').get,
+      enumerable: true,
+      configurable: false,
+    },
+    bytesWritten: {
+      get: Object.getOwnPropertyDescriptor(Socket.prototype, 'bytesWritten').get,
+      enumerable: true,
+      configurable: false,
+    },
+    connect: {
+      value: Socket.prototype.connect,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
     _reset: {
       value: Socket.prototype._reset,
       writable: true,

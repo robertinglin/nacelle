@@ -922,6 +922,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
   let gid = 1000;
   let exited = false;
   let exitRequested = false;
+  let exiting = false;
   let exitEventEmitted = false;
   let beforeExitEventEmitted = false;
   const terminateBySignal = (signal) => {
@@ -947,7 +948,9 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
         stderr(`${error?.stack || error}\n`);
         if (options.abortOnUncaughtException) terminateBySignal('SIGABRT');
         else exitCode ||= 1;
+        return false;
       }
+      return true;
     };
     // The timer callback has already unwound when process dispatches the error.
     // Re-enter its recorded async resource while user error handlers run.
@@ -1048,6 +1051,39 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     resolved.resource?.emitDestroy?.();
   };
   const processObject = new EventEmitter();
+  const processEvents = Object.create(null);
+  const syncProcessEvents = () => {
+    for (const key of Reflect.ownKeys(processEvents)) delete processEvents[key];
+    for (const [name, listeners] of processObject._listeners) {
+      if (!listeners.size) continue;
+      const values = [...listeners];
+      Object.defineProperty(processEvents, name, {
+        configurable: true,
+        enumerable: typeof name === 'string',
+        writable: true,
+        value: values.length === 1 ? values[0] : values,
+      });
+    }
+    processObject._eventsCount = processObject._listeners.size;
+  };
+  Object.defineProperty(processObject, '_events', {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: processEvents,
+  });
+  Object.defineProperty(processObject, '_eventsCount', {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: 0,
+  });
+  Object.defineProperty(processObject, '_exiting', {
+    configurable: true,
+    enumerable: true,
+    get: () => exiting,
+    set: (value) => { exiting = Boolean(value); },
+  });
   installWarningContract(processObject, { synchronous: options.synchronousWarnings });
   const signalResources = new Map();
   const isSignalEvent = (name) => typeof name === 'string' && /^SIG[A-Z0-9]+$/.test(name);
@@ -1068,15 +1104,30 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
         ?? 1;
       signalResources.set(name, new AsyncResource('SIGNALWRAP', { triggerAsyncId }));
     }
-    return originalProcessOn(name, listener);
+    const result = originalProcessOn(name, listener);
+    syncProcessEvents();
+    return result;
+  };
+  processObject.addListener = processObject.on;
+  processObject.prependListener = (name, listener) => {
+    const result = EventEmitter.prototype.prependListener.call(processObject, name, listener);
+    syncProcessEvents();
+    return result;
+  };
+  processObject.prependOnceListener = (name, listener) => {
+    const result = EventEmitter.prototype.prependOnceListener.call(processObject, name, listener);
+    syncProcessEvents();
+    return result;
   };
   processObject.removeListener = (name, listener) => {
     const result = originalProcessRemoveListener(name, listener);
+    syncProcessEvents();
     if (isSignalEvent(name) && processObject.listenerCount(name) === 0) destroySignalResource(name);
     return result;
   };
   processObject.removeAllListeners = (name) => {
     const result = originalProcessRemoveAllListeners(name);
+    syncProcessEvents();
     if (name === undefined) {
       for (const signal of signalResources.keys()) destroySignalResource(signal);
     } else if (isSignalEvent(name)) {
@@ -1084,6 +1135,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     }
     return result;
   };
+  processObject.off = processObject.removeListener;
   processObject.emit = (name, ...args) => {
     const resource = signalResources.get(name);
     if (!resource) return originalProcessEmit(name, ...args);
@@ -1308,6 +1360,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     exit: (code = 0) => {
       exitCode = Number(code) || 0;
       exitRequested = true;
+      exiting = true;
       if (!exitEventEmitted) {
         exitEventEmitted = true;
         processObject.emit('exit', exitCode);
@@ -1315,6 +1368,27 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       exited = true;
     },
     abort: () => terminateBySignal('SIGABRT'),
+    _debugEnd: function _debugEnd() {},
+    _debugProcess: function _debugProcess() {},
+    _fatalException: (error, fromPromise) => {
+      const handled = dispatchUncaughtException(error, fromPromise ? 'unhandledRejection' : 'uncaughtException');
+      if (!handled) {
+        if (!exiting) {
+          exiting = true;
+          exitRequested = true;
+          exitCode = 1;
+          if (!exitEventEmitted) {
+            exitEventEmitted = true;
+            processObject.emit('exit', exitCode);
+          }
+        }
+      } else {
+        processObject._bnhSetTimer?.(() => {}, 0, false, 'Immediate');
+      }
+      return handled;
+    },
+    _getActiveHandles: function _getActiveHandles() { return []; },
+    _kill: function _kill() { return 0; },
     kill: (pid, signal = 'SIGTERM') => {
       const targetPid = Number(pid);
       const requestedSignal = String(signal || 'SIGTERM').toUpperCase();
@@ -1347,6 +1421,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       return true;
     },
     _markExited: () => {
+      exiting = true;
       if (!exitEventEmitted && !exitSignal) {
         exitEventEmitted = true;
         exitRequested = true;

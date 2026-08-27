@@ -268,29 +268,8 @@ function responseHeaders(value) {
   return { headers, rawHeaders };
 }
 
-const INCOMING_COMMA_HEADERS = new Set([
-  'accept', 'accept-encoding', 'accept-language', 'cache-control', 'connection',
-  'content-encoding', 'date', 'expect', 'if-match', 'if-none-match',
-  'transfer-encoding', 'upgrade', 'vary', 'x-forwarded-for', 'x-forwarded-host',
-  'x-forwarded-proto',
-]);
-
 function addIncomingHeaderLine(message, field, value, destination) {
-  const name = String(field).toLowerCase();
-  const headerValue = String(value);
-  if (name === 'set-cookie') {
-    (destination[name] ||= []).push(headerValue);
-  } else if (name === 'cookie') {
-    destination[name] = destination[name] === undefined
-      ? headerValue
-      : `${destination[name]}; ${headerValue}`;
-  } else if (INCOMING_COMMA_HEADERS.has(name) || name.startsWith('x-') || message.joinDuplicateHeaders) {
-    destination[name] = destination[name] === undefined
-      ? headerValue
-      : `${destination[name]}, ${headerValue}`;
-  } else if (destination[name] === undefined) {
-    destination[name] = headerValue;
-  }
+  message._addHeaderLine(field, value, destination);
 }
 
 function protocolName(value, fallback) {
@@ -1954,9 +1933,16 @@ class BrowserAgent extends EventEmitter {
     this.maxFreeSockets = options.maxFreeSockets ?? 256;
     this.maxTotalSockets = options.maxTotalSockets ?? Infinity;
     this.scheduling = options.scheduling || 'lifo';
+    this.keepAliveMsecs = options.keepAliveMsecs || 1000;
+    this.agentKeepAliveTimeoutBuffer = typeof options.agentKeepAliveTimeoutBuffer === 'number'
+      && options.agentKeepAliveTimeoutBuffer >= 0
+      && Number.isFinite(options.agentKeepAliveTimeoutBuffer)
+      ? options.agentKeepAliveTimeoutBuffer
+      : 1000;
     this.requests = Object.create(null);
     this.sockets = Object.create(null);
     this.freeSockets = Object.create(null);
+    this.totalSocketCount = 0;
     // The global agent object is shared by virtual child processes, but Node's
     // tunnel reuse is process-local. Keep tunnel state keyed by the owning
     // virtual process so a later child cannot skip its CONNECT handshake.
@@ -1965,27 +1951,59 @@ class BrowserAgent extends EventEmitter {
   }
 
   getName(options = {}) {
-    const host = options.host || options.hostname || 'localhost';
-    const port = options.port ?? '';
-    const family = options.family === 4 || options.family === 6 ? `:${options.family}` : '';
-    const socketPath = options.socketPath ? `:${options.socketPath}` : '';
-    return `${host}:${port}:${options.localAddress || ''}${family}${socketPath}`;
+    let name = options.host || 'localhost';
+    name += ':';
+    if (options.port) name += options.port;
+    name += ':';
+    if (options.localAddress) name += options.localAddress;
+    if (options.family === 4 || options.family === 6) name += `:${options.family}`;
+    if (options.socketPath) name += `:${options.socketPath}`;
+    return name;
   }
 
-  addRequest(request, options = {}) {
+  addRequest(request, options, port, localAddress) {
+    if (typeof options === 'string') options = { host: options, port, localAddress };
+    options = { ...options, ...this.options };
+    if (options.socketPath) options.path = options.socketPath;
+
     const name = this.getName(options);
-    (this.requests[name] ||= []).push(request);
-    request.once?.('close', () => {
-      const pending = this.requests[name];
-      if (!pending) return;
-      const index = pending.indexOf(request);
-      if (index >= 0) pending.splice(index, 1);
-      if (!pending.length) delete this.requests[name];
-    });
+    this.sockets[name] ||= [];
+    const freeSockets = this.freeSockets[name];
+    let socket;
+    if (freeSockets) {
+      while (freeSockets.length && freeSockets[0].destroyed) freeSockets.shift();
+      socket = this.scheduling === 'fifo' ? freeSockets.shift() : freeSockets.pop();
+      if (!freeSockets.length) delete this.freeSockets[name];
+    }
+
+    if (socket) {
+      this.reuseSocket(socket, request);
+      request.onSocket?.(socket);
+      this.sockets[name].push(socket);
+      return request;
+    }
+
     const createSocket = this.createSocket;
     if (createSocket !== BrowserAgent.prototype.createSocket) {
+      if (this.sockets[name].length >= this.maxSockets
+        || this.totalSocketCount >= this.maxTotalSockets) {
+        (this.requests[name] ||= []).push(request);
+        request._agentRequestOptions = options;
+        request.once?.('close', () => {
+          const pending = this.requests[name];
+          if (!pending) return;
+          const index = pending.indexOf(request);
+          if (index >= 0) pending.splice(index, 1);
+          if (!pending.length) delete this.requests[name];
+        });
+        return request;
+      }
+
       request._agentSocketAttempted = true;
+      let socketAssigned = false;
       const onSocket = (error, socket) => {
+        if (socketAssigned) return;
+        socketAssigned = true;
         if (request.destroyed) return;
         if (error) {
           request.destroy(error);
@@ -1997,6 +2015,7 @@ class BrowserAgent extends EventEmitter {
         }
         request.socket = socket;
         request.connection = socket;
+        request.onSocket?.(socket);
       };
       try {
         const socket = createSocket.call(this, request, options, onSocket);
@@ -2008,31 +2027,97 @@ class BrowserAgent extends EventEmitter {
     return request;
   }
 
-  keepSocketAlive(socket) { return this.keepAlive && !socket.destroyed; }
-  createConnection(options, callback) {
-    if (typeof this._connectionFactory !== 'function') return undefined;
-    return this._connectionFactory(options, callback);
+  keepSocketAlive(socket) {
+    socket.setKeepAlive?.(true, this.keepAliveMsecs);
+    socket.unref?.();
+
+    let agentTimeout = this.options.timeout || 0;
+    let canKeepSocketAlive = true;
+    const keepAliveHint = socket._httpMessage?.res?.headers?.['keep-alive'];
+    if (keepAliveHint) {
+      const hint = /^timeout=(\d+)/.exec(keepAliveHint)?.[1];
+      if (hint) {
+        let serverHintTimeout = Number.parseInt(hint, 10) * 1000 - this.agentKeepAliveTimeoutBuffer;
+        serverHintTimeout = serverHintTimeout > 0 ? serverHintTimeout : 0;
+        if (serverHintTimeout === 0) {
+          canKeepSocketAlive = false;
+        } else if (serverHintTimeout < agentTimeout) {
+          agentTimeout = serverHintTimeout;
+        }
+      }
+    }
+
+    if (socket.timeout !== agentTimeout) socket.setTimeout?.(agentTimeout);
+    return canKeepSocketAlive;
   }
-  createSocket(options, callback) { return this.createConnection(options, callback); }
-  reuseSocket(socket) { socket.ref?.(); return socket; }
+  createConnection(...args) {
+    if (typeof this._connectionFactory !== 'function') return undefined;
+    return this._connectionFactory(...args);
+  }
+
+  createSocket(request, options, callback) {
+    options = { ...options, ...this.options };
+    if (options.socketPath) options.path = options.socketPath;
+
+    const name = this.getName(options);
+    let created = false;
+    const onCreate = (error, socket) => {
+      if (created) return;
+      created = true;
+      if (error) {
+        callback?.(error);
+        return;
+      }
+      this.sockets[name] ||= [];
+      this.sockets[name].push(socket);
+      this.totalSocketCount += 1;
+      socket.once?.('close', () => {
+        this.totalSocketCount = Math.max(0, this.totalSocketCount - 1);
+        this.removeSocket(socket, options);
+      });
+      callback?.(null, socket);
+    };
+
+    const socket = this.createConnection(options, onCreate);
+    if (socket) onCreate(null, socket);
+  }
+
+  reuseSocket(socket, request) {
+    request.reusedSocket = true;
+    socket.ref?.();
+  }
+
   removeSocket(socket, options = {}) {
     const name = this.getName(options);
-    for (const collection of [this.sockets, this.freeSockets]) {
+    const collections = [this.sockets];
+    if (!socket.writable) collections.push(this.freeSockets);
+    for (const collection of collections) {
       const sockets = collection[name];
       if (!sockets) continue;
       const index = sockets.indexOf(socket);
       if (index >= 0) sockets.splice(index, 1);
       if (!sockets.length) delete collection[name];
     }
+
+    const pending = this.requests[name]?.[0];
+    if (pending && this.createSocket !== BrowserAgent.prototype.createSocket) {
+      this.requests[name].shift();
+      const pendingOptions = pending._agentRequestOptions || options;
+      delete pending._agentRequestOptions;
+      this.createSocket(pending, pendingOptions, (error, replacement) => {
+        if (error) pending.onSocket?.(null, error);
+        else pending.onSocket?.(replacement);
+      });
+    }
   }
 
   destroy() {
-    this.requests = Object.create(null);
-    this.sockets = Object.create(null);
-    this.freeSockets = Object.create(null);
+    for (const collection of [this.freeSockets, this.sockets]) {
+      for (const sockets of Object.values(collection)) {
+        for (const socket of sockets) socket.destroy?.();
+      }
+    }
     this._proxyTunnels = new WeakMap();
-    this.emit('free');
-    return this;
   }
 }
 
@@ -2060,6 +2145,7 @@ function parseArguments(input, options, callback, scope) {
 class IncomingMessage extends Readable {
   constructor(response = {}, owner, scope = globalThis, BufferClass = scope.Buffer) {
     super({ preserveStrings: true });
+    this._readableState.readingMore = true;
     response ||= {};
     const { rawHeaders } = responseHeaders(response.headers);
     this.statusCode = Number(response.status ?? 0);
@@ -2071,6 +2157,7 @@ class IncomingMessage extends Readable {
     this.rawTrailers = [];
     this._trailersCount = 0;
     this._trailers = null;
+    this._trailersDistinct = null;
     this.joinDuplicateHeaders = false;
     this.httpVersion = '1.1';
     this.url = response.url || '';
@@ -2086,6 +2173,8 @@ class IncomingMessage extends Readable {
     this.connection = this.socket;
     this._bodyReader = null;
     this._closed = false;
+    this._consuming = false;
+    this._dumped = false;
     this._resource = new AsyncResource('HTTPINCOMINGMESSAGE', {
       triggerAsyncId: this.socket?._tcpResource?.asyncId() ?? owner?._resource?.asyncId(),
     });
@@ -2227,6 +2316,199 @@ class IncomingMessage extends Readable {
   }
 }
 
+IncomingMessage.prototype._read = function _read(n) {
+  if (!this._consuming) {
+    this._readableState.readingMore = false;
+    this._consuming = true;
+  }
+  if (this.socket?.readable) this.socket.resume?.();
+};
+
+function incomingMessageError(self, error, callback) {
+  const hasUserErrorListener = self.listeners('error').some((listener) => !listener._bnhInternal);
+  if (!hasUserErrorListener) callback();
+  else callback(error);
+}
+
+IncomingMessage.prototype._destroy = function _destroy(error, callback) {
+  if (!this.readableEnded || !this.complete) {
+    this.aborted = true;
+    this.emit('aborted');
+  }
+
+  const socket = this.socket;
+  const finish = (socketError) => {
+    const finalError = socketError?.code === 'ERR_STREAM_PREMATURE_CLOSE'
+      ? error
+      : (socketError || error);
+    schedule(this._scope, () => incomingMessageError(this, finalError, callback));
+  };
+
+  if (socket && !socket.destroyed && this.aborted && typeof socket.destroy === 'function') {
+    let settled = false;
+    const cleanup = () => {
+      socket.off?.('error', onSocketError);
+      socket.off?.('close', onSocketClose);
+      socket.off?.('finish', onSocketClose);
+      socket.off?.('end', onSocketClose);
+    };
+    const done = (socketError) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      finish(socketError);
+    };
+    const onSocketError = (socketError) => done(socketError);
+    const onSocketClose = () => done();
+    if (typeof socket.once === 'function') {
+      socket.once('error', onSocketError);
+      socket.once('close', onSocketClose);
+      socket.once('finish', onSocketClose);
+      socket.once('end', onSocketClose);
+    }
+    try {
+      socket.destroy(error);
+    } catch (destroyError) {
+      done(destroyError);
+    }
+    if (typeof socket.once !== 'function') done();
+  } else {
+    schedule(this._scope, () => incomingMessageError(this, error, callback));
+  }
+};
+
+function _addHeaderLines(headers, n) {
+  if (headers?.length) {
+    let destination;
+    if (this.complete) {
+      this.rawTrailers = headers;
+      this._trailersCount = n;
+      destination = this._trailers;
+    } else {
+      this.rawHeaders = headers;
+      this._headersCount = n;
+      destination = this._headers;
+    }
+
+    if (destination) {
+      for (let index = 0; index < n; index += 2) {
+        this._addHeaderLine(headers[index], headers[index + 1], destination);
+      }
+    }
+  }
+}
+
+IncomingMessage.prototype._addHeaderLines = _addHeaderLines;
+
+// Avoid lowercasing common header names twice while retaining the flags used
+// by Node's incoming-header aggregation rules.
+function matchKnownFields(field, lowercased) {
+  switch (field.length) {
+    case 3:
+      if (field === 'Age' || field === 'age') return 'age';
+      break;
+    case 4:
+      if (field === 'Host' || field === 'host') return 'host';
+      if (field === 'From' || field === 'from') return 'from';
+      if (field === 'ETag' || field === 'etag') return 'etag';
+      if (field === 'Date' || field === 'date') return '\u0000date';
+      if (field === 'Vary' || field === 'vary') return '\u0000vary';
+      break;
+    case 6:
+      if (field === 'Server' || field === 'server') return 'server';
+      if (field === 'Cookie' || field === 'cookie') return '\u0002cookie';
+      if (field === 'Origin' || field === 'origin') return '\u0000origin';
+      if (field === 'Expect' || field === 'expect') return '\u0000expect';
+      if (field === 'Accept' || field === 'accept') return '\u0000accept';
+      break;
+    case 7:
+      if (field === 'Referer' || field === 'referer') return 'referer';
+      if (field === 'Expires' || field === 'expires') return 'expires';
+      if (field === 'Upgrade' || field === 'upgrade') return '\u0000upgrade';
+      break;
+    case 8:
+      if (field === 'Location' || field === 'location') return 'location';
+      if (field === 'If-Match' || field === 'if-match') return '\u0000if-match';
+      break;
+    case 10:
+      if (field === 'User-Agent' || field === 'user-agent') return 'user-agent';
+      if (field === 'Set-Cookie' || field === 'set-cookie') return '\u0001';
+      if (field === 'Connection' || field === 'connection') return '\u0000connection';
+      break;
+    case 11:
+      if (field === 'Retry-After' || field === 'retry-after') return 'retry-after';
+      break;
+    case 12:
+      if (field === 'Content-Type' || field === 'content-type') return 'content-type';
+      if (field === 'Max-Forwards' || field === 'max-forwards') return 'max-forwards';
+      break;
+    case 13:
+      if (field === 'Authorization' || field === 'authorization') return 'authorization';
+      if (field === 'Last-Modified' || field === 'last-modified') return 'last-modified';
+      if (field === 'Cache-Control' || field === 'cache-control') return '\u0000cache-control';
+      if (field === 'If-None-Match' || field === 'if-none-match') return '\u0000if-none-match';
+      break;
+    case 14:
+      if (field === 'Content-Length' || field === 'content-length') return 'content-length';
+      break;
+    case 15:
+      if (field === 'Accept-Encoding' || field === 'accept-encoding') return '\u0000accept-encoding';
+      if (field === 'Accept-Language' || field === 'accept-language') return '\u0000accept-language';
+      if (field === 'X-Forwarded-For' || field === 'x-forwarded-for') return '\u0000x-forwarded-for';
+      break;
+    case 16:
+      if (field === 'Content-Encoding' || field === 'content-encoding') return '\u0000content-encoding';
+      if (field === 'X-Forwarded-Host' || field === 'x-forwarded-host') return '\u0000x-forwarded-host';
+      break;
+    case 17:
+      if (field === 'If-Modified-Since' || field === 'if-modified-since') return 'if-modified-since';
+      if (field === 'Transfer-Encoding' || field === 'transfer-encoding') return '\u0000transfer-encoding';
+      if (field === 'X-Forwarded-Proto' || field === 'x-forwarded-proto') return '\u0000x-forwarded-proto';
+      break;
+    case 19:
+      if (field === 'Proxy-Authorization' || field === 'proxy-authorization') return 'proxy-authorization';
+      if (field === 'If-Unmodified-Since' || field === 'if-unmodified-since') return 'if-unmodified-since';
+      break;
+  }
+  if (lowercased) return '\u0000' + field;
+  return matchKnownFields(field.toLowerCase(), true);
+}
+
+IncomingMessage.prototype._addHeaderLine = function _addHeaderLine(field, value, destination) {
+  field = matchKnownFields(field);
+  const flag = field.charCodeAt(0);
+  if (flag === 0 || flag === 2) {
+    field = field.slice(1);
+    if (typeof destination[field] === 'string') {
+      destination[field] += (flag === 0 ? ', ' : '; ') + value;
+    } else {
+      destination[field] = value;
+    }
+  } else if (flag === 1) {
+    if (destination['set-cookie'] !== undefined) destination['set-cookie'].push(value);
+    else destination['set-cookie'] = [value];
+  } else if (this.joinDuplicateHeaders) {
+    if (destination[field] === undefined) destination[field] = value;
+    else destination[field] += ', ' + value;
+  } else if (destination[field] === undefined) {
+    destination[field] = value;
+  }
+};
+
+IncomingMessage.prototype._addHeaderLineDistinct = function _addHeaderLineDistinct(field, value, destination) {
+  field = field.toLowerCase();
+  if (!destination[field]) destination[field] = [value];
+  else destination[field].push(value);
+};
+
+IncomingMessage.prototype._dump = function _dump() {
+  if (!this._dumped) {
+    this._dumped = true;
+    this.removeAllListeners('data');
+    this.resume();
+  }
+};
+
 Object.defineProperties(IncomingMessage.prototype, {
   connection: {
     get() { return this.socket; },
@@ -2249,8 +2531,7 @@ Object.defineProperties(IncomingMessage.prototype, {
       if (!this._headersDistinct) {
         this._headersDistinct = Object.create(null);
         for (let index = 0; index < this._headersCount; index += 2) {
-          const name = String(this.rawHeaders[index]).toLowerCase();
-          (this._headersDistinct[name] ||= []).push(String(this.rawHeaders[index + 1]));
+          this._addHeaderLineDistinct(this.rawHeaders[index], this.rawHeaders[index + 1], this._headersDistinct);
         }
       }
       return this._headersDistinct;
@@ -2264,10 +2545,22 @@ Object.defineProperties(IncomingMessage.prototype, {
         for (let index = 0; index < this._trailersCount; index += 2) {
           addIncomingHeaderLine(this, this.rawTrailers[index], this.rawTrailers[index + 1], this._trailers);
         }
+    }
+    return this._trailers;
+  },
+  set(value) { this._trailers = value; },
+  },
+  trailersDistinct: {
+    get() {
+      if (!this._trailersDistinct) {
+        this._trailersDistinct = {};
+        for (let index = 0; index < this._trailersCount; index += 2) {
+          this._addHeaderLineDistinct(this.rawTrailers[index], this.rawTrailers[index + 1], this._trailersDistinct);
+        }
       }
-      return this._trailers;
+      return this._trailersDistinct;
     },
-    set(value) { this._trailers = value; },
+    set(value) { this._trailersDistinct = value; },
   },
 });
 
@@ -2979,6 +3272,26 @@ export function createHttpCompatibility(scope = globalThis, {
   const HttpsAgent = class Agent extends BrowserAgent {
     constructor(options = {}) { super(options, DEFAULT_HTTPS_PROTOCOL, net.createConnection); }
   };
+  const agentMethods = [
+    'createConnection',
+    'getName',
+    'addRequest',
+    'createSocket',
+    'removeSocket',
+    'keepSocketAlive',
+    'reuseSocket',
+    'destroy',
+  ];
+  for (const Agent of [HttpAgent, HttpsAgent]) {
+    for (const name of agentMethods) {
+      Object.defineProperty(Agent.prototype, name, {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: BrowserAgent.prototype[name],
+      });
+    }
+  }
   const allowCrossProtocol = Boolean(
     proxy?.mode === 'proxy'
       && proxy.enabled

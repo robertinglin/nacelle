@@ -3,6 +3,7 @@ import { BrowserEventEmitter } from './events.js';
 const uncloneableValues = new WeakSet();
 const nativeMessageChannels = new WeakMap();
 const cloneablePrototypeMarker = Symbol.for('bnh.messaging.cloneablePrototype');
+const messageEventData = new WeakMap();
 
 export function markAsUncloneable(value) {
   if (!value || (typeof value !== 'object' && typeof value !== 'function')) return;
@@ -234,7 +235,7 @@ export function createMessageEvent(scope = globalThis, {
   NativeMessagePort = scope.MessagePort,
 } = {}) {
   const Event = scope.Event || class BrowserEvent {};
-  return class MessageEvent extends Event {
+  const MessageEvent = class MessageEvent extends Event {
     constructor(type, init = {}) {
       super(type, init || {});
       const options = init || {};
@@ -259,8 +260,8 @@ export function createMessageEvent(scope = globalThis, {
           }
         }
       }
+      messageEventData.set(this, options.data === undefined ? null : options.data);
       Object.defineProperties(this, {
-        data: { enumerable: true, value: options.data === undefined ? null : options.data },
         origin: { enumerable: true, value: options.origin === undefined ? '' : String(options.origin) },
         lastEventId: { enumerable: true, value: options.lastEventId === undefined ? '' : String(options.lastEventId) },
         source: { enumerable: true, value: source },
@@ -268,6 +269,19 @@ export function createMessageEvent(scope = globalThis, {
       });
     }
   };
+  Object.defineProperty(MessageEvent.prototype, 'data', {
+    configurable: true,
+    enumerable: true,
+    get() {
+      if (!messageEventData.has(this)) {
+        const error = new TypeError('Illegal invocation');
+        error.code = 'ERR_INVALID_THIS';
+        throw error;
+      }
+      return messageEventData.get(this);
+    },
+  });
+  return MessageEvent;
 }
 
 function isVirtualHandle(value) {

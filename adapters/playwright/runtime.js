@@ -3162,6 +3162,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       BufferClass: Buffer,
       trackTask,
       diagnostics: () => scope.__BNH_DIAGNOSTICS__,
+      cluster: () => cluster,
+      clusterGroupId: runtimeOptions.clusterGroupId,
+      onListening: notifyClusterListening,
     });
     const internalBindingContract = createBrowserInternalBindings({
       globalObject: scope,

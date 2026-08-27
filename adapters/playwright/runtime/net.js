@@ -121,8 +121,11 @@ export class Socket extends Duplex {
     this._transport = internal.transport;
     this.allowHalfOpen = options.allowHalfOpen ?? true;
     this.connecting = false;
-    this.pending = true;
-    this.readyState = 'open';
+    this._pending = true;
+    this._readyState = 'open';
+    this._noDelay = Boolean(options.noDelay);
+    this._keepAlive = Boolean(options.keepAlive);
+    this._keepAliveInitialDelay = ~~(options.keepAliveInitialDelay / 1000);
     this.localAddress = undefined;
     this.localPort = undefined;
     this.localFamily = undefined;
@@ -164,8 +167,8 @@ export class Socket extends Duplex {
     const host = String(options.host || options.hostname || 'localhost');
     const family = Number(options.family || 0);
     this.connecting = true;
-    this.pending = true;
-    this.readyState = 'opening';
+    this._pending = true;
+    this._readyState = 'opening';
     this._connectOptions = { ...options, port, host, family };
     if (this._handle?.connect) {
       let status;
@@ -283,8 +286,8 @@ export class Socket extends Duplex {
       return this;
     }
     this.connecting = true;
-    this.pending = true;
-    this.readyState = 'opening';
+    this._pending = true;
+    this._readyState = 'opening';
     this.path = path;
     this._connectOptions = { ...options, path };
     this._network.connectPipe({
@@ -299,8 +302,8 @@ export class Socket extends Duplex {
   _establish(connection, family) {
     if (this.destroyed) return;
     this.connecting = false;
-    this.pending = false;
-    this.readyState = 'open';
+    this._pending = false;
+    this._readyState = 'open';
     this.localAddress = connection.localAddress || undefined;
     this.localPort = connection.localPort || undefined;
     this.localFamily = this.localAddress ? (virtualAddressFamily(this.localAddress) === 6 ? 'IPv6' : 'IPv4') : undefined;
@@ -312,6 +315,11 @@ export class Socket extends Duplex {
     this._pipeConnectResource = connection.pipeConnectResource;
     if (connection.transport) this._attachTransport(connection.transport);
     else this._peer = connection.serverSocket;
+    const handle = this._handle || this._transportPeer;
+    if (this._noDelay && handle?.setNoDelay) handle.setNoDelay(true);
+    if (this._keepAlive && handle?.setKeepAlive) {
+      handle.setKeepAlive(true, this._keepAliveInitialDelay);
+    }
     const emitConnect = () => this.emit('connect');
     if (this._pipeConnectResource) {
       this._pipeConnectResource.runInAsyncScope(emitConnect, this);
@@ -335,8 +343,8 @@ export class Socket extends Duplex {
   _failConnect(error) {
     if (this.destroyed) return;
     this.connecting = false;
-    this.pending = false;
-    this.readyState = 'closed';
+    this._pending = false;
+    this._readyState = 'closed';
     if (this._unrefed) return;
     this.destroy(error);
   }
@@ -366,7 +374,7 @@ export class Socket extends Duplex {
   }
 
   end(...args) {
-    if (!this.destroyed && this.readyState === 'open') this.readyState = 'readOnly';
+    if (!this.destroyed && this.readyState === 'open') this._readyState = 'readOnly';
     return super.end(...args);
   }
 
@@ -407,7 +415,7 @@ export class Socket extends Duplex {
   }
 
   _finishTransport(callback) {
-    if (!this.destroyed && this.readyState === 'open') this.readyState = 'readOnly';
+    if (!this.destroyed && this.readyState === 'open') this._readyState = 'readOnly';
     const shutdownParent = this._pipeResource || this._tcpResource;
     const shutdownResource = shutdownParent ? this._createPipeResource('SHUTDOWNWRAP', shutdownParent) : null;
     const complete = (error) => {
@@ -428,9 +436,74 @@ export class Socket extends Duplex {
     });
   }
 
+  _onTimeout() {
+    this.emit('timeout');
+  }
+
+  setNoDelay(enable) {
+    enable = Boolean(enable === undefined ? true : enable);
+    const handle = this._handle || this._transportPeer;
+    if (!handle) {
+      this._noDelay = enable;
+      return this;
+    }
+    if (handle.setNoDelay && enable !== this._noDelay) {
+      this._noDelay = enable;
+      handle.setNoDelay(enable);
+    }
+    return this;
+  }
+
+  setKeepAlive(enable, initialDelayMsecs) {
+    enable = Boolean(enable);
+    const initialDelay = ~~(initialDelayMsecs / 1000);
+    const handle = this._handle || this._transportPeer;
+    if (!handle) {
+      this._keepAlive = enable;
+      this._keepAliveInitialDelay = initialDelay;
+      return this;
+    }
+    if (!handle.setKeepAlive) return this;
+    if (enable !== this._keepAlive
+      || (enable && this._keepAliveInitialDelay !== initialDelay)) {
+      this._keepAlive = enable;
+      this._keepAliveInitialDelay = initialDelay;
+      handle.setKeepAlive(enable, initialDelay);
+    }
+    return this;
+  }
+
   address() {
-    if (!this.localPort) return null;
+    if (this._handle?.getsockname) {
+      const address = {};
+      this._handle.getsockname(address);
+      return address;
+    }
+    if (this.localPort === undefined || this.localPort === null) return {};
     return { address: this.localAddress, family: this.localFamily, port: this.localPort };
+  }
+
+  get _connecting() {
+    return this.connecting;
+  }
+
+  get pending() {
+    return this._pending ?? (!this._handle || this.connecting);
+  }
+
+  get readyState() {
+    if (this.connecting) return 'opening';
+    if (this._readyState === 'closed' || this.destroyed) return 'closed';
+    if (this._readyState === 'readOnly' && this.readable) return 'readOnly';
+    if (this._readyState === 'writeOnly' && this.writable) return 'writeOnly';
+    if (this.readable && this.writable) return 'open';
+    if (this.readable && !this.writable) return 'readOnly';
+    if (!this.readable && this.writable) return 'writeOnly';
+    return 'closed';
+  }
+
+  get bufferSize() {
+    if (this._handle || this._peer || this._transportPeer) return this.writableLength;
   }
 
   setTimeout(milliseconds, callback) {
@@ -451,12 +524,10 @@ export class Socket extends Duplex {
     }
     if (this._timeout) clearTimeout(this._timeout);
     if (callback) this.once('timeout', callback);
-    if (milliseconds > 0) this._timeout = setTimeout(() => this.emit('timeout'), milliseconds);
+    if (milliseconds > 0) this._timeout = setTimeout(() => this._onTimeout(), milliseconds);
     return this;
   }
 
-  setNoDelay() { return this; }
-  setKeepAlive() { return this; }
   ref() { this._unrefed = false; return this; }
   unref() { this._unrefed = true; return this; }
   destroySoon() { return this.destroy(); }
@@ -496,8 +567,8 @@ export class Socket extends Duplex {
     this._pipeConnectResource?.emitDestroy();
     this._pipeResource?.emitDestroy();
     this.connecting = false;
-    this.pending = false;
-    this.readyState = 'closed';
+    this._pending = false;
+    this._readyState = 'closed';
     if (this._tcpResource) {
       return this._tcpResource.runInAsyncScope(() => super.destroy(error), this);
     }
@@ -507,7 +578,7 @@ export class Socket extends Duplex {
   _peerClosed(forceClose = false) {
     this._peer = null;
     this.push(null);
-    if (!forceClose && this.readyState === 'open') this.readyState = 'writeOnly';
+    if (!forceClose && this.readyState === 'open') this._readyState = 'writeOnly';
     if (forceClose || !this.allowHalfOpen) this.destroy();
   }
 }
@@ -759,8 +830,8 @@ export class Server extends EventEmitter {
     accepted.path = connection.path;
     accepted._pipeResource = connection.serverPipeResource;
     accepted.connecting = false;
-    accepted.pending = false;
-    accepted.readyState = 'open';
+    accepted._pending = false;
+    accepted._readyState = 'open';
     accepted.localAddress = connection.remoteAddress;
     accepted.localPort = this._boundPort;
     accepted.localFamily = connection.remoteAddress

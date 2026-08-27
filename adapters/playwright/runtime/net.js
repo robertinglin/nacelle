@@ -1144,6 +1144,52 @@ export function createBrowserNet({ network = sharedVirtualNetwork, dns = createB
   const ConfiguredSocket = class BrowserNetSocket extends Socket {
     constructor(options = {}) { super(options, config); }
   };
+  Object.defineProperties(ConfiguredSocket.prototype, {
+    _onTimeout: {
+      value: Socket.prototype._onTimeout,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+    setNoDelay: {
+      value: Socket.prototype.setNoDelay,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+    setKeepAlive: {
+      value: Socket.prototype.setKeepAlive,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+    address: {
+      value: Socket.prototype.address,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+    _connecting: {
+      get: Object.getOwnPropertyDescriptor(Socket.prototype, '_connecting').get,
+      enumerable: false,
+      configurable: false,
+    },
+    pending: {
+      get: Object.getOwnPropertyDescriptor(Socket.prototype, 'pending').get,
+      enumerable: false,
+      configurable: true,
+    },
+    readyState: {
+      get: Object.getOwnPropertyDescriptor(Socket.prototype, 'readyState').get,
+      enumerable: false,
+      configurable: false,
+    },
+    bufferSize: {
+      get: Object.getOwnPropertyDescriptor(Socket.prototype, 'bufferSize').get,
+      enumerable: false,
+      configurable: false,
+    },
+  });
   const ConfiguredServer = class BrowserNetServer extends Server {
     constructor(options = {}, listener) { super(options, listener, { ...config, SocketClass: ConfiguredSocket }); }
   };

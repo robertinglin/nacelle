@@ -288,6 +288,13 @@ export {
   Transform,
   PassThrough,
   pipeline,
+  compose,
+  isDestroyed,
+  isDisturbed,
+  isErrored,
+  isReadable,
+  isWritable,
+  promises,
 } from './streams.js';
 export {
   readableStreamFrom,

@@ -31,6 +31,7 @@ import { createVfs, fileURLToPath, pathToFileURL } from './runtime/vfs.js';
 import { path } from './runtime/path.js';
 import {
   Readable, Writable, Duplex, Transform, PassThrough, Stream, duplexPair, pipeline, destroy,
+  compose, isDestroyed, isDisturbed, isErrored, isReadable, isWritable, promises as streamPromises,
   setDefaultHighWaterMark, getDefaultHighWaterMark,
 } from './runtime/streams.js';
 import { createPlatformContract } from './runtime/os-platform.js';
@@ -3056,6 +3057,13 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       duplexPair,
       pipeline,
       destroy,
+      compose,
+      isDestroyed,
+      isDisturbed,
+      isErrored,
+      isReadable,
+      isWritable,
+      promises: streamPromises,
       addAbortSignal,
       finished,
       setDefaultHighWaterMark,
@@ -3068,6 +3076,23 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       .newReadableWritablePairFromDuplex(duplex);
     const streamWebApi = createNodeWebStreamModule(runtimeRequire);
     const streamConsumers = createStreamConsumers(scope, Buffer);
+    const streamPromisePipeline = (...args) => new Promise((resolve, reject) => {
+      pipeline(...args, (error) => error ? reject(error) : resolve());
+    });
+    const streamPromiseFinished = (stream, options) => finished(stream, options);
+    streamPromises.pipeline = streamPromisePipeline;
+    streamPromises.finished = streamPromiseFinished;
+    const promisifyCustom = Symbol.for('nodejs.util.promisify.custom');
+    Object.defineProperty(pipeline, promisifyCustom, {
+      configurable: true,
+      enumerable: true,
+      value: streamPromisePipeline,
+    });
+    Object.defineProperty(finished, promisifyCustom, {
+      configurable: true,
+      enumerable: true,
+      value: streamPromiseFinished,
+    });
     const unsupportedBuiltins = createUnsupportedBuiltins();
     const notifyDnsLookup = () => {
       scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ = Math.max(1, Number(scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ || 0));
@@ -3551,10 +3576,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       },
       path: nodePath, 'path/posix': path.posix, 'path/win32': path.win32, process: processObject, querystring: createQuerystring(),
       stream: streamApi, 'stream/consumers': streamConsumers, 'stream/web': streamWebApi,
-      'stream/promises': {
-        pipeline: (...args) => new Promise((resolve, reject) => pipeline(...args, (error) => error ? reject(error) : resolve())),
-        finished: (stream, options) => finished(stream, options),
-      },
+      'stream/promises': streamPromises,
       timers, 'timers/promises': timerPromises, string_decoder: { StringDecoder: createStringDecoder() },
       url: nodeUrl, util: (() => {
         const inspectFn = (value, options) => nodeInspect(value, options ?? {});

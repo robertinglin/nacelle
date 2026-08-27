@@ -191,6 +191,89 @@ function createDeprecate(processObject) {
   };
 }
 
+const BROWSER_ALLOWED_NODE_ENVIRONMENT_FLAGS = Object.freeze([
+  '--abort-on-uncaught-exception', '--allow-addons', '--allow-child-process', '--allow-fs-read',
+  '--allow-fs-write', '--allow-wasi', '--allow-worker', '--conditions', '--debug-port',
+  '--disable-proto', '--disable-wasm-trap-handler', '--enable-source-maps', '--experimental-default-type',
+  '--experimental-fetch', '--experimental-import-meta-resolve', '--experimental-loader',
+  '--experimental-require-module', '--experimental-specifier-resolution', '--experimental-vm-modules',
+  '--experimental-wasm-modules', '--expose-gc', '--frozen-intrinsics', '--heap-prof', '--import',
+  '--input-type', '--inspect', '--inspect-brk', '--inspect-port', '--jitless', '--loader',
+  '--max-http-header-size', '--max-old-space-size', '--max-semi-space-size', '--no-addons',
+  '--no-enable-source-maps', '--no-experimental-fetch', '--no-experimental-import-meta-resolve',
+  '--no-experimental-require-module', '--no-experimental-vm-modules', '--no-experimental-wasm-modules',
+  '--no-frozen-intrinsics', '--no-warnings', '--openssl-config', '--openssl-legacy-provider',
+  '--pending-deprecation', '--perf-basic-prof', '--perf-prof', '--preserve-symlinks',
+  '--preserve-symlinks-main', '--prof-process', '--report-compact', '--report-dir',
+  '--report-exclude-env', '--report-exclude-network', '--report-filename', '--report-on-fatalerror',
+  '--report-on-signal', '--report-uncaught-exception', '--require', '--stack-trace-limit', '--title',
+  '--trace-deprecation', '--trace-events-enabled', '--trace-exit', '--trace-uncaught',
+  '--trace-warnings', '--unhandled-rejections', '--use-bundled-ca', '--use-openssl-ca', '--warnings',
+  '-C', '-r',
+]);
+
+const nodeEnvironmentFlagName = (flag) => String(flag).replaceAll('_', '-');
+
+function createAllowedNodeEnvironmentFlags() {
+  const flags = [...BROWSER_ALLOWED_NODE_ENVIRONMENT_FLAGS];
+  const states = new WeakMap();
+  class NodeEnvironmentFlagsSet extends Set {
+    constructor(values) {
+      super();
+      states.set(this, { values, normalizedValues: values.map((flag) => flag.replace(/^-+/, '')) });
+    }
+
+    add() { return this; }
+    delete() { return false; }
+    clear() {}
+    has(value) {
+      if (typeof value !== 'string') return false;
+      const flag = nodeEnvironmentFlagName(value).replace(/=.*$/, '');
+      const state = states.get(this);
+      if (flag.startsWith('-')) return state.values.includes(flag);
+      return state.normalizedValues.includes(flag);
+    }
+    entries() { return new Set(states.get(this).values).entries(); }
+    forEach(callback, thisArg = undefined) {
+      for (const flag of states.get(this).values) Reflect.apply(callback, thisArg, [flag, flag, this]);
+    }
+    get size() { return states.get(this).values.length; }
+    values() { return new Set(states.get(this).values).values(); }
+    keys() { return this.values(); }
+    [Symbol.iterator]() { return this.values(); }
+  }
+  Object.freeze(NodeEnvironmentFlagsSet.prototype);
+  return Object.freeze(new NodeEnvironmentFlagsSet(flags));
+}
+
+function formatProcessDebug(...values) {
+  if (!values.length) return '';
+  let first = String(values[0]);
+  let index = 1;
+  first = first.replace(/%[sdifjoOc%]/g, (token) => {
+    if (token === '%%') return '%';
+    if (index >= values.length) return token;
+    const value = values[index++];
+    if (token === '%s') return typeof value === 'object' ? nodeInspect(value) : String(value);
+    if (token === '%d') return String(Number(value));
+    if (token === '%i') return String(Number.parseInt(value, 10));
+    if (token === '%f') return String(Number.parseFloat(value));
+    if (token === '%j') {
+      try { return JSON.stringify(value); } catch { return '[Circular]'; }
+    }
+    if (token === '%c') return '';
+    return nodeInspect(value);
+  });
+  return [first, ...values.slice(index).map((value) => typeof value === 'string' ? value : nodeInspect(value))].join(' ');
+}
+
+function processAssertion(value, message) {
+  if (value) return;
+  const error = new Error(message || 'assertion error');
+  error.code = 'ERR_ASSERTION';
+  throw error;
+}
+
 function onceCallback(callback, { preserveReturnValue = false } = {}) {
   let called = false;
   let returnValue;
@@ -1026,6 +1109,57 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     }
     return numeric;
   };
+  const normalizeGroupId = (value, name) => {
+    if (typeof value === 'number') {
+      if (!Number.isInteger(value)) {
+        const error = new RangeError(`The value of "${name}" is out of range. It must be an integer. Received ${value}`);
+        error.code = 'ERR_OUT_OF_RANGE';
+        throw error;
+      }
+      if (value < 0 || value > 0xffffffff) {
+        const error = new RangeError(`The value of "${name}" is out of range. It must be >= 0 && <= 4294967295. Received ${value}`);
+        error.code = 'ERR_OUT_OF_RANGE';
+        throw error;
+      }
+      return value;
+    }
+    if (typeof value === 'string') {
+      const error = new Error(`Group identifier does not exist: ${value}`);
+      error.code = 'ERR_UNKNOWN_CREDENTIAL';
+      throw error;
+    }
+    const received = value === null
+      ? 'null'
+      : value === undefined
+        ? 'undefined'
+        : Array.isArray(value)
+          ? 'an instance of Array'
+          : typeof value === 'object'
+            ? `an instance of ${value.constructor?.name || 'Object'}`
+            : typeof value === 'function'
+              ? `function ${value.name || ''}`
+              : `type ${typeof value} (${String(value)})`;
+    const error = new TypeError(`The "${name}" argument must be one of type number or string. Received ${received}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  };
+  const validateGroups = (groups) => {
+    if (!Array.isArray(groups)) {
+      const received = groups === null
+        ? 'null'
+        : groups === undefined
+          ? 'undefined'
+          : typeof groups === 'object'
+            ? `an instance of ${groups.constructor?.name || 'Object'}`
+            : typeof groups === 'function'
+              ? `function ${groups.name || ''}`
+              : `type ${typeof groups} (${String(groups)})`;
+      const error = new TypeError(`The "groups" argument must be an instance of Array. Received ${received}`);
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    for (let index = 0; index < groups.length; index += 1) normalizeGroupId(groups[index], `groups[${index}]`);
+  };
   const parseUmask = (mask) => {
     if (typeof mask === 'string') {
       if (!/^[0-7]+$/.test(mask)) {
@@ -1049,6 +1183,29 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
   };
   const memoryUsage = () => ({ rss: 0, heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0 });
   memoryUsage.rss = () => 0;
+  const nextTickQueue = [];
+  let nextTickScheduled = false;
+  const runNextTicks = () => {
+    while (nextTickQueue.length) {
+      const { callback, args, resource, release } = nextTickQueue.shift();
+      try { resource.runInAsyncScope(callback, processObject, ...args); }
+      finally {
+        resource.emitDestroy();
+        release?.();
+      }
+    }
+  };
+  const nextTick = (callback, ...args) => {
+    const resource = new AsyncResource('TickObject');
+    nextTickQueue.push({ callback, args, resource, release: trackTask() });
+    if (!nextTickScheduled) {
+      nextTickScheduled = true;
+      scope.queueMicrotask(() => {
+        nextTickScheduled = false;
+        runNextTicks();
+      });
+    }
+  };
   Object.assign(processObject, {
     argv: [...(options.argv || ['node'])],
     argv0: options.argv0 ?? 'node',
@@ -1123,17 +1280,28 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     seteuid: (value) => { uid = normalizeCredential(value, 'User'); },
     setgid: (value) => { gid = normalizeCredential(value, 'Group'); },
     setegid: (value) => { gid = normalizeCredential(value, 'Group'); },
-    nextTick: (callback, ...args) => {
-      const resource = new AsyncResource('TickObject');
-      const release = trackTask();
-      scope.queueMicrotask(() => {
-        try { resource.runInAsyncScope(callback, processObject, ...args); }
-        finally {
-          resource.emitDestroy();
-          release?.();
-        }
-      });
+    ref(maybeRefable) {
+      if (maybeRefable == null) return;
+      const ref = maybeRefable[Symbol.for('nodejs.ref')] || maybeRefable.ref;
+      if (typeof ref === 'function') Reflect.apply(ref, maybeRefable, []);
     },
+    unref(maybeRefable) {
+      if (maybeRefable == null) return;
+      const unref = maybeRefable[Symbol.for('nodejs.unref')] || maybeRefable.unref;
+      if (typeof unref === 'function') Reflect.apply(unref, maybeRefable, []);
+    },
+    setgroups(groups) { validateGroups(groups); },
+    nextTick,
+    _tickCallback: runNextTicks,
+    _startProfilerIdleNotifier: () => {},
+    _stopProfilerIdleNotifier: () => {},
+    _rawDebug: (...args) => { processObject.stderr.write(`${formatProcessDebug(...args)}\n`); },
+    _linkedBinding: (module) => {
+      const error = new Error(`No such binding was linked: ${String(module)}`);
+      error.code = 'ERR_INVALID_MODULE';
+      throw error;
+    },
+    assert: createDeprecate(processObject)(processAssertion, 'process.assert() is deprecated. Please use the `assert` module instead.', 'DEP0100'),
     uptime: () => (scope.performance?.now?.() || 0) / 1000,
     hrtime: (previous) => { const now = Math.floor((scope.performance?.now?.() || 0) * 1e6); const result = [Math.floor(now / 1e9), now % 1e9]; return previous ? [result[0] - previous[0], result[1] - previous[1]] : result; },
     memoryUsage,
@@ -1188,6 +1356,41 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       exited = true;
       processObject._bnhReleaseTasks?.();
       for (const handle of timers) clearTimer(handle);
+    },
+  });
+  const preloads = [];
+  const execArgv = options.execArgv || [];
+  for (let index = 0; index < execArgv.length; index += 1) {
+    const argument = String(execArgv[index]);
+    if (argument === '-r' || argument === '--require') preloads.push(String(execArgv[++index]));
+    else if (argument.startsWith('--require=')) preloads.push(argument.slice('--require='.length));
+  }
+  Object.defineProperty(processObject, '_preload_modules', {
+    configurable: true,
+    enumerable: true,
+    writable: false,
+    value: preloads,
+  });
+  Object.defineProperty(processObject, 'allowedNodeEnvironmentFlags', {
+    configurable: true,
+    enumerable: true,
+    get() {
+      const flags = createAllowedNodeEnvironmentFlags();
+      Object.defineProperty(this, 'allowedNodeEnvironmentFlags', {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: flags,
+      });
+      return flags;
+    },
+    set(value) {
+      Object.defineProperty(this, 'allowedNodeEnvironmentFlags', {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value,
+      });
     },
   });
   Object.defineProperty(processObject, 'exitCode', {
@@ -1862,6 +2065,15 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       nodeModules: sourceMapsEnabledByFlag,
       generatedCode: sourceMapsEnabledByFlag,
     });
+    Object.defineProperty(processObject, 'sourceMapsEnabled', {
+      configurable: true,
+      enumerable: true,
+      get: () => sourceMapsSupport.enabled,
+    });
+    processObject.setSourceMapsEnabled = function setSourceMapsEnabled(enabled) {
+      if (typeof enabled !== 'boolean') throw moduleArgumentTypeError('enabled', 'boolean', enabled);
+      sourceMapsSupport = Object.freeze({ enabled, nodeModules: enabled, generatedCode: enabled });
+    };
     const sourceMapCache = new Map();
     const sourceMapComment = /\/[/*]#\s*sourceMappingURL=([^\s*]+)/g;
     const sourceMapPayload = (value) => {

@@ -14,6 +14,37 @@ const BUILTIN_RECORDS = Object.freeze({
   ],
 });
 
+// These records keep the resolver surface useful in a browser without
+// silently delegating DNS work to the host. They intentionally contain only
+// the shapes exposed by the resolver methods implemented below.
+const BUILTIN_DNS_RECORDS = Object.freeze({
+  'nodejs.org': Object.freeze({
+    MX: Object.freeze([{ exchange: 'mail.nodejs.org', priority: 10 }]),
+    NS: Object.freeze(['ns1.nodejs.org']),
+    SOA: Object.freeze({
+      nsname: 'ns1.nodejs.org',
+      hostmaster: 'hostmaster.nodejs.org',
+      serial: 1,
+      refresh: 3600,
+      retry: 600,
+      expire: 86400,
+      minttl: 300,
+    }),
+  }),
+  '_caldav._tcp.google.com': Object.freeze({
+    SRV: Object.freeze([{ name: 'calendar.google.com', port: 443, priority: 10, weight: 10 }]),
+  }),
+  '8.8.8.8.in-addr.arpa': Object.freeze({ PTR: Object.freeze(['dns.google']) }),
+  'sip2sip.info': Object.freeze({
+    NAPTR: Object.freeze([{
+      flags: 's', service: 'SIP+D2U', regexp: '', replacement: '_sip._udp.sip2sip.info', order: 10, preference: 10,
+    }]),
+  }),
+  '_443._tcp.fedoraproject.org': Object.freeze({
+    TLSA: Object.freeze([{ certUsage: 3, selector: 1, match: 1, data: new Uint8Array([0]).buffer }]),
+  }),
+});
+
 const SERVICE_NAMES = Object.freeze({
   22: 'ssh',
   53: 'domain',
@@ -32,6 +63,17 @@ const DNS_ERROR_CODES = Object.freeze({
   BADQUERY: 'EBADQUERY',
   BADRESP: 'EBADRESP',
   BADSTR: 'EBADSTR',
+  SERVFAIL: 'ESERVFAIL',
+});
+
+const RESOLVER_TYPES = Object.freeze({
+  MX: 'resolveMx',
+  NS: 'resolveNs',
+  TLSA: 'resolveTlsa',
+  SRV: 'resolveSrv',
+  PTR: 'resolvePtr',
+  NAPTR: 'resolveNaptr',
+  SOA: 'resolveSoa',
 });
 
 function isIPv4Literal(value) {
@@ -155,9 +197,95 @@ function normalizeRecords(records) {
   const result = new Map();
   for (const [hostname, value] of Object.entries(records || {})) {
     const values = Array.isArray(value) ? value : [value];
-    result.set(String(hostname), values.map(normalizeRecord));
+    const addressValues = values.filter((record) => typeof record === 'string'
+      || (record && typeof record === 'object' && (Object.hasOwn(record, 'address') || Object.hasOwn(record, 'family'))));
+    if (addressValues.length) result.set(String(hostname), addressValues.map(normalizeRecord));
   }
   return result;
+}
+
+function normalizeQueryRecords(records) {
+  const result = new Map();
+  const supportedTypes = new Set(Object.keys(RESOLVER_TYPES));
+  for (const [hostname, value] of Object.entries(records || {})) {
+    const values = Array.isArray(value) ? value : [value];
+    const byType = {};
+    for (const item of values) {
+      if (!item || typeof item !== 'object' || typeof item === 'function') continue;
+      const explicitTypes = Object.keys(item).filter((key) => supportedTypes.has(key.toUpperCase()));
+      if (explicitTypes.length) {
+        for (const key of explicitTypes) {
+          const type = key.toUpperCase();
+          const entries = Array.isArray(item[key]) ? item[key] : [item[key]];
+          byType[type] = [...(byType[type] || []), ...entries];
+        }
+        continue;
+      }
+      const type = item.exchange !== undefined || item.priority !== undefined
+        ? 'MX'
+        : item.name !== undefined && item.port !== undefined
+          ? 'SRV'
+          : item.nsname !== undefined || item.hostmaster !== undefined
+            ? 'SOA'
+            : item.certUsage !== undefined || item.selector !== undefined || item.match !== undefined
+              ? 'TLSA'
+              : item.flags !== undefined || item.regexp !== undefined || item.preference !== undefined
+                ? 'NAPTR'
+                : item.address !== undefined || item.family !== undefined ? null : 'NS';
+      if (type) byType[type] = [...(byType[type] || []), item];
+    }
+    if (Object.keys(byType).length) result.set(String(hostname), byType);
+  }
+  return result;
+}
+
+function cloneArrayBuffer(value) {
+  if (value instanceof ArrayBuffer) return value.slice(0);
+  if (ArrayBuffer.isView(value)) return value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+  return new Uint8Array().buffer;
+}
+
+function normalizeQueryResult(type, value) {
+  if (type === 'MX') return { exchange: String(value.exchange), priority: Number(value.priority) };
+  if (type === 'NS' || type === 'PTR') return String(typeof value === 'object' ? value.name || value.value || value.target : value);
+  if (type === 'SRV') {
+    return {
+      name: String(value.name),
+      port: Number(value.port),
+      priority: Number(value.priority),
+      weight: Number(value.weight),
+    };
+  }
+  if (type === 'NAPTR') {
+    return {
+      flags: String(value.flags),
+      service: String(value.service),
+      regexp: String(value.regexp),
+      replacement: String(value.replacement),
+      order: Number(value.order),
+      preference: Number(value.preference),
+    };
+  }
+  if (type === 'SOA') {
+    return {
+      nsname: String(value.nsname),
+      hostmaster: String(value.hostmaster),
+      serial: Number(value.serial),
+      refresh: Number(value.refresh),
+      retry: Number(value.retry),
+      expire: Number(value.expire),
+      minttl: Number(value.minttl),
+    };
+  }
+  if (type === 'TLSA') {
+    return {
+      certUsage: Number(value.certUsage),
+      selector: Number(value.selector),
+      match: Number(value.match),
+      data: cloneArrayBuffer(value.data),
+    };
+  }
+  return value;
 }
 
 function normalizeCaresRecords(addresses, family = 0) {
@@ -223,6 +351,8 @@ function caresFailure(code, syscall, hostname) {
     [-12]: 'ENOMEM',
     [-3001]: 'EAI_NODATA',
     [-3008]: 'EAI_NONAME',
+    3: 'ESERVFAIL',
+    ESERVFAIL: 'ESERVFAIL',
   };
   const error = new Error(`${syscall} ${names[code] || code} ${hostname}`);
   error.code = names[code] || code;
@@ -276,6 +406,7 @@ function promiseFor(work, synchronous) {
 /** Create deterministic browser DNS with optional in-memory records. */
 export function createBrowserDns({ synchronous = false, records = {}, proxy, lookupHook } = {}) {
   const customRecords = normalizeRecords(records);
+  const customQueryRecords = normalizeQueryRecords(records);
   let servers = ['127.0.0.1'];
   let resultOrder = 'verbatim';
 
@@ -313,7 +444,7 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     const actualOptions = typeof options === 'function' ? undefined : options;
     validateLookupOptions(actualOptions);
     const lookupOptions = normalizeLookupOptions(actualOptions);
-    if (!(hostname === false && lookupOptions.all)) validateLookupHostname(hostname);
+    if (hostname && hostname !== false) validateLookupHostname(hostname);
     const actualCallback = typeof options === 'function' ? options : callback;
     if (typeof actualCallback !== 'function') throw new TypeError('callback must be a function');
     lookupHook?.(hostname, lookupOptions);
@@ -358,9 +489,12 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
       return request.resolve(addresses);
     };
     if (lookupThroughProxy(hostname, lookupOptions, completeCallback)) return request;
-    if (hostname === false && lookupOptions.all) {
-      if (synchronous) completeCallback(null, [], undefined);
-      else queueMicrotask(() => completeCallback(null, [], undefined));
+    if (!hostname || hostname === false) {
+      const family = lookupOptions.family === 6 ? 6 : 4;
+      const result = lookupOptions.all ? [] : null;
+      const args = lookupOptions.all ? [null, result] : [null, result, family];
+      if (synchronous) completeCallback(...args);
+      else queueMicrotask(() => completeCallback(...args));
       return request;
     }
     const complete = () => {
@@ -413,7 +547,7 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     if (typeof callback !== 'function') throw new TypeError('callback must be a function');
     const request = caresRequest('QUERYWRAP');
     const completeCallback = (...args) => {
-      try { callback(...args); }
+      try { request.runInAsyncScope(callback, undefined, ...args); }
       finally { queueMicrotask(() => request.emitDestroy()); }
     };
     if (proxyIsActive(proxy) && !hasLocalRecord(customRecords, String(hostname))) {
@@ -435,7 +569,7 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     if (typeof callback !== 'function') throw new TypeError('callback must be a function');
     const request = caresRequest('QUERYWRAP');
     const completeCallback = (...args) => {
-      try { callback(...args); }
+      try { request.runInAsyncScope(callback, undefined, ...args); }
       finally { queueMicrotask(() => request.emitDestroy()); }
     };
     if (proxyIsActive(proxy) && !hasLocalRecord(customRecords, String(address))) {
@@ -458,26 +592,35 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     return request;
   }
 
-  function resolve(hostname, rrtype, callback) {
-    const type = typeof rrtype === 'function' ? 'A' : String(rrtype || 'A').toUpperCase();
+  function resolve(hostname, rrtype, callback, resolverHandle) {
+    if (typeof rrtype !== 'function' && rrtype !== undefined && typeof rrtype !== 'string') {
+      throw invalidArgumentError(
+        `The "rrtype" argument must be of type string. Received type ${typeof rrtype}`,
+        'ERR_INVALID_ARG_TYPE',
+      );
+    }
+    const type = typeof rrtype === 'function' || rrtype === undefined ? 'A' : rrtype.toUpperCase();
+    if (!['A', 'AAAA', 'ANY', 'TXT', ...Object.keys(RESOLVER_TYPES)].includes(type)) {
+      throw invalidArgumentError(`The argument 'rrtype' is invalid. Received '${rrtype}'`, 'ERR_INVALID_ARG_VALUE');
+    }
     const actualCallback = typeof rrtype === 'function' ? rrtype : callback;
     if (typeof actualCallback !== 'function') {
       throw invalidArgumentError('The "callback" argument must be of type function', 'ERR_INVALID_ARG_TYPE');
     }
+    validateResolverName(hostname);
+    if (RESOLVER_TYPES[type]) return queryRecords(hostname, type, actualCallback, resolverHandle);
     const request = caresRequest('QUERYWRAP');
     const completeCallback = (...args) => {
-      try { actualCallback(...args); }
+      try { request.runInAsyncScope(actualCallback, undefined, ...args); }
       finally { queueMicrotask(() => request.emitDestroy()); }
     };
     const queryName = {
       A: 'queryA',
       AAAA: 'queryAaaa',
-      PTR: 'queryPtr',
       ANY: 'queryAny',
       TXT: 'queryTxt',
     }[type];
-    const cares = globalThis.__BNH_VIRTUAL_CARES__;
-    const channel = typeof cares?.ChannelWrap === 'function' ? new cares.ChannelWrap() : null;
+    const channel = queryChannel(resolverHandle);
     if (queryName && typeof channel?.[queryName] === 'function') {
       let caresResult;
       try { caresResult = channel[queryName](request, String(hostname)); }
@@ -494,7 +637,6 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
       try {
         if (type === 'A') return completeCallback(null, [lookupAddress(hostname, 4).address]);
         if (type === 'AAAA') return completeCallback(null, [lookupAddress(hostname, 6).address]);
-        if (type === 'PTR') return reverse(hostname, completeCallback);
         if (type === 'ANY') {
           return completeCallback(null, lookupAddresses(hostname).map((record) => ({
             address: record.address,
@@ -502,7 +644,7 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
           })));
         }
         if (type === 'TXT') return completeCallback(null, []);
-        return completeCallback(null, []);
+        throw invalidArgumentError(`The argument 'rrtype' is invalid. Received '${rrtype}'`, 'ERR_INVALID_ARG_VALUE');
       } catch (error) {
         return completeCallback(error);
       }
@@ -518,6 +660,125 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
 
   function resolveTxt(hostname, callback) {
     return resolve(hostname, 'TXT', callback);
+  }
+
+  function validateResolverQuery(hostname, callback) {
+    validateResolverName(hostname);
+    if (typeof callback !== 'function') {
+      throw invalidArgumentError(
+        'The "callback" argument must be of type function',
+        'ERR_INVALID_ARG_TYPE',
+      );
+    }
+  }
+
+  function validateResolverName(hostname) {
+    if (typeof hostname !== 'string') {
+      throw invalidArgumentError(
+        `The "name" argument must be of type string. Received type ${typeof hostname}`,
+        'ERR_INVALID_ARG_TYPE',
+      );
+    }
+  }
+
+  function queryError(type, hostname) {
+    const bindingName = RESOLVER_TYPES[type];
+    const error = new Error(`${bindingName === 'resolvePtr' ? 'queryPtr' : `query${bindingName.slice(7)}`} ENOTFOUND ${hostname}`);
+    error.code = 'ENOTFOUND';
+    error.errno = 'ENOTFOUND';
+    error.syscall = bindingName === 'resolvePtr' ? 'queryPtr' : `query${bindingName.slice(7)}`;
+    error.hostname = String(hostname);
+    return error;
+  }
+
+  function queryChannel(resolverHandle) {
+    if (resolverHandle) return resolverHandle;
+    const cares = globalThis.__BNH_VIRTUAL_CARES__;
+    return typeof cares?.ChannelWrap === 'function' ? new cares.ChannelWrap() : null;
+  }
+
+  function normalizeQueryValues(type, value) {
+    const values = Array.isArray(value) ? value : [value];
+    if (type === 'SOA') return normalizeQueryResult(type, values[0]);
+    return values.map((entry) => normalizeQueryResult(type, entry));
+  }
+
+  function queryRecords(hostname, type, callback, resolverHandle) {
+    validateResolverQuery(hostname, callback);
+    const request = caresRequest('QUERYWRAP');
+    const metadata = {
+      MX: { binding: 'queryMx' },
+      NS: { binding: 'queryNs' },
+      TLSA: { binding: 'queryTlsa' },
+      SRV: { binding: 'querySrv' },
+      PTR: { binding: 'queryPtr' },
+      NAPTR: { binding: 'queryNaptr' },
+      SOA: { binding: 'querySoa' },
+    }[type];
+    let completed = false;
+    const completeCallback = (...args) => {
+      if (completed) return;
+      completed = true;
+      try { request.runInAsyncScope(callback, undefined, ...args); }
+      finally { queueMicrotask(() => request.emitDestroy()); }
+    };
+    request.oncomplete = (error, value) => {
+      if (error) {
+        completeCallback(error instanceof Error ? error : caresFailure(error, metadata.binding, hostname));
+        return;
+      }
+      completeCallback(null, normalizeQueryValues(type, value));
+    };
+    const completeVirtual = () => {
+      const custom = customQueryRecords.get(hostname)?.[type];
+      const builtin = BUILTIN_DNS_RECORDS[hostname]?.[type];
+      if (custom !== undefined || builtin !== undefined) {
+        const values = custom ?? builtin;
+        completeCallback(null, normalizeQueryValues(type, values));
+      } else {
+        completeCallback(queryError(type, hostname));
+      }
+    };
+    const channel = queryChannel(resolverHandle);
+    const query = channel?.[metadata.binding];
+    if (typeof query === 'function') {
+      let result;
+      try {
+        result = query.call(channel, request, String(hostname));
+      } catch (error) {
+        completeCallback(error);
+        return request;
+      }
+      if (result instanceof Error) {
+        completeCallback(result);
+        return request;
+      }
+      if (Number.isInteger(result) && result !== 0) {
+        completeCallback(caresFailure(result, metadata.binding, hostname));
+        return request;
+      }
+      // A zero return value means that the virtual channel accepted the query.
+      // An undefined return is the no-egress stub; resolve it from virtual data.
+      if (result === 0) return request;
+    }
+    if (synchronous) completeVirtual();
+    else queueMicrotask(completeVirtual);
+    return request;
+  }
+
+  function resolveMx(hostname, callback, resolverHandle) { return queryRecords(hostname, 'MX', callback, resolverHandle); }
+  function resolveNs(hostname, callback, resolverHandle) { return queryRecords(hostname, 'NS', callback, resolverHandle); }
+  function resolveTlsa(hostname, callback, resolverHandle) { return queryRecords(hostname, 'TLSA', callback, resolverHandle); }
+  function resolveSrv(hostname, callback, resolverHandle) { return queryRecords(hostname, 'SRV', callback, resolverHandle); }
+  function resolvePtr(hostname, callback, resolverHandle) { return queryRecords(hostname, 'PTR', callback, resolverHandle); }
+  function resolveNaptr(hostname, callback, resolverHandle) { return queryRecords(hostname, 'NAPTR', callback, resolverHandle); }
+  function resolveSoa(hostname, callback, resolverHandle) { return queryRecords(hostname, 'SOA', callback, resolverHandle); }
+
+  function queryPromise(hostname, type, resolverHandle) {
+    validateResolverName(hostname);
+    return new Promise((resolveValue, reject) => {
+      queryRecords(hostname, type, (error, value) => error ? reject(error) : resolveValue(value), resolverHandle);
+    });
   }
 
   function lookupService(address, port, callback) {
@@ -571,7 +832,7 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
       validateLookupOptions(options);
       const lookupOptions = normalizeLookupOptions(options);
       if (hostname === false && lookupOptions.all) return promiseFor(() => [], synchronous);
-      validateLookupHostname(hostname);
+      if (hostname && hostname !== false) validateLookupHostname(hostname);
       return new Promise((resolve, reject) => lookup(hostname, lookupOptions, (error, address, family) => {
         if (error) reject(error);
         else resolve(lookupOptions.all ? address : { address, family });
@@ -596,12 +857,31 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
       return promiseFor(() => new Promise((resolve, reject) => reverse(address, (error, names) => error ? reject(error) : resolve(names))), synchronous);
     },
     resolve(hostname, rrtype = 'A') {
+      if (typeof rrtype !== 'string') {
+        throw invalidArgumentError(
+          `The "rrtype" argument must be of type string. Received type ${typeof rrtype}`,
+          'ERR_INVALID_ARG_TYPE',
+        );
+      }
+      validateResolverName(hostname);
+      const type = rrtype.toUpperCase();
+      if (!['A', 'AAAA', 'ANY', 'TXT', ...Object.keys(RESOLVER_TYPES)].includes(type)) {
+        throw invalidArgumentError(`The argument 'rrtype' is invalid. Received '${rrtype}'`, 'ERR_INVALID_ARG_VALUE');
+      }
+      if (RESOLVER_TYPES[type]) return queryPromise(hostname, type);
       return new Promise((resolveValue, reject) => resolve(hostname, rrtype, (error, value) => error ? reject(error) : resolveValue(value)));
     },
     resolve4(hostname) { return promiseFor(() => [lookupAddress(hostname, 4).address], synchronous); },
     resolve6(hostname) { return promiseFor(() => [lookupAddress(hostname, 6).address], synchronous); },
     resolveAny(hostname) { return new Promise((resolveValue, reject) => resolveAny(hostname, (error, value) => error ? reject(error) : resolveValue(value))); },
     resolveTxt(hostname) { return new Promise((resolveValue, reject) => resolveTxt(hostname, (error, value) => error ? reject(error) : resolveValue(value))); },
+    resolveMx(hostname) { return queryPromise(hostname, 'MX'); },
+    resolveNs(hostname) { return queryPromise(hostname, 'NS'); },
+    resolveTlsa(hostname) { return queryPromise(hostname, 'TLSA'); },
+    resolveSrv(hostname) { return queryPromise(hostname, 'SRV'); },
+    resolvePtr(hostname) { return queryPromise(hostname, 'PTR'); },
+    resolveNaptr(hostname) { return queryPromise(hostname, 'NAPTR'); },
+    resolveSoa(hostname) { return queryPromise(hostname, 'SOA'); },
     lookupService(address, port) {
       const host = String(address);
       if (addressFamily(host) === 0) {
@@ -662,22 +942,51 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
 
     cancel() { this._handle.cancel?.(); }
     lookup(...args) { return lookup(...args); }
-    resolve(...args) { return resolve(...args); }
+    resolve(hostname, rrtype, callback) { return resolve(hostname, rrtype, callback, this._handle); }
     resolve4(...args) { return resolveFamily(args[0], 4, args[1]); }
     resolve6(...args) { return resolveFamily(args[0], 6, args[1]); }
     resolveAny(...args) { return resolveAny(...args); }
     resolveTxt(...args) { return resolveTxt(...args); }
+    resolveMx(...args) { return resolveMx(...args, this._handle); }
+    resolveNs(...args) { return resolveNs(...args, this._handle); }
+    resolveTlsa(...args) { return resolveTlsa(...args, this._handle); }
+    resolveSrv(...args) { return resolveSrv(...args, this._handle); }
+    resolvePtr(...args) { return resolvePtr(...args, this._handle); }
+    resolveNaptr(...args) { return resolveNaptr(...args, this._handle); }
+    resolveSoa(...args) { return resolveSoa(...args, this._handle); }
     reverse(...args) { return reverse(...args); }
     lookupService(...args) { return lookupService(...args); }
   }
 
   class PromisesResolver extends Resolver {
     lookup(hostname, options) { return promises.lookup(hostname, options); }
-    resolve(hostname, rrtype) { return promises.resolve(hostname, rrtype); }
+    resolve(hostname, rrtype) {
+      const type = rrtype === undefined ? 'A' : rrtype;
+      if (typeof type !== 'string') {
+        throw invalidArgumentError(
+          `The "rrtype" argument must be of type string. Received type ${typeof type}`,
+          'ERR_INVALID_ARG_TYPE',
+        );
+      }
+      validateResolverName(hostname);
+      const normalized = type.toUpperCase();
+      if (!['A', 'AAAA', 'ANY', 'TXT', ...Object.keys(RESOLVER_TYPES)].includes(normalized)) {
+        throw invalidArgumentError(`The argument 'rrtype' is invalid. Received '${type}'`, 'ERR_INVALID_ARG_VALUE');
+      }
+      if (RESOLVER_TYPES[normalized]) return queryPromise(hostname, normalized, this._handle);
+      return new Promise((resolveValue, reject) => resolve(hostname, type, (error, value) => error ? reject(error) : resolveValue(value), this._handle));
+    }
     resolve4(hostname) { return promises.resolve4(hostname); }
     resolve6(hostname) { return promises.resolve6(hostname); }
     resolveAny(hostname) { return promises.resolveAny(hostname); }
     resolveTxt(hostname) { return promises.resolveTxt(hostname); }
+    resolveMx(hostname) { return queryPromise(hostname, 'MX', this._handle); }
+    resolveNs(hostname) { return queryPromise(hostname, 'NS', this._handle); }
+    resolveTlsa(hostname) { return queryPromise(hostname, 'TLSA', this._handle); }
+    resolveSrv(hostname) { return queryPromise(hostname, 'SRV', this._handle); }
+    resolvePtr(hostname) { return queryPromise(hostname, 'PTR', this._handle); }
+    resolveNaptr(hostname) { return queryPromise(hostname, 'NAPTR', this._handle); }
+    resolveSoa(hostname) { return queryPromise(hostname, 'SOA', this._handle); }
     reverse(address) { return promises.reverse(address); }
     lookupService(address, port) { return promises.lookupService(address, port); }
   }
@@ -692,6 +1001,13 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     resolve,
     resolveAny,
     resolveTxt,
+    resolveMx,
+    resolveNs,
+    resolveTlsa,
+    resolveSrv,
+    resolvePtr,
+    resolveNaptr,
+    resolveSoa,
     Resolver,
     getServers: () => [...servers],
     setServers: (values) => {

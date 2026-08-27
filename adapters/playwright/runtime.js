@@ -3118,7 +3118,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           finally { scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ = Math.max(0, Number(scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ || 1) - 1); }
         };
         const actualCallback = typeof rrtype === 'function' ? rrtype : callback;
-        if (typeof actualCallback !== 'function') throw new TypeError('callback must be a function');
+        if (typeof actualCallback !== 'function') {
+          // Let the DNS implementation validate rrtype before reporting a
+          // missing callback, matching Node's synchronous error ordering.
+          return Reflect.apply(dnsModule.resolve, this, [hostname, rrtype, actualCallback]);
+        }
         return Reflect.apply(dnsModule.resolve, this, [hostname, rrtype, onComplete]);
       },
     };

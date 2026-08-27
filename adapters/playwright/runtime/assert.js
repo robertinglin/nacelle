@@ -615,6 +615,10 @@ function assertionMessage(actual, expected, operator, message, fallback) {
   if (operator === 'strictEqual' || operator === 'deepStrictEqual' || operator === 'partialDeepStrictEqual') {
     return strictDiff(actual, expected, operator, message);
   }
+  if (operator === 'throws' || operator === 'rejects'
+    || operator === 'doesNotThrow' || operator === 'doesNotReject') {
+    return message ? String(message) : fallback;
+  }
   if (message) return String(message);
   if (operator === 'notStrictEqual') {
     if (isObject(actual) || typeof actual === 'function') {
@@ -654,9 +658,27 @@ export class AssertionError extends Error {
     this.name = 'AssertionError';
     this.code = 'ERR_ASSERTION';
     this.generatedMessage = options.generatedMessage ?? !options.message;
-    this.actual = options.actual;
-    this.expected = options.expected;
-    this.operator = options.operator;
+    if (Array.isArray(options.details)) {
+      this.actual = undefined;
+      this.expected = undefined;
+      this.operator = undefined;
+      for (let index = 0; index < options.details.length; index += 1) {
+        const detail = options.details[index];
+        this[`message ${index}`] = detail.message;
+        this[`actual ${index}`] = detail.actual;
+        this[`expected ${index}`] = detail.expected;
+        this[`operator ${index}`] = detail.operator;
+        this[`stack trace ${index}`] = detail.stack;
+      }
+    } else {
+      this.actual = options.actual;
+      this.expected = options.expected;
+      this.operator = options.operator;
+    }
+  }
+
+  toString() {
+    return `${this.name} [${this.code}]: ${this.message}`;
   }
 }
 
@@ -708,9 +730,6 @@ function validateErrorExpectation(expected) {
   if (typeof expected !== 'function' && typeof expected !== 'object') {
     throw invalidArgumentType('error', expected, 'function or an instance of Error, RegExp, or Object');
   }
-  if (isPlainObject(expected) && !(expected instanceof RegExp) && !(expected instanceof Error) && Object.keys(expected).length === 0) {
-    throw invalidArgumentValue('error', expected, 'may not be an empty object');
-  }
 }
 
 function validateNoErrorExpectation(expected) {
@@ -740,11 +759,11 @@ function ambiguousStringError(error, message) {
   throw result;
 }
 
-function missingException(expected, message) {
+function missingException(expected, message, rejection = false) {
   let detail = '';
   if (expected?.name) detail += ` (${expected.name})`;
   detail += message ? `: ${message}` : '.';
-  return `Missing expected exception${detail}`;
+  return `Missing expected ${rejection ? 'rejection' : 'exception'}${detail}`;
 }
 
 function mismatchMessage(error, expected, message, match) {
@@ -760,7 +779,12 @@ function mismatchMessage(error, expected, message, match) {
     const detail = error instanceof Error && error.message ? `\n\nError message:\n\n${error.message}` : '';
     return `The error is expected to be an instance of "${name}". Received ${received}${detail}`;
   }
-  if (typeof expected === 'function') return 'The validation function is expected to return "true".';
+  if (typeof expected === 'function') {
+    const name = expected.name ? `"${expected.name}" ` : '';
+    let result = `The ${name}validation function is expected to return "true". Received ${inspect(match?.result)}`;
+    if (error instanceof Error) result += `\n\nCaught error:\n\n${error}`;
+    return result;
+  }
   const diff = match?.comparison
     ? strictDiff(match.comparison.actual, match.comparison.expected, 'deepStrictEqual')
     : strictDiff(error, expected, 'deepStrictEqual');
@@ -775,6 +799,41 @@ function thrownValue(fn) {
   } catch (error) {
     return { value: error, threw: true };
   }
+}
+
+const noRejection = Symbol('no rejection');
+
+function isPromiseLike(value) {
+  return value instanceof Promise
+    || (value !== null && typeof value === 'object'
+      && typeof value.then === 'function'
+      && typeof value.catch === 'function');
+}
+
+function invalidReturnValue(name, value, modernMessage = false) {
+  const error = new TypeError(modernMessage
+    ? `The "${name}" function is expected to return an instance of Promise. Received ${typeDescription(value)}.`
+    : `Expected instance of Promise to be returned from the "${name}" function but got ${typeDescription(value)}.`);
+  error.code = 'ERR_INVALID_RETURN_VALUE';
+  return error;
+}
+
+async function waitForActual(promiseOrFn, modernInvalidReturn = false) {
+  let promise;
+  if (typeof promiseOrFn === 'function') {
+    promise = promiseOrFn();
+    if (!isPromiseLike(promise)) throw invalidReturnValue('promiseFn', promise, modernInvalidReturn);
+  } else if (isPromiseLike(promiseOrFn)) {
+    promise = promiseOrFn;
+  } else {
+    throw invalidArgumentType('promiseFn', promiseOrFn, 'function or an instance of Promise');
+  }
+  try {
+    await promise;
+  } catch (error) {
+    return error;
+  }
+  return noRejection;
 }
 
 function missingArguments() {
@@ -940,14 +999,8 @@ export function createAssert({ strict = false, readSource, sourcePath, process: 
     expected = normalized.expected;
     message = normalized.message;
     validateErrorExpectation(expected);
-    let result;
-    try {
-      const promise = typeof promiseOrFn === 'function' ? promiseOrFn() : promiseOrFn;
-      await promise;
-    } catch (error) {
-      result = error;
-    }
-    if (result === undefined) fail(message, undefined, expected, 'rejects', missingException(expected, message));
+    const result = await waitForActual(promiseOrFn);
+    if (result === noRejection) fail(message, undefined, expected, 'rejects', missingException(expected, message, true));
     const match = expected == null ? { matched: true } : matcherResult(result, expected);
     if (!match.matched) {
       const failureMessage = mismatchMessage(result, expected, message, match);
@@ -957,7 +1010,31 @@ export function createAssert({ strict = false, readSource, sourcePath, process: 
     return result;
   };
 
-  assert.match = (actual, regexp, message) => {
+  assert.doesNotReject = async function doesNotReject(promiseOrFn, expected, message) {
+    const normalized = normalizeErrorArguments(expected, message, arguments.length);
+    expected = normalized.expected;
+    message = normalized.message;
+    const result = await waitForActual(promiseOrFn);
+    if (result === noRejection) return;
+    validateNoErrorExpectation(expected);
+    const match = matcherResult(result, expected);
+    if (expected == null || match.matched) {
+      try {
+        fail(message, result, expected, 'doesNotReject', `Got unwanted rejection${message ? `: ${message}` : '.'}\nActual message: "${result?.message}"`);
+      } catch (error) {
+        if (typeof error?.stack === 'string') {
+          error.stack = error.stack
+            .split('\n')
+            .filter((line) => !line.includes('assert.doesNotReject') && !line.includes('Assert.doesNotReject'))
+            .join('\n');
+        }
+        throw error;
+      }
+    }
+    throw result;
+  };
+
+  function internalMatch(actual, regexp, message, operator, shouldMatch) {
     if (!(regexp instanceof RegExp)) {
       const error = new TypeError(
         `The "regexp" argument must be an instance of RegExp. Received ${typeDescription(regexp)}`,
@@ -965,24 +1042,30 @@ export function createAssert({ strict = false, readSource, sourcePath, process: 
       error.code = 'ERR_INVALID_ARG_TYPE';
       throw error;
     }
-    if (typeof actual !== 'string') throw invalidArgumentType('string', actual, 'string');
-    if (!regexp.test(actual)) fail(message, actual, regexp, 'match', `The input did not match the regular expression ${inspect(regexp)}. Input:\n\n${inspect(actual)}\n`);
-  };
-  assert.doesNotMatch = (actual, regexp, message) => {
-    if (!(regexp instanceof RegExp)) {
-      const error = new TypeError(
-        `The "regexp" argument must be an instance of RegExp. Received ${typeDescription(regexp)}`,
-      );
-      error.code = 'ERR_INVALID_ARG_TYPE';
-      throw error;
-    }
-    if (typeof actual !== 'string') throw invalidArgumentType('string', actual, 'string');
-    if (regexp.test(actual)) fail(message, actual, regexp, 'doesNotMatch', `The input was expected to not match the regular expression ${inspect(regexp)}. Input:\n\n${inspect(actual)}\n`);
-  };
+    const matched = typeof actual === 'string' && regexp.exec(actual) !== null;
+    if (matched === shouldMatch) return;
+    if (message instanceof Error) throw message;
+    const generatedMessage = !message;
+    const failureMessage = message || (typeof actual !== 'string'
+      ? `The "string" argument must be of type string. Received type ${typeof actual} (${inspect(actual)})`
+      : `${shouldMatch
+        ? 'The input did not match the regular expression '
+        : 'The input was expected to not match the regular expression '}${inspect(regexp)}. Input:\n\n${inspect(actual)}\n`);
+    const error = new AssertionError({
+      actual,
+      expected: regexp,
+      message: failureMessage,
+      operator,
+    });
+    error.generatedMessage = generatedMessage;
+    throw error;
+  }
+  assert.match = (actual, regexp, message) => internalMatch(actual, regexp, message, 'match', true);
+  assert.doesNotMatch = (actual, regexp, message) => internalMatch(actual, regexp, message, 'doesNotMatch', false);
 
   assert.AssertionError = AssertionError;
   assert.CallTracker = class RuntimeCallTracker extends CallTracker {
-    constructor() { super(processObject); }
+    constructor() { super(processObject, AssertionError); }
   };
   assert.strict = strict ? assert : createAssert({ strict: true, readSource, sourcePath, process: processObject });
   assert.ifError = (value) => {

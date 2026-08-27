@@ -695,6 +695,27 @@ function createAsyncLocalStorage() {
       if (isBrowserRealm) installTaskHooks(globalThis);
     }
 
+    _enable() {
+      if (!this._enabled) this._enabled = true;
+    }
+
+    _propagate(resource, triggerResource, type) {
+      if (!this._enabled) return;
+      let resourceAsyncId;
+      let triggerAsyncId;
+      for (const [asyncId, record] of resources) {
+        const value = resourceValue(record);
+        if (value === resource) resourceAsyncId = asyncId;
+        if (value === triggerResource) triggerAsyncId = asyncId;
+        if (resourceAsyncId !== undefined && triggerAsyncId !== undefined) break;
+      }
+      if (resourceAsyncId === undefined || triggerAsyncId === undefined) return;
+      const triggerContext = contexts.get(triggerAsyncId);
+      const context = contexts.get(resourceAsyncId) || new Map();
+      context.set(this, triggerContext?.get(this));
+      contexts.set(resourceAsyncId, context);
+    }
+
     disable() {
       this._enabled = false;
       for (const context of contexts.values()) context.delete(this);

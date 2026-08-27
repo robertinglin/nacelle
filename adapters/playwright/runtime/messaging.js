@@ -1,14 +1,32 @@
 import { BrowserEventEmitter } from './events.js';
 
 const uncloneableValues = new WeakSet();
+const untransferableValues = new WeakSet();
+const untransferableMarker = Symbol.for('nodejs.worker_threads.untransferable');
 const nativeMessageChannels = new WeakMap();
 const cloneablePrototypeMarker = Symbol.for('bnh.messaging.cloneablePrototype');
 const messageEventData = new WeakMap();
+
+export const SHARE_ENV = Symbol.for('nodejs.worker_threads.SHARE_ENV');
 
 export function markAsUncloneable(value) {
   if (!value || (typeof value !== 'object' && typeof value !== 'function')) return;
   if (value instanceof ArrayBuffer || (typeof SharedArrayBuffer === 'function' && value instanceof SharedArrayBuffer)) return;
   uncloneableValues.add(value);
+}
+
+export function markAsUntransferable(value) {
+  if (value !== null && (typeof value === 'object' || typeof value === 'function')) {
+    untransferableValues.add(value);
+    try { Object.defineProperty(value, untransferableMarker, { configurable: true, value: true }); } catch { /* host buffer may be sealed */ }
+  }
+}
+
+export function isMarkedAsUntransferable(value) {
+  return value !== null
+    && (typeof value === 'object' || typeof value === 'function')
+    && (untransferableValues.has(value)
+      || (Object.hasOwn(value, untransferableMarker) && value[untransferableMarker] === true));
 }
 
 function isUncloneable(value) {
@@ -97,6 +115,7 @@ function transferArguments(value, transferList) {
   const identities = new Set();
   for (const item of list) {
     const identity = item?.raw || item;
+    if (isMarkedAsUntransferable(identity)) throw dataCloneError('Cannot transfer object of unsupported type.');
     if (identities.has(identity)) {
       const type = item instanceof ArrayBuffer ? 'ArrayBuffer' : item?.__bnhReceiveMessage ? 'MessagePort' : null;
       if (type) throw dataCloneError(`Transfer list contains duplicate ${type}`);
@@ -569,6 +588,7 @@ export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePor
       },
     },
     [Symbol.for('nodejs.util.inspect.custom')]: {
+      configurable: true,
       value: () => `MessagePort { active: ${!closed}, refed: ${refed} }`,
     },
   });
@@ -960,9 +980,51 @@ export function createWorkerFactory(scope = globalThis, { bootstrap = '' } = {})
 export function createBroadcastChannelFactory(scope = globalThis) {
   if (typeof scope.BroadcastChannel !== 'function') return undefined;
   return function BroadcastChannel(name) {
-    const channel = new scope.BroadcastChannel(name);
+    if (!new.target) {
+      const error = new TypeError('Class constructor BroadcastChannel cannot be invoked without \'new\'');
+      error.code = 'ERR_CONSTRUCT_CALL_REQUIRED';
+      throw error;
+    }
+    if (arguments.length === 0) {
+      const error = new TypeError('The "name" argument must be specified');
+      error.code = 'ERR_MISSING_ARGS';
+      throw error;
+    }
+    const channelName = String(name);
+    const channel = new scope.BroadcastChannel(channelName);
     const adapted = adaptMessagePort(channel);
-    adapted.name = channel.name;
+    Object.defineProperty(adapted, 'name', {
+      configurable: true,
+      enumerable: true,
+      get: () => channelName,
+    });
+    const nativeClose = adapted.close;
+    adapted.close = function close() {
+      nativeClose.call(adapted);
+    };
+    const nativePostMessage = adapted.postMessage;
+    adapted.postMessage = function postMessage(value) {
+      if (arguments.length === 0) {
+        const error = new TypeError('The "message" argument must be specified');
+        error.code = 'ERR_MISSING_ARGS';
+        throw error;
+      }
+      if (adapted.__bnhIsClosed) {
+        const error = typeof scope.DOMException === 'function'
+          ? new scope.DOMException('BroadcastChannel is closed.', 'InvalidStateError')
+          : Object.assign(new Error('BroadcastChannel is closed.'), { name: 'InvalidStateError', code: 11 });
+        throw error;
+      }
+      return nativePostMessage.call(adapted, value);
+    };
+    Object.defineProperty(adapted, Symbol.for('nodejs.util.inspect.custom'), {
+      configurable: true,
+      value(depth) {
+        if (depth < 0) return 'BroadcastChannel';
+        const quotedName = channelName.replaceAll('\\', '\\\\').replaceAll("'", "\\'");
+        return `BroadcastChannel { name: '${quotedName}', active: ${!adapted.__bnhIsClosed} }`;
+      },
+    });
     return adapted;
   };
 }
@@ -989,12 +1051,15 @@ export function createMessagingPrimitives(scope = globalThis) {
     Worker,
     MessageChannel,
     BroadcastChannel: createBroadcastChannelFactory(scope),
+    SHARE_ENV,
     MessagePort: nodeMessagePortClass,
     isMainThread: true,
     parentPort: null,
     workerData: undefined,
     ...createMessagePortHelpers(),
     markAsUncloneable,
+    markAsUntransferable,
+    isMarkedAsUntransferable,
     structuredClone(value, options) {
       if (isUncloneable(value)) throw dataCloneError('object could not be cloned');
       if (!nativeStructuredClone) return value;

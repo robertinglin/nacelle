@@ -640,6 +640,20 @@ export function isUtf8(input) {
 
 export function createBufferClass() {
   const internalBuffer = Symbol('internal buffer');
+  const untransferableMarker = Symbol.for('nodejs.worker_threads.untransferable');
+  let poolBuffer = null;
+  let poolOffset = 0;
+  const pooledBytes = (size) => {
+    if (size <= 0 || size > 4096) return null;
+    if (!poolBuffer || poolOffset + size > 8192) {
+      poolBuffer = new ArrayBuffer(8192);
+      poolOffset = 0;
+      try { Object.defineProperty(poolBuffer, untransferableMarker, { configurable: true, value: true }); } catch { /* host buffer may be sealed */ }
+    }
+    const view = new Uint8Array(poolBuffer, poolOffset, size);
+    poolOffset += size;
+    return view;
+  };
   let warningEmitted = false;
   class NodeBuffer extends Uint8Array {
     // Typed-array slice/subarray consult species before our methods can wrap
@@ -695,7 +709,13 @@ export function createBufferClass() {
         }
         return new NodeBuffer(value, offset, size, internalBuffer);
       }
-      return new NodeBuffer(bytesFrom(value, encodingOrOffset), internalBuffer);
+      const bytes = bytesFrom(value, encodingOrOffset);
+      const pooled = pooledBytes(bytes.byteLength);
+      if (pooled) {
+        pooled.set(bytes);
+        return new NodeBuffer(pooled.buffer, pooled.byteOffset, pooled.byteLength, internalBuffer);
+      }
+      return new NodeBuffer(bytes, internalBuffer);
     }
     static alloc(size, fill = 0, encoding) {
       const result = new NodeBuffer(validateBufferSize(size), internalBuffer);

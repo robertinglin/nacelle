@@ -407,22 +407,58 @@ function browserHeapSnapshot(scope) {
   return JSON.stringify({ snapshot: { meta: { node_fields: nodeFields, node_types: nodeTypes, edge_fields: edgeFields, edge_types: edgeTypes } }, nodes, edges, strings });
 }
 
+function createWorkerHeapSnapshot(scope) {
+  let snapshot = browserHeapSnapshot(scope);
+  return {
+    pause() { return this; },
+    resume() { return this; },
+    destroy() { snapshot = ''; return this; },
+    read() {
+      const value = snapshot;
+      snapshot = '';
+      return value;
+    },
+  };
+}
+
+function workerMethodError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function cloneForWorker(value, scope) {
+  if (typeof scope.structuredClone === 'function') return scope.structuredClone(value);
+  return adaptWorkerData(value, scope);
+}
+
+function workerHeapStatistics() {
+  const memory = {
+    total_heap_size: 1,
+    total_heap_size_executable: 0,
+    total_physical_size: 1,
+    total_available_size: Number.MAX_SAFE_INTEGER,
+    used_heap_size: 1,
+    heap_size_limit: Number.MAX_SAFE_INTEGER,
+    malloced_memory: 0,
+    peak_malloced_memory: 0,
+    does_zap_garbage: false,
+    number_of_native_contexts: 1,
+    number_of_detached_contexts: 0,
+    total_global_handles_size: 0,
+    used_global_handles_size: 0,
+    external_memory: 0,
+    total_allocated_bytes: 1,
+  };
+  return Object.assign(Object.create(null), memory);
+}
+
 function createBrowserV8Module(processObject, scope) {
   const v8 = createV8Module(processObject);
   return {
     ...v8,
     getHeapSnapshot() {
-      let snapshot = browserHeapSnapshot(scope);
-      return {
-        pause() { return this; },
-        resume() { return this; },
-        destroy() { snapshot = ''; return this; },
-        read() {
-          const value = snapshot;
-          snapshot = '';
-          return value;
-        },
-      };
+      return createWorkerHeapSnapshot(scope);
     },
   };
 }
@@ -2032,6 +2068,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
   let dnsModule = createBrowserDns();
   let proxyCapability = createProxyCapability();
   const virtualProcessLiveness = new Map();
+  const environmentData = new Map();
 
   const trackVirtualProcess = (processHandle) => {
     const pid = Number(processHandle?.pid);
@@ -5284,6 +5321,10 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
   async function execute(entry, options, stdout, stderr) {
     installBrowserAbortSignalCompatibility(scope);
     scope.__BNH_BROWSER_WORKERS__ ||= new Set();
+    if (options.workerThread) {
+      environmentData.clear();
+      for (const [key, value] of options.environmentData || []) environmentData.set(key, value);
+    }
     let pending = 0;
     const trackTask = () => {
       pending += 1;
@@ -5437,6 +5478,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           const parentPort = new EventEmitter();
           let assignedOnMessage = null;
           const onMessage = (value, handle) => {
+            if (value?.__bnhThreadMessage || value?.__bnhThreadMessageResult) return;
             const adaptedValue = adaptWorkerData(value, scope);
             parentPort.emit('message', adaptedValue, handle);
             assignedOnMessage?.({
@@ -5467,7 +5509,16 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           return parentPort;
         })()
       : null;
+    processObject.on('message', (message) => {
+      if (!message?.__bnhThreadMessage) return;
+      processObject.emit('workerMessage', message.value, Number(message.source));
+    });
     const createBrowserWorker = (source, workerOptions, threadId, ownerProcess) => {
+      if (workerOptions.env !== undefined
+        && workerOptions.env !== browserIO.SHARE_ENV
+        && (workerOptions.env === null || typeof workerOptions.env !== 'object' || Array.isArray(workerOptions.env))) {
+        throw workerMethodError('ERR_INVALID_ARG_TYPE', 'The "options.env" property must be of type object');
+      }
       const isEval = Boolean(workerOptions.eval);
       const requestedTransferList = workerOptions.transferList === undefined
         ? undefined
@@ -5477,6 +5528,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       const grantedPorts = new Set(workerDataTransferList || []);
       if (requiredPorts.some((port) => !grantedPorts.has(port))) throw workerDataTransferError(scope);
       const [workerData] = prepareTransferPayload(workerOptions.workerData, requestedTransferList);
+      const workerEnvironment = workerOptions.env === browserIO.SHARE_ENV
+        ? ownerProcess.env
+        : workerOptions.env === undefined
+          ? { ...(ownerProcess.env || {}) }
+          : { ...workerOptions.env };
       const workerPath = isEval
         ? `/node/.bnh-worker-eval-${threadId}.js`
         : normalizePath(source, ownerProcess.cwd?.() || '/node');
@@ -5496,7 +5552,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         childId: `thread-${threadId}-${Date.now()}`,
         argv: ['node', workerPath],
         execArgv: workerOptions.execArgv || ownerProcess.execArgv,
-        env: ownerProcess.env,
+        env: workerEnvironment,
         cwd: ownerProcess.cwd?.() || '/node',
         ppid: ownerProcess.pid,
         signalGrants: capabilities.manifest.signals.allowed,
@@ -5511,11 +5567,40 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           proxy: capabilities.manifest.proxy,
           workerThread: true,
           threadId,
+          threadName: workerOptions.name ? String(workerOptions.name).trim() : '',
           workerData,
+          environmentData: [...environmentData].map(([key, value]) => [cloneForWorker(key, scope), cloneForWorker(value, scope)]),
+          resourceLimits: workerOptions.resourceLimits,
         },
         workerDataTransferList,
       });
+      child.on('message', (message) => {
+        const request = message?.__bnhThreadMessageRequest;
+        if (!request) return;
+        let delivered = false;
+        if (Number(request.destination) === 0) {
+          delivered = ownerProcess.emit('workerMessage', request.value, Number(request.source));
+        } else {
+          const target = [...scope.__BNH_BROWSER_WORKERS__ || []]
+            .find((candidate) => Number(candidate.threadId) === Number(request.destination));
+          if (target) {
+            target.postMessage({
+              __bnhThreadMessage: true,
+              value: request.value,
+              source: Number(request.source),
+            }, request.transferList);
+            delivered = true;
+          }
+        }
+        child.send({
+          __bnhThreadMessageResult: {
+            requestId: request.requestId,
+            delivered,
+          },
+        });
+      });
       const workerStdout = new Readable({ read() {} });
+      const workerStderr = new Readable({ read() {} });
       const workerStdin = workerOptions.stdin === true
         ? new Writable({
             write(chunk, _encoding, callback) {
@@ -5535,10 +5620,15 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           })
         : null;
       child.stdout = workerStdout;
+      child.stderr = workerOptions.stderr === true ? workerStderr : null;
       child.stdin = workerStdin;
       child.once('exit', () => workerStdout.push(null));
+      child.once('exit', () => workerStderr.push(null));
       if (workerOptions.stdout !== true) {
         workerStdout.on('data', (chunk) => ownerProcess.stdout?.write?.(chunk));
+      }
+      if (workerOptions.stderr !== true) {
+        workerStderr.on('data', (chunk) => ownerProcess.stderr?.write?.(chunk));
       }
       child.threadId = threadId;
       child.postMessage = (value, transferList) => child.send(value, transferList);
@@ -5564,12 +5654,18 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         : createRuntimeWorker(...args);
       if (worker.stdout === undefined) worker.stdout = new Readable({ read() {} });
       if (worker.stdin === undefined) worker.stdin = null;
+      if (worker.stderr === undefined) worker.stderr = workerOptions.stderr === true ? new Readable({ read() {} }) : null;
       const workerResource = new AsyncResource('WORKER');
       let workerRefed = true;
       let workerExited = false;
       let workerResourceDestroyed = false;
       let messagePortResource = null;
-      const workerThreadName = workerOptions.name ? String(workerOptions.name).trim() : 'WorkerThread';
+      const workerThreadName = workerOptions.name ? String(workerOptions.name).trim() : '';
+      const resourceLimits = workerOptions.resourceLimits === undefined
+        ? {}
+        : workerOptions.resourceLimits && typeof workerOptions.resourceLimits === 'object' && !Array.isArray(workerOptions.resourceLimits)
+          ? { ...workerOptions.resourceLimits }
+          : (() => { throw workerMethodError('ERR_INVALID_ARG_TYPE', 'The "resourceLimits" option must be an object'); })();
       workerResource.hasRef = () => workerResourceDestroyed ? undefined : workerRefed;
       const refWorker = worker.ref?.bind(worker);
       const unrefWorker = worker.unref?.bind(worker);
@@ -5609,6 +5705,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         get threadName() { return workerExited ? null : workerThreadName; },
         stdin: worker.stdin,
         stdout: worker.stdout,
+        stderr: worker.stderr,
+        resourceLimits,
       });
       worker.once('spawn', () => worker.emit('online'));
       worker.once('exit', () => {
@@ -5703,6 +5801,60 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           return runtimeWorkerStates.get(this)?.stdout;
         },
       },
+      stderr: {
+        configurable: true,
+        get() {
+          return runtimeWorkerStates.get(this)?.stderr;
+        },
+      },
+      resourceLimits: {
+        configurable: true,
+        get() {
+          return runtimeWorkerStates.get(this)?.resourceLimits;
+        },
+      },
+      getHeapSnapshot: {
+        configurable: true,
+        writable: true,
+        value() {
+          const state = runtimeWorkerStates.get(this);
+          if (!state || this.threadId === -1) return Promise.reject(workerMethodError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
+          return Promise.resolve(createWorkerHeapSnapshot(scope));
+        },
+      },
+      getHeapStatistics: {
+        configurable: true,
+        writable: true,
+        value() {
+          const state = runtimeWorkerStates.get(this);
+          if (!state || this.threadId === -1) return Promise.reject(workerMethodError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
+          return Promise.resolve(workerHeapStatistics());
+        },
+      },
+      cpuUsage: {
+        configurable: true,
+        writable: true,
+        value(previous) {
+          if (previous !== undefined && previous !== null && typeof previous !== 'object') {
+            return Promise.reject(workerMethodError('ERR_INVALID_ARG_TYPE', 'The "prev" argument must be of type object'));
+          }
+          const state = runtimeWorkerStates.get(this);
+          if (!state || this.threadId === -1) return Promise.reject(workerMethodError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
+          return Promise.resolve({ user: 0, system: 0 });
+        },
+      },
+      startCpuProfile: {
+        configurable: true,
+        writable: true,
+        value(options = {}) {
+          if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+            return Promise.reject(workerMethodError('ERR_INVALID_ARG_TYPE', 'The "options" argument must be of type object'));
+          }
+          const state = runtimeWorkerStates.get(this);
+          if (!state || this.threadId === -1) return Promise.reject(workerMethodError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
+          return Promise.resolve({ stop: async () => ({}) });
+        },
+      },
     });
     const workerThreads = {
       ...browserIO,
@@ -5711,6 +5863,63 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       threadId: options.workerThread ? Number(options.threadId ?? 1) : 0,
       parentPort: workerThreadParentPort,
       workerData: adaptWorkerData(options.workerData, scope),
+      resourceLimits: options.workerThread ? { ...(options.resourceLimits || {}) } : {},
+      getEnvironmentData(key) {
+        return environmentData.get(key);
+      },
+      setEnvironmentData(key, value) {
+        if (value === undefined) environmentData.delete(key);
+        else environmentData.set(key, value);
+      },
+      isInternalThread: false,
+      threadName: options.workerThread ? String(options.threadName || '') : '',
+      postMessageToThread(threadId, value, transferList, timeout) {
+        if (typeof transferList === 'number' && timeout === undefined) {
+          timeout = transferList;
+          transferList = [];
+        }
+        if (timeout !== undefined && (!Number.isFinite(timeout) || timeout < 0)) {
+          return Promise.reject(workerMethodError('ERR_OUT_OF_RANGE', 'The value of "timeout" is out of range. It must be >= 0.'));
+        }
+        if (threadId === workerThreads.threadId) {
+          return Promise.reject(workerMethodError('ERR_WORKER_MESSAGING_SAME_THREAD', 'Cannot send a message to the same thread'));
+        }
+        if (options.workerThread) {
+          const requestId = `${workerThreads.threadId}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+          return new Promise((resolve, reject) => {
+            const onResult = (message) => {
+              if (message?.__bnhThreadMessageResult?.requestId !== requestId) return;
+              processObject.removeListener('message', onResult);
+              if (message.__bnhThreadMessageResult.delivered) resolve();
+              else reject(workerMethodError('ERR_WORKER_MESSAGING_FAILED', 'Cannot find the destination thread or listener'));
+            };
+            processObject.on('message', onResult);
+            try {
+              processObject.send({
+                __bnhThreadMessageRequest: {
+                  requestId,
+                  source: workerThreads.threadId,
+                  destination: Number(threadId),
+                  value,
+                  transferList,
+                },
+              });
+            } catch (error) {
+              processObject.removeListener('message', onResult);
+              reject(error);
+            }
+          });
+        }
+        const target = [...scope.__BNH_BROWSER_WORKERS__ || []]
+          .find((candidate) => Number(candidate.threadId) === Number(threadId));
+        if (!target) return Promise.reject(workerMethodError('ERR_WORKER_MESSAGING_FAILED', 'Cannot find the destination thread or listener'));
+        try {
+          target.postMessage({ __bnhThreadMessage: true, value, source: workerThreads.threadId }, transferList);
+          return Promise.resolve();
+        } catch (error) {
+          return Promise.reject(error);
+        }
+      },
     };
     const builtins = makeBuiltins(
       processObject,
@@ -6370,6 +6579,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       if (activeChild) await activeChild.kill();
       activeChild = null;
       virtualProcessLiveness.clear();
+      environmentData.clear();
       if (context.signal?.aborted) return;
       runSpec = {
         runId: String(context.runId || context.metadata?.runId || `browser-${Date.now()}`),

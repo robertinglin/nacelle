@@ -22,36 +22,8 @@ function authority(url) {
   };
 }
 
-function legacyUrlObject(scope, input, parseQueryString, slashesDenoteHost) {
-  const text = String(input);
-  const base = slashesDenoteHost && text.startsWith('//') ? 'http:' : 'http://localhost';
-  const parsed = new scope.URL(text, base);
-  const { auth, host, hostname, port } = authority(parsed);
-  const search = parsed.search || null;
-  const queryText = search ? search.slice(1) : '';
-  const query = parseQueryString ? parseQueryStringValue(queryText) : (queryText || null);
-  const pathname = parsed.pathname || (parsed.host ? '/' : null);
-  const path = pathname === null ? null : `${pathname}${search || ''}`;
-  const result = {
-    protocol: parsed.protocol || null,
-    slashes: Boolean(parsed.host || text.startsWith('//')),
-    auth,
-    host: host || null,
-    port,
-    hostname: hostname || null,
-    hash: parsed.hash || null,
-    search,
-    query,
-    pathname,
-    path,
-    href: parsed.href,
-  };
-  result.format = () => formatUrl(result);
-  return result;
-}
-
 function parseQueryStringValue(value) {
-  const result = {};
+  const result = Object.create(null);
   for (const part of String(value || '').split('&')) {
     if (!part) continue;
     const separator = part.indexOf('=');
@@ -65,6 +37,205 @@ function parseQueryStringValue(value) {
   }
   return result;
 }
+
+const legacyProtocolPattern = /^[a-z0-9.+-]+:/i;
+const legacySlashedProtocols = new Set(['http:', 'https:', 'ftp:', 'gopher:', 'file:', 'ws:', 'wss:']);
+const legacyHostlessProtocols = new Set(['javascript:']);
+
+function legacyString(value, name) {
+  if (typeof value !== 'string') {
+    const error = new TypeError(`The "${name}" argument must be of type string. Received ${value === null ? 'null' : typeof value}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  return value;
+}
+
+function legacyUrlFields(urlObject) {
+  urlObject.protocol = null;
+  urlObject.slashes = null;
+  urlObject.auth = null;
+  urlObject.host = null;
+  urlObject.port = null;
+  urlObject.hostname = null;
+  urlObject.hash = null;
+  urlObject.search = null;
+  urlObject.query = null;
+  urlObject.pathname = null;
+  urlObject.path = null;
+  urlObject.href = null;
+}
+
+function Url() {
+  legacyUrlFields(this);
+}
+
+function legacyNormalizeHost(scope, host) {
+  if (!host) return { host: '', hostname: '' };
+  const bracketMatch = /^\[([^\]]*)\](?::([0-9]*))?$/.exec(host);
+  const bracketed = Boolean(bracketMatch);
+  const portMatch = bracketed ? null : /:([0-9]*)$/.exec(host);
+  let hostname = bracketMatch ? bracketMatch[1] : portMatch ? host.slice(0, -portMatch[0].length) : host;
+  const port = bracketMatch?.[2] || (portMatch && portMatch[1]) || null;
+  try {
+    const native = new scope.URL(`http://${host}`);
+    hostname = native.hostname;
+    if (hostname.startsWith('[') && hostname.endsWith(']')) hostname = hostname.slice(1, -1);
+    return { host: `${bracketed ? `[${hostname}]` : hostname}${native.port ? `:${native.port}` : port ? `:${port}` : ''}`, hostname, port: native.port || port };
+  } catch {
+    return { host: `${bracketed ? `[${hostname}]` : hostname}${port ? `:${port}` : ''}`, hostname: hostname.toLowerCase(), port };
+  }
+}
+
+function legacyAutoEscape(value) {
+  return String(value).replace(/[\u0000-\u0020"'<>\\^`{|}]/g, (character) => {
+    const code = character.charCodeAt(0);
+    return `%${code.toString(16).toUpperCase().padStart(2, '0')}`;
+  });
+}
+
+function legacyParseUrl(scope, input, parseQueryString = false, slashesDenoteHost = false) {
+  const url = legacyString(input, 'url');
+  const result = new Url();
+  let text = url.trim();
+  if (!text) {
+    result.href = '';
+    return result;
+  }
+
+  const protocolMatch = legacyProtocolPattern.exec(text);
+  const protocol = protocolMatch ? protocolMatch[0].toLowerCase() : null;
+  if (protocol) {
+    result.protocol = protocol;
+    text = text.slice(protocolMatch[0].length);
+  }
+
+  const hasExplicitSlashes = text.startsWith('//');
+  const shouldParseHost = !legacyHostlessProtocols.has(protocol)
+    && ((slashesDenoteHost && hasExplicitSlashes) || (hasExplicitSlashes && Boolean(protocol))
+      || Boolean(protocol && !legacySlashedProtocols.has(protocol))
+      || Boolean(!protocol && /^\/\/[^@/]+@[^@/]+/.test(text)));
+  if (shouldParseHost) {
+    if (hasExplicitSlashes) {
+      result.slashes = true;
+      text = text.slice(2);
+    }
+    const delimiter = text.search(/[\/?#]/);
+    const authorityText = delimiter < 0 ? text : text.slice(0, delimiter);
+    text = delimiter < 0 ? '' : text.slice(delimiter);
+    const at = authorityText.lastIndexOf('@');
+    let hostText = authorityText;
+    if (at >= 0) {
+      result.auth = decodeURIComponent(authorityText.slice(0, at));
+      hostText = authorityText.slice(at + 1);
+    }
+    const normalized = legacyNormalizeHost(scope, hostText);
+    result.host = normalized.host;
+    result.hostname = normalized.hostname;
+    result.port = normalized.port || null;
+    if (result.slashes === null && hasExplicitSlashes) result.slashes = true;
+  }
+
+  const split = text.search(/[?#]/);
+  let pathPart = split < 0 ? text : text.slice(0, split);
+  let suffix = split < 0 ? '' : text.slice(split);
+  pathPart = legacyAutoEscape(pathPart.replaceAll('\\', '/'));
+  suffix = legacyAutoEscape(suffix);
+  const hashIndex = suffix.indexOf('#');
+  if (hashIndex >= 0) {
+    result.hash = suffix.slice(hashIndex);
+    suffix = suffix.slice(0, hashIndex);
+  }
+  if (suffix.startsWith('?')) {
+    result.search = suffix;
+    const queryText = suffix.slice(1);
+    result.query = parseQueryString ? parseQueryStringValue(queryText) : queryText;
+  } else if (parseQueryString) {
+    result.query = Object.create(null);
+  }
+
+  if (pathPart) result.pathname = pathPart;
+  if (result.host !== null && result.hostname !== null && !result.pathname && legacySlashedProtocols.has(protocol)) result.pathname = '/';
+  if (result.pathname || result.search) result.path = `${result.pathname || ''}${result.search || ''}`;
+  result.href = legacyFormat(result);
+  return result;
+}
+
+function legacyFormat(urlObject) {
+  let auth = urlObject.auth || '';
+  if (auth) auth = encodeAuth(auth) + '@';
+  let protocol = urlObject.protocol || '';
+  if (protocol && !protocol.endsWith(':')) protocol += ':';
+  let pathname = urlObject.pathname || '';
+  let hash = urlObject.hash || '';
+  let host = '';
+  if (urlObject.host) host = auth + urlObject.host;
+  else if (urlObject.hostname) {
+    const hostname = String(urlObject.hostname);
+    host = auth + (hostname.includes(':') && !hostname.startsWith('[') ? `[${hostname}]` : hostname);
+    if (urlObject.port) host += `:${urlObject.port}`;
+  }
+  let query = '';
+  if (urlObject.query && typeof urlObject.query === 'object') {
+    query = Object.entries(urlObject.query).flatMap(([key, value]) => (Array.isArray(value) ? value : [value])
+      .map((item) => `${encodeURIComponent(key)}=${encodeURIComponent(item ?? '')}`)).join('&');
+  }
+  let search = urlObject.search || (query ? `?${query}` : '');
+  if (pathname.includes('#') || pathname.includes('?')) pathname = pathname.replaceAll('#', '%23').replaceAll('?', '%3F');
+  if (urlObject.slashes || legacySlashedProtocols.has(protocol)) {
+    if (urlObject.slashes || host) {
+      if (pathname && !pathname.startsWith('/')) pathname = `/${pathname}`;
+      host = `//${host}`;
+    } else if (protocol === 'file:') host = '//';
+  }
+  if (search.includes('#')) search = search.replaceAll('#', '%23');
+  if (search && !search.startsWith('?')) search = `?${search}`;
+  if (hash && !hash.startsWith('#')) hash = `#${hash}`;
+  return `${protocol}${host}${pathname}${search}${hash}`;
+}
+
+Url.prototype.parse = function parse(url, parseQueryString, slashesDenoteHost) {
+  const parsed = legacyParseUrl(globalThis, url, parseQueryString, slashesDenoteHost);
+  Object.assign(this, parsed);
+  return this;
+};
+
+Url.prototype.format = function format() {
+  return legacyFormat(this);
+};
+
+Url.prototype.resolve = function resolve(relative) {
+  return this.resolveObject(typeof relative === 'string' ? legacyParseUrl(globalThis, relative, false, true) : relative).format();
+};
+
+Url.prototype.resolveObject = function resolveObject(relative) {
+  if (typeof relative === 'string') relative = legacyParseUrl(globalThis, relative, false, true);
+  if (!(relative instanceof Url)) relative = legacyParseUrl(globalThis, String(relative), false, true);
+  const source = this.href || this.format();
+  if (source.startsWith('mailto:') && !relative.protocol) return legacyParseUrl(globalThis, `mailto:${relative.href}`, false, true);
+  if (!relative.href) {
+    const result = legacyParseUrl(globalThis, source, false, true);
+    result.hash = relative.hash;
+    result.href = result.format();
+    return result;
+  }
+  try {
+    const resolved = new globalThis.URL(relative.href, source).href;
+    return legacyParseUrl(globalThis, resolved, false, true);
+  } catch {
+    return legacyParseUrl(globalThis, relative.href, false, true);
+  }
+};
+
+Url.prototype.parseHost = function parseHost() {
+  const host = this.host || '';
+  const port = /:([0-9]*)$/.exec(host);
+  if (port) {
+    if (port[1]) this.port = port[1];
+    this.host = host.slice(0, -port[0].length);
+  }
+  if (this.host) this.hostname = this.host;
+};
 
 function decodeComponent(value) {
   try {
@@ -247,44 +418,136 @@ function createNodeUrlSearchParams(scope) {
     }
   }
 
+  const propertyNames = [
+    'port', 'pathname', 'search', 'hash', 'href', 'origin', 'protocol',
+    'username', 'password', 'host', 'hostname',
+  ];
+  for (const name of propertyNames) {
+    const descriptor = Object.getOwnPropertyDescriptor(scope.URL.prototype, name);
+    if (!descriptor?.get) continue;
+    Object.defineProperty(NodeURL.prototype, name, {
+      configurable: true,
+      enumerable: true,
+      get() { return descriptor.get.call(this); },
+      ...(descriptor.set ? { set(value) { descriptor.set.call(this, value); } } : {}),
+    });
+  }
+  const nativeToString = scope.URL.prototype.toString;
+  Object.defineProperty(NodeURL.prototype, 'toString', {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value() { return nativeToString.call(this); },
+  });
+  Object.defineProperty(NodeURL.prototype, 'toJSON', {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value() {
+      const nativeToJSON = scope.URL.prototype.toJSON;
+      return typeof nativeToJSON === 'function' ? nativeToJSON.call(this) : this.href;
+    },
+  });
+
   return { URL: NodeURL, URLSearchParams: NodeURLSearchParams };
 }
 
 function formatUrl(value, scope = globalThis) {
   if (typeof value === 'string') return value;
+  if (value instanceof Url) return value.format();
   if (value && typeof value.href === 'string' && !value.protocol && !value.pathname) return value.href;
-  const protocol = value?.protocol ? `${String(value.protocol).replace(/:$/, '')}:` : '';
-  const auth = value?.auth ? `${encodeAuth(value.auth)}@` : '';
-  const host = value?.host || `${value?.hostname || ''}${value?.port ? `:${value.port}` : ''}`;
-  const hasAuthority = Boolean(host || value?.slashes || auth);
-  const pathname = value?.pathname || '';
-  let search = value?.search || '';
-  if (!search && value?.query && typeof value.query === 'object') {
-    search = `?${Object.entries(value.query).flatMap(([key, item]) => (Array.isArray(item) ? item : [item])
-      .map((entry) => `${encodeURIComponent(key)}=${encodeURIComponent(entry ?? '')}`)).join('&')}`;
+  if (value && typeof value === 'object') return legacyFormat(value);
+  if (!value || typeof value !== 'object') {
+    const error = new TypeError(`The "urlObject" argument must be one of type object or string. Received ${value === null ? 'null' : typeof value}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
   }
-  if (search && !search.startsWith('?')) search = `?${search}`;
-  const hash = value?.hash ? (String(value.hash).startsWith('#') ? String(value.hash) : `#${value.hash}`) : '';
-  const separator = hasAuthority && pathname && !pathname.startsWith('/') ? '/' : '';
-  const slashes = hasAuthority ? '//' : '';
-  const formatted = `${protocol}${slashes}${auth}${host}${separator}${pathname}${search}${hash}`;
-  if (formatted || !scope?.URL) return formatted;
+  if (!scope?.URL) return String(value);
   return String(new scope.URL(value));
+}
+
+function fileURLToPathBuffer(scope, value, options) {
+  const windows = options?.windows === undefined ? false : Boolean(options.windows);
+  let input;
+  if (value instanceof scope.URL) input = value;
+  else if (typeof value === 'string') input = new scope.URL(value);
+  else {
+    const error = new TypeError(`The "path" argument must be of type string or an instance of URL. Received ${value === null ? 'null' : typeof value === 'object' ? `an instance of ${value?.constructor?.name || 'Object'}` : `type ${typeof value} (${String(value)})`}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (input.protocol !== 'file:') {
+    const error = new TypeError('The URL must be of scheme file');
+    error.code = 'ERR_INVALID_URL_SCHEME';
+    throw error;
+  }
+  if (!windows && input.hostname && input.hostname !== 'localhost') {
+    const error = new TypeError('File URL host must be "localhost" or empty on linux');
+    error.code = 'ERR_INVALID_FILE_URL_HOST';
+    throw error;
+  }
+  const decodeBytes = (pathname) => {
+    const bytes = [];
+    for (let index = 0; index < pathname.length;) {
+      if (pathname[index] === '%' && /^[0-9A-Fa-f]{2}$/.test(pathname.slice(index + 1, index + 3))) {
+        bytes.push(Number.parseInt(pathname.slice(index + 1, index + 3), 16));
+        index += 3;
+        continue;
+      }
+      const codePoint = pathname.codePointAt(index);
+      const text = String.fromCodePoint(codePoint);
+      bytes.push(...new TextEncoder().encode(text));
+      index += text.length;
+    }
+    return new Uint8Array(bytes);
+  };
+  const decodedBytes = decodeBytes(input.pathname);
+  if (decodedBytes[0] !== 0x2F) {
+    const error = new TypeError('File URL path must be absolute');
+    error.code = 'ERR_INVALID_FILE_URL_PATH';
+    throw error;
+  }
+  let bytes = decodedBytes;
+  if (windows) {
+    if (input.hostname && input.hostname !== 'localhost') {
+      const prefix = new TextEncoder().encode(`\\\\${input.hostname}`);
+      const suffix = bytes.slice(0);
+      for (let index = 0; index < suffix.length; index += 1) if (suffix[index] === 0x2F) suffix[index] = 0x5C;
+      bytes = new Uint8Array(prefix.length + suffix.length);
+      bytes.set(prefix);
+      bytes.set(suffix, prefix.length);
+    } else {
+      if (bytes.length < 3 || !((bytes[1] >= 0x41 && bytes[1] <= 0x5A) || (bytes[1] >= 0x61 && bytes[1] <= 0x7A)) || bytes[2] !== 0x3A) {
+        const error = new TypeError('File URL path must be absolute');
+        error.code = 'ERR_INVALID_FILE_URL_PATH';
+        throw error;
+      }
+      bytes = bytes.slice(1);
+      for (let index = 0; index < bytes.length; index += 1) if (bytes[index] === 0x2F) bytes[index] = 0x5C;
+    }
+  }
+  return typeof scope.Buffer?.from === 'function' ? scope.Buffer.from(bytes) : bytes;
 }
 
 export function createUrlModule(scope, { pathToFileURL, fileURLToPath } = {}) {
   const { URL: URLClass, URLSearchParams } = createNodeUrlSearchParams(scope);
+  const parse = (input, parseQueryString = false, slashesDenoteHost = false) =>
+    input instanceof Url ? input : legacyParseUrl(scope, input, parseQueryString, slashesDenoteHost);
+  const resolve = (from, to) => parse(from).resolve(to);
+  const resolveObject = (from, to) => parse(from).resolveObject(to);
   return Object.freeze({
     URL: URLClass,
     URLSearchParams,
-    parse: (input, parseQueryString = false, slashesDenoteHost = false) => legacyUrlObject(scope, input, parseQueryString, slashesDenoteHost),
+    Url,
+    parse,
     format: (value) => formatUrl(value, scope),
-    resolve: (from, to) => new URLClass(String(to), String(from)).href,
-    resolveObject: (from, to) => legacyUrlObject(scope, new URLClass(String(to), String(from)).href, false, true),
+    resolve,
+    resolveObject,
     domainToASCII: (value) => String(value),
     domainToUnicode: (value) => String(value),
     pathToFileURL,
     fileURLToPath,
+    fileURLToPathBuffer: (value, options) => fileURLToPathBuffer(scope, value, options),
     urlToHttpOptions: (value) => {
       const parsed = value instanceof URLClass ? value : new URLClass(String(value));
       return {

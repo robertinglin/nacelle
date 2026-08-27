@@ -409,6 +409,203 @@ function moduleSearchPaths(filename) {
   return result;
 }
 
+function createSourceMapClass() {
+  let base64Map;
+  const base64Digits = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const vlqBaseShift = 5;
+  const vlqBaseMask = (1 << vlqBaseShift) - 1;
+  const vlqContinuationMask = 1 << vlqBaseShift;
+
+  class StringCharIterator {
+    constructor(string) {
+      this.string = string;
+      this.position = 0;
+    }
+
+    next() {
+      return this.string.charAt(this.position++);
+    }
+
+    peek() {
+      return this.string.charAt(this.position);
+    }
+
+    hasNext() {
+      return this.position < this.string.length;
+    }
+  }
+
+  const cloneSourceMapV3 = (payload) => {
+    if (payload === null || typeof payload !== 'object') {
+      const error = new TypeError('The "payload" argument must be of type object');
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    const clone = { ...payload };
+    for (const key of Object.keys(clone)) {
+      if (Array.isArray(clone[key])) clone[key] = clone[key].slice();
+    }
+    return clone;
+  };
+
+  const isSeparator = (character) => character === ',' || character === ';';
+  const decodeVLQ = (iterator) => {
+    let result = 0;
+    let shift = 0;
+    let digit;
+    do {
+      digit = base64Map[iterator.next()];
+      result += (digit & vlqBaseMask) << shift;
+      shift += vlqBaseShift;
+    } while (digit & vlqContinuationMask);
+    const negative = result & 1;
+    result >>>= 1;
+    if (!negative) return result;
+    return -result | (1 << 31);
+  };
+
+  class SourceMap {
+    #payload;
+    #mappings = [];
+    #sources = {};
+    #sourceContentByURL = {};
+    #lineLengths;
+
+    constructor(payload, { lineLengths } = {}) {
+      if (!base64Map) {
+        base64Map = {};
+        for (let index = 0; index < base64Digits.length; index += 1) {
+          base64Map[base64Digits[index]] = index;
+        }
+      }
+      this.#payload = cloneSourceMapV3(payload);
+      this.#parseMappingPayload();
+      if (Array.isArray(lineLengths) && lineLengths.length) this.#lineLengths = lineLengths;
+    }
+
+    get payload() {
+      return cloneSourceMapV3(this.#payload);
+    }
+
+    get lineLengths() {
+      return this.#lineLengths ? this.#lineLengths.slice() : undefined;
+    }
+
+    #parseMappingPayload() {
+      if (this.#payload.sections) {
+        for (const section of this.#payload.sections) {
+          this.#parseMap(section.map, section.offset.line, section.offset.column);
+        }
+      } else {
+        this.#parseMap(this.#payload, 0, 0);
+      }
+      this.#mappings.sort((left, right) => left[0] - right[0] || left[1] - right[1]);
+    }
+
+    #parseMap(map, lineNumber, columnNumber) {
+      let sourceIndex = 0;
+      let sourceLineNumber = 0;
+      let sourceColumnNumber = 0;
+      let nameIndex = 0;
+      const sources = [];
+      for (let index = 0; index < map.sources.length; index += 1) {
+        const url = map.sources[index];
+        sources.push(url);
+        this.#sources[url] = true;
+        if (map.sourcesContent?.[index]) this.#sourceContentByURL[url] = map.sourcesContent[index];
+      }
+
+      const iterator = new StringCharIterator(map.mappings);
+      let sourceURL = sources[sourceIndex];
+      while (true) {
+        if (iterator.peek() === ',') iterator.next();
+        else {
+          while (iterator.peek() === ';') {
+            lineNumber += 1;
+            columnNumber = 0;
+            iterator.next();
+          }
+          if (!iterator.hasNext()) break;
+        }
+
+        columnNumber += decodeVLQ(iterator);
+        if (isSeparator(iterator.peek())) {
+          this.#mappings.push([lineNumber, columnNumber]);
+          continue;
+        }
+
+        const sourceIndexDelta = decodeVLQ(iterator);
+        if (sourceIndexDelta) {
+          sourceIndex += sourceIndexDelta;
+          sourceURL = sources[sourceIndex];
+        }
+        sourceLineNumber += decodeVLQ(iterator);
+        sourceColumnNumber += decodeVLQ(iterator);
+        let name;
+        if (!isSeparator(iterator.peek())) {
+          nameIndex += decodeVLQ(iterator);
+          name = map.names?.[nameIndex];
+        }
+        this.#mappings.push([
+          lineNumber,
+          columnNumber,
+          sourceURL,
+          sourceLineNumber,
+          sourceColumnNumber,
+          name,
+        ]);
+      }
+    }
+
+    findEntry(lineOffset, columnOffset) {
+      let first = 0;
+      let count = this.#mappings.length;
+      while (count > 1) {
+        const step = count >> 1;
+        const middle = first + step;
+        const mapping = this.#mappings[middle];
+        if (lineOffset < mapping[0]
+          || (lineOffset === mapping[0] && columnOffset < mapping[1])) {
+          count = step;
+        } else {
+          first = middle;
+          count -= step;
+        }
+      }
+      const entry = this.#mappings[first];
+      if (!entry || (!first && (lineOffset < entry[0]
+        || (lineOffset === entry[0] && columnOffset < entry[1])))) return {};
+      return {
+        generatedLine: entry[0],
+        generatedColumn: entry[1],
+        originalSource: entry[2],
+        originalLine: entry[3],
+        originalColumn: entry[4],
+        name: entry[5],
+      };
+    }
+  }
+
+  return SourceMap;
+}
+
+function moduleHasStaticEsmSyntax(source) {
+  return /(?:^|[;\n])\s*export\s+(?:default\b|(?:const|let|var|function|class)\b|[*{])/.test(source);
+}
+
+function moduleSynchronousEsmSource(source) {
+  let transformed = String(source);
+  transformed = transformed.replace(
+    /(^|[;\n])\s*export\s+default\s+([^;]+);?/g,
+    (_, prefix, expression) => `${prefix}module.exports.default = (${expression});`,
+  );
+  transformed = transformed.replace(
+    /(^|[;\n])\s*export\s+(const|let|var)\s+([$_A-Za-z][$_\w]*)\s*=\s*([^;\n]+);?/g,
+    (_, prefix, declaration, name, expression) => `${prefix}${declaration} ${name} = ${expression}; module.exports.${name} = ${name};`,
+  );
+  return transformed;
+}
+
 function installAbortSignalCompatibility(scope) {
   const AbortSignalClass = scope.AbortSignal;
   if (typeof AbortSignalClass?.any !== 'function') return;
@@ -1572,6 +1769,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     ];
     let currentModuleWrapper = moduleWrapper;
     let syncBuiltinESMExportsImpl = () => {};
+    const moduleParents = new WeakMap();
+    const SourceMap = createSourceMapClass();
     const childProcessArgumentTypeError = (name, expected, value) => {
       const received = value === null
         ? 'null'
@@ -1730,18 +1929,83 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     const createModuleApi = (processObj = processObject, childStderr = stderr) => {
       function Module(id = '', parent = null) {
         if (!(this instanceof Module)) return new Module(id, parent);
-        const filename = id ? String(id) : null;
-        this.id = filename || '';
-        this.path = filename ? path.dirname(filename) : '.';
+        this.id = id;
+        this.path = path.dirname(id);
         this.exports = {};
-        this.filename = filename;
+        this.filename = null;
         this.loaded = false;
         this.children = [];
-        this.parent = parent;
-        this.paths = filename ? moduleSearchPaths(filename) : [];
+        moduleParents.set(this, parent);
+        this.paths = [];
       }
       Module.prototype.require = function require(name) {
         return moduleApi._load(name, this.filename || sourcePath);
+      };
+      Object.defineProperties(Module.prototype, {
+        isPreloading: {
+          configurable: true,
+          get: () => Boolean(processObj.__bnhModuleIsPreloading),
+        },
+        parent: {
+          configurable: true,
+          get() { return moduleParents.get(this); },
+          set(value) { moduleParents.set(this, value); },
+        },
+      });
+      Module.prototype.load = function load(filename) {
+        if (typeof filename !== 'string') {
+          const error = new TypeError('The "filename" argument must be of type string');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        if (this.loaded) {
+          const error = new Error('Module already loaded');
+          error.code = 'ERR_ASSERTION';
+          throw error;
+        }
+        const resolved = resolveFile(filename, this.parent?.filename || sourcePath, processObj);
+        this.filename ??= resolved;
+        this.path = path.dirname(resolved);
+        this.paths = moduleSearchPaths(resolved);
+        const source = readSource(resolved);
+        if (resolved.endsWith('.json')) this.exports = JSON.parse(typeof source === 'string' ? source : new TextDecoder().decode(source));
+        else this._compile(typeof source === 'string' ? source : new TextDecoder().decode(source), resolved);
+        this.loaded = true;
+        return this;
+      };
+      Module.prototype._compile = function compile(content, filename, format) {
+        const source = typeof content === 'string' ? content : String(content);
+        const resolved = String(filename || this.filename || sourcePath);
+        const compileSource = format === 'module' || moduleHasStaticEsmSyntax(source)
+          ? moduleSynchronousEsmSource(source)
+          : source;
+        const require = (name) => {
+          const value = moduleApi._load(name, this);
+          if (value && this.children && value !== this.exports) {
+            const child = moduleApi._cache?.get?.(name);
+            if (child && !this.children.includes(child)) this.children.push(child);
+          }
+          return value;
+        };
+        require.resolve = (name) => moduleApi._resolve
+          ? moduleApi._resolve(name, this)
+          : name;
+        require.main = moduleApi._main || null;
+        require.cache = moduleApi._cache || new Map();
+        this.require = require;
+        return runCommonJSWrapper(
+          compileSource,
+          resolved,
+          [require, this, this.exports, resolved, path.dirname(resolved),
+            (specifier, options) => {
+              if (typeof processObj.__bnhModuleImport === 'function') {
+                return processObj.__bnhModuleImport(specifier, resolved, options);
+              }
+              if (typeof esmLoader !== 'undefined') return esmLoader.import(specifier, resolved, {}, options);
+              return import(specifier, options);
+            }],
+          currentModuleWrapper,
+        );
       };
       const compileCacheStatus = Object.freeze({
         FAILED: 'failed',
@@ -1808,7 +2072,10 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       };
       const moduleApi = Object.assign(Module, {
         builtinModules: BUILTIN_NAMES,
-        _load: (name, parent, isMain) => runtimeRequire(name, parent),
+        _load: (name, parent, isMain) => runtimeRequire(
+          name,
+          typeof parent === 'string' ? parent : parent?.filename || sourcePath,
+        ),
         wrap: (script) => `${currentModuleWrapper[0]}${script}${currentModuleWrapper[1]}`,
         createRequire: (filename) => {
           const importer = typeof filename === 'string' && filename.startsWith('file:')
@@ -1884,6 +2151,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         },
         registerHooks,
         syncBuiltinESMExports: () => syncBuiltinESMExportsImpl(),
+        SourceMap,
       });
       moduleApi.Module = Module;
       Object.defineProperties(moduleApi, {
@@ -3543,14 +3811,12 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             if (compileCacheState && entryPath === compileCacheState.entryPath) compileCacheState.primaryAction = cacheAction;
           }
           const moduleExports = {};
-          const moduleRecord = {
-            exports: moduleExports,
-            id: entryPath,
-            filename: entryPath,
-            loaded: false,
-            parent: null,
-            children: [],
-          };
+          const moduleRecord = new moduleApi(entryPath, moduleState.cache?.get?.(parentImport) || null);
+          moduleRecord.filename = entryPath;
+          moduleRecord.paths = moduleSearchPaths(entryPath);
+          moduleRecord.exports = moduleExports;
+          moduleState.cache ||= new Map();
+          moduleState.cache.set(entryPath, moduleRecord);
           if (isMain) moduleState.main = moduleRecord;
           const requireFn = (name) => {
             const builtin = builtinName(name);
@@ -3927,8 +4193,13 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                 );
               } else {
                 if (prepared.source === null) {
-                  for (const preload of prepared.preloads) {
-                    loadModuleSync(normalizePath(preload, cwd), entryPath, childProc.processObject, scope, Buffer, stderrArr, undefined, moduleState, false, compileCacheState, false, syncStreamWebApi);
+                  childProc.processObject.__bnhModuleIsPreloading = true;
+                  try {
+                    for (const preload of prepared.preloads) {
+                      loadModuleSync(normalizePath(preload, cwd), entryPath, childProc.processObject, scope, Buffer, stderrArr, undefined, moduleState, false, compileCacheState, false, syncStreamWebApi);
+                    }
+                  } finally {
+                    childProc.processObject.__bnhModuleIsPreloading = false;
                   }
                 }
                 const childSource = prepared.source === null ? undefined : prepared.source;
@@ -4580,9 +4851,16 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       (pathname) => vfs.read(pathname),
       entry,
     );
+    builtins.module._cache = new Map();
+    builtins.module._main = null;
+    builtins.module._resolve = (name, parent) => {
+      const importer = typeof parent === 'string' ? parent : parent?.filename || entry;
+      return BUILTIN_NAMES.includes(builtinName(name)) ? name : resolveFile(name, importer, processObject);
+    };
     builtins.module._load = (name, parent) => {
       const builtin = builtinName(name);
-      return BUILTIN_NAMES.includes(builtin) ? builtins[builtin] ?? {} : loadModule(name, parent || entry);
+      const importer = typeof parent === 'string' ? parent : parent?.filename || entry;
+      return BUILTIN_NAMES.includes(builtin) ? builtins[builtin] ?? {} : loadModule(name, importer);
     };
     const streamWebApi = builtins['stream/web'];
     const internalBindings = builtins['internal/test/binding'].__bnhContract;
@@ -4861,7 +5139,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       error.stack = `Error [ERR_REQUIRE_ASYNC_MODULE]: ${error.message}`;
       return error;
     };
-    const loadModule = (specifier, importer = entry) => {
+    const loadModule = (specifier, importer = entry, skipResolve = false) => {
       const name = builtinName(specifier);
       if (name === 'repl') return loadModule('/node/lib/repl.js', importer);
       if (BUILTIN_NAMES.includes(name)) {
@@ -4908,13 +5186,23 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         return builtins[name] ?? {};
       }
       const context = moduleHookContext(importer);
-      const resolvedResult = runModuleHook('resolve', specifier, context, (currentSpecifier) => {
-        const candidate = esmLoader.resolve(currentSpecifier, importer, ['node', 'require']);
-        return {
-          url: pathToFileURL(candidate).href,
-            format: candidate.endsWith('.json') ? 'json' : isRuntimeEsmModule(candidate, processObject.execArgv) ? 'module' : 'commonjs',
-        };
-      });
+      const resolvedResult = skipResolve
+        ? {
+            url: specifier.startsWith('file:') ? specifier : pathToFileURL(specifier).href,
+            format: specifier.endsWith('.json') ? 'json' : isRuntimeEsmModule(specifier, processObject.execArgv) ? 'module' : 'commonjs',
+          }
+        : runModuleHook('resolve', specifier, context, (currentSpecifier) => {
+            const candidate = esmLoader.resolve(currentSpecifier, importer, ['node', 'require']);
+            return {
+              url: pathToFileURL(candidate).href,
+              format: candidate.endsWith('.json') ? 'json' : isRuntimeEsmModule(candidate, processObject.execArgv) ? 'module' : 'commonjs',
+            };
+          });
+      if (resolvedResult?.url?.startsWith('node:') && resolvedResult.shortCircuit !== true) {
+        const error = new Error('"shortCircuit" must be true when a resolve hook does not call nextResolve');
+        error.code = 'ERR_INVALID_RETURN_PROPERTY_VALUE';
+        throw error;
+      }
       const resolvedURL = resolvedResult?.url || pathToFileURL(resolveFile(specifier, importer, processObject)).href;
       let resolved = resolvedURL.startsWith('file:') ? fileURLToPath(resolvedURL) : resolvedURL;
       if (isNativeAddonBuildPath(resolved) || (resolved.endsWith('.node') && addonsDisabled(processObject))) {
@@ -4929,7 +5217,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           return {
             url,
             format: candidate.endsWith('.json') ? 'json' : isRuntimeEsmModule(candidate, processObject.execArgv) ? 'module' : 'commonjs',
-            source,
+            source: typeof source === 'string' ? source : new TextDecoder().decode(source),
           };
         });
       } catch (error) {
@@ -4948,17 +5236,14 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             && (esmSourceHasTopLevelAwait(text) || esmGraphRequiresAsync(resolved))) {
             throw requireAsyncEsmError(resolved, importer);
           }
-      const module = {
-        exports: {},
-        id: resolved,
-        filename: resolved,
-        paths: moduleSearchPaths(resolved),
-        loaded: false,
-        parent: null,
-        children: [],
-      };
+      const parentModule = typeof importer === 'string' ? cache.get(importer) : importer;
+      const module = new builtins.module(resolved, parentModule || null);
+      module.filename = resolved;
+      module.paths = moduleSearchPaths(resolved);
       if (!mainModule && resolved === entry) mainModule = module;
+      builtins.module._main = mainModule;
       cache.set(resolved, module);
+      builtins.module._cache = cache;
       if (resolved.endsWith('.json')) module.exports = JSON.parse(text);
       else {
         const require = (name) => loadModule(esmLoader.resolve(name, resolved, ['node', 'require']), resolved);
@@ -4968,19 +5253,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         require.main = mainModule;
         require.cache = cache;
         module.require = require;
-        runCommonJSWrapper(
-          text,
-            resolved,
-            [
-            require,
-            module,
-            module.exports,
-            resolved,
-            path.dirname(resolved),
-            (specifier, options) => esmLoader.import(specifier, resolved, {}, options),
-          ],
-          builtins.module.wrapper,
-        );
+        module._compile(text, resolved, loaded?.format === 'module' || moduleHasStaticEsmSyntax(text)
+          ? 'module' : loaded?.format);
       }
       module.loaded = true;
       return module.exports;
@@ -4992,12 +5266,15 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       },
       builtins,
       globalObject: scope,
-      evaluateCommonJS: (specifier, importer) => loadModule(specifier, importer),
+      evaluateCommonJS: (specifier, importer) => loadModule(specifier, importer, true),
       runModuleHook,
       defaultModuleType: processObject.execArgv?.some(
         (argument) => String(argument) === '--experimental-default-type=module',
       ) ? 'module' : 'commonjs',
     });
+    processObject.__bnhModuleImport = (specifier, importer, options) => (
+      esmLoader.import(specifier, importer, {}, options)
+    );
     builtins.module._bnhSetSyncBuiltinESMExports(esmLoader.syncBuiltinESMExports);
     const loadModuleRegistrations = async () => {
       const registrations = processObject.__bnhModuleRegistrations || [];

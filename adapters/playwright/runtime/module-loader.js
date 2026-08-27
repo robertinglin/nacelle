@@ -1076,7 +1076,10 @@ export function createModuleLoader({
     }
     const module = cache.get(resolved);
     if (module?.promise) await module.promise;
-    return { default: exports };
+    return {
+      default: exports,
+      ...(exports && (typeof exports === 'object' || typeof exports === 'function') ? exports : {}),
+    };
   };
 
   return {

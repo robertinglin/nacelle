@@ -350,19 +350,45 @@ function writableConsoleStream(stream, name) {
   throw error;
 }
 
-function streamError(stream) {
-  return stream?._writableState?.errored || stream?.errored || null;
+function noop() {}
+
+function createWriteErrorHandler(instance, streamName) {
+  return (error) => {
+    const stream = instance[streamName];
+    if (error !== null && error !== undefined
+      && !stream?._writableState?.errorEmitted
+      && typeof stream?.listenerCount === 'function'
+      && stream.listenerCount('error') === 0
+      && typeof stream.once === 'function') {
+      stream.once('error', noop);
+    }
+  };
 }
 
-function writeStream(stream, value, ignoreErrors) {
-  try {
-    stream.write(`${value}\n`);
-  } catch (error) {
-    if (!ignoreErrors || error instanceof RangeError) throw error;
+function writeStream(stream, value, ignoreErrors, errorHandler) {
+  const output = `${value}\n`;
+  if (ignoreErrors === false) {
+    stream.write(output);
     return;
   }
-  const error = streamError(stream);
-  if (error && (!ignoreErrors || error instanceof RangeError)) throw error;
+
+  try {
+    // Catch synchronous stream errors and keep asynchronous errors from
+    // becoming uncaught exceptions. The temporary listener is removed after
+    // the write so it cannot affect later non-console writes.
+    if (typeof stream.listenerCount === 'function'
+      && stream.listenerCount('error') === 0
+      && typeof stream.once === 'function') {
+      stream.once('error', noop);
+    }
+    stream.write(output, errorHandler);
+  } catch (error) {
+    // Console is a debugging utility; do not swallow stack overflows caused
+    // by a synchronous write implementation.
+    if (error instanceof RangeError) throw error;
+  } finally {
+    stream.removeListener?.('error', noop);
+  }
 }
 
 function stringWidth(value) {
@@ -453,6 +479,18 @@ export function createConsoleModule(processObject) {
     const error = options.stderr ?? stderr ?? processObject.stderr;
     this._stdout = writableConsoleStream(stdout, 'stdout');
     this._stderr = writableConsoleStream(error, 'stderr');
+    Object.defineProperties(this, {
+      _stdoutErrorHandler: {
+        configurable: true,
+        value: createWriteErrorHandler(this, '_stdout'),
+        writable: true,
+      },
+      _stderrErrorHandler: {
+        configurable: true,
+        value: createWriteErrorHandler(this, '_stderr'),
+        writable: true,
+      },
+    });
     this._ignoreErrors = options.ignoreErrors ?? ignoreErrors ?? true;
     this._inspectOptions = options.inspectOptions ?? {};
     if (options.inspectOptions !== undefined && (options.inspectOptions === null || typeof options.inspectOptions !== 'object' || Array.isArray(options.inspectOptions))) {
@@ -484,26 +522,26 @@ export function createConsoleModule(processObject) {
     this._counts = new Map();
     for (const name of methods) if (typeof this[name] === 'function') this[name] = this[name].bind(this);
   }
-  const write = (instance, stream, values) => {
+  const write = (instance, stream, errorHandler, values) => {
     const indentation = ' '.repeat(instance._groupIndent * instance._groupIndentation);
     const inspectOptions = instance._colorMode !== undefined || Object.keys(instance._inspectOptions).length > 0
       ? { ...instance._inspectOptions, multiline: true }
       : instance._inspectOptions;
     const text = formatConsole(values, inspectOptions, false).replaceAll('\n', `\n${indentation}`);
-    writeStream(stream, `${indentation}${text}`, instance._ignoreErrors);
+    writeStream(stream, `${indentation}${text}`, instance._ignoreErrors, errorHandler);
   };
   Object.assign(Console.prototype, {
     constructor: Console,
-    log(...values) { write(this, this._stdout, values); },
+    log(...values) { write(this, this._stdout, this._stdoutErrorHandler, values); },
     info(...values) { this.log(...values); },
     debug(...values) { this.log(...values); },
-    warn(...values) { write(this, this._stderr, values); },
+    warn(...values) { write(this, this._stderr, this._stderrErrorHandler, values); },
     error(...values) { this.warn(...values); },
     dir(value) {
       const inspectOptions = this._colorMode !== undefined || Object.keys(this._inspectOptions).length > 0
         ? { ...this._inspectOptions, multiline: true }
         : this._inspectOptions;
-      write(this, this._stdout, [inspectValue(value, inspectOptions, false)]);
+      write(this, this._stdout, this._stdoutErrorHandler, [inspectValue(value, inspectOptions, false)]);
     },
     time(label = 'default') { if (!this._times.has(String(label))) this._times.set(String(label), Date.now()); },
     timeEnd(label = 'default') { const key = String(label); if (!this._times.has(key)) return; const duration = Date.now() - this._times.get(key); this._times.delete(key); this.log(`${key}: ${duration}ms`); },
@@ -514,7 +552,7 @@ export function createConsoleModule(processObject) {
       const inspectOptions = this._colorMode !== undefined || Object.keys(this._inspectOptions).length > 0
         ? { ...this._inspectOptions, multiline: true }
         : this._inspectOptions;
-      write(this, this._stderr, [`Trace: ${formatConsole(values, inspectOptions, false)}${stack ? `\n${stack}` : ''}`]);
+      write(this, this._stderr, this._stderrErrorHandler, [`Trace: ${formatConsole(values, inspectOptions, false)}${stack ? `\n${stack}` : ''}`]);
     },
     assert(value, ...values) { if (!value) this.error('Assertion failed', ...values); },
     clear() {},
@@ -525,10 +563,10 @@ export function createConsoleModule(processObject) {
     table(data, properties) {
       if (properties !== undefined && !Array.isArray(properties)) throw invalidConsoleType('properties', properties, 'an instance of Array');
       if (data === null || data === undefined || typeof data !== 'object') {
-        writeStream(this._stdout, typeof data === 'string' ? data : inspectConsole(data, this._inspectOptions), this._ignoreErrors);
+        writeStream(this._stdout, typeof data === 'string' ? data : inspectConsole(data, this._inspectOptions), this._ignoreErrors, this._stdoutErrorHandler);
         return;
       }
-      writeStream(this._stdout, formatTable(data, properties), this._ignoreErrors);
+      writeStream(this._stdout, formatTable(data, properties), this._ignoreErrors, this._stdoutErrorHandler);
     },
     dirxml(...values) { this.log(...values); },
     groupCollapsed(...values) { this.group(...values); },

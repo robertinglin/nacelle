@@ -141,8 +141,6 @@ export class Socket extends Duplex {
     this._noDelay = Boolean(options.noDelay);
     this._keepAlive = Boolean(options.keepAlive);
     this._keepAliveInitialDelay = ~~(options.keepAliveInitialDelay / 1000);
-    this.localPort = undefined;
-    this.localFamily = undefined;
     this._peername = null;
     this._sockname = null;
     this.autoSelectFamilyAttemptedAddresses = undefined;
@@ -154,7 +152,6 @@ export class Socket extends Duplex {
     this._tcpResource = null;
     this._tcpConnectResource = null;
     this._pendingWrite = null;
-    this._pendingFinal = null;
     this._timeout = null;
     this._closing = false;
     this._writable._write = (bytes, encoding, callback) => this._write(bytes, encoding, callback);
@@ -349,11 +346,6 @@ export class Socket extends Duplex {
       this._tcpConnectResource.runInAsyncScope(emitConnect, this);
     } else emitConnect();
     this._flushPendingWrite();
-    if (this._pendingFinal) {
-      const done = this._pendingFinal;
-      this._pendingFinal = null;
-      this._finishTransport(done);
-    }
   }
 
   _runTcpResource(callback) {
@@ -388,10 +380,26 @@ export class Socket extends Duplex {
     this._send(bytes, callback);
   }
 
-  _write(bytes, _encoding, callback) {
+  _writeGeneric(writev, data, _encoding, callback) {
+    let bytes = data;
+    if (writev) {
+      const chunks = data.map(({ chunk }) => chunk instanceof Uint8Array
+        ? chunk
+        : typeof chunk === 'string' ? new TextEncoder().encode(chunk) : new Uint8Array(chunk));
+      bytes = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.byteLength, 0));
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+    }
     if (this._peer || this._transportPeer) this._send(bytes, callback);
     else if (this.connecting) this._pendingWrite = { bytes, callback };
     else callback(socketError('EPIPE', 'write', this.remoteAddress || 'socket', this.remotePort || 0));
+  }
+
+  _write(bytes, encoding, callback) {
+    return this._writeGeneric(false, bytes, encoding, callback);
   }
 
   end(...args) {
@@ -429,7 +437,11 @@ export class Socket extends Duplex {
 
   _final(callback) {
     if (this.connecting) {
-      this._pendingFinal = callback;
+      this.once('connect', () => this._final(callback));
+      return;
+    }
+    if (!this._handle && !this._peer && !this._transportPeer) {
+      callback();
       return;
     }
     this._finishTransport(callback);
@@ -459,6 +471,16 @@ export class Socket extends Duplex {
 
   _onTimeout() {
     this.emit('timeout');
+  }
+
+  _unrefTimer() {
+    for (let stream = this; stream !== null; stream = stream._parent) {
+      stream._timeout?.refresh?.();
+    }
+  }
+
+  _read(n) {
+    if (this.connecting) this.once('connect', () => this._read(n));
   }
 
   setNoDelay(enable) {
@@ -521,7 +543,40 @@ export class Socket extends Duplex {
     if (this._handle || this._peer || this._transportPeer) return this.writableLength;
   }
 
+  pause() {
+    const handle = this._handle;
+    if (handle?.reading && !this.connecting) {
+      handle.reading = false;
+      if (!this.destroyed && handle.readStop) {
+        const error = handle.readStop();
+        if (error) this.destroy(socketError('EIO', 'read', this.remoteAddress || 'socket', this.remotePort || 0));
+      }
+    }
+    return super.pause();
+  }
+
+  resume() {
+    const handle = this._handle;
+    if (handle && !this.connecting && !handle.reading && handle.readStart) {
+      handle.reading = true;
+      const error = handle.readStart();
+      if (error) this.destroy(socketError('EIO', 'read', this.remoteAddress || 'socket', this.remotePort || 0));
+    }
+    return super.resume();
+  }
+
+  read(size) {
+    const handle = this._handle;
+    if (handle && !this.connecting && !handle.reading && handle.readStart) {
+      handle.reading = true;
+      const error = handle.readStart();
+      if (error) this.destroy(socketError('EIO', 'read', this.remoteAddress || 'socket', this.remotePort || 0));
+    }
+    return super.read(size);
+  }
+
   setTimeout(milliseconds, callback) {
+    if (this.destroyed) return this;
     if (typeof milliseconds !== 'number') {
       const error = new TypeError('The "msecs" argument must be of type number');
       error.code = 'ERR_INVALID_ARG_TYPE';
@@ -537,15 +592,26 @@ export class Socket extends Duplex {
       error.code = 'ERR_INVALID_ARG_TYPE';
       throw error;
     }
+    this.timeout = milliseconds;
     if (this._timeout) clearTimeout(this._timeout);
+    this._timeout = null;
+    if (milliseconds === 0) {
+      if (callback !== undefined) this.removeListener('timeout', callback);
+      return this;
+    }
     if (callback) this.once('timeout', callback);
-    if (milliseconds > 0) this._timeout = setTimeout(() => this._onTimeout(), milliseconds);
+    this._timeout = setTimeout(() => this._onTimeout(), milliseconds);
+    this._timeout?.unref?.();
     return this;
   }
 
   ref() { this._unrefed = false; this._handle?.ref?.(); return this; }
   unref() { this._unrefed = true; this._handle?.unref?.(); return this; }
-  destroySoon() { return this.destroy(); }
+  destroySoon() {
+    if (this.writable) this.end();
+    if (this.writableFinished) this.destroy();
+    else this.once('finish', this.destroy);
+  }
   _reset() { return this.resetAndDestroy(); }
 
   _getpeername() {
@@ -577,6 +643,8 @@ export class Socket extends Duplex {
   get remoteFamily() { return this._getpeername().family; }
   get remotePort() { return this._getpeername().port; }
   get localAddress() { return this._getsockname().address; }
+  get localPort() { return this._getsockname().port; }
+  get localFamily() { return this._getsockname().family; }
 
   resetAndDestroy() {
     if (this.destroyed) return this;
@@ -594,15 +662,8 @@ export class Socket extends Duplex {
     return this;
   }
 
-  destroy(error) {
-    if (this._closing) return this;
-    this._closing = true;
+  _destroy(error, callback) {
     if (this._timeout) clearTimeout(this._timeout);
-    // Node tears down destinations attached with socket.pipe(destination)
-    // when the source socket is destroyed. This matters for CONNECT proxies:
-    // the client-side tunnel can close before either side sends EOF, so
-    // leaving the opposite pipe alive would keep the upstream socket and its
-    // child process open indefinitely.
     for (const destination of this._pipes.keys()) destination.destroy?.(error);
     this.unpipe();
     const peer = this._peer;
@@ -616,6 +677,12 @@ export class Socket extends Duplex {
     this.connecting = false;
     this._pending = false;
     this._readyState = 'closed';
+    callback(error);
+  }
+
+  destroy(error) {
+    if (this._closing) return this;
+    this._closing = true;
     if (this._tcpResource) {
       return this._tcpResource.runInAsyncScope(() => super.destroy(error), this);
     }
@@ -957,8 +1024,6 @@ export class Server extends EventEmitter {
         : undefined,
       port: this._boundPort,
     };
-    accepted.localPort = this._boundPort;
-    accepted.localFamily = accepted._sockname.family;
     accepted._peername = {
       address: connection.localAddress,
       port: connection.localPort,
@@ -1021,6 +1086,7 @@ function createDetachedServerHandle(network, config, address, port, addressType,
 }
 
 const blockListCloneMarker = Symbol.for('bnh.messaging.cloneablePrototype');
+const socketAddressFlowlabel = Symbol('socketAddressFlowlabel');
 
 class BrowserSocketAddress {
   constructor(options = {}) {
@@ -1048,7 +1114,18 @@ class BrowserSocketAddress {
     if (!Number.isInteger(flowlabel) || flowlabel < 0 || flowlabel > 0xfffff) {
       throw blockListError('ERR_OUT_OF_RANGE', `flowlabel must be between 0 and 1048575: ${flowlabel}`, RangeError);
     }
-    this.flowlabel = flowlabel;
+    this[socketAddressFlowlabel] = flowlabel;
+  }
+
+  get flowlabel() { return this[socketAddressFlowlabel]; }
+
+  toJSON() {
+    return {
+      address: this.address,
+      port: this.port,
+      family: this.family,
+      flowlabel: this.flowlabel,
+    };
   }
 
   static isSocketAddress(value) { return value instanceof BrowserSocketAddress; }
@@ -1335,6 +1412,52 @@ export function createBrowserNet({ network = sharedVirtualNetwork, dns = createB
       enumerable: true,
       configurable: false,
     },
+    pause: {
+      value: Socket.prototype.pause,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+    resume: {
+      value: Socket.prototype.resume,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+    read: {
+      value: Socket.prototype.read,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+    destroySoon: {
+      value: Socket.prototype.destroySoon,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+    _destroy: {
+      value: Socket.prototype._destroy,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+    localPort: {
+      get: Object.getOwnPropertyDescriptor(Socket.prototype, 'localPort').get,
+      enumerable: true,
+      configurable: false,
+    },
+    localFamily: {
+      get: Object.getOwnPropertyDescriptor(Socket.prototype, 'localFamily').get,
+      enumerable: true,
+      configurable: false,
+    },
+    _writeGeneric: {
+      value: Socket.prototype._writeGeneric,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
     _onTimeout: {
       value: Socket.prototype._onTimeout,
       writable: true,
@@ -1393,6 +1516,42 @@ export function createBrowserNet({ network = sharedVirtualNetwork, dns = createB
     },
     unref: {
       value: Socket.prototype.unref,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+    _unrefTimer: {
+      value: Socket.prototype._unrefTimer,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+    _final: {
+      value: Socket.prototype._final,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+    setTimeout: {
+      value: Socket.prototype.setTimeout,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+    _read: {
+      value: Socket.prototype._read,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+    end: {
+      value: Socket.prototype.end,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+    resetAndDestroy: {
+      value: Socket.prototype.resetAndDestroy,
       writable: true,
       enumerable: true,
       configurable: true,

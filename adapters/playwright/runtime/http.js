@@ -19,6 +19,9 @@ const objectToString = Object.prototype.toString;
 const HTTP_TOKEN_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const INVALID_HEADER_CHAR_PATTERN = /[^\t\x20-\x7e\x80-\xff]/;
 const httpParsers = { max: 1000 };
+const kOutgoingHeaders = Symbol('outgoingHeaders');
+const kOutgoingSocket = Symbol('outgoingSocket');
+const kOutgoingHighWaterMark = Symbol('outgoingHighWaterMark');
 
 const METHODS = Object.freeze([
   'GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'CONNECT', 'TRACE',
@@ -627,9 +630,7 @@ class OutgoingMessage extends EventEmitter {
     this._onPendingData = () => {};
     this.writable = true;
     this.destroyed = false;
-    this.writableObjectMode = false;
     this.decodeStrings = true;
-    this.writableHighWaterMark = 16 * 1024;
     this._queue = [];
     this._current = null;
     this._pendingBytes = 0;
@@ -642,7 +643,6 @@ class OutgoingMessage extends EventEmitter {
     this._endCallbacks = [];
     this._endCallbackCalled = false;
     this._corked = 0;
-    this.writableLength = 0;
     this.finished = false;
     this.writableEnded = false;
     this.writableFinished = false;
@@ -654,13 +654,15 @@ class OutgoingMessage extends EventEmitter {
       finished: false,
       length: 0,
       objectMode: false,
-      highWaterMark: this.writableHighWaterMark,
+      highWaterMark: 16 * 1024,
       autoDestroy: true,
       emitClose: true,
       closed: false,
       errorEmitted: false,
     };
-    this.socket = null;
+    this[kOutgoingHeaders] = null;
+    this[kOutgoingSocket] = null;
+    this[kOutgoingHighWaterMark] = 16 * 1024;
     this._header = null;
     this._headerSent = false;
   }
@@ -682,8 +684,8 @@ class OutgoingMessage extends EventEmitter {
       throw error;
     }
     const headers = {};
-    if (!(this._headers instanceof Map)) return headers;
-    for (const [key, entry] of this._headers) {
+    if (!(this[kOutgoingHeaders] instanceof Map)) return headers;
+    for (const [key, entry] of this[kOutgoingHeaders]) {
       if (Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string') {
         headers[entry[0]] = entry[1];
       } else {
@@ -695,12 +697,12 @@ class OutgoingMessage extends EventEmitter {
 
   cork() {
     this._corked = (this._corked || 0) + 1;
-    this.socket?.cork?.();
+    this[kOutgoingSocket]?.cork?.();
   }
 
   uncork() {
     this._corked = (this._corked || 0) - 1;
-    this.socket?.uncork?.();
+    this[kOutgoingSocket]?.uncork?.();
     const buffer = this._chunkedBuffer;
     if (this._corked || !buffer?.length) return;
 
@@ -721,10 +723,10 @@ class OutgoingMessage extends EventEmitter {
 
   setTimeout(milliseconds, callback) {
     if (callback) this.on('timeout', callback);
-    if (!this.socket) {
+    if (!this[kOutgoingSocket]) {
       this.once('socket', (socket) => socket.setTimeout(milliseconds));
     } else {
-      this.socket.setTimeout(milliseconds);
+      this[kOutgoingSocket].setTimeout(milliseconds);
     }
     return this;
   }
@@ -733,13 +735,13 @@ class OutgoingMessage extends EventEmitter {
     if (this.destroyed) return this;
     this.destroyed = true;
     this._writableState && (this._writableState.destroyed = true);
-    if (this.socket) this.socket.destroy?.(error);
+    if (this[kOutgoingSocket]) this[kOutgoingSocket].destroy?.(error);
     else this.once('socket', (socket) => socket.destroy?.(error));
     return this;
   }
 
   _writeRaw(data, encoding, callback, size) {
-    const socket = this.socket;
+    const socket = this[kOutgoingSocket];
     if (socket?.destroyed) return false;
     if (typeof encoding === 'function') {
       callback = encoding;
@@ -752,9 +754,9 @@ class OutgoingMessage extends EventEmitter {
     const byteLength = size ?? data?.byteLength ?? data?.length ?? 0;
     this.outputData.push({ data, encoding, callback });
     this.outputSize += byteLength;
-    this.writableLength = this.outputSize;
+    if (this._writableState) this._writableState.length = this.writableLength;
     this._onPendingData(byteLength);
-    return this.outputSize < (this.writableHighWaterMark || 16 * 1024);
+    return this.outputSize < this.writableHighWaterMark;
   }
 
   _storeHeader(firstLine, headers) {
@@ -850,8 +852,8 @@ class OutgoingMessage extends EventEmitter {
     }
     validateHeaderName(name);
     validateHeaderValue(name, value);
-    if (!(this._headers instanceof Map)) this._headers = new Map();
-    this._headers.set(String(name).toLowerCase(), [String(name), value]);
+    if (!(this[kOutgoingHeaders] instanceof Map)) this[kOutgoingHeaders] = new Map();
+    this[kOutgoingHeaders].set(String(name).toLowerCase(), [String(name), value]);
     return this;
   }
 
@@ -890,7 +892,7 @@ class OutgoingMessage extends EventEmitter {
     validateHeaderValue(name, value);
 
     const field = name.toLowerCase();
-    const headers = this._headers;
+    const headers = this[kOutgoingHeaders];
     if (!(headers instanceof Map)) return this.setHeader(name, value);
     const entry = headers.get(field);
     if (entry === undefined) return this.setHeader(name, value);
@@ -912,8 +914,8 @@ class OutgoingMessage extends EventEmitter {
 
   getHeader(name) {
     if (typeof name !== 'string') throw invalidArgumentType('name', 'string', name);
-    if (!(this._headers instanceof Map)) return undefined;
-    const entry = this._headers.get(name.toLowerCase());
+    if (!(this[kOutgoingHeaders] instanceof Map)) return undefined;
+    const entry = this[kOutgoingHeaders].get(name.toLowerCase());
     if (Array.isArray(entry) && entry.length === 2
       && typeof entry[0] === 'string' && entry[0].toLowerCase() === name.toLowerCase()) {
       return entry[1];
@@ -922,12 +924,12 @@ class OutgoingMessage extends EventEmitter {
   }
 
   getHeaderNames() {
-    return this._headers instanceof Map ? [...this._headers.keys()] : [];
+    return this[kOutgoingHeaders] instanceof Map ? [...this[kOutgoingHeaders].keys()] : [];
   }
 
   getRawHeaderNames() {
-    if (!(this._headers instanceof Map)) return [];
-    return [...this._headers].map(([name, entry]) => {
+    if (!(this[kOutgoingHeaders] instanceof Map)) return [];
+    return [...this[kOutgoingHeaders]].map(([name, entry]) => {
       if (Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string'
         && entry[0].toLowerCase() === name) return entry[0];
       return name;
@@ -935,9 +937,9 @@ class OutgoingMessage extends EventEmitter {
   }
 
   getHeaders() {
-    if (!(this._headers instanceof Map)) return {};
+    if (!(this[kOutgoingHeaders] instanceof Map)) return {};
     const headers = {};
-    for (const [name, entry] of this._headers) {
+    for (const [name, entry] of this[kOutgoingHeaders]) {
       headers[name] = Array.isArray(entry) && entry.length === 2
         && typeof entry[0] === 'string' && entry[0].toLowerCase() === name
         ? entry[1]
@@ -948,7 +950,7 @@ class OutgoingMessage extends EventEmitter {
 
   hasHeader(name) {
     if (typeof name !== 'string') throw invalidArgumentType('name', 'string', name);
-    return this._headers instanceof Map && this._headers.has(name.toLowerCase());
+    return this[kOutgoingHeaders] instanceof Map && this[kOutgoingHeaders].has(name.toLowerCase());
   }
 
   removeHeader(name) {
@@ -959,7 +961,7 @@ class OutgoingMessage extends EventEmitter {
       throw error;
     }
     const field = name.toLowerCase();
-    if (this._headers instanceof Map) this._headers.delete(field);
+    if (this[kOutgoingHeaders] instanceof Map) this[kOutgoingHeaders].delete(field);
     if (field === 'connection') this._removedConnection = true;
     else if (field === 'content-length') this._removedContLen = true;
     else if (field === 'transfer-encoding') this._removedTE = true;
@@ -977,14 +979,13 @@ class OutgoingMessage extends EventEmitter {
       callback: typeof callback === 'function' ? callback : () => {},
     });
     this.outputSize += size;
-    this.writableLength = this.outputSize;
     if (this._writableState) this._writableState.length = this.writableLength;
-    if (this.socket?.writable) this._flush();
+    if (this[kOutgoingSocket]?.writable) this._flush();
     return this.outputSize < this.writableHighWaterMark;
   }
 
   _flush() {
-    const socket = this.socket;
+    const socket = this[kOutgoingSocket];
     if (!socket?.writable) return;
 
     const ret = this._flushOutput(socket);
@@ -1014,7 +1015,6 @@ class OutgoingMessage extends EventEmitter {
     this.outputData = [];
     this._onPendingData(-this.outputSize);
     this.outputSize = 0;
-    this.writableLength = 0;
     if (this._writableState) this._writableState.length = 0;
     return ret;
   }
@@ -1089,6 +1089,70 @@ class OutgoingMessage extends EventEmitter {
 }
 Object.setPrototypeOf(OutgoingMessage.prototype, Writable.prototype);
 Object.defineProperties(OutgoingMessage.prototype, {
+  writableObjectMode: {
+    get() { return false; },
+  },
+  writableLength: {
+    get() {
+      return this.outputSize + (this._chunkedLength || 0)
+        + (this[kOutgoingSocket]?.writableLength || 0);
+    },
+  },
+  writableHighWaterMark: {
+    get() {
+      return this[kOutgoingSocket]?.writableHighWaterMark ?? this[kOutgoingHighWaterMark];
+    },
+  },
+  writableCorked: {
+    get() { return this._corked || 0; },
+  },
+  _headers: {
+    get() { return this.getHeaders(); },
+    set(value) {
+      if (value == null) {
+        this[kOutgoingHeaders] = null;
+      } else if (value instanceof Map) {
+        this[kOutgoingHeaders] = value;
+      } else if (typeof value === 'object') {
+        const headers = new Map();
+        for (const name of Object.keys(value)) {
+          headers.set(name.toLowerCase(), [name, value[name]]);
+        }
+        this[kOutgoingHeaders] = headers;
+      }
+    },
+  },
+  connection: {
+    get() { return this[kOutgoingSocket]; },
+    set(value) { this.socket = value; },
+  },
+  socket: {
+    get() { return this[kOutgoingSocket]; },
+    set(value) {
+      for (let index = 0; index < (this._corked || 0); index += 1) {
+        value?.cork?.();
+        this[kOutgoingSocket]?.uncork?.();
+      }
+      this[kOutgoingSocket] = value;
+    },
+  },
+  _headerNames: {
+    get() {
+      if (!(this[kOutgoingHeaders] instanceof Map)) return null;
+      const names = {};
+      for (const [name, entry] of this[kOutgoingHeaders]) {
+        names[name] = Array.isArray(entry) && typeof entry[0] === 'string' ? entry[0] : name;
+      }
+      return names;
+    },
+    set(value) {
+      if (!value || typeof value !== 'object' || !(this[kOutgoingHeaders] instanceof Map)) return;
+      for (const name of Object.keys(value)) {
+        const entry = this[kOutgoingHeaders].get(name);
+        if (entry) entry[0] = value[name];
+      }
+    },
+  },
   headersSent: {
     configurable: true,
     enumerable: true,

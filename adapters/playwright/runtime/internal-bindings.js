@@ -263,9 +263,13 @@ function createTraceEventsBinding() {
 
 function createSymbolsBinding() {
   const symbols = new Map();
+  const sharedSymbols = {
+    vm_dynamic_import_main_context_default: Symbol.for('nodejs.vm_dynamic_import_main_context_default'),
+    vm_context_no_contextify: Symbol.for('nodejs.vm_context_no_contextify'),
+  };
   return new Proxy({}, {
     get: (_, name) => {
-      if (!symbols.has(name)) symbols.set(name, Symbol(String(name)));
+      if (!symbols.has(name)) symbols.set(name, sharedSymbols[name] || Symbol(String(name)));
       return symbols.get(name);
     },
   });
@@ -1309,11 +1313,34 @@ export function createBrowserInternalBindings({ globalObject = globalThis, const
         Z_STREAM_END: 1,
         Z_NEED_DICT: 2,
         Z_ERRNO: -1,
+        Z_FILTERED: 1,
         Z_STREAM_ERROR: -2,
         Z_DATA_ERROR: -3,
         Z_MEM_ERROR: -4,
         Z_BUF_ERROR: -5,
         Z_VERSION_ERROR: -6,
+        Z_DEFAULT_CHUNK: 16384,
+        Z_DEFAULT_COMPRESSION: -1,
+        Z_DEFAULT_LEVEL: -1,
+        Z_DEFAULT_MEMLEVEL: 8,
+        Z_DEFAULT_STRATEGY: 0,
+        Z_DEFAULT_WINDOWBITS: 15,
+        ZSTD_error_maxSymbolValue_tooSmall: 48,
+        ZSTD_error_memory_allocation: 64,
+        ZSTD_error_noForwardProgress_destFull: 80,
+        ZSTD_error_noForwardProgress_inputEmpty: 82,
+        ZSTD_error_no_error: 0,
+        ZSTD_error_parameter_combination_unsupported: 41,
+        ZSTD_error_parameter_outOfBound: 42,
+        ZSTD_error_parameter_unsupported: 40,
+        ZSTD_c_nbWorkers: 400,
+        ZSTD_c_overlapLog: 402,
+        ZSTD_c_searchLog: 104,
+        ZSTD_c_strategy: 107,
+        ZSTD_c_targetLength: 106,
+        ZSTD_c_windowLog: 101,
+        ZSTD_d_windowLogMax: 100,
+        ZSTD_dfast: 2,
       }),
       fs: new Proxy({ ...constants }, { get: (target, name) => target[name] ?? 0 }),
       os: {

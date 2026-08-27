@@ -1674,6 +1674,38 @@ function createCryptoShim(scope, Buffer, processObject) {
 }
 
 function createZlibShim(scope, BufferClass) {
+  const constants = Object.freeze({
+    Z_NO_FLUSH: 0,
+    Z_PARTIAL_FLUSH: 1,
+    Z_SYNC_FLUSH: 2,
+    Z_FULL_FLUSH: 3,
+    Z_FINISH: 4,
+    Z_BLOCK: 5,
+    ZSTD_error_maxSymbolValue_tooSmall: 48,
+    ZSTD_error_memory_allocation: 64,
+    ZSTD_error_noForwardProgress_destFull: 80,
+    ZSTD_error_noForwardProgress_inputEmpty: 82,
+    ZSTD_error_no_error: 0,
+    ZSTD_error_parameter_combination_unsupported: 41,
+    ZSTD_error_parameter_outOfBound: 42,
+    ZSTD_error_parameter_unsupported: 40,
+    ZSTD_c_nbWorkers: 400,
+    ZSTD_c_overlapLog: 402,
+    ZSTD_c_searchLog: 104,
+    ZSTD_c_strategy: 107,
+    ZSTD_c_targetLength: 106,
+    ZSTD_c_windowLog: 101,
+    ZSTD_d_windowLogMax: 100,
+    ZSTD_dfast: 2,
+    Z_DEFAULT_CHUNK: 16384,
+    Z_DEFAULT_COMPRESSION: -1,
+    Z_DEFAULT_LEVEL: -1,
+    Z_DEFAULT_MEMLEVEL: 8,
+    Z_DEFAULT_STRATEGY: 0,
+    Z_DEFAULT_WINDOWBITS: 15,
+    Z_ERRNO: -1,
+    Z_FILTERED: 1,
+  });
   class Zlib {
     constructor() { this._resource = new AsyncResource('ZLIB'); }
     getAsyncId() { return this._resource.asyncId(); }
@@ -1786,8 +1818,8 @@ function createZlibShim(scope, BufferClass) {
     if (typeof callback !== 'function') return result.then((output) => new BufferClass(output));
     return result.then((output) => callback(null, new BufferClass(output)), (error) => callback(error));
   };
-  return {
-    constants: Object.freeze({ Z_NO_FLUSH: 0, Z_PARTIAL_FLUSH: 1, Z_SYNC_FLUSH: 2, Z_FULL_FLUSH: 3, Z_FINISH: 4, Z_BLOCK: 5 }),
+  const zlib = {
+    constants,
     gzip: (value, callback) => operation(value, 'gzip', scope.CompressionStream, callback),
     gunzip: (value, callback) => operation(value, 'gzip', scope.DecompressionStream, callback),
     deflate: (value, callback) => operation(value, 'deflate', scope.CompressionStream, callback),
@@ -1807,6 +1839,17 @@ function createZlibShim(scope, BufferClass) {
     brotliCompressSync() { throw new Error('Brotli sync compression is unavailable in a browser'); },
     brotliDecompressSync() { throw new Error('Brotli sync decompression is unavailable in a browser'); },
   };
+  for (const [name, value] of Object.entries(constants)) {
+    if (!name.startsWith('ZSTD_') && !name.startsWith('Z_DEFAULT')
+      && name !== 'Z_ERRNO' && name !== 'Z_FILTERED') continue;
+    Object.defineProperty(zlib, name, {
+      configurable: false,
+      enumerable: false,
+      value,
+      writable: false,
+    });
+  }
+  return zlib;
 }
 
 function createTimerPromises(scope, trackTask) {

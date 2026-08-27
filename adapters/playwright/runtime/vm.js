@@ -1,6 +1,10 @@
 const CONTEXT_MARKER = Symbol('browser-node-vm-context');
 const MODULE_KIND = Symbol('browser-node-vm-module-kind');
 const INSPECT_CUSTOM = Symbol.for('nodejs.util.inspect.custom');
+const VM_CONSTANTS = Object.freeze(Object.assign(Object.create(null), {
+  USE_MAIN_CONTEXT_DEFAULT_LOADER: Symbol.for('nodejs.vm_dynamic_import_main_context_default'),
+  DONT_CONTEXTIFY: Symbol.for('nodejs.vm_context_no_contextify'),
+}));
 const GLOBAL_SHADOWS = Object.freeze(['process', 'Buffer']);
 const CONTEXT_REALMS = new WeakMap();
 const TYPED_ARRAY_NAMES = Object.freeze([
@@ -227,6 +231,19 @@ function receivedValue(value) {
   return String(value);
 }
 
+function measureMemoryReceivedValue(value) {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'an instance of Array';
+  if (typeof value === 'function') return 'function ';
+  if (typeof value === 'object') return `an instance of ${value.constructor?.name || 'Object'}`;
+  if (typeof value === 'string') return `'${value}'`;
+  return String(value);
+}
+
+function measureMemoryResult() {
+  return { total: 0, current: 0, other: [] };
+}
+
 function markVmPromise(promise, state) {
   Object.defineProperty(promise, '__bnhInspect', {
     configurable: true,
@@ -388,6 +405,7 @@ export function createVmModule(scope = globalThis) {
   const evaluate = createContextEvaluator(scope);
   const FunctionConstructor = scope.Function || Function;
   const moduleIds = new WeakMap();
+  let measureMemoryWarned = false;
 
   const moduleIdentifier = (context) => {
     if (!moduleIds.has(context)) moduleIds.set(context, 0);
@@ -465,6 +483,40 @@ export function createVmModule(scope = globalThis) {
       return compiled(dynamicImport, ...args);
     };
     return functionObject;
+  }
+
+  function measureMemory(options = {}) {
+    if (!measureMemoryWarned) {
+      measureMemoryWarned = true;
+      scope.process?.emitWarning?.(
+        'vm.measureMemory is an experimental feature and might change at any time',
+        { type: 'ExperimentalWarning' },
+      );
+    }
+    if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+      throw vmError(
+        'ERR_INVALID_ARG_TYPE',
+        `The "options" argument must be of type object. Received ${measureMemoryReceivedValue(options)}`,
+        TypeError,
+      );
+    }
+    const mode = options.mode === undefined ? 'summary' : options.mode;
+    const execution = options.execution === undefined ? 'default' : options.execution;
+    if (mode !== 'summary' && mode !== 'detailed') {
+      throw vmError(
+        'ERR_INVALID_ARG_VALUE',
+        `The property 'options.mode' must be one of: 'summary', 'detailed'. Received ${measureMemoryReceivedValue(mode)}`,
+        TypeError,
+      );
+    }
+    if (execution !== 'default' && execution !== 'eager') {
+      throw vmError(
+        'ERR_INVALID_ARG_VALUE',
+        `The property 'options.execution' must be one of: 'default', 'eager'. Received ${measureMemoryReceivedValue(execution)}`,
+        TypeError,
+      );
+    }
+    return Promise.resolve(measureMemoryResult());
   }
 
   class Script {
@@ -719,6 +771,8 @@ export function createVmModule(scope = globalThis) {
     runInNewContext,
     runInThisContext,
     compileFunction,
+    measureMemory,
+    constants: VM_CONSTANTS,
     SourceTextModule,
     SyntheticModule,
   });

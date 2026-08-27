@@ -979,7 +979,17 @@ export function createWorkerFactory(scope = globalThis, { bootstrap = '' } = {})
 
 export function createBroadcastChannelFactory(scope = globalThis) {
   if (typeof scope.BroadcastChannel !== 'function') return undefined;
-  return function BroadcastChannel(name) {
+  const channelStates = new WeakMap();
+  const stateFor = (receiver) => {
+    const state = channelStates.get(receiver);
+    if (!state) {
+      const error = new TypeError('Illegal invocation');
+      error.code = 'ERR_INVALID_THIS';
+      throw error;
+    }
+    return state;
+  };
+  function BroadcastChannel(name) {
     if (!new.target) {
       const error = new TypeError('Class constructor BroadcastChannel cannot be invoked without \'new\'');
       error.code = 'ERR_CONSTRUCT_CALL_REQUIRED';
@@ -992,18 +1002,14 @@ export function createBroadcastChannelFactory(scope = globalThis) {
     }
     const channelName = String(name);
     const channel = new scope.BroadcastChannel(channelName);
-    const adapted = adaptMessagePort(channel);
-    Object.defineProperty(adapted, 'name', {
-      configurable: true,
-      enumerable: true,
-      get: () => channelName,
-    });
+    const adapted = adaptMessagePort(channel, { MessagePortClass: BroadcastChannel });
     const nativeClose = adapted.close;
-    adapted.close = function close() {
-      nativeClose.call(adapted);
-    };
     const nativePostMessage = adapted.postMessage;
-    adapted.postMessage = function postMessage(value) {
+    const nativeRef = adapted.ref;
+    const nativeUnref = adapted.unref;
+    const onmessage = Object.getOwnPropertyDescriptor(adapted, 'onmessage');
+    const onmessageerror = Object.getOwnPropertyDescriptor(adapted, 'onmessageerror');
+    const postMessage = function postMessage(value) {
       if (arguments.length === 0) {
         const error = new TypeError('The "message" argument must be specified');
         error.code = 'ERR_MISSING_ARGS';
@@ -1017,16 +1023,81 @@ export function createBroadcastChannelFactory(scope = globalThis) {
       }
       return nativePostMessage.call(adapted, value);
     };
-    Object.defineProperty(adapted, Symbol.for('nodejs.util.inspect.custom'), {
-      configurable: true,
-      value(depth) {
-        if (depth < 0) return 'BroadcastChannel';
-        const quotedName = channelName.replaceAll('\\', '\\\\').replaceAll("'", "\\'");
-        return `BroadcastChannel { name: '${quotedName}', active: ${!adapted.__bnhIsClosed} }`;
-      },
+    const ownProperties = ['close', 'hasRef', 'postMessage', 'ref', 'start', 'unref'];
+    for (const property of ownProperties) delete adapted[property];
+    delete adapted[Symbol.for('nodejs.util.inspect.custom')];
+    channelStates.set(adapted, {
+      adapted,
+      channelName,
+      close: () => { nativeClose.call(adapted); },
+      postMessage,
+      ref: () => nativeRef.call(adapted),
+      unref: () => nativeUnref.call(adapted),
+      onmessage,
+      onmessageerror,
     });
     return adapted;
+  }
+  const close = function close() { stateFor(this).close(); };
+  const postMessage = function postMessage(message) {
+    const state = stateFor(this);
+    return arguments.length === 0 ? state.postMessage() : state.postMessage(message);
   };
+  const ref = function ref() { stateFor(this).ref(); return this; };
+  const unref = function unref() { stateFor(this).unref(); return this; };
+  Object.defineProperties(BroadcastChannel.prototype, {
+    constructor: { configurable: true, writable: true, value: BroadcastChannel },
+    name: {
+      configurable: true,
+      enumerable: true,
+      get() { return stateFor(this).channelName; },
+    },
+    close: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: close,
+    },
+    postMessage: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: postMessage,
+    },
+    ref: {
+      configurable: true,
+      writable: true,
+      value: ref,
+    },
+    unref: {
+      configurable: true,
+      writable: true,
+      value: unref,
+    },
+    onmessage: {
+      configurable: true,
+      enumerable: true,
+      get() { return stateFor(this).onmessage.get.call(stateFor(this).adapted); },
+      set(value) { stateFor(this).onmessage.set.call(stateFor(this).adapted, value); },
+    },
+    onmessageerror: {
+      configurable: true,
+      enumerable: true,
+      get() { return stateFor(this).onmessageerror.get.call(stateFor(this).adapted); },
+      set(value) { stateFor(this).onmessageerror.set.call(stateFor(this).adapted, value); },
+    },
+    [Symbol.for('nodejs.util.inspect.custom')]: {
+      configurable: true,
+      value(depth) {
+        const state = stateFor(this);
+        if (depth < 0) return 'BroadcastChannel';
+        const quotedName = state.channelName.replaceAll('\\', '\\\\').replaceAll("'", "\\'");
+        return `BroadcastChannel { name: '${quotedName}', active: ${!state.adapted.__bnhIsClosed} }`;
+      },
+    },
+  });
+  Object.defineProperty(BroadcastChannel, 'prototype', { writable: false });
+  return BroadcastChannel;
 }
 
 export function createMessagingPrimitives(scope = globalThis) {

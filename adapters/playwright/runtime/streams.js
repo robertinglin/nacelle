@@ -615,6 +615,27 @@ export class Readable extends EventEmitter {
   get readableDidRead() { return this._readableDidRead; }
   get readableListening() { return this.listenerCount('readable') > 0; }
 
+  _undestroy() {
+    this._destroyed = false;
+    this.destroyed = false;
+    this._closeEmitted = false;
+    this._error = null;
+    this._errorEmitted = false;
+    this._readableState.destroyed = false;
+    this._readableState.errored = null;
+    this._readableState.closed = false;
+    this._readableState.errorEmitted = false;
+    this._reading = false;
+    this._ended = this.readable === false;
+    this._endEmitted = this.readable === false;
+    this._readableState.ended = this._ended;
+    this._readableState.endEmitted = this._endEmitted;
+  }
+
+  _destroy(error, callback) {
+    callback(error);
+  }
+
   pause() {
     const wasFlowing = this._flowing;
     this._flowing = false;
@@ -678,6 +699,7 @@ export class Readable extends EventEmitter {
     this._destroyed = true;
     this.destroyed = true;
     this.readable = false;
+    this._readableState.readable = false;
     this._readableState.destroyed = true;
     this._readableState.errored = error || null;
     this._buffer.length = 0;
@@ -1084,8 +1106,7 @@ class WritableImpl extends EventEmitter {
       const write = this._owner?._write || this._write;
       write.call(this._owner || this, request.bytes, request.encoding, done);
     } catch (error) {
-      if (!request.settled) done(error);
-      else throw error;
+      throw error;
     }
   }
 
@@ -1247,6 +1268,20 @@ class DuplexImpl extends Readable {
     }));
   }
 
+  get writableFinished() { return this._writable?.writableFinished ?? false; }
+  get writableCorked() { return this._writable?.writableCorked ?? 0; }
+  get writableEnded() { return this._writable?.writableEnded ?? false; }
+  get writableNeedDrain() { return this._writable?.writableNeedDrain ?? false; }
+  get destroyed() {
+    return Boolean(this._readableState?.destroyed && this._writableState?.destroyed);
+  }
+  set destroyed(value) {
+    if (this._readableState && this._writableState) {
+      this._readableState.destroyed = Boolean(value);
+      this._writableState.destroyed = Boolean(value);
+    }
+  }
+
   write(...args) {
     const result = this._writable.write(...args);
     this.writableLength = this._writable.writableLength;
@@ -1300,13 +1335,12 @@ export function duplexPair(options = {}) {
 
 export class Transform extends Duplex {
   constructor(options = {}) {
-    const transform = options.transform || ((value, _encoding, done) => done(null, value));
     const flush = options.flush;
     super({
       ...options,
       write(chunk, encoding, callback) {
         try {
-          transform.call(this, chunk, encoding, (error, output) => {
+          this._transform.call(this, chunk, encoding, (error, output) => {
             if (!error && output !== undefined && output !== null) this.push(output);
             callback(error);
           });
@@ -1325,19 +1359,17 @@ export class Transform extends Duplex {
         });
       },
     });
+    if (typeof options.transform === 'function') this._transform = options.transform;
     this._writable.once('finish', () => this.push(null));
+  }
+
+  _transform(value, _encoding, done) {
+    done(null, value);
   }
 }
 
 export class PassThrough extends Transform {
-  constructor(options = {}) {
-    super({
-      ...options,
-      transform(chunk, _encoding, callback) {
-        callback(null, chunk);
-      },
-    });
-  }
+  _transform(chunk, _encoding, callback) { callback(null, chunk); }
 }
 
 export class OutputLimitError extends Error {

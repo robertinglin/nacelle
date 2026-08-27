@@ -632,7 +632,7 @@ export function finished(stream, options, callbackArgument) {
         settled = true;
         try {
           if (callbackResource) callbackResource.runInAsyncScope(callback, undefined, error);
-          if (error) reject(error);
+          if (error && !callbackResource) reject(error);
           else resolve();
         } finally {
           callbackResource?.emitDestroy();

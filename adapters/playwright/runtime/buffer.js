@@ -118,6 +118,35 @@ function encodeBase64(bytes, urlSafe) {
   return urlSafe ? encodedText.replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '') : encodedText;
 }
 
+function sliceBytes(buffer, start, end) {
+  const [first, last] = nativeSliceRange(buffer.length, start, end);
+  return buffer.subarray(first, last);
+}
+
+function asciiSlice(start, end) {
+  return decodeAscii(sliceBytes(this, start, end));
+}
+
+function base64Slice(start, end) {
+  return encodeBase64(sliceBytes(this, start, end), false);
+}
+
+function base64urlSlice(start, end) {
+  return encodeBase64(sliceBytes(this, start, end), true);
+}
+
+function latin1Slice(start, end) {
+  return decodeSingleByte(sliceBytes(this, start, end));
+}
+
+function hexSlice(start, end) {
+  return encodeHex(sliceBytes(this, start, end));
+}
+
+function ucs2Slice(start, end) {
+  return decodeUcs2(sliceBytes(this, start, end));
+}
+
 const UTF8_OPS = Object.freeze({
   search: 'bytes',
   encode: (text) => textEncoder.encode(text),
@@ -1216,7 +1245,17 @@ export function createBufferClass(scope = globalThis) {
   NodeBuffer.prototype.lastIndexOf = function lastIndexOf(val, byteOffset, encoding) {
     return bidirectionalIndexOf(this, val, byteOffset, encoding, false);
   };
-    NodeBuffer.prototype.includes = function includes(val, byteOffset, encoding) {
+  Object.assign(NodeBuffer.prototype, {
+    writeUint16BE: NodeBuffer.prototype.writeUInt16BE,
+    writeUint32BE: NodeBuffer.prototype.writeUInt32BE,
+    asciiSlice,
+    base64Slice,
+    base64urlSlice,
+    latin1Slice,
+    hexSlice,
+    ucs2Slice,
+  });
+  NodeBuffer.prototype.includes = function includes(val, byteOffset, encoding) {
     return this.indexOf(val, byteOffset, encoding) !== -1;
   };
   Object.defineProperties(NodeBuffer.prototype, {

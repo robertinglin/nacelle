@@ -876,6 +876,118 @@ class OutgoingMessage extends EventEmitter {
     return this;
   }
 
+  setHeaders(headers) {
+    if (this._header || this.headersSent || this._started) {
+      const error = new Error('Cannot set headers after they are sent');
+      error.code = 'ERR_HTTP_HEADERS_SENT';
+      throw error;
+    }
+    if (!headers || Array.isArray(headers) || typeof headers.keys !== 'function'
+      || typeof headers.get !== 'function') {
+      throw invalidArgumentType('headers', 'an instance of Headers or Map', headers);
+    }
+
+    let cookies = null;
+    for (const [key, value] of headers) {
+      if (key === 'set-cookie') {
+        cookies ||= [];
+        if (Array.isArray(value)) cookies.push(...value);
+        else cookies.push(value);
+      } else {
+        this.setHeader(key, value);
+      }
+    }
+    if (cookies !== null) this.setHeader('set-cookie', cookies);
+    return this;
+  }
+
+  appendHeader(name, value) {
+    if (this._header || this.headersSent || this._started) {
+      const error = new Error('Cannot append headers after they are sent');
+      error.code = 'ERR_HTTP_HEADERS_SENT';
+      throw error;
+    }
+    validateHeaderName(name);
+    validateHeaderValue(name, value);
+
+    const field = name.toLowerCase();
+    const headers = this._headers;
+    if (!(headers instanceof Map)) return this.setHeader(name, value);
+    const entry = headers.get(field);
+    if (entry === undefined) return this.setHeader(name, value);
+
+    const isEntry = Array.isArray(entry) && entry.length === 2
+      && typeof entry[0] === 'string' && entry[0].toLowerCase() === field;
+    if (isEntry) {
+      if (!Array.isArray(entry[1])) entry[1] = [entry[1]];
+      if (Array.isArray(value)) entry[1].push(...value);
+      else entry[1].push(value);
+    } else {
+      const values = Array.isArray(entry) ? entry : [entry];
+      if (Array.isArray(value)) values.push(...value);
+      else values.push(value);
+      headers.set(field, values);
+    }
+    return this;
+  }
+
+  getHeader(name) {
+    if (typeof name !== 'string') throw invalidArgumentType('name', 'string', name);
+    if (!(this._headers instanceof Map)) return undefined;
+    const entry = this._headers.get(name.toLowerCase());
+    if (Array.isArray(entry) && entry.length === 2
+      && typeof entry[0] === 'string' && entry[0].toLowerCase() === name.toLowerCase()) {
+      return entry[1];
+    }
+    return entry;
+  }
+
+  getHeaderNames() {
+    return this._headers instanceof Map ? [...this._headers.keys()] : [];
+  }
+
+  getRawHeaderNames() {
+    if (!(this._headers instanceof Map)) return [];
+    return [...this._headers].map(([name, entry]) => {
+      if (Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string'
+        && entry[0].toLowerCase() === name) return entry[0];
+      return name;
+    });
+  }
+
+  getHeaders() {
+    if (!(this._headers instanceof Map)) return {};
+    const headers = {};
+    for (const [name, entry] of this._headers) {
+      headers[name] = Array.isArray(entry) && entry.length === 2
+        && typeof entry[0] === 'string' && entry[0].toLowerCase() === name
+        ? entry[1]
+        : entry;
+    }
+    return headers;
+  }
+
+  hasHeader(name) {
+    if (typeof name !== 'string') throw invalidArgumentType('name', 'string', name);
+    return this._headers instanceof Map && this._headers.has(name.toLowerCase());
+  }
+
+  removeHeader(name) {
+    if (typeof name !== 'string') throw invalidArgumentType('name', 'string', name);
+    if (this._header || this.headersSent || this._started) {
+      const error = new Error('Cannot remove headers after they are sent');
+      error.code = 'ERR_HTTP_HEADERS_SENT';
+      throw error;
+    }
+    const field = name.toLowerCase();
+    if (this._headers instanceof Map) this._headers.delete(field);
+    if (field === 'connection') this._removedConnection = true;
+    else if (field === 'content-length') this._removedContLen = true;
+    else if (field === 'transfer-encoding') this._removedTE = true;
+    else if (field === 'date') this.sendDate = false;
+    return this;
+  }
+
   _send(data, encoding = 'utf8', callback = undefined, byteLength = undefined) {
     const size = byteLength ?? (typeof data === 'string'
       ? (typeof TextEncoder === 'function' ? new TextEncoder().encode(data).byteLength : data.length)

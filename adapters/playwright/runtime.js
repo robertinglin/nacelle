@@ -44,7 +44,9 @@ import {
   aesGcmEncrypt,
   createHashShim,
   createHmacShim,
+  createVerifyClass,
   createSecretKeyShim,
+  createVerifyShim,
   browserCryptoVersion,
   BrowserECDH,
   createCertificateShim,
@@ -1643,18 +1645,7 @@ function createCryptoShim(scope, Buffer, processObject) {
       },
     };
   };
-  const createVerify = (algorithm) => {
-    const chunks = [];
-    return {
-      update(value, encoding) {
-        chunks.push(Buffer.from(value, encoding));
-        return this;
-      },
-      verify(key, signature) {
-        return nodeVerify(algorithm, Buffer.concat(chunks), key, signature);
-      },
-    };
-  };
+  const createVerify = (algorithm) => createVerifyShim(algorithm, Buffer, scope);
   const nodeCrypto = {
     webcrypto: crypto,
     subtle: crypto?.subtle,
@@ -1686,6 +1677,7 @@ function createCryptoShim(scope, Buffer, processObject) {
     aesGcmDecrypt: wrapBuffer(aesGcmDecrypt),
     sign: nodeSign,
     verify: nodeVerify,
+    Verify: createVerifyClass(Buffer, scope),
     createSign,
     createVerify,
     generateKeyPair: (type, options, callback) => generateKeyPair(type, options, callback, scope),

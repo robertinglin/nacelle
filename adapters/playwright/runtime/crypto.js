@@ -4,6 +4,8 @@ import { createDiffieHellman, createDiffieHellmanGroup } from './diffie-hellman.
 
 const objectToString = Object.prototype.toString;
 const virtualKeyPairs = new Map();
+const VERIFY_SYNC_BLOCKER = 'Web Crypto exposes only asynchronous SubtleCrypto.verify; no browser-native synchronous verifier is available for this key';
+const X509_PARSER_BLOCKER = 'Web Crypto exposes key operations but no browser-native X.509 parser or certificate-chain field extraction';
 
 function isArrayBuffer(value) {
   return value !== null && typeof value === 'object'
@@ -801,6 +803,74 @@ export function verifySync(algorithm, value, key, signature, options = {}, globa
   return expected.every((byte, index) => byte === actual[index]);
 }
 
+export function createVerifyShim(algorithm, BufferClass, globalObject = globalThis) {
+  if (typeof algorithm !== 'string') {
+    const received = algorithm === null ? 'null' : algorithm === undefined ? 'undefined' : typeof algorithm;
+    const error = new TypeError(`The "algorithm" argument must be of type string. Received ${received}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+
+  function Verify() {
+    this._chunks = [];
+    this._finalized = false;
+  }
+
+  Verify.prototype.update = function update(value, encoding) {
+    if (this._finalized) {
+      const error = new Error('Not initialised');
+      error.code = 'ERR_CRYPTO_INVALID_STATE';
+      throw error;
+    }
+    if (value === undefined) {
+      const error = new TypeError('The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received undefined');
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    this._chunks.push(BufferClass.from(value, encoding));
+    return this;
+  };
+
+  Verify.prototype.verify = function verifyValue(key, signature, signatureEncoding) {
+    if (this._finalized) {
+      const error = new Error('Not initialised');
+      error.code = 'ERR_CRYPTO_INVALID_STATE';
+      throw error;
+    }
+    this._finalized = true;
+    const data = BufferClass.concat(this._chunks);
+    const encodedSignature = signatureEncoding === undefined
+      ? signature
+      : BufferClass.from(signature, signatureEncoding);
+    const result = verifySync(algorithm, data, key, encodedSignature, {}, globalObject);
+    if (result !== undefined) return result;
+    throw new UnsupportedWebCapabilityError(
+      'Verify.verify',
+      VERIFY_SYNC_BLOCKER,
+    );
+  };
+
+  return Verify;
+}
+
+export function createVerifyClass(BufferClass, globalObject = globalThis) {
+  function Verify(algorithm) {
+    const Implementation = createVerifyShim(algorithm, BufferClass, globalObject);
+    this._implementation = new Implementation();
+  }
+
+  Verify.prototype.update = function update(value, encoding) {
+    this._implementation.update(value, encoding);
+    return this;
+  };
+
+  Verify.prototype.verify = function verifyValue(key, signature, signatureEncoding) {
+    return this._implementation.verify(key, signature, signatureEncoding);
+  };
+
+  return Verify;
+}
+
 function normalizeSigningOptions(options) {
   if (!options || typeof options !== 'object') throw new TypeError('crypto signing options must be an object');
   return options;
@@ -1088,9 +1158,27 @@ export function createCertificateShim(globalObject = globalThis, name = 'X509Cer
   if (typeof NativeCertificate === 'function') return NativeCertificate;
   return class UnsupportedCertificate {
     constructor() {
-      throw new UnsupportedWebCapabilityError(name, 'X.509 parsing is not exposed by Web Crypto');
+      throw new UnsupportedWebCapabilityError(
+        name,
+        X509_PARSER_BLOCKER,
+      );
     }
+
+    get subject() { throw unsupportedCertificateProperty(name, 'subject'); }
+    get subjectAltName() { throw unsupportedCertificateProperty(name, 'subjectAltName'); }
+    get issuer() { throw unsupportedCertificateProperty(name, 'issuer'); }
+    get issuerCertificate() { throw unsupportedCertificateProperty(name, 'issuerCertificate'); }
+    get infoAccess() { throw unsupportedCertificateProperty(name, 'infoAccess'); }
+    get validFrom() { throw unsupportedCertificateProperty(name, 'validFrom'); }
+    get validTo() { throw unsupportedCertificateProperty(name, 'validTo'); }
   };
+}
+
+function unsupportedCertificateProperty(name, property) {
+  return new UnsupportedWebCapabilityError(
+    `${name}.${property}`,
+    X509_PARSER_BLOCKER,
+  );
 }
 
 export function randomBytes(length, globalObject = globalThis) {

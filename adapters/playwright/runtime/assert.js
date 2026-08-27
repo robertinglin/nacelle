@@ -1092,32 +1092,73 @@ export function createAssert({ strict = false, readSource, sourcePath, process: 
     }
   };
 
+  const kOptions = Symbol('options');
+  const methodLengths = {
+    fail: 5,
+    ok: 0,
+    equal: 3,
+    notEqual: 3,
+    deepEqual: 3,
+    notDeepEqual: 3,
+    deepStrictEqual: 3,
+    notDeepStrictEqual: 3,
+    strictEqual: 3,
+    notStrictEqual: 3,
+    partialDeepStrictEqual: 3,
+    throws: 1,
+    rejects: 1,
+    doesNotThrow: 1,
+    doesNotReject: 1,
+    ifError: 1,
+    match: 3,
+    doesNotMatch: 3,
+  };
+
   function Assert(options = {}) {
     if (!new.target) {
-      const error = new TypeError('Class constructor Assert cannot be invoked without new');
+      const error = new TypeError('Class constructor Assert cannot be invoked without `new`');
       error.code = 'ERR_CONSTRUCT_CALL_REQUIRED';
       throw error;
     }
-    if (options === null || typeof options !== 'object') {
-      throw invalidArgumentType('options', options, 'an object');
-    }
-    const configuredStrict = options.strict === undefined ? true : Boolean(options.strict);
-    if (options.diff !== undefined && options.diff !== 'simple' && options.diff !== 'full') {
+
+    const configuredOptions = Object.assign({ __proto__: null, strict: true }, options);
+    if (configuredOptions.diff !== undefined
+      && configuredOptions.diff !== 'simple'
+      && configuredOptions.diff !== 'full') {
       const error = new TypeError(
-        `The property 'options.diff' must be one of: 'simple', 'full'. Received '${String(options.diff)}'`,
+        `The property 'options.diff' must be one of: 'simple', 'full'. Received '${String(configuredOptions.diff)}'`,
       );
       error.code = 'ERR_INVALID_ARG_VALUE';
       throw error;
     }
-    const base = configuredStrict ? assert.strict : assert;
-    const diff = options.diff;
-    const instance = this;
-    const wrap = (name) => function wrappedAssertMethod(...args) {
+
+    this.AssertionError = AssertionError;
+    Object.defineProperty(this, kOptions, {
+      value: configuredOptions,
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    });
+
+    if (configuredOptions.strict) {
+      this.equal = this.strictEqual;
+      this.deepEqual = this.deepStrictEqual;
+      this.notEqual = this.notStrictEqual;
+      this.notDeepEqual = this.notDeepStrictEqual;
+    }
+  }
+
+  const wrapAssertMethod = (name) => {
+    const method = function (...args) {
+      const options = this?.[kOptions];
+      const base = options?.strict ? assert.strict : assert;
       try {
         return base[name](...args);
       } catch (error) {
         if (error instanceof AssertionError) {
-          const selectedDiff = this === instance ? (diff || 'simple') : 'simple';
+          const selectedDiff = name === 'match' || name === 'doesNotMatch'
+            ? 'simple'
+            : options?.diff || 'simple';
           error.diff = selectedDiff;
           if (error.operator === 'deepEqual') {
             error.message = looseDeepDiff(error.actual, error.expected, selectedDiff === 'full');
@@ -1130,23 +1171,15 @@ export function createAssert({ strict = false, readSource, sourcePath, process: 
         throw error;
       }
     };
-    for (const name of [
-      'ok', 'fail', 'equal', 'notEqual', 'deepEqual', 'notDeepEqual',
-      'strictEqual', 'notStrictEqual', 'deepStrictEqual', 'notDeepStrictEqual',
-      'partialDeepStrictEqual', 'throws', 'rejects', 'doesNotThrow', 'doesNotReject',
-      'match', 'doesNotMatch', 'ifError',
-    ]) {
-      this[name] = wrap(name);
-    }
-    if (configuredStrict) {
-      this.equal = this.strictEqual;
-      this.deepEqual = this.deepStrictEqual;
-      this.notEqual = this.notStrictEqual;
-      this.notDeepEqual = this.notDeepStrictEqual;
-    }
-    this.AssertionError = AssertionError;
+    Object.defineProperty(method, 'name', { value: name });
+    Object.defineProperty(method, 'length', { value: methodLengths[name] });
+    return method;
+  };
+
+  for (const name of Object.keys(methodLengths)) {
+    Assert.prototype[name] = wrapAssertMethod(name);
   }
-  Assert.prototype.constructor = Assert;
+
   assert.Assert = Assert;
   assert.strict.Assert = Assert;
   return assert;

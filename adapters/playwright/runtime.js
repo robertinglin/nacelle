@@ -5553,6 +5553,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       child.unref = () => child;
       return child;
     };
+    const runtimeWorkerStates = new WeakMap();
     function RuntimeWorker(...args) {
       const ownerProcess = scope.process || processObject;
       if (ownerProcess._bnhNextWorkerThreadId === undefined) ownerProcess._bnhNextWorkerThreadId = 1;
@@ -5599,6 +5600,16 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         worker.ref();
         return Promise.resolve(terminate?.(...terminateArgs));
       };
+      runtimeWorkerStates.set(worker, {
+        postMessage: worker.postMessage,
+        terminate: worker.terminate,
+        ref: worker.ref,
+        unref: worker.unref,
+        get threadId() { return workerExited ? -1 : threadId; },
+        get threadName() { return workerExited ? null : workerThreadName; },
+        stdin: worker.stdin,
+        stdout: worker.stdout,
+      });
       worker.once('spawn', () => worker.emit('online'));
       worker.once('exit', () => {
         workerExited = true;
@@ -5639,6 +5650,60 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       diagnosticsChannels.channel('worker_threads').publish({ worker });
       return worker;
     }
+    Object.defineProperties(RuntimeWorker.prototype, {
+      postMessage: {
+        configurable: true,
+        writable: true,
+        value(value, transferList) {
+          return runtimeWorkerStates.get(this)?.postMessage?.(value, transferList);
+        },
+      },
+      terminate: {
+        configurable: true,
+        writable: true,
+        value(...terminateArgs) {
+          return runtimeWorkerStates.get(this)?.terminate?.(...terminateArgs);
+        },
+      },
+      ref: {
+        configurable: true,
+        writable: true,
+        value() {
+          return runtimeWorkerStates.get(this)?.ref?.();
+        },
+      },
+      unref: {
+        configurable: true,
+        writable: true,
+        value() {
+          return runtimeWorkerStates.get(this)?.unref?.();
+        },
+      },
+      threadId: {
+        configurable: true,
+        get() {
+          return runtimeWorkerStates.get(this)?.threadId;
+        },
+      },
+      threadName: {
+        configurable: true,
+        get() {
+          return runtimeWorkerStates.get(this)?.threadName;
+        },
+      },
+      stdin: {
+        configurable: true,
+        get() {
+          return runtimeWorkerStates.get(this)?.stdin;
+        },
+      },
+      stdout: {
+        configurable: true,
+        get() {
+          return runtimeWorkerStates.get(this)?.stdout;
+        },
+      },
+    });
     const workerThreads = {
       ...browserIO,
       Worker: createRuntimeWorker ? RuntimeWorker : undefined,

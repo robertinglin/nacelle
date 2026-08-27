@@ -192,7 +192,13 @@ function appendBytes(previous, next) {
 function streamError(code, message) {
   // Node exposes the code separately; the code prefix belongs to formatting,
   // not to the observable Error#message used by callers and assertions.
-  const error = new Error(message);
+  const ErrorClass = code === 'ERR_INVALID_ARG_TYPE'
+    || code === 'ERR_INVALID_ARG_VALUE'
+    || code === 'ERR_INVALID_RETURN_VALUE'
+    || code === 'ERR_MISSING_ARGS'
+    ? TypeError
+    : code === 'ERR_OUT_OF_RANGE' ? RangeError : Error;
+  const error = new ErrorClass(message);
   error.code = code;
   return error;
 }
@@ -232,7 +238,10 @@ Stream.prototype.once = function once(name, listener) {
   return this.on(name, wrapped);
 };
 Stream.prototype.removeListener = function removeListener(name, listener) {
-  legacyState(this).listeners.get(name)?.delete(listener);
+  const state = legacyState(this);
+  const listeners = state.listeners.get(name);
+  listeners?.delete(listener);
+  if (listeners?.size === 0) state.listeners.delete(name);
   return this;
 };
 Stream.prototype.off = Stream.prototype.removeListener;
@@ -255,6 +264,11 @@ Stream.prototype.emit = function emit(name, ...args) {
   for (let index = 0; index < snapshot.length; index += 1) snapshot[index].apply(this, args);
   return listeners.size > 0;
 };
+Stream.prototype.eventNames = function eventNames() {
+  return [...legacyState(this).listeners]
+    .filter(([, listeners]) => listeners.size > 0)
+    .map(([name]) => name);
+};
 Stream.prototype.pipe = function pipe(destination) {
   this.on('data', (chunk) => {
     if (!destination.write(chunk)) this.pause?.();
@@ -266,11 +280,11 @@ Stream.prototype.pipe = function pipe(destination) {
 };
 
 function validateCombinatorOptions(options) {
-  if (options === undefined) return {};
-  if (options === null || typeof options !== 'object') {
+  if (options === undefined || options === null) return {};
+  if (typeof options !== 'object' || Array.isArray(options)) {
     throw streamError('ERR_INVALID_ARG_TYPE', 'options must be an object');
   }
-  if (options.signal !== undefined && (options.signal === null
+  if (options.signal != null && (typeof options.signal !== 'object'
     || typeof options.signal.addEventListener !== 'function'
     || typeof options.signal.aborted !== 'boolean')) {
     throw streamError('ERR_INVALID_ARG_TYPE', 'options.signal must be an AbortSignal');
@@ -307,7 +321,26 @@ function abortError(signal) {
 }
 
 function throwIfAborted(signal) {
-  if (signal.aborted) throw abortError(signal);
+  if (signal?.aborted) throw abortError(signal);
+}
+
+function toNonNegativeIntegerOrInfinity(value) {
+  const number = Number(value);
+  if (Number.isNaN(number)) return 0;
+  if (number < 0) {
+    throw streamError(
+      'ERR_OUT_OF_RANGE',
+      `The value of "number" is out of range. It must be >= 0. Received ${number}`,
+    );
+  }
+  return number;
+}
+
+function filterValues(source, fn, options) {
+  if (typeof fn !== 'function') throw streamError('ERR_INVALID_ARG_TYPE', 'fn must be a function');
+  return mapValues(source, async (value, context) => (
+    await fn(value, context) ? value : COMBINATOR_EMPTY
+  ), options);
 }
 
 function mapValues(source, fn, options) {
@@ -929,10 +962,7 @@ export class Readable extends EventEmitter {
   }
 
   filter(fn, options) {
-    if (typeof fn !== 'function') throw streamError('ERR_INVALID_ARG_TYPE', 'fn must be a function');
-    return Readable.from(mapValues(this, async (value, context) => (
-      await fn(value, context) ? value : COMBINATOR_EMPTY
-    ), options), { objectMode: true });
+    return Readable.from(filterValues(this, fn, options), { objectMode: true });
   }
 
   flatMap(fn, options) {
@@ -940,6 +970,103 @@ export class Readable extends EventEmitter {
     return Readable.from((async function* flatMap() {
       for await (const value of mapped) yield* value;
     })(), { objectMode: true });
+  }
+
+  drop(number, options = undefined) {
+    const validated = validateCombinatorOptions(options);
+    const count = toNonNegativeIntegerOrInfinity(number);
+    const source = this;
+    return Readable.from((async function* drop() {
+      throwIfAborted(validated.signal);
+      let remaining = count;
+      for await (const value of source) {
+        throwIfAborted(validated.signal);
+        if (remaining-- <= 0) yield value;
+      }
+    })(), { objectMode: true });
+  }
+
+  take(number, options = undefined) {
+    const validated = validateCombinatorOptions(options);
+    const count = toNonNegativeIntegerOrInfinity(number);
+    const source = this;
+    return Readable.from((async function* take() {
+      throwIfAborted(validated.signal);
+      let remaining = count;
+      for await (const value of source) {
+        throwIfAborted(validated.signal);
+        if (remaining-- > 0) yield value;
+        if (remaining <= 0) return;
+      }
+    })(), { objectMode: true });
+  }
+
+  async every(fn, options = undefined) {
+    if (typeof fn !== 'function') throw streamError('ERR_INVALID_ARG_TYPE', 'fn must be a function');
+    for await (const unused of filterValues(this, async (...args) => !(await fn(...args)), options)) {
+      return false;
+    }
+    return true;
+  }
+
+  async forEach(fn, options) {
+    if (typeof fn !== 'function') throw streamError('ERR_INVALID_ARG_TYPE', 'fn must be a function');
+    const mapped = mapValues(this, async (value, context) => {
+      await fn(value, context);
+      return COMBINATOR_EMPTY;
+    }, options);
+    for await (const unused of mapped) { /* consume */ }
+  }
+
+  async reduce(reducer, initialValue, options) {
+    if (typeof reducer !== 'function') throw streamError('ERR_INVALID_ARG_TYPE', 'reducer must be a function');
+    const validated = validateCombinatorOptions(options);
+    let hasInitialValue = arguments.length > 1;
+    if (validated.signal?.aborted) {
+      const error = abortError(validated.signal);
+      this.once('error', () => {});
+      this.destroy(error);
+      throw error;
+    }
+
+    const reducerController = new AbortController();
+    const reducerSignal = reducerController.signal;
+    let abortHandler;
+    if (validated.signal) {
+      abortHandler = () => reducerController.abort();
+      validated.signal.addEventListener('abort', abortHandler, { once: true });
+    }
+
+    let gotAnyItem = false;
+    try {
+      for await (const value of this) {
+        gotAnyItem = true;
+        throwIfAborted(validated.signal || { aborted: false });
+        if (!hasInitialValue) {
+          initialValue = value;
+          hasInitialValue = true;
+        } else {
+          initialValue = await reducer(initialValue, value, { signal: reducerSignal });
+        }
+      }
+      if (!gotAnyItem && !hasInitialValue) {
+        throw streamError('ERR_MISSING_ARGS', 'Reduce of an empty stream requires an initial value');
+      }
+      return initialValue;
+    } finally {
+      if (abortHandler) validated.signal.removeEventListener('abort', abortHandler);
+      reducerController.abort();
+    }
+  }
+
+  async some(fn, options = undefined) {
+    for await (const unused of filterValues(this, fn, options)) return true;
+    return false;
+  }
+
+  async find(fn, options) {
+    for await (const value of filterValues(this, fn, options)) return value;
+    return undefined;
   }
 
   async toArray() {

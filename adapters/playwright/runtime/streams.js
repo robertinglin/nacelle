@@ -203,6 +203,17 @@ function streamError(code, message) {
   return error;
 }
 
+function streamReceivedValue(value) {
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  if (typeof value === 'function') return 'function';
+  if (typeof value === 'string') return `type string ('${value}')`;
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return `type ${typeof value} (${value})`;
+  }
+  return `an instance of ${value?.constructor?.name || typeof value}`;
+}
+
 const COMBINATOR_EMPTY = Symbol('stream-combinator-empty');
 const COMBINATOR_EOF = Symbol('stream-combinator-eof');
 
@@ -434,10 +445,7 @@ function mapValues(source, fn, options) {
 export class Readable extends EventEmitter {
   constructor(options = {}) {
     super();
-    this.readable = true;
     const objectMode = Boolean(options.readableObjectMode ?? options.objectMode);
-    this.readableHighWaterMark = options.highWaterMark
-      ?? (objectMode ? defaultObjectHighWaterMark : defaultHighWaterMark);
     this._buffer = [];
     this._bufferedBytes = 0;
     this._ended = false;
@@ -458,11 +466,13 @@ export class Readable extends EventEmitter {
       pipes: [], flowing: null, reading: false, ended: false, endEmitted: false,
       readableListening: false, needReadable: false, emittedReadable: false, readingMore: false,
       objectMode,
+      highWaterMark: options.highWaterMark
+        ?? (objectMode ? defaultObjectHighWaterMark : defaultHighWaterMark),
+      buffer: this._buffer,
       autoDestroy: options.autoDestroy !== false, emitClose: options.emitClose !== false,
       closed: false, errorEmitted: false,
     };
     if (options.readable === false) {
-      this.readable = false;
       this._ended = true;
       this._endEmitted = true;
       this._readableState.readable = false;
@@ -486,6 +496,8 @@ export class Readable extends EventEmitter {
 
   on(name, listener) {
     super.on(name, listener);
+    if (name === 'readable') this._readableState.readableListening = true;
+    if (name === 'data') this._readableState.dataListening = true;
     if (name === 'data') this.resume();
     if (name === 'readable' && !this._flowing) {
       if (!this._ended && (this.readableHighWaterMark === 0
@@ -498,6 +510,32 @@ export class Readable extends EventEmitter {
 
   addListener(name, listener) {
     return this.on(name, listener);
+  }
+
+  removeListener(name, listener) {
+    const result = super.removeListener(name, listener);
+    if (name === 'readable') {
+      this._readableState.readableListening = this.listenerCount('readable') > 0;
+    }
+    if (name === 'data' && this.listenerCount('data') === 0) {
+      this._readableState.dataListening = false;
+    }
+    return result;
+  }
+
+  off(name, listener) {
+    return this.removeListener(name, listener);
+  }
+
+  removeAllListeners(name = undefined) {
+    const result = super.removeAllListeners(name);
+    if (name === undefined || name === 'readable') {
+      this._readableState.readableListening = this.listenerCount('readable') > 0;
+    }
+    if (name === undefined || name === 'data') {
+      this._readableState.dataListening = this.listenerCount('data') > 0;
+    }
+    return result;
   }
 
   static from(source, options = {}) {
@@ -522,6 +560,18 @@ export class Readable extends EventEmitter {
       }
     })();
     return readable;
+  }
+
+  static wrap(source, options = {}) {
+    const readable = new Readable({
+      objectMode: source.readableObjectMode ?? source.objectMode ?? true,
+      ...options,
+      destroy(error, callback) {
+        source.destroy?.(error);
+        callback(error);
+      },
+    });
+    return readable.wrap(source);
   }
 
   push(chunk, encoding) {
@@ -768,6 +818,16 @@ export class Readable extends EventEmitter {
   get readableLength() { return this._bufferedBytes; }
   get readableObjectMode() { return Boolean(this._readableState?.objectMode); }
   get readableEncoding() { return this._encoding ?? null; }
+  get readable() {
+    const state = this._readableState;
+    return Boolean(state && state.readable !== false && !state.destroyed
+      && !state.errorEmitted && !state.endEmitted);
+  }
+  set readable(value) {
+    if (this._readableState) this._readableState.readable = Boolean(value);
+  }
+  get readableHighWaterMark() { return this._readableState?.highWaterMark; }
+  get readableBuffer() { return this._readableState?.buffer; }
   get errored() { return this._readableState?.errored ?? null; }
   get closed() { return Boolean(this._readableState?.closed); }
   get destroyed() { return Boolean(this._readableState?.destroyed ?? this._destroyed); }
@@ -923,29 +983,86 @@ export class Readable extends EventEmitter {
     this.emit('close');
   }
 
-  async *[Symbol.asyncIterator]() {
-    const onError = (error) => {
-      this._error = error;
-      this._resolvePending?.();
-    };
-    this.on('error', onError);
-    try {
-      while (true) {
-        if (this._buffer.length) {
-          yield this.read();
-          continue;
-        }
-        if (this._error) throw this._error;
-        if (this._ended || this._destroyed) return;
-        this._readOnce();
-        if (this._buffer.length || this._error || this._ended || this._destroyed) continue;
-        await new Promise((resolve) => { this._resolvePending = resolve; });
-        this._resolvePending = null;
-      }
-    } finally {
-      this.off('error', onError);
-      if (!this._ended && !this._destroyed) this.destroy(this._error);
+  iterator(options = undefined) {
+    if (options !== undefined && (options === null || typeof options !== 'object' || Array.isArray(options))) {
+      throw streamError(
+        'ERR_INVALID_ARG_TYPE',
+        `The "options" argument must be of type object. Received ${streamReceivedValue(options)}`,
+      );
     }
+    const stream = this;
+    const iterator = (async function* createReadableIterator() {
+      const onError = (error) => {
+        stream._error = error;
+        stream._resolvePending?.();
+      };
+      const onEnd = () => {};
+      stream.on('error', onError);
+      stream.once('end', onEnd);
+      try {
+        while (true) {
+          if (stream._buffer.length) {
+            yield stream.read();
+            continue;
+          }
+          if (stream._error) throw stream._error;
+          if (stream._ended || stream._destroyed) {
+            stream._maybeEmitEnd();
+            return;
+          }
+          stream._readOnce();
+          if (stream._buffer.length || stream._error || stream._ended || stream._destroyed) continue;
+          await new Promise((resolve) => { stream._resolvePending = resolve; });
+          stream._resolvePending = null;
+        }
+      } finally {
+        stream.off('error', onError);
+        stream.off('end', onEnd);
+        if (!stream._ended && !stream._destroyed
+          && options?.destroyOnReturn !== false
+          && (!stream._error || stream._readableState.autoDestroy)) {
+          stream.destroy(stream._error);
+        }
+      }
+    })();
+    iterator.stream = stream;
+    return iterator;
+  }
+
+  [Symbol.asyncIterator]() {
+    return this.iterator();
+  }
+
+  wrap(source) {
+    let paused = false;
+
+    source.on('data', (chunk) => {
+      if (!this.push(chunk) && source.pause) {
+        paused = true;
+        source.pause();
+      }
+    });
+    source.on('end', () => this.push(null));
+    source.on('error', (error) => {
+      if (this._readableState.autoDestroy) this.destroy(error);
+      else this.emit('error', error);
+    });
+    source.on('close', () => this.destroy());
+    source.on('destroy', () => this.destroy());
+
+    this._read = () => {
+      if (paused && source.resume) {
+        paused = false;
+        source.resume();
+      }
+    };
+
+    for (const key of Object.keys(source)) {
+      if (this[key] === undefined && typeof source[key] === 'function') {
+        this[key] = source[key].bind(source);
+      }
+    }
+    return this;
   }
 
   compose(stage, options) {
@@ -1082,6 +1199,7 @@ export class Readable extends EventEmitter {
 }
 
 for (const property of [
+  'readable', 'readableHighWaterMark', 'readableBuffer',
   'readableFlowing', 'readableLength', 'readableObjectMode', 'readableEncoding',
   'errored', 'closed', 'destroyed', 'readableEnded',
 ]) Object.defineProperty(Readable.prototype, property, { configurable: false });

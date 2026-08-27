@@ -5,6 +5,7 @@ import { AsyncResource, ownerSymbol } from './async-hooks.js';
 import { createVirtualNetwork, sharedVirtualNetwork, normalizeVirtualAddress, virtualAddressFamily } from './virtual-network.js';
 
 let nextClientPort = 62000;
+const socketHandle = Symbol('socketHandle');
 
 function schedule(callback) {
   queueMicrotask(callback);
@@ -84,23 +85,31 @@ function validatePort(port, allowZero = false) {
 }
 
 function parseConnectArgs(args) {
-  let options;
-  let callback;
-  if (typeof args.at(-1) === 'function') callback = args.pop();
-  if (typeof args[0] === 'object' && args[0] !== null) options = { ...args[0] };
-  else if (typeof args[0] === 'string' && !/^\d+$/.test(args[0])) options = { path: args[0] };
-  else options = { port: args[0], host: args[1] };
-  return { options, callback };
+  const normalized = normalizeArgs(args);
+  return { options: normalized[0], callback: normalized[1] };
 }
 
 function parseListenArgs(args) {
-  let callback;
-  if (typeof args.at(-1) === 'function') callback = args.pop();
-  let options;
-  if (typeof args[0] === 'object' && args[0] !== null) options = { ...args[0] };
-  else if (typeof args[0] === 'string' && !/^\d+$/.test(args[0])) options = { path: args[0] };
-  else options = { port: args[0], host: args[1] };
-  return { options, callback };
+  const normalized = normalizeArgs(args);
+  return { options: normalized[0], callback: normalized[1] };
+}
+
+function isPipeName(value) {
+  return typeof value === 'string' && !(Number(value) >= 0);
+}
+
+function normalizeArgs(args) {
+  if (args.length === 0) return [{}, null];
+  const arg0 = args[0];
+  let options = {};
+  if (typeof arg0 === 'object' && arg0 !== null) options = arg0;
+  else if (isPipeName(arg0)) options.path = arg0;
+  else {
+    options.port = arg0;
+    if (typeof args[1] === 'string') options.host = args[1];
+  }
+  const callback = typeof args.at(-1) === 'function' ? args.at(-1) : null;
+  return [options, callback];
 }
 
 function nextLocalPort() {
@@ -528,8 +537,8 @@ export class Socket extends Duplex {
     return this;
   }
 
-  ref() { this._unrefed = false; return this; }
-  unref() { this._unrefed = true; return this; }
+  ref() { this._unrefed = false; this._handle?.ref?.(); return this; }
+  unref() { this._unrefed = true; this._handle?.unref?.(); return this; }
   destroySoon() { return this.destroy(); }
   _reset() { return this.resetAndDestroy(); }
 
@@ -614,6 +623,13 @@ export class Socket extends Duplex {
     if (forceClose || !this.allowHalfOpen) this.destroy();
   }
 }
+
+Object.defineProperty(Socket.prototype, '_handle', {
+  configurable: false,
+  enumerable: false,
+  get() { return this[socketHandle] || null; },
+  set(value) { this[socketHandle] = value; },
+});
 
 export class Server extends EventEmitter {
   constructor(options = {}, connectionListener, internal = {}) {
@@ -909,6 +925,24 @@ export class Server extends EventEmitter {
 
   ref() { this._handle?.ref?.(); this._unref = false; return this; }
   unref() { this._handle?.unref?.(); this._unref = true; return this; }
+}
+
+function createDetachedServerHandle(network, config, address, port, addressType, fd) {
+  if (typeof fd === 'number' && fd >= 0) return -1;
+  const server = new Server({}, undefined, config);
+  if (port === -1 && addressType === -1) {
+    server._pipeName = address;
+    network.bindPipe(server, address);
+  } else {
+    const family = addressType === 6 ? 6 : 4;
+    const bindAddress = normalizeVirtualAddress(address || (family === 6 ? '::' : '0.0.0.0'), family);
+    const result = network.bindTcp(server, bindAddress, port ?? 0);
+    server._boundAddress = result.address;
+    server._boundPort = result.port;
+  }
+  server.listening = true;
+  server._handle = server._createServerHandle();
+  return server._handle;
 }
 
 const blockListCloneMarker = Symbol.for('bnh.messaging.cloneablePrototype');
@@ -1270,6 +1304,24 @@ export function createBrowserNet({ network = sharedVirtualNetwork, dns = createB
       enumerable: false,
       configurable: false,
     },
+    _handle: {
+      get: Object.getOwnPropertyDescriptor(Socket.prototype, '_handle').get,
+      set: Object.getOwnPropertyDescriptor(Socket.prototype, '_handle').set,
+      enumerable: false,
+      configurable: false,
+    },
+    ref: {
+      value: Socket.prototype.ref,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+    unref: {
+      value: Socket.prototype.unref,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
   });
   const ConfiguredServer = class BrowserNetServer extends Server {
     constructor(options = {}, listener) { super(options, listener, { ...config, SocketClass: ConfiguredSocket }); }
@@ -1312,6 +1364,9 @@ export function createBrowserNet({ network = sharedVirtualNetwork, dns = createB
     setDefaultAutoSelectFamily: () => undefined,
     getDefaultAutoSelectFamilyAttemptTimeout: () => 250,
     setDefaultAutoSelectFamilyAttemptTimeout: () => undefined,
+    _createServerHandle: (...args) => createDetachedServerHandle(configuredNetwork, config, ...args),
+    _normalizeArgs: normalizeArgs,
+    _setSimultaneousAccepts: () => undefined,
     constants: Object.freeze({}),
   };
 }
@@ -1327,6 +1382,9 @@ export const getDefaultAutoSelectFamily = defaultNet.getDefaultAutoSelectFamily;
 export const setDefaultAutoSelectFamily = defaultNet.setDefaultAutoSelectFamily;
 export const getDefaultAutoSelectFamilyAttemptTimeout = defaultNet.getDefaultAutoSelectFamilyAttemptTimeout;
 export const setDefaultAutoSelectFamilyAttemptTimeout = defaultNet.setDefaultAutoSelectFamilyAttemptTimeout;
+export const _createServerHandle = defaultNet._createServerHandle;
+export const _normalizeArgs = defaultNet._normalizeArgs;
+export const _setSimultaneousAccepts = defaultNet._setSimultaneousAccepts;
 
 export default {
   ...defaultNet,

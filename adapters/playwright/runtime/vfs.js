@@ -2041,7 +2041,6 @@ export function createVfs(options = {}) {
       if (completed) return;
       completed = true;
       if (error) stream._fsCloseError = error;
-      stream.closed = true;
       stream.fd = null;
       callback(error);
     };
@@ -2286,7 +2285,6 @@ export function createVfs(options = {}) {
     stream.autoClose = options.autoClose !== false;
     stream.start = options.start;
     stream.end = options.end ?? Infinity;
-    stream.closed = false;
     stream._fsPosition = stream.start === undefined ? null : stream.start;
     stream._fsStarted = hasFd;
     stream._fsOwned = hasFd;
@@ -2658,7 +2656,6 @@ export function createVfs(options = {}) {
     stream.mode = options.mode ?? 0o666;
     stream.bytesWritten = 0;
     stream.autoClose = options.autoClose !== false;
-    stream.closed = false;
     stream._fsPosition = options.start === undefined ? null : options.start;
     const hasFd = options.fd !== undefined && options.fd !== null;
     stream._fsStarted = hasFd;

@@ -494,8 +494,8 @@ export class Readable extends EventEmitter {
     this._error = null;
     const inheritedRead = this._read;
     const inheritedDestroy = this._destroy;
-    if (options.read) this._read = options.read;
-    else if (typeof inheritedRead !== 'function') this._read = () => {};
+    if (typeof options.read === 'function') this._read = options.read;
+    else if (typeof inheritedRead !== 'function') this._read = Readable.prototype._read;
     this._destroyHook = options.destroy || inheritedDestroy;
     this._preserveStrings = Boolean(options.preserveStrings);
     this._decoder = null;
@@ -1238,6 +1238,13 @@ export class Readable extends EventEmitter {
   }
 }
 
+// Node's default readable hook is deliberately abstract. Keeping it on the
+// prototype lets subclasses inherit the public/internal method descriptor and
+// makes a missing implementation fail with the standard stream error.
+Readable.prototype._read = function _read(_size) {
+  throw streamError('ERR_METHOD_NOT_IMPLEMENTED', 'The _read() method is not implemented');
+};
+
 for (const property of [
   'readable', 'readableHighWaterMark', 'readableBuffer',
   'readableFlowing', 'readableLength', 'readableObjectMode', 'readableEncoding',
@@ -1316,7 +1323,11 @@ class WritableImpl extends EventEmitter {
     this._destroyed = Boolean(value);
     if (this._writableState) this._writableState.destroyed = this._destroyed;
   }
-  get writable() { return this._writableState?.writable ?? this._writableFlag; }
+  get writable() {
+    const state = this._writableState;
+    return Boolean(state && state.writable !== false
+      && !this._ending && !this._ended && !this._destroyed && !state.errored);
+  }
   set writable(value) {
     this._writableFlag = Boolean(value);
     if (this._writableState) this._writableState.writable = this._writableFlag;
@@ -1327,7 +1338,8 @@ class WritableImpl extends EventEmitter {
   get writableHighWaterMark() { return this._writableState?.highWaterMark; }
   get writableLength() { return this._writableState?.length; }
   get writableBuffer() {
-    return this._queue.map(({ bytes: chunk, encoding, callback }) => ({ chunk, encoding, callback }));
+    const queue = this._queue || this._writable?._queue || [];
+    return queue.map(({ bytes: chunk, encoding, callback }) => ({ chunk, encoding, callback }));
   }
   get errored() { return this._writableState?.errored ?? null; }
   get writableAborted() { return this._destroyed && !this._finishEmitted; }
@@ -1706,12 +1718,16 @@ class WritableImpl extends EventEmitter {
   }
 }
 
-WritableImpl.prototype._write = function _write(_chunk, _encoding, callback) {
-  callback(streamError('ERR_METHOD_NOT_IMPLEMENTED', 'The _write() method is not implemented'));
+WritableImpl.prototype._write = function _write(chunk, encoding, callback) {
+  if (this._writev) {
+    this._writev([{ chunk, encoding }], callback);
+    return;
+  }
+  throw streamError('ERR_METHOD_NOT_IMPLEMENTED', 'The _write() method is not implemented');
 };
 WritableImpl.prototype._writev = null;
 for (const property of ['pipe', 'setDefaultEncoding']) {
-  Object.defineProperty(WritableImpl.prototype, property, { enumerable: true });
+  Object.defineProperty(WritableImpl.prototype, property, { enumerable: true, configurable: true });
 }
 for (const property of [
   'closed', 'destroyed', 'writable', 'writableFinished', 'writableObjectMode', 'writableBuffer',
@@ -1760,6 +1776,7 @@ class DuplexImpl extends Readable {
     this._writable._destroyHook = null;
     const inheritedDestroy = this._destroyHook;
     if (options.write) this._write = options.write;
+    if (options.writev) this._writev = options.writev;
     if (options.final) this._final = options.final;
     this._destroyHook = options.destroy || inheritedDestroy;
     // The writable side owns queueing and finish emission, but the public
@@ -1824,6 +1841,20 @@ class DuplexImpl extends Readable {
     this._writable._undestroy();
     this.writable = this._writable.writable;
   }
+}
+
+// Duplex parasitically inherits Writable's methods/accessors in Node. The
+// inner writable owns the queue and state, so these members intentionally
+// forward to it while retaining the public descriptors on Duplex.prototype.
+for (const property of ['setDefaultEncoding', '_write', '_writev']) {
+  Object.defineProperty(DuplexImpl.prototype, property, {
+    ...Object.getOwnPropertyDescriptor(WritableImpl.prototype, property),
+  });
+}
+for (const property of ['writable', 'writableBuffer']) {
+  Object.defineProperty(DuplexImpl.prototype, property, {
+    ...Object.getOwnPropertyDescriptor(WritableImpl.prototype, property),
+  });
 }
 
 export function Duplex(options = {}) {

@@ -18,6 +18,8 @@ const VIRTUAL_DGRAM_STATE = Symbol.for('bnh.dgram.state');
 const BIND_STATE_UNBOUND = 0;
 const BIND_STATE_BINDING = 1;
 const BIND_STATE_BOUND = 2;
+const UV_EINVAL = -22;
+const UV_EADDRINUSE = -98;
 let nextVirtualDescriptor = 1000;
 
 function asBytes(value, offset = 0, length = undefined) {
@@ -92,6 +94,125 @@ function enqueue(socket, operation) {
 
 function makeNodeBytes(bytes, BufferClass) {
   return typeof BufferClass?.from === 'function' ? BufferClass.from(bytes) : bytes;
+}
+
+function isInt32(value) {
+  return Number.isInteger(value) && value >= -0x80000000 && value <= 0x7fffffff;
+}
+
+function socketTypeError(type) {
+  const error = new TypeError(`Bad socket type: ${type}`);
+  error.code = 'ERR_SOCKET_BAD_TYPE';
+  return error;
+}
+
+function allocateHandleFd() {
+  const descriptors = globalThis.__BNH_VIRTUAL_FD_TYPES__;
+  let fd = nextVirtualDescriptor++;
+  while (descriptors?.has(fd)) fd = nextVirtualDescriptor++;
+  return fd;
+}
+
+function createDgramHandle(type, { dns, network, lookup } = {}) {
+  if (type !== 'udp4' && type !== 'udp6') throw socketTypeError(type);
+
+  const family = type === 'udp6' ? 6 : 4;
+  const resolver = lookup || dns?.lookup?.bind(dns) || createBrowserDns().lookup;
+  const descriptors = globalThis.__BNH_VIRTUAL_FD_TYPES__;
+  const udpHandles = globalThis.__BNH_VIRTUAL_UDP_HANDLES__;
+  const state = {
+    address: family === 6 ? '::' : '0.0.0.0',
+    family: family === 6 ? 'IPv6' : 'IPv4',
+    port: 0,
+    bound: false,
+    closed: false,
+    owner: null,
+  };
+  const handle = {
+    fd: allocateHandleFd(),
+    lookup(address, callback) {
+      return resolver(address || (family === 6 ? '::1' : '127.0.0.1'), { family }, callback);
+    },
+    bind(address = family === 6 ? '::' : '0.0.0.0', port = 0, flags = 0) {
+      if (state.closed || state.bound) return UV_EINVAL;
+      if (typeof address !== 'string' || virtualAddressFamily(address) !== family) return UV_EINVAL;
+      const normalizedAddress = normalizeVirtualAddress(address, family);
+      try {
+        const binding = network?.bindUdp?.(handle, normalizedAddress, validatePort(port), {
+          reuseAddr: (Number(flags) & UDP_CONSTANTS.UV_UDP_REUSEADDR) !== 0,
+          ipv6Only: false,
+        });
+        if (!binding) return UV_EINVAL;
+        state.address = binding.address;
+        state.family = family === 6 ? 'IPv6' : 'IPv4';
+        state.port = binding.port;
+        state.bound = true;
+        state.owner = handle;
+        udpHandles?.set(handle.fd, { handle, ...state });
+        return 0;
+      } catch (error) {
+        return error?.code === 'EADDRINUSE' ? UV_EADDRINUSE : UV_EINVAL;
+      }
+    },
+    getsockname(address) {
+      if (address) Object.assign(address, state);
+      return state.bound ? 0 : UV_EINVAL;
+    },
+    open(fd) {
+      const descriptorType = descriptors?.get(fd);
+      const descriptor = udpHandles?.get(fd);
+      if (descriptorType !== 'udp' || !descriptor) return UV_EINVAL;
+      state.address = descriptor.address;
+      state.family = descriptor.family;
+      state.port = descriptor.port;
+      state.bound = Boolean(descriptor.bound);
+      state.owner = descriptor.owner || descriptor.handle;
+      return 0;
+    },
+    recvStart() { return state.closed ? UV_EINVAL : 0; },
+    recvStop() { return 0; },
+    getSendQueueCount() { return 0; },
+    send(request) {
+      request?._bnhInitialize?.();
+      queueMicrotask(() => request?.oncomplete?.(0));
+      return 0;
+    },
+    close(callback) {
+      if (state.closed) return 0;
+      if (state.bound && state.owner === handle) network?.unbindUdp?.(handle);
+      state.bound = false;
+      state.closed = true;
+      descriptors?.delete(handle.fd);
+      udpHandles?.delete(handle.fd);
+      callback?.();
+      return 0;
+    },
+  };
+  handle.bind6 = handle.bind;
+  handle.connect = () => 0;
+  handle.connect6 = handle.connect;
+  handle.send6 = handle.send;
+  descriptors?.set(handle.fd, 'udp');
+  udpHandles?.set(handle.fd, { handle, ...state });
+  return handle;
+}
+
+function createSocketHandle(address, port, addressType, fd, flags, options) {
+  const handle = createDgramHandle(addressType, options);
+  let error;
+  if (isInt32(fd) && fd > 0) {
+    const descriptors = globalThis.__BNH_VIRTUAL_FD_TYPES__;
+    const udpHandles = globalThis.__BNH_VIRTUAL_UDP_HANDLES__;
+    if (descriptors?.get(fd) !== 'udp' || !udpHandles?.has(fd)) error = UV_EINVAL;
+    else error = handle.open(fd);
+  } else if (port || address) {
+    error = handle.bind(address || (addressType === 'udp6' ? '::' : '0.0.0.0'), port || 0, flags);
+  }
+  if (error) {
+    handle.close();
+    return error;
+  }
+  return handle;
 }
 
 /** Browser-native UDP socket backed by the shared virtual socket registry. */
@@ -597,6 +718,14 @@ Socket.prototype._stopReceiving = function _stopReceiving() {
 
 export function createBrowserDgram({ network = sharedVirtualNetwork, transport, dns = createBrowserDns(), BufferClass, trackTask, diagnostics, cluster, clusterGroupId, onListening } = {}) {
   const configuredNetwork = transport && network === sharedVirtualNetwork ? createVirtualNetwork({ transport }) : network;
+  const createHandle = (address, port, addressType, fd, flags) => createSocketHandle(
+    address,
+    port,
+    addressType,
+    fd,
+    flags,
+    { dns, network: configuredNetwork },
+  );
   const SocketWithDefaults = class BrowserDgramSocket extends Socket {
     constructor(type, listener) {
       super(type, listener, {
@@ -615,13 +744,30 @@ export function createBrowserDgram({ network = sharedVirtualNetwork, transport, 
     createSocket: function createSocket(type, listener) { return new SocketWithDefaults(type, listener); },
     Socket: SocketWithDefaults,
     constants: UDP_CONSTANTS,
+    _createSocketHandle: createHandle,
+    newHandle: (type, lookup) => createDgramHandle(type, { dns, network: configuredNetwork, lookup }),
   };
 }
 
 export const constants = UDP_CONSTANTS;
 
+export function _createSocketHandle(address, port, addressType, fd, flags) {
+  return createSocketHandle(address, port, addressType, fd, flags, {
+    dns: createBrowserDns(),
+    network: sharedVirtualNetwork,
+  });
+}
+
+export function newHandle(type, lookup) {
+  return createDgramHandle(type, {
+    dns: createBrowserDns(),
+    network: sharedVirtualNetwork,
+    lookup,
+  });
+}
+
 export function createSocket(type, listener) {
   return new Socket(type, listener);
 }
 
-export default { createSocket, Socket, constants };
+export default { createSocket, Socket, constants, _createSocketHandle, newHandle };

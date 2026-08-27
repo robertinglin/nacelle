@@ -671,6 +671,186 @@ class OutgoingMessage extends EventEmitter {
     throw error;
   }
 
+  _renderHeaders() {
+    if (this._header) {
+      const error = new Error('Cannot render headers after they are sent');
+      error.code = 'ERR_HTTP_HEADERS_SENT';
+      throw error;
+    }
+    const headers = {};
+    if (!(this._headers instanceof Map)) return headers;
+    for (const [key, entry] of this._headers) {
+      if (Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string') {
+        headers[entry[0]] = entry[1];
+      } else {
+        headers[key] = entry;
+      }
+    }
+    return headers;
+  }
+
+  cork() {
+    this._corked = (this._corked || 0) + 1;
+    this.socket?.cork?.();
+  }
+
+  uncork() {
+    this._corked = (this._corked || 0) - 1;
+    this.socket?.uncork?.();
+    const buffer = this._chunkedBuffer;
+    if (this._corked || !buffer?.length) return;
+
+    const length = this._chunkedLength || 0;
+    let callbacks;
+    this._send(length.toString(16), 'latin1');
+    this._send('\r\n');
+    for (let index = 0; index < buffer.length; index += 3) {
+      this._send(buffer[index], buffer[index + 1]);
+      if (buffer[index + 2]) (callbacks ||= []).push(buffer[index + 2]);
+    }
+    this._send('\r\n', undefined, callbacks?.length
+      ? (error) => callbacks.forEach((callback) => callback(error))
+      : undefined);
+    this._chunkedBuffer = [];
+    this._chunkedLength = 0;
+  }
+
+  setTimeout(milliseconds, callback) {
+    if (callback) this.on('timeout', callback);
+    if (!this.socket) {
+      this.once('socket', (socket) => socket.setTimeout(milliseconds));
+    } else {
+      this.socket.setTimeout(milliseconds);
+    }
+    return this;
+  }
+
+  destroy(error) {
+    if (this.destroyed) return this;
+    this.destroyed = true;
+    this._writableState && (this._writableState.destroyed = true);
+    if (this.socket) this.socket.destroy?.(error);
+    else this.once('socket', (socket) => socket.destroy?.(error));
+    return this;
+  }
+
+  _writeRaw(data, encoding, callback, size) {
+    const socket = this.socket;
+    if (socket?.destroyed) return false;
+    if (typeof encoding === 'function') {
+      callback = encoding;
+      encoding = undefined;
+    }
+    if (socket && socket._httpMessage === this && socket.writable) {
+      if (this.outputData.length) this._flushOutput(socket);
+      return socket.write(data, encoding, callback);
+    }
+    const byteLength = size ?? data?.byteLength ?? data?.length ?? 0;
+    this.outputData.push({ data, encoding, callback });
+    this.outputSize += byteLength;
+    this.writableLength = this.outputSize;
+    this._onPendingData(byteLength);
+    return this.outputSize < (this.writableHighWaterMark || 16 * 1024);
+  }
+
+  _storeHeader(firstLine, headers) {
+    const state = {
+      connection: false,
+      contLen: false,
+      te: false,
+      date: false,
+      expect: false,
+      trailer: false,
+      header: firstLine,
+    };
+    const values = headers === undefined ? this._renderHeaders() : headers;
+    const entries = values instanceof Map
+      ? [...values].map(([key, value]) => [
+        Array.isArray(value) && typeof value[0] === 'string' ? value[0] : key,
+        Array.isArray(value) && value.length === 2 && typeof value[0] === 'string' ? value[1] : value,
+      ])
+      : Array.isArray(values)
+        ? (values.length && Array.isArray(values[0])
+          ? values
+          : Array.from({ length: Math.floor(values.length / 2) }, (_, index) => [values[index * 2], values[index * 2 + 1]]))
+        : Object.entries(values || {});
+
+    for (const [name, value] of entries) {
+      validateHeaderName(name);
+      validateHeaderValue(name, value);
+      const items = Array.isArray(value) && value.length >= 2 && String(name).toLowerCase() !== 'set-cookie'
+        ? value
+        : [value];
+      for (const item of items) {
+        state.header += `${name}: ${item}\r\n`;
+        const field = String(name).toLowerCase();
+        if (field === 'connection') {
+          state.connection = true;
+          this._removedConnection = false;
+          if (/(?:^|\W)close(?:$|\W)/i.test(String(item))) this._last = true;
+          else this.shouldKeepAlive = true;
+        } else if (field === 'transfer-encoding') {
+          state.te = true;
+          this._removedTE = false;
+          if (/chunked/i.test(String(item))) this.chunkedEncoding = true;
+        } else if (field === 'content-length') {
+          state.contLen = true;
+          this._contentLength = +item;
+          this._removedContLen = false;
+        } else if (field === 'date' || field === 'expect' || field === 'trailer') {
+          state[field] = true;
+        } else if (field === 'keep-alive') {
+          this._defaultKeepAlive = false;
+        }
+      }
+    }
+
+    let header = state.header;
+    if ((this.sendDate ?? false) && !state.date) header += `Date: ${new Date().toUTCString()}\r\n`;
+    const shouldKeepAlive = this.shouldKeepAlive ?? true;
+    const useChunked = this.useChunkedEncodingByDefault ?? true;
+    if (!state.connection) {
+      if (shouldKeepAlive && (state.contLen || useChunked || this.agent)) {
+        header += 'Connection: keep-alive\r\n';
+      } else {
+        this._last = true;
+        header += 'Connection: close\r\n';
+      }
+    }
+    if (!state.contLen && !state.te) {
+      if (this._hasBody === false) {
+        this.chunkedEncoding = false;
+      } else if (typeof this._contentLength === 'number' && this._contentLength >= 0) {
+        header += `Content-Length: ${this._contentLength}\r\n`;
+      } else if (useChunked && !this._removedTE) {
+        header += 'Transfer-Encoding: chunked\r\n';
+        this.chunkedEncoding = true;
+      } else {
+        this._last = true;
+      }
+    }
+    if (this.chunkedEncoding !== true && state.trailer) {
+      const error = new Error('Trailers are invalid with non-chunked encoding');
+      error.code = 'ERR_HTTP_TRAILER_INVALID';
+      throw error;
+    }
+    this._header = `${header}\r\n`;
+    this._headerSent = false;
+  }
+
+  setHeader(name, value) {
+    if (this._header) {
+      const error = new Error('Cannot set headers after they are sent');
+      error.code = 'ERR_HTTP_HEADERS_SENT';
+      throw error;
+    }
+    validateHeaderName(name);
+    validateHeaderValue(name, value);
+    if (!(this._headers instanceof Map)) this._headers = new Map();
+    this._headers.set(String(name).toLowerCase(), [String(name), value]);
+    return this;
+  }
+
   _send(data, encoding = 'utf8', callback = undefined, byteLength = undefined) {
     const size = byteLength ?? (typeof data === 'string'
       ? (typeof TextEncoder === 'function' ? new TextEncoder().encode(data).byteLength : data.length)

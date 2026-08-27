@@ -142,13 +142,15 @@ class GitOpsTests(unittest.TestCase):
             commit = manager.ensure_shared_browser_runtime()
 
             self.assertIsNotNone(commit)
+            self.assertTrue((integration / "runtime.js").is_symlink())
+            self.assertTrue((integration / "runtime").is_symlink())
             self.assertEqual((integration / "runtime.js").read_text(encoding="utf-8"), "export const runtime = {};\n")
             self.assertTrue((integration / "runtime" / "index.js").is_file())
             self.assertTrue((integration / "target-bridge.js").is_file())
             self.assertIn('type="module"', (integration / "harness.html").read_text(encoding="utf-8"))
             self.assertIsNone(manager.ensure_shared_browser_runtime())
 
-    def test_existing_integration_reuses_target_owned_runtime(self) -> None:
+    def test_existing_integration_reuses_shared_runtime_links(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             source = root / "adapters" / "playwright"
@@ -192,15 +194,15 @@ class GitOpsTests(unittest.TestCase):
             first_commit = manager.ensure_shared_browser_runtime()
             self.assertIsNotNone(first_commit)
 
-            (integration / "runtime.js").write_text("target-owned runtime\n", encoding="utf-8")
-            source.joinpath("runtime.js").write_text("new canonical runtime\n", encoding="utf-8")
+            (integration / "runtime.js").write_text("shared runtime\n", encoding="utf-8")
 
             reused_manager = GitManager(config)
             self.assertEqual(reused_manager.ensure_integration(), integration)
             self.assertIsNone(reused_manager.ensure_shared_browser_runtime())
+            self.assertTrue((integration / "runtime.js").is_symlink())
             self.assertEqual(
                 (integration / "runtime.js").read_text(encoding="utf-8"),
-                "target-owned runtime\n",
+                "shared runtime\n",
             )
 
     def test_new_variant_reuses_runtime_from_base_integration(self) -> None:
@@ -263,6 +265,8 @@ class GitOpsTests(unittest.TestCase):
             variant_commit = variant_manager.ensure_shared_browser_runtime()
 
             self.assertIsNone(variant_commit)
+            self.assertTrue((variant_integration / "runtime.js").is_symlink())
+            self.assertTrue((variant_integration / "runtime").is_symlink())
             self.assertEqual(
                 (variant_integration / "runtime.js").read_text(encoding="utf-8"),
                 (base_integration / "runtime.js").read_text(encoding="utf-8"),
@@ -311,7 +315,7 @@ class GitOpsTests(unittest.TestCase):
             manager = GitManager(config)
             manager.ensure_integration()
 
-            with self.assertRaisesRegex(GitError, "refusing to overwrite target-owned content"):
+            with self.assertRaisesRegex(GitError, "partial shared browser runtime paths"):
                 manager.ensure_shared_browser_runtime()
             self.assertEqual(
                 (manager.integration / "runtime.js").read_text(encoding="utf-8"),

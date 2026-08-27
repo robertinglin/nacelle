@@ -117,6 +117,24 @@ slot.
 Any other CLI can be used; see
 [Agent command contract](#agent-command-contract).
 
+### Keep the shared runtime linked
+
+The committed adapter runtime is the shared source for new target worktrees.
+Initialization creates relative links for `runtime.js` and `runtime/` instead
+of making another runtime copy. To link an existing integration worktree, run
+this from the project root:
+
+```bash
+./link-runtime.py --variant v22
+```
+
+The command is safe to rerun. It refuses to replace different target content,
+and saves any matching regular copies it converts under `.bnh-state/`. Runtime
+changes made through the integration path therefore update the adapter files
+that can be committed on the harness branch. The target worktree will show the
+links as local changes; do not commit those link replacements in the target
+repository.
+
 ## Start the loop with the dashboard
 
 Run the loop and its local status page together:

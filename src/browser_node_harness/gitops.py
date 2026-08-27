@@ -12,6 +12,7 @@ from pathlib import Path
 from .config import HarnessConfig, ValidationConfig
 from .models import PatchInfo
 from .process import run_process
+from .runtime_links import link_shared_runtime
 
 _HARNESS_CONTROL_MARKERS = (
     "BNH_NEGATIVE_CONTROL",
@@ -372,45 +373,51 @@ class GitManager:
         if not source_runtime.is_file() or not source_modules.is_dir() or not source_bridge.is_file():
             return None
 
-        target_runtime = self.integration / "runtime.js"
-        target_modules = self.integration / "runtime"
-        target_bridge = self.integration / "target-bridge.js"
-        if target_runtime.is_file() and target_modules.is_dir() and target_bridge.is_file():
-            return None
         if not self._integration_is_new:
             return None
         if self._git("status", "--porcelain", cwd=self.integration):
             raise GitError("integration worktree is dirty before shared browser runtime bootstrap")
+        target_runtime = self.integration / "runtime.js"
+        target_modules = self.integration / "runtime"
+        target_bridge = self.integration / "target-bridge.js"
+        target_harness = self.integration / "harness.html"
         existing_targets = [
             path
             for path in (
                 target_runtime,
                 target_modules,
                 target_bridge,
-                self.integration / "harness.html",
+                target_harness,
             )
             if path.exists() or path.is_symlink()
         ]
-        if existing_targets:
+        if existing_targets and len(existing_targets) != 4:
             paths = ", ".join(str(path.relative_to(self.integration)) for path in existing_targets)
             raise GitError(
-                "new integration already contains shared browser runtime paths; "
+                "new integration contains partial shared browser runtime paths; "
                 f"refusing to overwrite target-owned content: {paths}"
             )
 
-        shutil.copy2(source_runtime, target_runtime)
-        shutil.copytree(source_modules, target_modules)
-        shutil.copy2(source_bridge, target_bridge)
-        (self.integration / "harness.html").write_text(
-            "<!DOCTYPE html>\n"
-            "<html>\n"
-            "<head><meta charset=\"utf-8\"></head>\n"
-            "<body>\n"
-            "<script type=\"module\" src=\"./target-bridge.js\"></script>\n"
-            "</body>\n"
-            "</html>\n",
-            encoding="utf-8",
+        changed = link_shared_runtime(
+            source_root,
+            self.integration,
+            backup_root=self.config.project.state_dir / "runtime-link-backups" / self.integration.name,
         )
+        if not target_bridge.is_file():
+            shutil.copy2(source_bridge, target_bridge)
+        if not target_harness.is_file():
+            target_harness.write_text(
+                "<!DOCTYPE html>\n"
+                "<html>\n"
+                "<head><meta charset=\"utf-8\"></head>\n"
+                "<body>\n"
+                "<script type=\"module\" src=\"./target-bridge.js\"></script>\n"
+                "</body>\n"
+                "</html>\n",
+                encoding="utf-8",
+            )
+        if not changed and existing_targets:
+            return None
         self._git(
             "add",
             "harness.html",

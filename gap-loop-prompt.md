@@ -17,6 +17,54 @@ Fixed paths (always absolute — relative paths have caused two incidents):
 All `python3 -m browser_node_harness` commands run from the harness repo root
 with `PYTHONPATH=/home/robert/workspace/browser-node-harness/src`.
 
+## Environment bootstrap (required on every machine)
+
+The shared browser runtime has one branch-owned source of truth in the harness
+repository:
+
+- Runtime entry: `/home/robert/workspace/browser-node-harness/adapters/playwright/runtime.js`
+- Runtime modules: `/home/robert/workspace/browser-node-harness/adapters/playwright/runtime/`
+- Link command: `/home/robert/workspace/browser-node-harness/link-runtime.py`
+
+From the harness repository root, line up the active v22 integration before
+running setup, creating agents, or launching validation:
+
+```bash
+cd /home/robert/workspace/browser-node-harness
+./link-runtime.py --config harness.toml --variant v22
+```
+
+The command is safe to rerun. It creates relative links from the integration
+worktree to the adapter runtime:
+
+```bash
+test "$(readlink -f .bnh-state/v22/worktrees/integration-v22/runtime.js)" = \
+  "/home/robert/workspace/browser-node-harness/adapters/playwright/runtime.js"
+test "$(readlink -f .bnh-state/v22/worktrees/integration-v22/runtime)" = \
+  "/home/robert/workspace/browser-node-harness/adapters/playwright/runtime"
+```
+
+Do not copy a second runtime into the integration worktree and do not replace
+different target content silently. The link command refuses conflicts and
+backs up matching regular copies under `.bnh-state/` before converting them.
+The bridge and harness page remain target integration files; only
+`runtime.js` and `runtime/` are shared links.
+
+When runtime code is edited through the integration path, the bytes change in
+the adapter paths above and must be committed from the harness repository:
+
+```bash
+git -C /home/robert/workspace/browser-node-harness add \
+  adapters/playwright/runtime.js adapters/playwright/runtime
+git -C /home/robert/workspace/browser-node-harness commit \
+  -m "Update shared browser runtime"
+```
+
+Do not stage the integration worktree's symlink replacement as a target-runtime
+implementation commit. Detached agent worktrees remain isolated validation
+worktrees; do not link multiple concurrent agent worktrees to the same shared
+adapter files.
+
 ## One round
 
 1. **Pick 3 cards.** Read `WORKLIST.md` (or `bnh gaps --list`). Take the top

@@ -1246,6 +1246,14 @@ export function createBufferClass(scope = globalThis) {
     return bidirectionalIndexOf(this, val, byteOffset, encoding, false);
   };
   Object.assign(NodeBuffer.prototype, {
+    readUintBE: NodeBuffer.prototype.readUIntBE,
+    readUint32BE: NodeBuffer.prototype.readUInt32BE,
+    readUint16BE: NodeBuffer.prototype.readUInt16BE,
+    writeUintLE: NodeBuffer.prototype.writeUIntLE,
+    writeUint32LE: NodeBuffer.prototype.writeUInt32LE,
+    writeUint16LE: NodeBuffer.prototype.writeUInt16LE,
+    writeUint8: NodeBuffer.prototype.writeUInt8,
+    writeUintBE: NodeBuffer.prototype.writeUIntBE,
     writeUint16BE: NodeBuffer.prototype.writeUInt16BE,
     writeUint32BE: NodeBuffer.prototype.writeUInt32BE,
     asciiSlice,

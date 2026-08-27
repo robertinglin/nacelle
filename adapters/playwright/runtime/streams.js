@@ -1,8 +1,11 @@
 import { EventEmitter } from './events.js';
 import { resolveEncodingOps } from './buffer.js';
 
-const DEFAULT_HIGH_WATER_MARK = 16 * 1024;
-let defaultHighWaterMark = DEFAULT_HIGH_WATER_MARK;
+const DEFAULT_READABLE_HIGH_WATER_MARK = 64 * 1024;
+const DEFAULT_WRITABLE_HIGH_WATER_MARK = 16 * 1024;
+const DEFAULT_HIGH_WATER_MARK = DEFAULT_READABLE_HIGH_WATER_MARK;
+let defaultHighWaterMark = DEFAULT_READABLE_HIGH_WATER_MARK;
+let defaultWritableHighWaterMark = DEFAULT_WRITABLE_HIGH_WATER_MARK;
 let defaultObjectHighWaterMark = 16;
 
 export function setDefaultHighWaterMark(objectMode, value) {
@@ -11,7 +14,10 @@ export function setDefaultHighWaterMark(objectMode, value) {
     throw streamError('ERR_OUT_OF_RANGE', 'The "value" argument is out of range');
   }
   if (objectMode) defaultObjectHighWaterMark = value;
-  else defaultHighWaterMark = value;
+  else {
+    defaultHighWaterMark = value;
+    defaultWritableHighWaterMark = value;
+  }
 }
 
 export function getDefaultHighWaterMark(objectMode) {
@@ -165,14 +171,14 @@ function bufferChunk(value) {
     : streamChunk(value);
 }
 
-function toBytes(value) {
+function toBytes(value, encoding = 'utf8') {
   if (value instanceof StreamChunk) return bufferChunk(value);
   if (value.constructor?.isBuffer?.(value)) return value;
   if (value instanceof Uint8Array) return bufferChunk(value);
   if (typeof value === 'string') {
     const BufferClass = globalThis.Buffer;
     return typeof BufferClass?.from === 'function'
-      ? BufferClass.from(value)
+      ? BufferClass.from(value, encoding)
       : streamChunk(new TextEncoder().encode(value));
   }
   if (value instanceof ArrayBuffer) return bufferChunk(new Uint8Array(value.slice(0)));
@@ -215,6 +221,7 @@ function streamError(code, message) {
     || code === 'ERR_INVALID_ARG_VALUE'
     || code === 'ERR_INVALID_RETURN_VALUE'
     || code === 'ERR_MISSING_ARGS'
+    || code === 'ERR_UNKNOWN_ENCODING'
     ? TypeError
     : code === 'ERR_OUT_OF_RANGE' ? RangeError : Error;
   const error = new ErrorClass(message);
@@ -231,6 +238,14 @@ function streamReceivedValue(value) {
     return `type ${typeof value} (${value})`;
   }
   return `an instance of ${value?.constructor?.name || typeof value}`;
+}
+
+function normalizeWritableEncoding(encoding) {
+  if (typeof encoding !== 'string' || !resolveEncodingOps(encoding)) {
+    throw streamError('ERR_UNKNOWN_ENCODING', `Unknown encoding: ${encoding}`);
+  }
+  const normalized = encoding.toLowerCase();
+  return normalized === 'utf-8' ? 'utf8' : normalized;
 }
 
 const COMBINATOR_EMPTY = Symbol('stream-combinator-empty');
@@ -479,7 +494,8 @@ export class Readable extends EventEmitter {
     this._error = null;
     const inheritedRead = this._read;
     const inheritedDestroy = this._destroy;
-    this._read = options.read || (typeof inheritedRead === 'function' ? inheritedRead : () => {});
+    if (options.read) this._read = options.read;
+    else if (typeof inheritedRead !== 'function') this._read = () => {};
     this._destroyHook = options.destroy || inheritedDestroy;
     this._preserveStrings = Boolean(options.preserveStrings);
     this._decoder = null;
@@ -1237,8 +1253,11 @@ class WritableImpl extends EventEmitter {
     this.isTTY = false;
     this._writableObjectMode = Boolean(options.writableObjectMode ?? options.objectMode);
     this.decodeStrings = options.decodeStrings !== false;
-    this.writableHighWaterMark = options.highWaterMark
-      ?? (this._writableObjectMode ? defaultObjectHighWaterMark : defaultHighWaterMark);
+    const highWaterMark = options.highWaterMark
+      ?? (this._writableObjectMode ? defaultObjectHighWaterMark : defaultWritableHighWaterMark);
+    const defaultEncoding = options.defaultEncoding == null
+      ? 'utf8'
+      : normalizeWritableEncoding(options.defaultEncoding);
     const inheritedDestroy = this._destroy;
     const inheritedFinal = this._final;
     if (options.write) this._write = options.write;
@@ -1257,8 +1276,6 @@ class WritableImpl extends EventEmitter {
     this._destroyed = false;
     this._closeEmitted = false;
     this._errorEmitted = false;
-    this.writableLength = 0;
-    this.writableEnded = false;
     this._writableFinished = false;
     this._endCallbacks = [];
     this._endCallbackCalled = false;
@@ -1271,7 +1288,8 @@ class WritableImpl extends EventEmitter {
       finished: false,
       length: 0,
       objectMode: this.writableObjectMode,
-      highWaterMark: this.writableHighWaterMark,
+      highWaterMark,
+      defaultEncoding,
       autoDestroy: options.autoDestroy !== false, emitClose: options.emitClose !== false,
       closed: false, errorEmitted: false,
     };
@@ -1279,7 +1297,6 @@ class WritableImpl extends EventEmitter {
       this.writable = false;
       this._ending = true;
       this._ended = true;
-      this.writableEnded = true;
       this._writableFinished = true;
       this._writableState.writable = false;
       this._writableState.ended = true;
@@ -1306,6 +1323,9 @@ class WritableImpl extends EventEmitter {
   }
   get writableFinished() { return this._writableState?.finished ?? this._writableFinished; }
   get writableObjectMode() { return this._writableState?.objectMode ?? this._writableObjectMode; }
+  get writableEnded() { return Boolean(this._ending); }
+  get writableHighWaterMark() { return this._writableState?.highWaterMark; }
+  get writableLength() { return this._writableState?.length; }
   get writableBuffer() {
     return this._queue.map(({ bytes: chunk, encoding, callback }) => ({ chunk, encoding, callback }));
   }
@@ -1329,8 +1349,6 @@ class WritableImpl extends EventEmitter {
     this._finishScheduled = false;
     this._finalStarted = false;
     this._writableFinished = !writable;
-    this.writableEnded = !writable;
-    this.writableLength = 0;
     this._endCallbacks = [];
     this._endCallbackCalled = false;
     this._writableState.writable = writable;
@@ -1348,10 +1366,30 @@ class WritableImpl extends EventEmitter {
     callback(error);
   }
 
-  write(chunk, encoding = 'utf8', callback = () => {}) {
+  pipe() {
+    const error = streamError('ERR_STREAM_CANNOT_PIPE', 'Cannot pipe, not readable');
+    if (this._writableState?.autoDestroy !== false) {
+      this.destroy(error);
+    } else {
+      this._writableState.errored = error;
+      queueMicrotask(() => {
+        if (this._errorEmitted) return;
+        this._errorEmitted = true;
+        this._writableState.errorEmitted = true;
+        this.emit('error', error);
+      });
+    }
+  }
+
+  setDefaultEncoding(encoding) {
+    this._writableState.defaultEncoding = normalizeWritableEncoding(encoding);
+    return this;
+  }
+
+  write(chunk, encoding = undefined, callback = () => {}) {
     if (typeof encoding === 'function') {
       callback = encoding;
-      encoding = 'utf8';
+      encoding = undefined;
     }
     if (typeof callback !== 'function') callback = () => {};
     if (this._ending || this._ended) {
@@ -1389,11 +1427,17 @@ class WritableImpl extends EventEmitter {
       size = 1;
     } else {
       try {
+        const selectedEncoding = encoding === undefined || encoding === null
+          ? this._writableState.defaultEncoding
+          : encoding === 'buffer' ? encoding : normalizeWritableEncoding(encoding);
         if (typeof chunk === 'string' && !this.decodeStrings) {
           bytes = chunk;
           size = chunk.length;
+          requestEncoding = selectedEncoding;
         } else {
-          bytes = toBytes(chunk);
+          bytes = typeof chunk === 'string'
+            ? toBytes(chunk, selectedEncoding)
+            : toBytes(chunk);
           size = bytes.byteLength;
           requestEncoding = 'buffer';
         }
@@ -1405,22 +1449,21 @@ class WritableImpl extends EventEmitter {
     const request = { bytes, size, encoding: requestEncoding, callback, settled: false };
     this._queue.push(request);
     this._pendingBytes += size;
-    this.writableLength = this._pendingBytes;
-    this._writableState.length = this.writableLength;
+    this._writableState.length = this._pendingBytes;
     if (this._pendingBytes >= this.writableHighWaterMark) this._needDrain = true;
     this._processNext();
     return !this._destroyed && this._pendingBytes < this.writableHighWaterMark;
   }
 
-  end(chunk, encoding = 'utf8', callback = () => {}) {
+  end(chunk, encoding = undefined, callback = () => {}) {
     if (typeof chunk === 'function') {
       callback = chunk;
       chunk = undefined;
-      encoding = 'utf8';
+      encoding = undefined;
     }
     if (typeof encoding === 'function') {
       callback = encoding;
-      encoding = 'utf8';
+      encoding = undefined;
     }
     if (typeof callback !== 'function') callback = () => {};
     if (this._ending && !this._ended && !this._destroyed) {
@@ -1442,7 +1485,6 @@ class WritableImpl extends EventEmitter {
     }
     if (chunk !== undefined) this.write(chunk, encoding);
     this._ending = true;
-    this.writableEnded = true;
     this._endCallbacks.push(callback);
     this._finishIfReady();
     return this;
@@ -1472,7 +1514,6 @@ class WritableImpl extends EventEmitter {
     if (this._current && !this._current.settled) pending.unshift(this._current);
     this._current = null;
     this._pendingBytes = 0;
-    this.writableLength = 0;
     this._writableState.length = 0;
     for (const request of pending) this._complete(request, reason, false);
     if (this._ending && !this._endCallbackCalled) {
@@ -1530,8 +1571,7 @@ class WritableImpl extends EventEmitter {
         for (const item of requests) item.settled = true;
         this._current = null;
         this._pendingBytes = Math.max(0, this._pendingBytes - requests.reduce((total, item) => total + item.size, 0));
-        this.writableLength = this._pendingBytes;
-        this._writableState.length = this.writableLength;
+        this._writableState.length = this._pendingBytes;
         if (error) {
           for (const item of requests) item.callback(error);
           if (!this._destroyed) this.destroy(error);
@@ -1581,8 +1621,7 @@ class WritableImpl extends EventEmitter {
     request.settled = true;
     if (this._current === request) this._current = null;
     this._pendingBytes = Math.max(0, this._pendingBytes - request.size);
-    this.writableLength = this._pendingBytes;
-    this._writableState.length = this.writableLength;
+    this._writableState.length = this._pendingBytes;
     if (error) {
       try {
         request.callback(error);
@@ -1671,9 +1710,12 @@ WritableImpl.prototype._write = function _write(_chunk, _encoding, callback) {
   callback(streamError('ERR_METHOD_NOT_IMPLEMENTED', 'The _write() method is not implemented'));
 };
 WritableImpl.prototype._writev = null;
+for (const property of ['pipe', 'setDefaultEncoding']) {
+  Object.defineProperty(WritableImpl.prototype, property, { enumerable: true });
+}
 for (const property of [
   'closed', 'destroyed', 'writable', 'writableFinished', 'writableObjectMode', 'writableBuffer',
-  'errored',
+  'writableEnded', 'writableHighWaterMark', 'writableLength', 'errored',
 ]) Object.defineProperty(WritableImpl.prototype, property, { configurable: false });
 
 export function Writable(options = {}) {
@@ -1716,11 +1758,9 @@ class DuplexImpl extends Readable {
     // pending writes; invoking the user hook on both layers would double-call
     // the Node _destroy contract.
     this._writable._destroyHook = null;
-    const inheritedWrite = this._write;
-    const inheritedFinal = this._final;
     const inheritedDestroy = this._destroyHook;
-    this._write = options.write || inheritedWrite;
-    this._final = options.final || inheritedFinal;
+    if (options.write) this._write = options.write;
+    if (options.final) this._final = options.final;
     this._destroyHook = options.destroy || inheritedDestroy;
     // The writable side owns queueing and finish emission, but the public
     // Duplex subclass owns the _final hook. Keep the hook on the inner side
@@ -1728,8 +1768,6 @@ class DuplexImpl extends Readable {
     this._writable._final = this._final;
     this.allowHalfOpen = options.allowHalfOpen !== false;
     this.writable = this._writable.writable;
-    this.writableHighWaterMark = this._writable.writableHighWaterMark;
-    this.writableLength = 0;
     this._writable.on('drain', () => this.emit('drain'));
     this._writable.on('finish', () => {
       this.writable = false;
@@ -1745,6 +1783,8 @@ class DuplexImpl extends Readable {
 
   get writableFinished() { return this._writable?.writableFinished ?? false; }
   get writableObjectMode() { return this._writable?.writableObjectMode ?? this._writableState?.objectMode ?? false; }
+  get writableHighWaterMark() { return this._writable?.writableHighWaterMark ?? this._writableState?.highWaterMark; }
+  get writableLength() { return this._writable?.writableLength ?? this._writableState?.length; }
   get writableCorked() { return this._writable?.writableCorked ?? 0; }
   get writableEnded() { return this._writable?.writableEnded ?? false; }
   get writableNeedDrain() { return this._writable?.writableNeedDrain ?? false; }
@@ -1760,7 +1800,6 @@ class DuplexImpl extends Readable {
 
   write(...args) {
     const result = this._writable.write(...args);
-    this.writableLength = this._writable.writableLength;
     return result;
   }
 
@@ -1817,37 +1856,70 @@ export function duplexPair(options = {}) {
 
 export class Transform extends Duplex {
   constructor(options = {}) {
-    const flush = options.flush;
-    super({
-      ...options,
-      write(chunk, encoding, callback) {
-        try {
-          this._transform.call(this, chunk, encoding, (error, output) => {
-            if (!error && output !== undefined && output !== null) this.push(output);
-            callback(error);
-          });
-        } catch (error) {
-          callback(error);
-        }
-      },
-      final(callback) {
-        if (!flush) {
-          callback();
-          return;
-        }
-        flush.call(this, (error, output) => {
-          if (!error && output !== undefined && output !== null) this.push(output);
-          callback(error);
-        });
-      },
-    });
+    super(options);
     if (typeof options.transform === 'function') this._transform = options.transform;
-    this._writable.once('finish', () => this.push(null));
+    if (typeof options.flush === 'function') this._flush = options.flush;
+    this.on('prefinish', () => {
+      if (this._final !== Transform.prototype._final) Transform.prototype._final.call(this);
+    });
   }
 
   _transform(value, _encoding, done) {
-    done(null, value);
+    throw streamError('ERR_METHOD_NOT_IMPLEMENTED', '_transform()');
   }
+
+  _final(callback) {
+    if (typeof this._flush === 'function' && !this.destroyed) {
+      this._flush.call(this, (error, output) => {
+        if (error) {
+          callback(error);
+          return;
+        }
+        if (output != null) this.push(output);
+        this.push(null);
+        callback();
+      });
+      return;
+    }
+    this.push(null);
+    callback();
+  }
+
+  _write(chunk, encoding, callback) {
+    const length = this._bufferedBytes;
+    try {
+      this._transform.call(this, chunk, encoding, (error, output) => {
+        if (error) {
+          callback(error);
+          return;
+        }
+        if (output != null) this.push(output);
+        if (this._ended) {
+          queueMicrotask(callback);
+        } else if (this._ending
+          || length === this._bufferedBytes
+          || this._bufferedBytes < this.readableHighWaterMark) {
+          callback();
+        } else {
+          this._transformCallback = callback;
+        }
+      });
+    } catch (error) {
+      callback(error);
+    }
+  }
+
+  _read() {
+    if (this._transformCallback) {
+      const callback = this._transformCallback;
+      this._transformCallback = null;
+      callback();
+    }
+  }
+}
+
+for (const property of ['_final', '_write', '_read']) {
+  Object.defineProperty(Transform.prototype, property, { enumerable: true });
 }
 
 export class PassThrough extends Transform {

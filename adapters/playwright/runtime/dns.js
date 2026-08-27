@@ -409,6 +409,7 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
   const customQueryRecords = normalizeQueryRecords(records);
   let servers = ['127.0.0.1'];
   let resultOrder = 'verbatim';
+  let defaultResolverHandle;
 
   function lookupAddress(hostname, family = 0) {
     const host = String(hostname);
@@ -593,21 +594,30 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
   }
 
   function resolve(hostname, rrtype, callback, resolverHandle) {
-    if (typeof rrtype !== 'function' && rrtype !== undefined && typeof rrtype !== 'string') {
+    if (typeof rrtype !== 'function' && typeof rrtype !== 'string') {
+      const received = rrtype === undefined
+        ? 'undefined'
+        : rrtype === null
+          ? 'null'
+          : typeof rrtype === 'number'
+            ? `type number (${rrtype})`
+            : typeof rrtype === 'object'
+              ? `an instance of ${rrtype.constructor?.name || 'Object'}`
+              : `type ${typeof rrtype}`;
       throw invalidArgumentError(
-        `The "rrtype" argument must be of type string. Received type ${typeof rrtype}`,
+        `The "rrtype" argument must be of type string. Received ${received}`,
         'ERR_INVALID_ARG_TYPE',
       );
     }
-    const type = typeof rrtype === 'function' || rrtype === undefined ? 'A' : rrtype.toUpperCase();
+    const type = typeof rrtype === 'function' ? 'A' : rrtype.toUpperCase();
     if (!['A', 'AAAA', 'ANY', 'TXT', ...Object.keys(RESOLVER_TYPES)].includes(type)) {
       throw invalidArgumentError(`The argument 'rrtype' is invalid. Received '${rrtype}'`, 'ERR_INVALID_ARG_VALUE');
     }
+    validateResolverName(hostname);
     const actualCallback = typeof rrtype === 'function' ? rrtype : callback;
     if (typeof actualCallback !== 'function') {
       throw invalidArgumentError('The "callback" argument must be of type function', 'ERR_INVALID_ARG_TYPE');
     }
-    validateResolverName(hostname);
     if (RESOLVER_TYPES[type]) return queryRecords(hostname, type, actualCallback, resolverHandle);
     const request = caresRequest('QUERYWRAP');
     const completeCallback = (...args) => {
@@ -693,8 +703,10 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
 
   function queryChannel(resolverHandle) {
     if (resolverHandle) return resolverHandle;
+    if (defaultResolverHandle) return defaultResolverHandle;
     const cares = globalThis.__BNH_VIRTUAL_CARES__;
-    return typeof cares?.ChannelWrap === 'function' ? new cares.ChannelWrap() : null;
+    defaultResolverHandle = typeof cares?.ChannelWrap === 'function' ? new cares.ChannelWrap() : null;
+    return defaultResolverHandle;
   }
 
   function normalizeQueryValues(type, value) {
@@ -703,9 +715,10 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     return values.map((entry) => normalizeQueryResult(type, entry));
   }
 
-  function queryRecords(hostname, type, callback, resolverHandle) {
+  function queryRecords(hostname, type, callback, resolverHandle, options) {
     validateResolverQuery(hostname, callback);
     const request = caresRequest('QUERYWRAP');
+    request.ttl = Boolean(options?.ttl);
     const metadata = {
       MX: { binding: 'queryMx' },
       NS: { binding: 'queryNs' },
@@ -768,16 +781,24 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
 
   function resolveMx(hostname, callback, resolverHandle) { return queryRecords(hostname, 'MX', callback, resolverHandle); }
   function resolveNs(hostname, callback, resolverHandle) { return queryRecords(hostname, 'NS', callback, resolverHandle); }
-  function resolveTlsa(hostname, callback, resolverHandle) { return queryRecords(hostname, 'TLSA', callback, resolverHandle); }
-  function resolveSrv(hostname, callback, resolverHandle) { return queryRecords(hostname, 'SRV', callback, resolverHandle); }
+  function resolveTlsa(hostname, callback) {
+    const options = arguments.length > 2 ? callback : undefined;
+    const actualCallback = arguments.length > 2 ? arguments[2] : callback;
+    return queryRecords(hostname, 'TLSA', actualCallback, undefined, options);
+  }
+  function resolveSrv(hostname, callback) {
+    const options = arguments.length > 2 ? callback : undefined;
+    const actualCallback = arguments.length > 2 ? arguments[2] : callback;
+    return queryRecords(hostname, 'SRV', actualCallback, undefined, options);
+  }
   function resolvePtr(hostname, callback, resolverHandle) { return queryRecords(hostname, 'PTR', callback, resolverHandle); }
   function resolveNaptr(hostname, callback, resolverHandle) { return queryRecords(hostname, 'NAPTR', callback, resolverHandle); }
   function resolveSoa(hostname, callback, resolverHandle) { return queryRecords(hostname, 'SOA', callback, resolverHandle); }
 
-  function queryPromise(hostname, type, resolverHandle) {
+  function queryPromise(hostname, type, resolverHandle, options) {
     validateResolverName(hostname);
     return new Promise((resolveValue, reject) => {
-      queryRecords(hostname, type, (error, value) => error ? reject(error) : resolveValue(value), resolverHandle);
+      queryRecords(hostname, type, (error, value) => error ? reject(error) : resolveValue(value), resolverHandle, options);
     });
   }
 
@@ -877,8 +898,8 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     resolveTxt(hostname) { return new Promise((resolveValue, reject) => resolveTxt(hostname, (error, value) => error ? reject(error) : resolveValue(value))); },
     resolveMx(hostname) { return queryPromise(hostname, 'MX'); },
     resolveNs(hostname) { return queryPromise(hostname, 'NS'); },
-    resolveTlsa(hostname) { return queryPromise(hostname, 'TLSA'); },
-    resolveSrv(hostname) { return queryPromise(hostname, 'SRV'); },
+    resolveTlsa(hostname, options) { return queryPromise(hostname, 'TLSA', undefined, options); },
+    resolveSrv(hostname, options) { return queryPromise(hostname, 'SRV', undefined, options); },
     resolvePtr(hostname) { return queryPromise(hostname, 'PTR'); },
     resolveNaptr(hostname) { return queryPromise(hostname, 'NAPTR'); },
     resolveSoa(hostname) { return queryPromise(hostname, 'SOA'); },
@@ -949,8 +970,16 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     resolveTxt(...args) { return resolveTxt(...args); }
     resolveMx(...args) { return resolveMx(...args, this._handle); }
     resolveNs(...args) { return resolveNs(...args, this._handle); }
-    resolveTlsa(...args) { return resolveTlsa(...args, this._handle); }
-    resolveSrv(...args) { return resolveSrv(...args, this._handle); }
+    resolveTlsa(hostname, callback) {
+      const options = arguments.length > 2 ? callback : undefined;
+      const actualCallback = arguments.length > 2 ? arguments[2] : callback;
+      return queryRecords(hostname, 'TLSA', actualCallback, this._handle, options);
+    }
+    resolveSrv(hostname, callback) {
+      const options = arguments.length > 2 ? callback : undefined;
+      const actualCallback = arguments.length > 2 ? arguments[2] : callback;
+      return queryRecords(hostname, 'SRV', actualCallback, this._handle, options);
+    }
     resolvePtr(...args) { return resolvePtr(...args, this._handle); }
     resolveNaptr(...args) { return resolveNaptr(...args, this._handle); }
     resolveSoa(...args) { return resolveSoa(...args, this._handle); }
@@ -982,8 +1011,8 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     resolveTxt(hostname) { return promises.resolveTxt(hostname); }
     resolveMx(hostname) { return queryPromise(hostname, 'MX', this._handle); }
     resolveNs(hostname) { return queryPromise(hostname, 'NS', this._handle); }
-    resolveTlsa(hostname) { return queryPromise(hostname, 'TLSA', this._handle); }
-    resolveSrv(hostname) { return queryPromise(hostname, 'SRV', this._handle); }
+    resolveTlsa(hostname, options) { return queryPromise(hostname, 'TLSA', this._handle, options); }
+    resolveSrv(hostname, options) { return queryPromise(hostname, 'SRV', this._handle, options); }
     resolvePtr(hostname) { return queryPromise(hostname, 'PTR', this._handle); }
     resolveNaptr(hostname) { return queryPromise(hostname, 'NAPTR', this._handle); }
     resolveSoa(hostname) { return queryPromise(hostname, 'SOA', this._handle); }

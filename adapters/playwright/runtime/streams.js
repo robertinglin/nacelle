@@ -435,9 +435,9 @@ export class Readable extends EventEmitter {
   constructor(options = {}) {
     super();
     this.readable = true;
-    this.readableObjectMode = Boolean(options.readableObjectMode ?? options.objectMode);
+    const objectMode = Boolean(options.readableObjectMode ?? options.objectMode);
     this.readableHighWaterMark = options.highWaterMark
-      ?? (this.readableObjectMode ? defaultObjectHighWaterMark : defaultHighWaterMark);
+      ?? (objectMode ? defaultObjectHighWaterMark : defaultHighWaterMark);
     this._buffer = [];
     this._bufferedBytes = 0;
     this._ended = false;
@@ -452,12 +452,12 @@ export class Readable extends EventEmitter {
     this._preserveStrings = Boolean(options.preserveStrings);
     this._decoder = null;
     if (options.encoding) this.setEncoding(options.encoding);
-    this._flowing = false;
+    this._flowing = null;
     this._readableState = {
       readable: true, destroyed: false, errored: null,
-      pipes: [], flowing: false, reading: false, ended: false, endEmitted: false,
+      pipes: [], flowing: null, reading: false, ended: false, endEmitted: false,
       readableListening: false, needReadable: false, emittedReadable: false, readingMore: false,
-      objectMode: this.readableObjectMode,
+      objectMode,
       autoDestroy: options.autoDestroy !== false, emitClose: options.emitClose !== false,
       closed: false, errorEmitted: false,
     };
@@ -477,7 +477,6 @@ export class Readable extends EventEmitter {
     this._pipes = new Map();
     this._blockedPipes = new Set();
     this._sourceWaiter = null;
-    this.destroyed = false;
     const autoDestroyOnError = (error) => {
       if (this._readableState.autoDestroy && !this._destroyed) this.destroy(error);
     };
@@ -765,13 +764,20 @@ export class Readable extends EventEmitter {
     return !this._flowing;
   }
 
+  get readableFlowing() { return this._readableState?.flowing ?? null; }
+  get readableLength() { return this._bufferedBytes; }
+  get readableObjectMode() { return Boolean(this._readableState?.objectMode); }
+  get readableEncoding() { return this._encoding ?? null; }
+  get errored() { return this._readableState?.errored ?? null; }
+  get closed() { return Boolean(this._readableState?.closed); }
+  get destroyed() { return Boolean(this._readableState?.destroyed ?? this._destroyed); }
+  get readableEnded() { return Boolean(this._readableState?.endEmitted); }
   get readableAborted() { return this._destroyed && !this._endEmitted; }
   get readableDidRead() { return this._readableDidRead; }
   get readableListening() { return this.listenerCount('readable') > 0; }
 
   _undestroy() {
     this._destroyed = false;
-    this.destroyed = false;
     this._closeEmitted = false;
     this._error = null;
     this._errorEmitted = false;
@@ -851,7 +857,6 @@ export class Readable extends EventEmitter {
   destroy(error) {
     if (this._destroyed) return this;
     this._destroyed = true;
-    this.destroyed = true;
     this.readable = false;
     this._readableState.readable = false;
     this._readableState.destroyed = true;
@@ -1075,6 +1080,11 @@ export class Readable extends EventEmitter {
     return result;
   }
 }
+
+for (const property of [
+  'readableFlowing', 'readableLength', 'readableObjectMode', 'readableEncoding',
+  'errored', 'closed', 'destroyed', 'readableEnded',
+]) Object.defineProperty(Readable.prototype, property, { configurable: false });
 
 class WritableImpl extends EventEmitter {
   constructor(options = {}) {

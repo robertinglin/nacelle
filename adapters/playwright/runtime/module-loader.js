@@ -234,6 +234,10 @@ export function createModuleLoader({
   const moduleURLs = new Map();
   const importCache = new Map();
   const nativeSpecifierHints = new Map();
+  const builtinEsmSyncers = new Set();
+  const syncBuiltinESMExports = () => {
+    for (const sync of builtinEsmSyncers) sync();
+  };
   let mainModule = null;
   let moduleSequence = 0;
   const registryName = `__bnhEsmRegistry_${Date.now()}_${nextLoaderId++}_${moduleSequence++}`;
@@ -696,6 +700,9 @@ export function createModuleLoader({
       .filter((name) => name !== 'default');
     if (builtinName(resolved) === 'events' && !names.includes('once')) names.push('once');
     const token = register(() => value);
+    const syncToken = register((sync) => {
+      if (typeof sync === 'function') builtinEsmSyncers.add(sync);
+    });
     const access = `globalThis[${quote(registryName)}][${quote(token)}]()`;
     const namedAccess = (name) => {
       const namedToken = register(() => resolved === 'events' && name === 'once' && typeof value?.once !== 'function'
@@ -703,10 +710,12 @@ export function createModuleLoader({
         : value?.[name]);
       return `globalThis[${quote(registryName)}][${quote(namedToken)}]()`;
     };
+    const syncAssignments = names.map((name) => `  ${name} = moduleValue?.[${quote(name)}];`).join('\n');
     return [
       `const moduleValue = ${access};`,
       'export default moduleValue;',
-      ...names.map((name) => `export const ${name} = ${namedAccess(name)};`),
+      ...names.map((name) => `export let ${name} = ${namedAccess(name)};`),
+      `globalThis[${quote(registryName)}][${quote(syncToken)}](() => {\n${syncAssignments}\n});`,
     ].join('\n');
   };
 
@@ -1075,6 +1084,7 @@ export function createModuleLoader({
     resolve,
     require: (specifier, importer, globals = {}) => evaluate(specifier, importer, globals),
     import: (specifier, importer = '/node/index.mjs', globals = {}, options) => importModule(specifier, importer, globals, options),
+    syncBuiltinESMExports,
     normalize,
     moduleURL,
     dispose: () => { delete globalObject[registryName]; },

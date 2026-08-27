@@ -1571,6 +1571,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       '\n});',
     ];
     let currentModuleWrapper = moduleWrapper;
+    let syncBuiltinESMExportsImpl = () => {};
     const childProcessArgumentTypeError = (name, expected, value) => {
       const received = value === null
         ? 'null'
@@ -1727,6 +1728,21 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       },
     });
     const createModuleApi = (processObj = processObject, childStderr = stderr) => {
+      function Module(id = '', parent = null) {
+        if (!(this instanceof Module)) return new Module(id, parent);
+        const filename = id ? String(id) : null;
+        this.id = filename || '';
+        this.path = filename ? path.dirname(filename) : '.';
+        this.exports = {};
+        this.filename = filename;
+        this.loaded = false;
+        this.children = [];
+        this.parent = parent;
+        this.paths = filename ? moduleSearchPaths(filename) : [];
+      }
+      Module.prototype.require = function require(name) {
+        return moduleApi._load(name, this.filename || sourcePath);
+      };
       const compileCacheStatus = Object.freeze({
         FAILED: 'failed',
         ENABLED: 'enabled',
@@ -1790,11 +1806,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           },
         };
       };
-      return {
+      const moduleApi = Object.assign(Module, {
         builtinModules: BUILTIN_NAMES,
         _load: (name, parent, isMain) => runtimeRequire(name, parent),
-        get wrapper() { return currentModuleWrapper; },
-        set wrapper(value) { currentModuleWrapper = value; },
         wrap: (script) => `${currentModuleWrapper[0]}${script}${currentModuleWrapper[1]}`,
         createRequire: (filename) => {
           const importer = typeof filename === 'string' && filename.startsWith('file:')
@@ -1869,7 +1883,22 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           processObj.__bnhModuleRegistrations = registrations;
         },
         registerHooks,
-      };
+        syncBuiltinESMExports: () => syncBuiltinESMExportsImpl(),
+      });
+      moduleApi.Module = Module;
+      Object.defineProperties(moduleApi, {
+        wrapper: {
+          configurable: true,
+          enumerable: true,
+          get: () => currentModuleWrapper,
+          set: (value) => { currentModuleWrapper = value; },
+        },
+      });
+      Object.defineProperty(moduleApi, '_bnhSetSyncBuiltinESMExports', {
+        configurable: true,
+        value: (implementation) => { syncBuiltinESMExportsImpl = implementation; },
+      });
+      return moduleApi;
     };
     const moduleApi = createModuleApi(processObject);
     const callableReadable = function callableReadable(...args) {
@@ -4969,6 +4998,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         (argument) => String(argument) === '--experimental-default-type=module',
       ) ? 'module' : 'commonjs',
     });
+    builtins.module._bnhSetSyncBuiltinESMExports(esmLoader.syncBuiltinESMExports);
     const loadModuleRegistrations = async () => {
       const registrations = processObject.__bnhModuleRegistrations || [];
       processObject.__bnhModuleRegistrations = [];

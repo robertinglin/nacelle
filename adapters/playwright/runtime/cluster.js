@@ -169,6 +169,58 @@ function attachEmitterMethods(target, emitter) {
   for (const name of ['on', 'once', 'off', 'removeListener', 'removeAllListeners', 'listenerCount', 'listeners', 'emit']) {
     target[name] = emitter[name].bind(emitter);
   }
+  const events = new Proxy(Object.create(null), {
+    get(object, name, receiver) {
+      const listeners = emitter._listeners.get(name);
+      if (listeners?.size) {
+        const values = [...listeners];
+        return values.length === 1 ? values[0] : values;
+      }
+      return Reflect.get(object, name, receiver);
+    },
+    has(object, name) {
+      return emitter._listeners.has(name) || Reflect.has(object, name);
+    },
+    ownKeys(object) {
+      const keys = new Set(Reflect.ownKeys(object));
+      for (const name of emitter._listeners.keys()) {
+        keys.add(typeof name === 'symbol' ? name : String(name));
+      }
+      return [...keys];
+    },
+    getOwnPropertyDescriptor(object, name) {
+      if (emitter._listeners.has(name)) {
+        const listeners = emitter._listeners.get(name);
+        const values = [...listeners];
+        return {
+          configurable: true,
+          enumerable: true,
+          value: values.length === 1 ? values[0] : values,
+          writable: true,
+        };
+      }
+      return Reflect.getOwnPropertyDescriptor(object, name);
+    },
+  });
+  Object.defineProperties(target, {
+    _events: {
+      configurable: true,
+      enumerable: true,
+      value: events,
+      writable: true,
+    },
+    _eventsCount: {
+      configurable: true,
+      enumerable: true,
+      get: () => emitter._listeners.size,
+    },
+    _maxListeners: {
+      configurable: true,
+      enumerable: true,
+      get: () => emitter._maxListeners,
+      set: (value) => { emitter._maxListeners = value; },
+    },
+  });
   return target;
 }
 

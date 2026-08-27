@@ -257,7 +257,12 @@ export function createBrowserRuntimeContracts({ globalObject = globalThis, platf
   });
 }
 
-export { BrowserEventEmitter, EventEmitter, getEventListeners } from './events.js';
+export {
+  BrowserEventEmitter,
+  EventEmitter,
+  getEventListeners,
+  getMaxListeners,
+} from './events.js';
 export {
   createNetworkPrimitives,
   createBrowserNetworkGlobals,

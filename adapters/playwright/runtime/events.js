@@ -5,11 +5,38 @@
  * shims conventionally receive the useful payload directly. Keeping this
  * translation in one place avoids making every adapter know both contracts.
  */
+import { AsyncResource } from './async-hooks.js';
 import { installAbortSignalTimeout } from './timers.js';
 
 let defaultMaxListeners = 10;
 const kMaxEventTargetListeners = Symbol('events.maxEventTargetListeners');
 const kMaxEventTargetListenersWarned = Symbol('events.maxEventTargetListenersWarned');
+const kCapture = Symbol('events.captureRejections');
+const captureRejectionSymbol = Symbol.for('nodejs.rejection');
+const errorMonitor = Symbol('events.errorMonitor');
+let EventEmitterAsyncResource;
+
+class ListenerList extends Array {
+  get size() {
+    return this.length;
+  }
+
+  add(listener) {
+    this.push(listener);
+    return this;
+  }
+
+  delete(listener) {
+    const index = this.lastIndexOf(listener);
+    if (index < 0) return false;
+    this.splice(index, 1);
+    return true;
+  }
+
+  clear() {
+    this.length = 0;
+  }
+}
 
 function receivedValue(value) {
   if (value === null) return 'null';
@@ -49,6 +76,35 @@ function invalidEventTargets(value) {
   return error;
 }
 
+function invalidEmitter(value) {
+  const error = new TypeError(
+    `The "emitter" argument must be an instance of EventEmitter or EventTarget. Received ${receivedValue(value)}`,
+  );
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function invalidThis(name) {
+  const error = new TypeError(`Value of "this" must be of type ${name}`);
+  error.code = 'ERR_INVALID_THIS';
+  return error;
+}
+
+function initializeCapture(target, options) {
+  if (options?.captureRejections) {
+    if (typeof options.captureRejections !== 'boolean') {
+      const error = new TypeError(
+        `The "options.captureRejections" property must be of type boolean. Received ${receivedValue(options.captureRejections)}`,
+      );
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    target[kCapture] = Boolean(options.captureRejections);
+  } else {
+    target[kCapture] = EventEmitter.prototype[kCapture];
+  }
+}
+
 function activeProcess() {
   const candidate = globalThis?.process;
   // Never route compatibility warnings to the host process. Browser process
@@ -78,12 +134,13 @@ function emitMaxListenersWarning(emitter, name, count) {
 }
 
 export class BrowserEventEmitter {
-  constructor() {
+  constructor(options) {
     this._listeners = new Map();
     this._onceListeners = new Map();
     this._maxListeners = undefined;
     this._warned = new Set();
-    if (typeof EventEmitter.init === 'function') EventEmitter.init.call(this);
+    if (typeof EventEmitter.init === 'function') EventEmitter.init.call(this, options);
+    initializeCapture(this, options);
   }
 
   static get defaultMaxListeners() {
@@ -97,9 +154,10 @@ export class BrowserEventEmitter {
   on(name, listener) {
     if (typeof listener !== 'function') throw new TypeError('listener must be a function');
     if (name !== 'newListener') this.emit('newListener', name, listener.listener || listener);
-    const listeners = this._listeners.get(name) || new Set();
+    const listeners = this._listeners.get(name) || new ListenerList();
     listeners.add(listener);
     this._listeners.set(name, listeners);
+    syncEvents(this);
     this.checkListenerLimit(name, listeners);
     return this;
   }
@@ -111,8 +169,9 @@ export class BrowserEventEmitter {
   prependListener(name, listener) {
     if (typeof listener !== 'function') throw new TypeError('listener must be a function');
     if (name !== 'newListener') this.emit('newListener', name, listener.listener || listener);
-    const listeners = this._listeners.get(name) || new Set();
-    this._listeners.set(name, new Set([listener, ...listeners]));
+    const listeners = this._listeners.get(name) || new ListenerList();
+    this._listeners.set(name, new ListenerList(listener, ...listeners));
+    syncEvents(this);
     this.checkListenerLimit(name, this._listeners.get(name));
     return this;
   }
@@ -162,14 +221,19 @@ export class BrowserEventEmitter {
   off(name, listener) {
     const listeners = this._listeners.get(name);
     if (!listeners) return this;
-    listeners.delete(listener);
-    const onceListeners = this._onceListeners.get(listener);
-    if (onceListeners) {
-      for (const onceListener of onceListeners) listeners.delete(onceListener);
-      onceListeners.clear();
-      this._onceListeners.delete(listener);
+    let index = listeners.length - 1;
+    while (index >= 0 && listeners[index] !== listener && listeners[index].listener !== listener) index -= 1;
+    if (index >= 0) {
+      const removed = listeners[index];
+      listeners.splice(index, 1);
+      const onceListeners = this._onceListeners.get(removed.listener ? removed.listener : listener);
+      if (onceListeners) {
+        onceListeners.delete(removed);
+        if (onceListeners.size === 0) this._onceListeners.delete(removed.listener);
+      }
     }
     if (listeners.size === 0) this._listeners.delete(name);
+    syncEvents(this);
     return this;
   }
 
@@ -184,13 +248,21 @@ export class BrowserEventEmitter {
     } else {
       const listeners = this._listeners.get(name);
       if (listeners) {
-        for (const listener of listeners) this.off(name, listener);
+        for (const listener of [...listeners]) this.off(name, listener);
       }
     }
+    syncEvents(this);
     return this;
   }
 
   emit(name, ...args) {
+    if (name === 'error') {
+      const monitors = this._listeners.get(errorMonitor);
+      if (monitors?.size) {
+        const snapshot = [...monitors];
+        for (let index = 0; index < snapshot.length; index += 1) snapshot[index].apply(this, args);
+      }
+    }
     const listeners = this._listeners.get(name);
     if (name === 'error' && listeners?.size && this.domain && typeof this.domain._errorHandler === 'function') {
       const userListeners = [...listeners].filter((listener) => !listener._bnhInternal);
@@ -235,7 +307,30 @@ export class BrowserEventEmitter {
       return false;
     }
     const snapshot = [...listeners];
-    for (let index = 0; index < snapshot.length; index += 1) snapshot[index].apply(this, args);
+    for (let index = 0; index < snapshot.length; index += 1) {
+      const result = snapshot[index].apply(this, args);
+      if (this[kCapture] && result && typeof result.then === 'function') {
+        try {
+          result.then(undefined, (error) => {
+            const processObject = globalThis.process;
+            const dispatch = () => {
+              if (typeof this[captureRejectionSymbol] === 'function') {
+                this[captureRejectionSymbol](error, name, ...args);
+                return;
+              }
+              const previous = this[kCapture];
+              this[kCapture] = false;
+              try { this.emit('error', error); } finally { this[kCapture] = previous; }
+            };
+            if (typeof processObject?.nextTick === 'function') processObject.nextTick(dispatch);
+            else if (typeof globalThis.queueMicrotask === 'function') globalThis.queueMicrotask(dispatch);
+            else dispatch();
+          });
+        } catch (error) {
+          this.emit('error', error);
+        }
+      }
+    }
     return true;
   }
 
@@ -248,6 +343,36 @@ export class BrowserEventEmitter {
     if (!listeners || listeners.size === 0) return [];
     return [...listeners].map((listener) => listener.listener || listener);
   }
+
+  rawListeners(name) {
+    const listeners = this._listeners.get(name);
+    if (!listeners || listeners.size === 0) return [];
+    return [...listeners];
+  }
+
+  eventNames() {
+    return this._eventsCount > 0 ? Reflect.ownKeys(this._events) : [];
+  }
+}
+
+function syncEvents(emitter) {
+  let events = emitter._events;
+  if (!events || typeof events !== 'object') {
+    events = Object.create(null);
+    emitter._events = events;
+  }
+  for (const key of Reflect.ownKeys(events)) delete events[key];
+  for (const [name, listeners] of emitter._listeners) {
+    if (listeners.size === 0) continue;
+    const values = [...listeners];
+    Object.defineProperty(events, name, {
+      configurable: true,
+      enumerable: typeof name === 'string',
+      writable: true,
+      value: values.length === 1 ? values[0] : values,
+    });
+  }
+  emitter._eventsCount = emitter._listeners.size;
 }
 
 export function getEventListeners(emitter, name) {
@@ -255,6 +380,20 @@ export function getEventListeners(emitter, name) {
     return emitter.listeners(name);
   }
   return [];
+}
+
+export function getMaxListeners(emitterOrTarget) {
+  if (typeof emitterOrTarget?.getMaxListeners === 'function') {
+    return emitterOrTarget._maxListeners === undefined
+      ? defaultMaxListeners
+      : emitterOrTarget._maxListeners;
+  }
+  if (isEventTarget(emitterOrTarget)) {
+    return typeof emitterOrTarget[kMaxEventTargetListeners] === 'number'
+      ? emitterOrTarget[kMaxEventTargetListeners]
+      : defaultMaxListeners;
+  }
+  throw invalidEmitter(emitterOrTarget);
 }
 
 // Node exposes these names as aliases. Some upstream tests compare the
@@ -357,6 +496,8 @@ export function EventEmitter(...args) {
   if (!this._listeners) {
     this._listeners = new Map();
     this._onceListeners = new Map();
+    this._events = Object.create(null);
+    this._eventsCount = 0;
     this._maxListeners = undefined;
     this._warned = new Set();
   }
@@ -365,10 +506,110 @@ export function EventEmitter(...args) {
 }
 
 EventEmitter.prototype = BrowserEventEmitter.prototype;
+EventEmitter.prototype._events = undefined;
+EventEmitter.prototype._eventsCount = 0;
+EventEmitter.prototype._maxListeners = undefined;
+EventEmitter.init = function init(options) {
+  initializeCapture(this, options);
+};
+Object.defineProperty(EventEmitter.prototype, kCapture, {
+  configurable: false,
+  enumerable: false,
+  value: false,
+  writable: true,
+});
 Object.defineProperty(EventEmitter, 'defaultMaxListeners', {
   configurable: true,
   get: () => defaultMaxListeners,
   set: (value) => { defaultMaxListeners = validateMaxListeners(value, 'defaultMaxListeners'); },
+});
+
+Object.defineProperty(EventEmitter, 'captureRejections', {
+  enumerable: true,
+  get: () => EventEmitter.prototype[kCapture],
+  set: (value) => {
+    if (typeof value !== 'boolean') {
+      const error = new TypeError(
+        `The "EventEmitter.captureRejections" property must be of type boolean. Received ${receivedValue(value)}`,
+      );
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    EventEmitter.prototype[kCapture] = value;
+  },
+});
+
+EventEmitter.captureRejectionSymbol = captureRejectionSymbol;
+EventEmitter.errorMonitor = errorMonitor;
+
+function lazyEventEmitterAsyncResource() {
+  if (EventEmitterAsyncResource !== undefined) return EventEmitterAsyncResource;
+  const kEventEmitter = Symbol('events.eventEmitter');
+  const kAsyncResource = Symbol('events.asyncResource');
+  class EventEmitterReferencingAsyncResource extends AsyncResource {
+    constructor(emitter, type, options) {
+      super(type, options);
+      this[kEventEmitter] = emitter;
+    }
+
+    get eventEmitter() {
+      if (this[kEventEmitter] === undefined) throw invalidThis('EventEmitterReferencingAsyncResource');
+      return this[kEventEmitter];
+    }
+  }
+  EventEmitterAsyncResource = class EventEmitterAsyncResource extends EventEmitter {
+    constructor(options = undefined) {
+      let name;
+      if (typeof options === 'string') {
+        name = options;
+        options = undefined;
+      } else {
+        if (new.target === EventEmitterAsyncResource && typeof options?.name !== 'string') {
+          const error = new TypeError(
+            `The "options.name" property must be of type string. Received ${receivedValue(options?.name)}`,
+          );
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        name = options?.name || new.target.name;
+      }
+      super(options);
+      this[kAsyncResource] = new EventEmitterReferencingAsyncResource(this, name, options);
+    }
+
+    emit(event, ...args) {
+      if (this[kAsyncResource] === undefined) throw invalidThis('EventEmitterAsyncResource');
+      return this.asyncResource.runInAsyncScope(super.emit, this, event, ...args);
+    }
+
+    emitDestroy() {
+      if (this[kAsyncResource] === undefined) throw invalidThis('EventEmitterAsyncResource');
+      this.asyncResource.emitDestroy();
+    }
+
+    get asyncId() {
+      if (this[kAsyncResource] === undefined) throw invalidThis('EventEmitterAsyncResource');
+      return this.asyncResource.asyncId();
+    }
+
+    get triggerAsyncId() {
+      if (this[kAsyncResource] === undefined) throw invalidThis('EventEmitterAsyncResource');
+      return this.asyncResource.triggerAsyncId();
+    }
+
+    get asyncResource() {
+      if (this[kAsyncResource] === undefined) throw invalidThis('EventEmitterAsyncResource');
+      return this[kAsyncResource];
+    }
+  };
+  return EventEmitterAsyncResource;
+}
+
+Object.defineProperty(EventEmitter, 'EventEmitterAsyncResource', {
+  configurable: true,
+  enumerable: true,
+  get: lazyEventEmitterAsyncResource,
+  set: undefined,
 });
 
 EventEmitter.listenerCount = function listenerCount(emitter, name) {
@@ -394,6 +635,8 @@ EventEmitter.setMaxListeners = function setMaxListeners(value = defaultMaxListen
     }
   }
 };
+
+EventEmitter.getMaxListeners = getMaxListeners;
 
 Object.defineProperties(EventEmitter, {
   kMaxEventTargetListeners: {

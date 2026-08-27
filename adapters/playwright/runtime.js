@@ -19,7 +19,7 @@ import {
   collectAsyncResources,
   createAsyncHooksModule,
 } from './runtime/async-hooks.js';
-import { EventEmitter, addAbortListener, getEventListeners, once } from './runtime/events.js';
+import { EventEmitter, addAbortListener, getEventListeners, getMaxListeners, once } from './runtime/events.js';
 import { createVfs, fileURLToPath, pathToFileURL } from './runtime/vfs.js';
 import { path } from './runtime/path.js';
 import {
@@ -3424,6 +3424,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         EventEmitter.EventEmitter = EventEmitter;
         EventEmitter.addAbortListener = addAbortListener;
         EventEmitter.getEventListeners = getEventListeners;
+        EventEmitter.getMaxListeners = getMaxListeners;
         EventEmitter.once = once;
         return EventEmitter;
       })(), fs, 'fs/promises': fs.promises,

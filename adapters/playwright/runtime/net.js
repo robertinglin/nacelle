@@ -1095,8 +1095,17 @@ export class Server extends EventEmitter {
     };
   }
 
-  ref() { this._handle?.ref?.(); this._unref = false; return this; }
-  unref() { this._handle?.unref?.(); this._unref = true; return this; }
+  ref() {
+    this._unref = false;
+    if (this._handle) this._handle.ref();
+    return this;
+  }
+
+  unref() {
+    this._unref = true;
+    if (this._handle) this._handle.unref();
+    return this;
+  }
 }
 
 function createDetachedServerHandle(network, config, address, port, addressType, fd) {
@@ -1634,6 +1643,8 @@ export function createBrowserNet({ network = sharedVirtualNetwork, dns = createB
     'address',
     'getConnections',
     'close',
+    'ref',
+    'unref',
     '_emitCloseIfDrained',
     '_setupWorker',
   ]) {

@@ -1167,7 +1167,7 @@ class WritableImpl extends EventEmitter {
       this.emit('finish');
       queueMicrotask(() => {
         if (this._destroyed) this._emitClose();
-        else this.destroy();
+        else if (this._writableState.autoDestroy) this.destroy();
       });
     });
   }

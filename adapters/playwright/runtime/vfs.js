@@ -1995,18 +1995,40 @@ export function createVfs(options = {}) {
     return { fd: openDescriptor(pathValue, flags), owned: true };
   }
 
-  function closeStreamDescriptor(stream) {
-    if (!stream.autoClose || !stream._fsOwned || stream._fsClosed || stream.fd === null) return;
+  function closeStreamDescriptor(stream, callback = () => {}, force = false) {
+    if ((!force && !stream.autoClose) || !stream._fsOwned || stream._fsClosed || stream.fd === null) {
+      callback(stream._fsCloseError);
+      return;
+    }
     stream._fsClosed = true;
-    try {
-      const fd = stream.fd;
-      if (typeof stream._fsCloseWith === 'function') stream._fsCloseWith(fd);
-      else closeDescriptor(fd);
+    const fd = stream.fd;
+    let completed = false;
+    const complete = (error) => {
+      if (completed) return;
+      completed = true;
+      if (error) stream._fsCloseError = error;
       stream.closed = true;
       stream.fd = null;
+      callback(error);
+    };
+    try {
+      if (typeof stream._fsCloseWith === 'function') {
+        const result = stream._fsCloseWith(fd, complete);
+        if (result?.then) result.then(() => complete(), complete);
+      } else {
+        closeDescriptor(fd);
+        complete();
+      }
     } catch (error) {
-      stream._fsCloseError = error;
+      complete(error);
     }
+  }
+
+  function finishStreamIo(stream, error) {
+    stream._fsPerformingIO = false;
+    const waiters = stream._fsIoWaiters;
+    stream._fsIoWaiters = [];
+    for (const waiter of waiters || []) waiter(error);
   }
 
   function ReadStream(pathValue, optionsValue = {}) {
@@ -2019,15 +2041,179 @@ export function createVfs(options = {}) {
 
   ReadStream.prototype = Object.create(Readable.prototype);
   ReadStream.prototype.constructor = ReadStream;
+  Object.setPrototypeOf(ReadStream, Readable);
   ReadStream.prototype.open = function open() {
     this._fsOpenDefault();
   };
 
+  Object.defineProperty(ReadStream.prototype, 'autoClose', {
+    configurable: true,
+    get() {
+      if (!this?._readableState) throw invalidDirectoryThis();
+      return this._readableState.autoDestroy;
+    },
+    set(value) { this._readableState.autoDestroy = value; },
+  });
+
+  ReadStream.prototype._construct = function _construct(callback) {
+    if (typeof this.fd === 'number') {
+      callback();
+      return;
+    }
+    const opening = this._fsOpen();
+    if (opening?.then) {
+      opening.then(() => callback(this._fsOpenError), callback);
+      return;
+    }
+    callback(this._fsOpenError);
+  };
+
+  ReadStream.prototype._read = function _read(size) {
+    const stream = this;
+    const options = stream._fsOptions || {};
+    const n = size ?? stream.readableHighWaterMark ?? 16 * 1024;
+    const position = stream._fsPosition === null ? undefined : stream._fsPosition;
+    const remaining = position === undefined
+      ? stream.end - stream.bytesRead + 1
+      : stream.end - position + 1;
+    const requested = Math.min(remaining, n);
+
+    if (requested <= 0) {
+      stream.push(null);
+      return;
+    }
+
+    const readData = () => {
+      if (stream.destroyed || stream._ended) return;
+      if (stream._fsVirtualExecutable) {
+        stream.push(stream._fsVirtualExecutable);
+        stream.push(null);
+        return;
+      }
+
+      try {
+        const record = descriptor(stream.fd);
+        const at = position === undefined ? record.position : position;
+        const available = Math.max(0, Math.min(
+          readBytes(record.path).length - at,
+          stream.end - at + 1,
+        ));
+        if (!available) {
+          stream.push(null);
+          return;
+        }
+        const length = Math.max(1, Math.min(requested, available));
+        const buffer = new Uint8Array(length);
+        const finishRead = (result) => {
+          finishStreamIo(stream);
+          if (stream.destroyed) return;
+          if (stream._fsPosition !== null) stream._fsPosition = at + result.bytesRead;
+          stream.bytesRead += result.bytesRead;
+          stream.push(buffer.subarray(0, result.bytesRead));
+        };
+
+        stream._fsPerformingIO = true;
+        if (typeof stream._fsApi?.read === 'function'
+          && (options.fs || stream._fsApi.read !== fs.read)) {
+          return new Promise((resolve, reject) => {
+            try {
+              stream._fsApi.read(stream.fd, buffer, 0, length, position, (error, bytesRead) => {
+                if (error) {
+                  finishStreamIo(stream, error);
+                  reject(error);
+                } else {
+                  finishRead({ bytesRead });
+                  resolve();
+                }
+              });
+            } catch (error) {
+              finishStreamIo(stream, error);
+              reject(error);
+            }
+          });
+        }
+        finishRead(readDescriptor(stream.fd, buffer, 0, length, position));
+      } catch (error) {
+        finishStreamIo(stream, error);
+        if (stream.autoClose) {
+          stream.destroy(error);
+        } else {
+          stream._error = error;
+          if (!stream._errorEmitted) {
+            stream._errorEmitted = true;
+            stream._readableState.errorEmitted = true;
+            stream.emit('error', error);
+          }
+        }
+      }
+    };
+
+    const opening = stream._fsOpen();
+    if (opening?.then) return opening.then(readData, (error) => stream.destroy(error));
+    return readData();
+  };
+
+  ReadStream.prototype._destroy = function _destroy(error, callback) {
+    const close = (ioError) => closeStreamDescriptor(
+      this,
+      (closeError) => callback(closeError || error || ioError),
+      true,
+    );
+    if (this._fsPerformingIO) {
+      (this._fsIoWaiters ||= []).push(close);
+    } else {
+      close();
+    }
+  };
+
+  ReadStream.prototype.close = function close(callback) {
+    if (typeof callback === 'function') {
+      if (this._closeEmitted) queueMicrotask(callback);
+      else this.once('close', callback);
+    }
+    this.destroy();
+  };
+
+  Object.defineProperty(ReadStream.prototype, 'pending', {
+    configurable: true,
+    get() { return this.fd === null; },
+  });
+
+  function normalizeStreamOptions(optionsValue) {
+    if (optionsValue === undefined || optionsValue === null) return {};
+    if (typeof optionsValue === 'string') return { encoding: optionsValue };
+    if (typeof optionsValue !== 'object' || Array.isArray(optionsValue)) {
+      throw invalidArgumentType('options', optionsValue, 'Object');
+    }
+    return optionsValue;
+  }
+
+  function validateStreamFunction(fsApi, name) {
+    if (typeof fsApi?.[name] !== 'function') {
+      const error = new TypeError(
+        `The "options.fs.${name}" property must be of type function. ${receivedArgumentValue(fsApi?.[name])}`,
+      );
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+  }
+
+  function validateStreamFd(options) {
+    if (options.fd === undefined || options.fd === null) return;
+    const fd = typeof options.fd === 'number' ? options.fd : options.fd?.fd;
+    if (!Number.isInteger(fd)) throw invalidArgumentType('options.fd', options.fd, 'number');
+  }
+
+  function validateStreamPath(pathValue, options) {
+    if (options.fd === undefined || options.fd === null) validatePathArgument(pathValue);
+  }
+
   function validateReadStreamOptions(options) {
-    if (options.start !== undefined && (!Number.isInteger(options.start) || options.start < 0)) {
+    if (options.start !== undefined && (!Number.isSafeInteger(options.start) || options.start < 0)) {
       throw outOfRange('start', options.start);
     }
-    if (options.end !== undefined && (!Number.isInteger(options.end) || options.end < 0)) {
+    if (options.end !== undefined && options.end !== Infinity
+      && (!Number.isSafeInteger(options.end) || options.end < 0)) {
       throw outOfRange('end', options.end);
     }
     if (options.start !== undefined && options.end !== undefined && options.start > options.end) {
@@ -2038,35 +2224,51 @@ export function createVfs(options = {}) {
   }
 
   function createReadStream(pathValue, optionsValue = {}, target = null, moduleFs = null) {
-    const options = typeof optionsValue === 'string' ? { encoding: optionsValue } : optionsValue || {};
+    const options = normalizeStreamOptions(optionsValue);
     validateReadStreamOptions(options);
-    const fsApi = options.fs || moduleFs;
+    validateStreamFd(options);
+    const fsApi = options.fs || moduleFs || fs;
+    validateStreamPath(pathValue, options);
+    validateStreamFunction(fsApi, 'read');
+    if (options.fd === undefined || options.fd === null) validateStreamFunction(fsApi, 'open');
+    if (options.autoClose !== false) validateStreamFunction(fsApi, 'close');
     const virtualExecutable = pathValue === '/browser/node';
     const virtualExecutableBytes = new TextEncoder().encode('browser-native-node-runtime\n');
-    const stream = target || new Readable({ highWaterMark: options.highWaterMark ?? options.bufferSize });
-    if (target) Object.assign(stream, new Readable({ highWaterMark: options.highWaterMark ?? options.bufferSize }));
+    const highWaterMark = options.highWaterMark ?? options.bufferSize ?? 64 * 1024;
+    const autoDestroy = options.autoClose !== false;
+    const streamOptions = { highWaterMark, autoDestroy };
+    const stream = target || new Readable(streamOptions);
+    if (target) Object.assign(stream, new Readable(streamOptions));
     else Object.setPrototypeOf(stream, ReadStream.prototype);
     stream.path = pathValue ?? undefined;
     stream._fsApi = fsApi;
-    stream.fd = typeof options.fd === 'number' ? options.fd : options.fd?.fd ?? null;
+    stream._fsOptions = options;
+    stream._fsVirtualExecutable = virtualExecutable ? virtualExecutableBytes : null;
+    const hasFd = options.fd !== undefined && options.fd !== null;
+    stream.fd = hasFd ? (typeof options.fd === 'number' ? options.fd : options.fd?.fd) : null;
     stream.flags = options.flags || 'r';
     stream.mode = options.mode ?? 0o666;
     stream.bytesRead = 0;
     stream.autoClose = options.autoClose !== false;
-    stream.start = options.start ?? 0;
+    stream.start = options.start;
     stream.end = options.end ?? Infinity;
     stream.closed = false;
-    stream._fsPosition = stream.start;
-    stream._fsStarted = options.fd !== undefined;
-    stream._fsOwned = options.fd !== undefined;
+    stream._fsPosition = stream.start === undefined ? null : stream.start;
+    stream._fsStarted = hasFd;
+    stream._fsOwned = hasFd;
     stream._fsClosed = false;
+    stream._fsPerformingIO = false;
+    stream._fsIoWaiters = [];
     stream._fsCloseWith = typeof fsApi?.close === 'function'
-      ? (fd) => {
+      ? (fd, callback) => {
         const closeFn = fsApi.close;
-        if (options.fs || closeFn !== fs.close) closeFn(fd, () => {});
-        else closeDescriptor(fd);
+        if (options.fs || closeFn !== fs.close) return closeFn(fd, callback);
+        closeDescriptor(fd);
+        callback();
       }
       : null;
+    stream._read = ReadStream.prototype._read;
+    stream._destroyHook = ReadStream.prototype._destroy;
     if (options.encoding) stream.setEncoding(options.encoding);
     const destroy = stream.destroy.bind(stream);
     stream.destroy = (error, callback) => {
@@ -2078,16 +2280,7 @@ export function createVfs(options = {}) {
         if (stream._closeEmitted) queueMicrotask(callback);
         else stream.once('close', callback);
       }
-      closeStreamDescriptor(stream);
       return destroy(error || stream._fsCloseError);
-    };
-    stream.close = (callback) => {
-      if (typeof callback === 'function') {
-        if (stream._closeEmitted) queueMicrotask(callback);
-        else stream.once('close', callback);
-      }
-      stream.destroy();
-      return stream;
     };
     stream._fsOpenDefault = () => {
       if (stream._fsStarted) return;
@@ -2111,7 +2304,7 @@ export function createVfs(options = {}) {
               stream._fsOwned = true;
               stream.emit('open', stream.fd);
               stream.emit('ready');
-              if (stream.destroyed) closeStreamDescriptor(stream);
+              if (stream.destroyed) closeStreamDescriptor(stream, undefined, true);
               resolve(null);
             });
           } catch (error) {
@@ -2128,7 +2321,7 @@ export function createVfs(options = {}) {
         stream._fsOwned = opened.owned;
         stream.emit('open', stream.fd);
         stream.emit('ready');
-        if (stream.destroyed) closeStreamDescriptor(stream);
+        if (stream.destroyed) closeStreamDescriptor(stream, undefined, true);
         return;
       } catch (error) {
         stream.destroy(error);
@@ -2150,57 +2343,6 @@ export function createVfs(options = {}) {
       }
       return stream._fsOpenDefault();
     };
-    stream._read = () => {
-      const readData = () => {
-        if (stream.destroyed || stream._ended) return;
-        if (virtualExecutable) {
-          stream.push(virtualExecutableBytes);
-          stream.push(null);
-          return;
-        }
-        try {
-          const record = descriptor(stream.fd);
-          const available = Math.max(0, Math.min(
-            readBytes(record.path).length - stream._fsPosition,
-            stream.end - stream._fsPosition + 1,
-          ));
-          if (!available) {
-            stream.push(null);
-            closeStreamDescriptor(stream);
-            if (stream.autoClose) queueMicrotask(() => stream._emitClose());
-            return;
-          }
-          const size = Math.max(1, Math.min(options.highWaterMark ?? options.bufferSize ?? 16 * 1024, available));
-          const buffer = new Uint8Array(size);
-          const finishRead = (result) => {
-            stream._fsPosition += result.bytesRead;
-            stream.bytesRead += result.bytesRead;
-            stream.push(buffer.subarray(0, result.bytesRead));
-            if (!stream._ended) queueMicrotask(() => { if (stream._flowing) stream.resume(); });
-          };
-          if (typeof fsApi?.read === 'function' && (options.fs || fsApi.read !== fs.read)) {
-            return new Promise((resolve, reject) => {
-              try {
-                fsApi.read(stream.fd, buffer, 0, size, stream._fsPosition, (error, bytesRead) => {
-                  if (error) reject(error);
-                  else {
-                    finishRead({ bytesRead });
-                    resolve();
-                  }
-                });
-              } catch (error) { reject(error); }
-            });
-          }
-          finishRead(readDescriptor(stream.fd, buffer, 0, size, stream._fsPosition));
-        } catch (error) {
-          closeStreamDescriptor(stream);
-          stream.destroy(error);
-        }
-      };
-      const opening = stream._fsOpen();
-      if (opening?.then) return opening.then(readData, (error) => stream.destroy(error));
-      return readData();
-    };
     // Open eagerly like Node's fs.ReadStream, but wait for a data listener or
     // async iterator before switching into flowing mode so buffered bytes are
     // not discarded before a consumer attaches.
@@ -2218,21 +2360,91 @@ export function createVfs(options = {}) {
 
   WriteStream.prototype = Object.create(Writable.prototype);
   WriteStream.prototype.constructor = WriteStream;
+  Object.setPrototypeOf(WriteStream, Writable);
   WriteStream.prototype.open = function open() {
     this._fsOpenDefault();
   };
 
+  Object.defineProperty(WriteStream.prototype, 'autoClose', {
+    configurable: true,
+    get() {
+      if (!this?._writableState) throw invalidDirectoryThis();
+      return this._writableState.autoDestroy;
+    },
+    set(value) { this._writableState.autoDestroy = value; },
+  });
+
+  WriteStream.prototype._construct = function _construct(callback) {
+    if (typeof this.fd === 'number') {
+      callback();
+      return;
+    }
+    const opening = this._fsOpen();
+    if (opening?.then) {
+      opening.then(() => callback(this._fsOpenError), callback);
+      return;
+    }
+    callback(this._fsOpenError);
+  };
+
+  WriteStream.prototype._destroy = function _destroy(error, callback) {
+    const close = (ioError) => closeStreamDescriptor(
+      this,
+      (closeError) => callback(closeError || error || ioError),
+      true,
+    );
+    if (this._fsPerformingIO) {
+      (this._fsIoWaiters ||= []).push(close);
+    } else {
+      close();
+    }
+  };
+
+  WriteStream.prototype.close = function close(callback) {
+    if (typeof callback === 'function') {
+      if (this._closeEmitted) queueMicrotask(callback);
+      else this.once('close', callback);
+    }
+    if (!this.autoClose) this.once('finish', () => this.destroy());
+    this.end();
+  };
+
+  Object.defineProperty(WriteStream.prototype, 'pending', {
+    configurable: true,
+    get() { return this.fd === null; },
+  });
+
+  function validateWriteStreamOptions(options) {
+    if (options.start !== undefined && (!Number.isSafeInteger(options.start) || options.start < 0)) {
+      throw outOfRange('start', options.start);
+    }
+  }
+
   function createWriteStream(pathValue, optionsValue = {}, target = null, moduleFs = null) {
-    const options = typeof optionsValue === 'string' ? { encoding: optionsValue } : optionsValue || {};
-    const fsApi = options.fs || moduleFs;
+    const options = normalizeStreamOptions(optionsValue);
+    validateWriteStreamOptions(options);
+    validateStreamFd(options);
+    const fsApi = options.fs || moduleFs || fs;
+    validateStreamPath(pathValue, options);
+    if (options.fd === undefined || options.fd === null) validateStreamFunction(fsApi, 'open');
+    if (!fsApi || (typeof fsApi.write !== 'function' && typeof fsApi.writev !== 'function')) {
+      validateStreamFunction(fsApi, 'write');
+    }
+    if (fsApi.write !== undefined) validateStreamFunction(fsApi, 'write');
+    if (fsApi.writev !== undefined) validateStreamFunction(fsApi, 'writev');
+    if (options.autoClose !== false) validateStreamFunction(fsApi, 'close');
     let stream = target;
+    const autoDestroy = options.autoClose !== false;
     const streamOptions = {
       highWaterMark: options.highWaterMark,
+      autoDestroy,
+      decodeStrings: true,
       write(bytes, _encoding, callback) {
         const writeBytes = () => {
           try {
-            writeDescriptor(stream.fd, bytes, 0, bytes.length, stream._fsPosition);
-            stream._fsPosition += bytes.length;
+            const position = stream._fsPosition === null ? undefined : stream._fsPosition;
+            writeDescriptor(stream.fd, bytes, 0, bytes.length, position);
+            if (stream._fsPosition !== null) stream._fsPosition += bytes.length;
             stream.bytesWritten += bytes.length;
             callback();
           } catch (error) { callback(error); }
@@ -2252,8 +2464,7 @@ export function createVfs(options = {}) {
         }
       },
       final(callback) {
-        closeStreamDescriptor(stream);
-        callback(stream._fsCloseError);
+        callback();
       },
     };
     if (target) Writable.call(stream, streamOptions);
@@ -2261,23 +2472,31 @@ export function createVfs(options = {}) {
     if (!target) Object.setPrototypeOf(stream, WriteStream.prototype);
     stream.path = pathValue ?? undefined;
     stream._fsApi = fsApi;
-    stream.fd = typeof options.fd === 'number' ? options.fd : options.fd?.fd ?? null;
+    stream._fsOptions = options;
+    stream.fd = options.fd === undefined || options.fd === null
+      ? null
+      : typeof options.fd === 'number' ? options.fd : options.fd?.fd;
     stream.flags = options.flags || 'w';
     stream.mode = options.mode ?? 0o666;
     stream.bytesWritten = 0;
     stream.autoClose = options.autoClose !== false;
     stream.closed = false;
-    stream._fsPosition = options.start ?? 0;
-    stream._fsStarted = false;
-    stream._fsOwned = false;
+    stream._fsPosition = options.start === undefined ? null : options.start;
+    const hasFd = options.fd !== undefined && options.fd !== null;
+    stream._fsStarted = hasFd;
+    stream._fsOwned = hasFd;
     stream._fsClosed = false;
+    stream._fsPerformingIO = false;
+    stream._fsIoWaiters = [];
     stream._fsCloseWith = typeof fsApi?.close === 'function'
-      ? (fd) => {
+      ? (fd, callback) => {
         const closeFn = fsApi.close;
-        if (options.fs || closeFn !== fs.close) closeFn(fd, () => {});
-        else closeDescriptor(fd);
+        if (options.fs || closeFn !== fs.close) return closeFn(fd, callback);
+        closeDescriptor(fd);
+        callback();
       }
       : null;
+    stream._destroyHook = WriteStream.prototype._destroy;
     const destroy = stream.destroy.bind(stream);
     stream.destroy = (error, callback) => {
       if (typeof error === 'function') {
@@ -2288,16 +2507,7 @@ export function createVfs(options = {}) {
         if (stream._closeEmitted) queueMicrotask(callback);
         else stream.once('close', callback);
       }
-      closeStreamDescriptor(stream);
       return destroy(error || stream._fsCloseError);
-    };
-    stream.close = (callback) => {
-      if (typeof callback === 'function') {
-        if (stream._closeEmitted) queueMicrotask(callback);
-        else stream.once('close', callback);
-      }
-      stream.destroy();
-      return stream;
     };
     stream._fsOpenDefault = () => {
       if (stream._fsStarted) return;
@@ -2316,7 +2526,7 @@ export function createVfs(options = {}) {
               stream._fsOwned = true;
               stream.emit('open', stream.fd);
               stream.emit('ready');
-              if (stream.destroyed) closeStreamDescriptor(stream);
+              if (stream.destroyed) closeStreamDescriptor(stream, undefined, true);
               resolve(null);
             });
           } catch (error) {
@@ -2333,6 +2543,7 @@ export function createVfs(options = {}) {
         stream._fsOwned = opened.owned;
         stream.emit('open', stream.fd);
         stream.emit('ready');
+        if (stream.destroyed) closeStreamDescriptor(stream, undefined, true);
         return Promise.resolve();
       } catch (error) { stream.destroy(error); }
       return Promise.resolve(stream._fsOpenError);
@@ -2808,6 +3019,8 @@ export function createVfs(options = {}) {
     Stats,
     ReadStream,
     WriteStream,
+    FileReadStream: ReadStream,
+    FileWriteStream: WriteStream,
     writeFileSync: writeFile,
     readFileSync: readFile,
     appendFileSync: appendFile,
@@ -2996,12 +3209,8 @@ export function createVfs(options = {}) {
     ftruncate,
     readlink: readlinkAsync,
     openAsBlob,
-    createReadStream(pathValue, optionsValue) {
-      return createReadStream(pathValue, optionsValue, null, this);
-    },
-    createWriteStream(pathValue, optionsValue) {
-      return createWriteStream(pathValue, optionsValue, null, this);
-    },
+    createReadStream,
+    createWriteStream,
     readFile,
     writeFile,
     appendFile,

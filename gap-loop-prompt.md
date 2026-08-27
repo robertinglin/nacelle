@@ -7,30 +7,30 @@ rounds until the stop condition or the user interrupts.
 
 Fixed paths (always absolute — relative paths have caused two incidents):
 
-- Harness repo: `/home/robert/workspace/browser-node-harness`
-- Node target repo (owns worktrees): `/home/robert/workspace/browser-node-harness/.bnh-state/target`
-- Integration worktree (branch `bnh/integration-v22`): `/home/robert/workspace/browser-node-harness/.bnh-state/v22/worktrees/integration-v22`
-- Worklist: `/home/robert/workspace/browser-node-harness/.bnh-state/v22/gap-worklist` (WORKLIST.md + gap-<id>/ card dirs)
-- Real DB: `/home/robert/workspace/browser-node-harness/.bnh-state/v22/state.sqlite3` (never open `Database()` on a guessed filename — it creates a stray empty db)
-- Codex binary: `/home/robert/.local/share/mise/installs/codex/0.149.0/bin/codex`
+- Harness repo: `/home/bee/Projects/browser-node-harness`
+- Node target repo (owns worktrees): `/home/bee/Projects/browser-node-harness/.bnh-state/target`
+- Integration worktree (branch `bnh/integration-v22`): `/home/bee/Projects/browser-node-harness/.bnh-state/v22/worktrees/integration-v22`
+- Worklist: `/home/bee/Projects/browser-node-harness/.bnh-state/v22/gap-worklist` (WORKLIST.md + gap-<id>/ card dirs)
+- Real DB: `/home/bee/Projects/browser-node-harness/.bnh-state/v22/state.sqlite3` (never open `Database()` on a guessed filename — it creates a stray empty db)
+- Codex binary fallback: `/home/bee/.local/share/mise/installs/codex/latest/bin/codex`
 
 All `python3 -m browser_node_harness` commands run from the harness repo root
-with `PYTHONPATH=/home/robert/workspace/browser-node-harness/src`.
+with `PYTHONPATH=/home/bee/Projects/browser-node-harness/src`.
 
 ## Environment bootstrap (required on every machine)
 
 The shared browser runtime has one branch-owned source of truth in the harness
 repository:
 
-- Runtime entry: `/home/robert/workspace/browser-node-harness/adapters/playwright/runtime.js`
-- Runtime modules: `/home/robert/workspace/browser-node-harness/adapters/playwright/runtime/`
-- Link command: `/home/robert/workspace/browser-node-harness/link-runtime.py`
+- Runtime entry: `/home/bee/Projects/browser-node-harness/adapters/playwright/runtime.js`
+- Runtime modules: `/home/bee/Projects/browser-node-harness/adapters/playwright/runtime/`
+- Link command: `/home/bee/Projects/browser-node-harness/link-runtime.py`
 
 From the harness repository root, line up the active v22 integration before
 running setup, creating agents, or launching validation:
 
 ```bash
-cd /home/robert/workspace/browser-node-harness
+cd /home/bee/Projects/browser-node-harness
 ./link-runtime.py --config harness.toml --variant v22
 ```
 
@@ -39,9 +39,9 @@ worktree to the adapter runtime:
 
 ```bash
 test "$(readlink -f .bnh-state/v22/worktrees/integration-v22/runtime.js)" = \
-  "/home/robert/workspace/browser-node-harness/adapters/playwright/runtime.js"
+  "/home/bee/Projects/browser-node-harness/adapters/playwright/runtime.js"
 test "$(readlink -f .bnh-state/v22/worktrees/integration-v22/runtime)" = \
-  "/home/robert/workspace/browser-node-harness/adapters/playwright/runtime"
+  "/home/bee/Projects/browser-node-harness/adapters/playwright/runtime"
 ```
 
 Do not copy a second runtime into the integration worktree and do not replace
@@ -49,7 +49,7 @@ different target content silently. The link command refuses conflicts and
 backs up matching regular copies under `.bnh-state/` before converting them.
 The bridge and harness page remain target integration files; only
 `runtime.js`, `runtime/`, and `server.js` are shared links. The canonical
-server is `/home/robert/workspace/browser-node-harness/adapters/playwright/server.js`;
+server is `/home/bee/Projects/browser-node-harness/adapters/playwright/server.js`;
 it serves `harness.html` and modules from the current target worktree and
 supplies the required COOP/COEP headers. Do not write a replacement server in
 the Node checkout when this link is missing; rerun `./link-runtime.py` and
@@ -59,10 +59,10 @@ When runtime code is edited through the integration path, the bytes change in
 the adapter paths above and must be committed from the harness repository:
 
 ```bash
-git -C /home/robert/workspace/browser-node-harness add \
+git -C /home/bee/Projects/browser-node-harness add \
   adapters/playwright/runtime.js adapters/playwright/runtime \
   adapters/playwright/server.js
-git -C /home/robert/workspace/browser-node-harness commit \
+git -C /home/bee/Projects/browser-node-harness commit \
   -m "Update shared browser runtime"
 ```
 
@@ -106,8 +106,8 @@ responsive while the job continues running.
    (get it with `git -C <integration worktree> rev-parse HEAD`):
 
    ```bash
-   git -C /home/robert/workspace/browser-node-harness/.bnh-state/target worktree add \
-     /home/robert/workspace/browser-node-harness/.bnh-state/v22/worktrees/luna-gap-<id> \
+   git -C /home/bee/Projects/browser-node-harness/.bnh-state/target worktree add \
+     /home/bee/Projects/browser-node-harness/.bnh-state/v22/worktrees/luna-gap-<id> \
      -b luna-gap-<id> <HEAD>
    ```
 
@@ -126,8 +126,8 @@ responsive while the job continues running.
    Acceptance command shape:
 
    ```bash
-   cd /home/robert/workspace/browser-node-harness && \
-   PYTHONPATH=/home/robert/workspace/browser-node-harness/src python3 -m \
+   cd /home/bee/Projects/browser-node-harness && \
+   PYTHONPATH=/home/bee/Projects/browser-node-harness/src python3 -m \
    browser_node_harness --config harness.toml test \
      --worktree <worktree> <card acceptance_paths...>
    ```
@@ -144,7 +144,7 @@ responsive while the job continues running.
    below does not replace that escalation.
 
    ```bash
-   /home/robert/.local/share/mise/installs/codex/0.149.0/bin/codex exec \
+   /home/bee/.local/share/mise/installs/codex/latest/bin/codex exec \
      --dangerously-bypass-approvals-and-sandbox \
      -C <worktree> "$(cat <card dir>/agent-prompt.md)"
    ```
@@ -184,7 +184,7 @@ responsive while the job continues running.
 8. **Close the round.** Then start the next one:
 
    ```bash
-   cd /home/robert/workspace/browser-node-harness && \
+   cd /home/bee/Projects/browser-node-harness && \
    PYTHONPATH=src python3 -m browser_node_harness --config harness.toml gaps --verify && \
    PYTHONPATH=src python3 -m browser_node_harness --config harness.toml gaps --emit .bnh-state/v22/gap-worklist
    ```

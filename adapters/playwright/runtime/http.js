@@ -866,6 +866,31 @@ class VirtualServerResponse extends Writable {
     return this;
   }
 
+  writeEarlyHints(hints, callback) {
+    if (hints === null || typeof hints !== 'object' || Array.isArray(hints)) {
+      throw invalidArgumentType('hints', 'object', hints);
+    }
+    if (hints.link === null || hints.link === undefined) return;
+
+    const link = Array.isArray(hints.link) ? hints.link.join(', ') : String(hints.link);
+    if (link.length === 0) return;
+
+    let head = 'HTTP/1.1 103 Early Hints\r\nLink: ' + link + '\r\n';
+    for (const key of Object.keys(hints)) {
+      if (key !== 'link') head += `${key}: ${hints[key]}\r\n`;
+    }
+    head += '\r\n';
+
+    const socket = this.connection || this.socket;
+    if (socket?.writable && typeof socket.write === 'function') {
+      socket.write(head, 'ascii', callback);
+    }
+  }
+
+  _implicitHeader() {
+    this.writeHead(this.statusCode);
+  }
+
   _finish() {
     OutgoingMessage.prototype._finish.call(this);
   }
@@ -914,6 +939,12 @@ class VirtualServerResponse extends Writable {
 
 VirtualServerResponse.prototype.statusCode = 200;
 VirtualServerResponse.prototype.statusMessage = undefined;
+Object.defineProperty(VirtualServerResponse.prototype, 'writeHeader', {
+  configurable: true,
+  enumerable: false,
+  writable: true,
+  value: VirtualServerResponse.prototype.writeHead,
+});
 
 function appendBytes(previous, next) {
   const result = new Uint8Array(previous.byteLength + next.byteLength);
@@ -1427,9 +1458,7 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask) {
       // Node's internal HTTP connection listener annotates every accepted
       // socket before user connection listeners run, including manually
       // emitted connection events used by cluster handoff tests.
-      this.on('connection', (socket) => {
-        if (socket && typeof socket === 'object') socket.server = this;
-      });
+      this.on('connection', connectionListener);
       if (typeof listener === 'function') this.on('request', listener);
     }
 
@@ -1505,6 +1534,10 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask) {
   });
   Object.defineProperty(CallableServer, 'name', { value: 'Server' });
   return CallableServer;
+}
+
+function connectionListener(socket) {
+  if (socket && typeof socket === 'object') socket.server = this;
 }
 
 class BrowserAgent extends EventEmitter {
@@ -2381,6 +2414,7 @@ function createProtocolModule(protocol, ClientRequest, Server, Agent, scope, net
     Agent,
     globalAgent,
     Server,
+    _connectionListener: connectionListener,
     createServer(options, listener) {
       return new Server(options, listener);
     },

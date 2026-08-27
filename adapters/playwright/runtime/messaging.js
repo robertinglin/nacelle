@@ -1,6 +1,9 @@
 import { BrowserEventEmitter } from './events.js';
 
 const uncloneableValues = new WeakSet();
+const uncloneableErrors = new WeakMap();
+const uncloneableMarker = Symbol.for('bnh.messaging.uncloneable');
+const uncloneableErrorMarker = Symbol.for('bnh.messaging.uncloneableError');
 const untransferableValues = new WeakSet();
 const untransferableMarker = Symbol.for('nodejs.worker_threads.untransferable');
 const nativeMessageChannels = new WeakMap();
@@ -9,10 +12,20 @@ const messageEventData = new WeakMap();
 
 export const SHARE_ENV = Symbol.for('nodejs.worker_threads.SHARE_ENV');
 
-export function markAsUncloneable(value) {
+export function markAsUncloneable(value, errorFactory = undefined) {
   if (!value || (typeof value !== 'object' && typeof value !== 'function')) return;
   if (value instanceof ArrayBuffer || (typeof SharedArrayBuffer === 'function' && value instanceof SharedArrayBuffer)) return;
   uncloneableValues.add(value);
+  try {
+    Object.defineProperty(value, uncloneableMarker, { configurable: true, value: true });
+    if (typeof errorFactory === 'function') {
+      Object.defineProperty(value, uncloneableErrorMarker, {
+        configurable: true,
+        value: errorFactory,
+      });
+    }
+  } catch { /* host objects may be sealed; the WeakSet remains authoritative */ }
+  if (typeof errorFactory === 'function') uncloneableErrors.set(value, errorFactory);
 }
 
 export function markAsUntransferable(value) {
@@ -33,11 +46,23 @@ function isUncloneable(value) {
   let current = value;
   let depth = 0;
   while (current && (typeof current === 'object' || typeof current === 'function') && depth < 32) {
-    if (uncloneableValues.has(current)) return true;
+    if (uncloneableValues.has(current) || current[uncloneableMarker] === true) return true;
     current = Object.getPrototypeOf(current);
     depth += 1;
   }
   return false;
+}
+
+function uncloneableError(value) {
+  let current = value;
+  let depth = 0;
+  while (current && (typeof current === 'object' || typeof current === 'function') && depth < 32) {
+    const factory = uncloneableErrors.get(current) || current[uncloneableErrorMarker];
+    if (factory) return factory();
+    current = Object.getPrototypeOf(current);
+    depth += 1;
+  }
+  return dataCloneError('object could not be cloned');
 }
 
 export const IPC_ERROR_CODES = Object.freeze({
@@ -1132,7 +1157,7 @@ export function createMessagingPrimitives(scope = globalThis) {
     markAsUntransferable,
     isMarkedAsUntransferable,
     structuredClone(value, options) {
-      if (isUncloneable(value)) throw dataCloneError('object could not be cloned');
+      if (isUncloneable(value)) throw uncloneableError(value);
       if (!nativeStructuredClone) return value;
       return nativeStructuredClone(value, options);
     },

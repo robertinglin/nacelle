@@ -205,16 +205,19 @@ class ZstdDecompress extends ZlibStream {
   constructor(_options, bufferClass, scope) { super('zstd', 'decompress', bufferClass, scope); }
 }
 
-function operation(value, format, mode, BufferClass, scope, callback) {
+function operation(value, format, mode, BufferClass, scope, optionsOrCallback, callback) {
+  const done = typeof callback === 'function'
+    ? callback
+    : typeof optionsOrCallback === 'function' ? optionsOrCallback : undefined;
   const result = (async () => {
     const input = new scope.Blob([value]).stream();
     const transformed = input.pipeThrough(createWebTransform(scope, format, mode));
     return new Uint8Array(await new scope.Response(transformed).arrayBuffer());
   })();
-  if (typeof callback !== 'function') return result.then((output) => new BufferClass(output));
+  if (typeof done !== 'function') return result.then((output) => new BufferClass(output));
   return result.then(
-    (output) => callback(null, new BufferClass(output)),
-    (error) => callback(mode === 'decompress' ? zlibDataError(error) : error),
+    (output) => done(null, new BufferClass(output)),
+    (error) => done(mode === 'decompress' ? zlibDataError(error) : error),
   );
 }
 
@@ -262,6 +265,10 @@ export function createZlibShim(scope, BufferClass) {
     inflateRawSync() { syncUnavailable('decompression', 'inflateRaw'); },
     brotliCompressSync() { syncUnavailable('Brotli compression', 'brotliCompress'); },
     brotliDecompressSync() { syncUnavailable('Brotli decompression', 'brotliDecompress'); },
+    zstdCompress: (value, optionsOrCallback, callback) => operation(value, 'zstd', 'compress', BufferClass, scope, optionsOrCallback, callback),
+    zstdDecompress: (value, optionsOrCallback, callback) => operation(value, 'zstd', 'decompress', BufferClass, scope, optionsOrCallback, callback),
+    zstdCompressSync() { syncUnavailable('compression', 'zstdCompress'); },
+    zstdDecompressSync() { syncUnavailable('decompression', 'zstdDecompress'); },
   };
   for (const [name, value] of Object.entries(constants)) {
     if (name.startsWith('BROTLI')) continue;

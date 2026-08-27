@@ -4,6 +4,7 @@ import { resolveEncodingOps } from './buffer.js';
 import { unsupportedNativeAddon } from './errors.js';
 import { AsyncResource } from './async-hooks.js';
 import { createGlob } from './fs-glob.js';
+import { markAsUncloneable } from './messaging.js';
 
 const textEncoder = new TextEncoder();
 const READ_FILE_ASYNC_STAGES = 4;
@@ -1367,6 +1368,11 @@ export function createVfs(options = {}) {
         super([initialBytes], { type: blobType });
         this._start = start;
         this._end = end;
+        markAsUncloneable(this, () => {
+          const error = new TypeError('Invalid state: File-backed Blobs are not cloneable');
+          error.code = 'ERR_INVALID_STATE';
+          return error;
+        });
       }
 
       _readBytes() {

@@ -1261,7 +1261,12 @@ class VirtualServerResponse extends Writable {
     this.socket = request.socket;
     this.connection = request.connection;
     this._chunks = [];
-    this._headers = new Map();
+    Object.defineProperty(this, '_headers', {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: new Map(),
+    });
     this._completeResponse = complete;
     this._flushResponse = flush;
     this._headersFlushed = false;
@@ -1401,12 +1406,12 @@ class VirtualServerResponse extends Writable {
 
   write(...args) {
     this.flushHeaders();
-    return super.write(...args);
+    return Writable.prototype.write.apply(this, args);
   }
 
   end(...args) {
     this.headersSent = true;
-    return super.end(...args);
+    return Writable.prototype.end.apply(this, args);
   }
 
   _finalizeResponse(callback) {
@@ -2720,6 +2725,7 @@ function proxyRequestOptions(url, init) {
     headers: headersObject(createHeaderStore(init.headers)),
     body: init.body,
     signal: init.signal,
+    timeout: init.timeout,
   };
 }
 
@@ -2768,7 +2774,12 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
           if (length === 0) this._ownerProcess?.abort?.();
         },
       };
-      this._headers = createHeaderStore(options.headers);
+      Object.defineProperty(this, '_headers', {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: createHeaderStore(options.headers),
+      });
       this._duplicateContentLength = headerEntries(options.headers).some(([name, value]) =>
         String(name).toLowerCase() === 'content-length' && Array.isArray(value) && value.length > 1);
       this._chunks = [];
@@ -3141,7 +3152,12 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
 
       let operation;
       try {
-        if (this._proxy) operation = this._proxy.request(proxyRequestOptions(this._url, init));
+        if (this._proxy) {
+          operation = this._proxy.request(proxyRequestOptions(this._url, {
+            ...init,
+            timeout: this.timeout,
+          }));
+        }
         else {
           const runtimeProxyEnv = { ...this._proxyEnv, ...scope.process?.env };
           const proxyConfig = proxyConfigFor(

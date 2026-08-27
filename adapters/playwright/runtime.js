@@ -2,6 +2,7 @@ import { createAssert, inspect as nodeInspect } from './runtime/assert.js';
 import {
   createBufferClass,
   createTranscode,
+  createFileClass,
   installBlobCompatibility,
   isAscii,
   isUtf8,
@@ -2109,7 +2110,8 @@ const process = {
 export function createRuntime({ globalObject = globalThis, version = 'browser-native-runtime/v1' } = {}) {
   const scope = globalObject;
   let vfs = createVfs();
-  const Buffer = createBufferClass();
+  const Buffer = createBufferClass(scope);
+  const File = createFileClass(scope);
   const Blob = installBlobCompatibility(scope.Blob);
   const transcode = createTranscode(Buffer);
   let mounted = false;
@@ -3483,11 +3485,17 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       buffer: {
         Buffer,
         Blob,
+        File,
+        atob: Buffer.atob,
+        btoa: Buffer.btoa,
+        resolveObjectURL: Buffer.resolveObjectURL,
         transcode,
         SlowBuffer: Buffer.SlowBuffer,
         constants: Buffer.constants,
         kMaxLength: Buffer.kMaxLength,
         kStringMaxLength: Buffer.kStringMaxLength,
+        get INSPECT_MAX_BYTES() { return Buffer.INSPECT_MAX_BYTES; },
+        set INSPECT_MAX_BYTES(value) { Buffer.INSPECT_MAX_BYTES = value; },
         isAscii,
         isUtf8,
       },
@@ -4727,6 +4735,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               console: scope.console,
               global: scope.global,
               Buffer: scope.Buffer,
+              File: scope.File,
+              atob: scope.atob,
+              btoa: scope.btoa,
               ReadableStream: scope.ReadableStream,
               ReadableStreamDefaultReader: scope.ReadableStreamDefaultReader,
               ReadableStreamBYOBReader: scope.ReadableStreamBYOBReader,
@@ -4918,6 +4929,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               childProc.processObject._bnhConsole = scope.console;
               scope.global = scope;
               scope.Buffer = Buffer;
+              scope.File = File;
+              scope.atob = Buffer.atob;
+              scope.btoa = Buffer.btoa;
               scope.setTimeout = (callback, delay, ...args) => {
                 return childProc.setTimer(() => callback(...args), delay);
               };
@@ -5082,6 +5096,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               scope.console = previousState.console;
               scope.global = previousState.global;
               scope.Buffer = previousState.Buffer;
+              scope.File = previousState.File;
+              scope.atob = previousState.atob;
+              scope.btoa = previousState.btoa;
               scope.ReadableStream = previousState.ReadableStream;
               scope.ReadableStreamDefaultReader = previousState.ReadableStreamDefaultReader;
               scope.ReadableStreamBYOBReader = previousState.ReadableStreamBYOBReader;
@@ -6450,6 +6467,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     const previous = {
       process: scope.process,
       Buffer: scope.Buffer,
+      File: scope.File,
+      atob: scope.atob,
+      btoa: scope.btoa,
       console: scope.console,
       global: scope.global,
       MessageEvent: scope.MessageEvent,
@@ -6525,6 +6545,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       process: processObject,
       require: loadModule,
       Buffer,
+      File,
+      atob: Buffer.atob,
+      btoa: Buffer.btoa,
       console: childConsole,
       global: scope,
       MessageEvent: createMessageEvent(scope, {

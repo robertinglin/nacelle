@@ -388,6 +388,72 @@ export function installBlobCompatibility(BlobClass) {
   return BlobClass;
 }
 
+function missingArgumentError(name) {
+  const error = new TypeError(`The "${name}" argument must be specified`);
+  error.code = 'ERR_MISSING_ARGS';
+  return error;
+}
+
+function inspectTypedArray(value) {
+  const name = value.constructor?.name || 'TypedArray';
+  const values = Array.from(value, (item) => String(item)).join(', ');
+  return `${name}(${value.length}) [${values ? ` ${values} ` : ''}]`;
+}
+
+function bufferInspect(_recurseTimes, context = {}, inspectValue = null) {
+  const max = this.constructor?.__bnhInspectMaxBytes ?? 50;
+  const actualMax = Math.min(max, this.length);
+  const byteCount = Number.isFinite(actualMax) ? Math.max(0, Math.trunc(actualMax)) : this.length;
+  let text = encodeHex(this.subarray(0, byteCount)).replace(/(.{2})/g, '$1 ').trim();
+  const remaining = this.length - max;
+  if (remaining > 0) text += ` ... ${remaining} more byte${remaining > 1 ? 's' : ''}`;
+
+  const keys = Reflect.ownKeys(this).filter((key) => {
+    if (typeof key === 'string' && /^(?:0|[1-9]\d*)$/.test(key)) return false;
+    if (context.showHidden) return true;
+    return Object.getOwnPropertyDescriptor(this, key)?.enumerable === true;
+  });
+  if (keys.length > 0) {
+    const extras = keys.map((key) => {
+      const label = typeof key === 'symbol'
+        ? `[${String(key)}]`
+        : /^[A-Za-z_$][\w$]*$/.test(key) ? key : `'${key}'`;
+      let value;
+      try { value = this[key]; } catch { value = '<unavailable>'; }
+      let inspected;
+      if (ArrayBuffer.isView(value) && !(value instanceof DataView)) inspected = inspectTypedArray(value);
+      else if (typeof inspectValue === 'function') inspected = inspectValue(value, { ...context, breakLength: Infinity, compact: true });
+      else inspected = String(value);
+      return `${label}: ${inspected}`;
+    });
+    if (this.length !== 0) text += ', ';
+    text += extras.join(', ');
+  }
+  let constructorName = 'Buffer';
+  try {
+    const constructor = this.constructor;
+    if (typeof constructor === 'function' && Object.prototype.hasOwnProperty.call(constructor, 'name')) {
+      constructorName = constructor.name;
+    }
+  } catch { /* Ignore errors and use the default name. */ }
+  return `<${constructorName} ${text}>`;
+}
+
+export function createFileClass(scope = globalThis) {
+  if (typeof scope.File === 'function') return scope.File;
+  if (typeof scope.Blob !== 'function') return undefined;
+  return class File extends scope.Blob {
+    constructor(bits, name, options = {}) {
+      super(bits, options);
+      const lastModified = options?.lastModified === undefined ? Date.now() : Number(options.lastModified);
+      Object.defineProperties(this, {
+        name: { configurable: true, enumerable: true, value: String(name).replaceAll('/', ':') },
+        lastModified: { configurable: true, enumerable: true, value: Number.isFinite(lastModified) ? lastModified : Date.now() },
+      });
+    }
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Bidirectional byte search with Node.js Buffer#indexOf/#lastIndexOf
 // semantics: string needles are encoded through the registry above, number
@@ -799,9 +865,51 @@ export function isUtf8(input) {
   }
 }
 
-export function createBufferClass() {
+export function createBufferClass(scope = globalThis) {
   const internalBuffer = Symbol('internal buffer');
   const untransferableMarker = Symbol.for('nodejs.worker_threads.untransferable');
+  const objectURLRegistryKey = Symbol.for('bnh.buffer.objectURLRegistry');
+  const objectURLWrapperKey = Symbol.for('bnh.buffer.objectURLWrappers');
+  const urlClass = scope?.URL;
+  const objectURLRegistry = urlClass?.[objectURLRegistryKey] || new Map();
+  if (urlClass && typeof urlClass.createObjectURL === 'function' && !urlClass[objectURLWrapperKey]) {
+    const nativeCreateObjectURL = urlClass.createObjectURL;
+    const nativeRevokeObjectURL = urlClass.revokeObjectURL;
+    const wrappers = {
+      registry: objectURLRegistry,
+      createObjectURL(blob) {
+        const url = nativeCreateObjectURL.call(urlClass, blob);
+        objectURLRegistry.set(url, blob);
+        return url;
+      },
+      revokeObjectURL(url) {
+        objectURLRegistry.delete(url);
+        return typeof nativeRevokeObjectURL === 'function'
+          ? nativeRevokeObjectURL.call(urlClass, url)
+          : undefined;
+      },
+    };
+    try {
+      Object.defineProperty(urlClass, objectURLRegistryKey, { configurable: true, value: objectURLRegistry });
+      Object.defineProperty(urlClass, objectURLWrapperKey, { configurable: true, value: wrappers });
+      Object.defineProperty(urlClass, 'createObjectURL', { configurable: true, writable: true, value: wrappers.createObjectURL });
+      if (typeof nativeRevokeObjectURL === 'function') {
+        Object.defineProperty(urlClass, 'revokeObjectURL', { configurable: true, writable: true, value: wrappers.revokeObjectURL });
+      }
+    } catch { /* URL implementations may expose immutable static methods. */ }
+  }
+  const nativeAtob = typeof scope?.atob === 'function' ? scope.atob.bind(scope) : null;
+  const nativeBtoa = typeof scope?.btoa === 'function' ? scope.btoa.bind(scope) : null;
+  const nodeAtob = function atob(input) {
+    if (arguments.length === 0) throw missingArgumentError('input');
+    if (!nativeAtob) throw new TypeError('atob is not available in this browser');
+    return nativeAtob(`${input}`);
+  };
+  const nodeBtoa = function btoa(input) {
+    if (arguments.length === 0) throw missingArgumentError('input');
+    if (!nativeBtoa) throw new TypeError('btoa is not available in this browser');
+    return nativeBtoa(`${input}`);
+  };
   let poolBuffer = null;
   let poolOffset = 0;
   const pooledBytes = (size) => {
@@ -868,7 +976,9 @@ export function createBufferClass() {
           error.code = 'ERR_BUFFER_OUT_OF_BOUNDS';
           throw error;
         }
-        return new NodeBuffer(value, offset, size, internalBuffer);
+        return length === undefined
+          ? new NodeBuffer(value, offset, internalBuffer)
+          : new NodeBuffer(value, offset, size, internalBuffer);
       }
       const bytes = bytesFrom(value, encodingOrOffset);
       const pooled = pooledBytes(bytes.byteLength);
@@ -1122,11 +1232,38 @@ export function createBufferClass() {
   Buffer.prototype = NodeBuffer.prototype;
   Object.defineProperty(NodeBuffer.prototype, 'constructor', { value: Buffer, configurable: true, writable: true });
   const maxLength = 0x7fffffff;
-  const maxStringLength = 0x100000;
+  const maxStringLength = 0x1fffffe8;
   const constants = Object.freeze({ MAX_LENGTH: maxLength, MAX_STRING_LENGTH: maxStringLength });
   Buffer.constants = constants;
   Buffer.kMaxLength = maxLength;
   Buffer.kStringMaxLength = maxStringLength;
   Buffer.SlowBuffer = function SlowBuffer(size) { return Buffer.alloc(size); };
+  let inspectMaxBytes = 50;
+  Object.defineProperty(Buffer, '__bnhInspectMaxBytes', { configurable: true, value: inspectMaxBytes });
+  Object.defineProperty(NodeBuffer.prototype, 'inspect', {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: bufferInspect,
+  });
+  Object.defineProperty(NodeBuffer.prototype, Symbol.for('nodejs.util.inspect.custom'), {
+    configurable: true,
+    writable: true,
+    value: bufferInspect,
+  });
+  Object.defineProperty(Buffer, 'INSPECT_MAX_BYTES', {
+    configurable: true,
+    enumerable: true,
+    get() { return inspectMaxBytes; },
+    set(value) {
+      if (typeof value !== 'number') throw invalidArgumentTypeError('INSPECT_MAX_BYTES', ['number'], value);
+      if (Number.isNaN(value) || value < 0) throw outOfRangeError('INSPECT_MAX_BYTES', '>= 0', value);
+      inspectMaxBytes = value;
+      Object.defineProperty(Buffer, '__bnhInspectMaxBytes', { configurable: true, value });
+    },
+  });
+  Buffer.atob = nodeAtob;
+  Buffer.btoa = nodeBtoa;
+  Buffer.resolveObjectURL = (url) => objectURLRegistry.get(url);
   return Buffer;
 }

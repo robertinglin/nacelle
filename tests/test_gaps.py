@@ -388,6 +388,34 @@ class GapCardEmissionTests(unittest.TestCase):
             emit_worklist_index([native], out_dir)
             self.assertIn("emsdk", (out_dir / "WORKLIST.md").read_text())
 
+    def test_worklist_index_reports_family_accounting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "worklist"
+            gaps = [
+                Gap(
+                    gap_id="http-a",
+                    kind=MISSING_API,
+                    module="http",
+                    symbols=("request", "get"),
+                    affected_count=2,
+                    affected_paths=("test/http-a.js", "test/http-b.js"),
+                ),
+                Gap(
+                    gap_id="http-b",
+                    kind=MISSING_API,
+                    module="_http_common",
+                    symbols=("HTTPParser",),
+                    affected_count=2,
+                    affected_paths=("test/http-b.js", "test/http-c.js"),
+                ),
+            ]
+            index = emit_worklist_index(gaps, out_dir)
+            text = index.read_text()
+            self.assertIn("Implementation families (runtime write surfaces): **1**", text)
+            self.assertIn("Evidence/build cards: **2**", text)
+            self.assertIn("Distinct missing obligations: **3**", text)
+            self.assertIn("| `runtime/http.js` | _http_common, http | 2 | 3 | 3 |", text)
+
 
 class ProbeResilienceTests(unittest.TestCase):
     """A hanging module must degrade to a load error, not abort the worklist."""

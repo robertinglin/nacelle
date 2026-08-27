@@ -95,16 +95,20 @@ responsive while the job continues running.
 
 ## One round
 
-1. **Pick 3 cards.** Read `WORKLIST.md` (or `bnh gaps --list`). Take the top
-   ranked cards that are non-overlapping by both module and runtime write
-   surface — different modules and different runtime files per round whenever
-   possible. Before dispatch, inspect each card's symbols and determine its
-   likely files under `adapters/playwright/runtime/`. Never assign two agents
-   cards that edit the same runtime file, shared export table, or tightly
-   coupled API family in parallel. If the next ranked card overlaps, skip it
-   for this round and select the next safe card; if overlap is unavoidable,
-   batch the cards into one agent or serialize them after the first merge.
-   Never assign two agents the same card. Note `test/es-module/
+1. **Pick 3 cards.** Read the `## Work accounting` family table in
+   `WORKLIST.md` first, then the `## Evidence/build cards` table. The evidence
+   card count is not the independent-work count: several bounded cards may
+   belong to one runtime write-surface family, and the family table reports
+   the assignment unit and its combined obligations. Take top-ranked cards
+   from different, unclaimed runtime write surfaces — different runtime files
+   per round whenever possible. Before dispatch, inspect each card's symbols
+   and confirm its likely files under `adapters/playwright/runtime/`. Never
+   assign two agents cards that edit the same runtime file, shared export
+   table, or tightly coupled API family in parallel. If the next ranked card
+   overlaps, skip it for this round and select the next safe family; if
+   overlap is unavoidable, batch the cards into one agent or serialize them
+   after the first merge. Never assign two agents the same card or the same
+   family at once. Note `test/es-module/
    test-esm-named-exports.mjs` is a known pre-existing loader-hook timeout:
    when it appears in a card's acceptance list, a "9 of 10 pass" result is
    acceptable — treat that test as a note, not a blocker.
@@ -212,8 +216,14 @@ responsive while the job continues running.
 
 ## Stop / escalate
 
-- Stop starting new rounds when the top open card's affected count is below
-  ~50 (diminishing returns) and report the summary.
+- Do not stop solely because the top open card's affected count is below ~50.
+  That is a card-ranking signal, not a work-completion signal. Continue while
+  a safe, unquarantined family has credible implementation work and a round
+  can close a card or materially reduce that family's obligations. Stop after
+  two consecutive rounds with zero accepted card closures, or when every
+  remaining family is blocked by infrastructure, unsafe to merge, or has no
+  credible browser-native implementation path. Report evidence-card count,
+  distinct obligation count, and runtime-family count separately.
 - Escalate to the user (stop working) if: a merge cannot be resolved
   confidently, an acceptance regression appears that a dedupe fix doesn't
   cure, or the gaps commands error.

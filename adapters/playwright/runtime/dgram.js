@@ -15,6 +15,9 @@ const UDP_CONSTANTS = Object.freeze({
 });
 
 const VIRTUAL_DGRAM_STATE = Symbol.for('bnh.dgram.state');
+const BIND_STATE_UNBOUND = 0;
+const BIND_STATE_BINDING = 1;
+const BIND_STATE_BOUND = 2;
 let nextVirtualDescriptor = 1000;
 
 function asBytes(value, offset = 0, length = undefined) {
@@ -59,7 +62,32 @@ function socketError(code, message) {
 }
 
 function healthCheck(socket) {
-  if (socket._closed) throw socketError('ERR_SOCKET_DGRAM_NOT_RUNNING', 'Not running');
+  if (socket._closed || !socket[VIRTUAL_DGRAM_STATE]?.handle) {
+    throw socketError('ERR_SOCKET_DGRAM_NOT_RUNNING', 'Not running');
+  }
+}
+
+function stopReceiving(socket) {
+  const state = socket[VIRTUAL_DGRAM_STATE];
+  if (!state?.receiving) return;
+  state.handle?.recvStop?.();
+  state.receiving = false;
+}
+
+function enqueue(socket, operation) {
+  const state = socket[VIRTUAL_DGRAM_STATE];
+  if (state.queue === undefined) {
+    state.queue = [];
+    socket.once(EventEmitter.errorMonitor, () => {
+      state.queue = undefined;
+    });
+    socket.once('listening', () => {
+      const queue = state.queue;
+      state.queue = undefined;
+      for (const queuedOperation of queue || []) queuedOperation();
+    });
+  }
+  state.queue.push(operation);
 }
 
 function makeNodeBytes(bytes, BufferClass) {
@@ -83,7 +111,6 @@ export class Socket extends EventEmitter {
     this._bufferClass = internal.BufferClass;
     this._trackTask = internal.trackTask;
     this._diagnostics = internal.diagnostics;
-    this._reuseAddr = Boolean(internal.reuseAddr);
     this._reusePort = Boolean(internal.reusePort);
     this._ipv6Only = Boolean(internal.ipv6Only);
     this._cluster = internal.cluster;
@@ -102,10 +129,11 @@ export class Socket extends EventEmitter {
     this.boundAddress = null;
     this._taskRelease = null;
     this._sendResources = new Set();
+    this._sendQueueCount = 0;
     // A UDP socket is an async resource whose callbacks inherit the context
     // in which the socket was created, including an active AsyncLocalStorage.
     this._receiveResource = new AsyncResource('UDPWRAP');
-    this[VIRTUAL_DGRAM_STATE] = {
+    const state = this[VIRTUAL_DGRAM_STATE] = {
       handle: {
         fd: nextVirtualDescriptor++,
         lookup: (address, callback) => this._dns.lookup(
@@ -114,7 +142,20 @@ export class Socket extends EventEmitter {
           callback,
         ),
       },
+      receiving: false,
+      bindState: BIND_STATE_UNBOUND,
+      queue: undefined,
+      reuseAddr: Boolean(internal.reuseAddr),
     };
+    state.handle.recvStart = () => {
+      state.receiving = true;
+      return 0;
+    };
+    state.handle.recvStop = () => {
+      state.receiving = false;
+      return 0;
+    };
+    state.handle.getSendQueueCount = () => this._sendQueueCount;
     const diagnostics = typeof this._diagnostics === 'function' ? this._diagnostics() : this._diagnostics;
     const channel = diagnostics?.channel?.('udp.socket');
     if (channel?.hasSubscribers) channel.publish({ socket: this });
@@ -123,7 +164,9 @@ export class Socket extends EventEmitter {
 
   bind(port_, address_, callback_) {
     healthCheck(this);
-    if (this._bound || this._binding) throw socketError('ERR_SOCKET_ALREADY_BOUND', 'Socket is already bound');
+    if (this._bindState !== BIND_STATE_UNBOUND) {
+      throw socketError('ERR_SOCKET_ALREADY_BOUND', 'Socket is already bound');
+    }
     let options = {};
     let port = port_;
     let address = address_;
@@ -164,6 +207,7 @@ export class Socket extends EventEmitter {
     let normalizedAddress = normalizeVirtualAddress(address || (family === 6 ? '::' : '0.0.0.0'), family);
     const requestedPort = validatePort(port ?? 0);
     this._binding = true;
+    this[VIRTUAL_DGRAM_STATE].bindState = BIND_STATE_BINDING;
     queueMicrotask(() => {
       if (this._closed) return;
       const handle = this[VIRTUAL_DGRAM_STATE].handle;
@@ -171,6 +215,7 @@ export class Socket extends EventEmitter {
         if (this._closed) return;
         if (lookupError) {
           this._binding = false;
+          this[VIRTUAL_DGRAM_STATE].bindState = BIND_STATE_UNBOUND;
           this.emit('error', lookupError);
           return;
         }
@@ -198,11 +243,15 @@ export class Socket extends EventEmitter {
           this._taskRelease = this._refed ? this._trackTask?.() || null : null;
           this._binding = false;
           this._bound = true;
+          const state = this[VIRTUAL_DGRAM_STATE];
+          state.bindState = BIND_STATE_BOUND;
+          state.handle.recvStart?.();
           this.emit('listening');
           this._onListening?.(this.address());
           callback?.call(this);
         } catch (error) {
           this._binding = false;
+          this[VIRTUAL_DGRAM_STATE].bindState = BIND_STATE_UNBOUND;
           this.emit('error', error);
         }
       });
@@ -291,7 +340,15 @@ export class Socket extends EventEmitter {
         }
         const resource = new AsyncResource('UDPSENDWRAP');
         this._sendResources.add(resource);
-        const runCallback = (...callbackArgs) => resource.runInAsyncScope(callback, this, ...callbackArgs);
+        this._sendQueueCount += 1;
+        let callbackFinished = false;
+        const runCallback = (...callbackArgs) => {
+          if (!callbackFinished) {
+            callbackFinished = true;
+            this._sendQueueCount = Math.max(0, this._sendQueueCount - 1);
+          }
+          return resource.runInAsyncScope(callback, this, ...callbackArgs);
+        };
         const handleSend = this[VIRTUAL_DGRAM_STATE].handle.send;
         if (typeof handleSend === 'function') {
           let result;
@@ -340,7 +397,7 @@ export class Socket extends EventEmitter {
     if (!this._bound) {
       if (!this._binding) this.bind(0, this.type === 'udp6' ? '::' : '0.0.0.0');
       if (this._bound) transmit();
-      else this.once('listening', transmit);
+      else enqueue(this, transmit);
     } else {
       transmit();
     }
@@ -422,9 +479,14 @@ export class Socket extends EventEmitter {
     this._closed = true;
     this._binding = false;
     if (this._bound) this._network.unbindUdp(this);
+    stopReceiving(this);
     this._taskRelease?.();
     this._taskRelease = null;
     this._bound = false;
+    this[VIRTUAL_DGRAM_STATE].bindState = BIND_STATE_UNBOUND;
+    this[VIRTUAL_DGRAM_STATE].queue = undefined;
+    this._sendQueueCount = 0;
+    this[VIRTUAL_DGRAM_STATE].handle = null;
     this.boundPort = null;
     this.boundAddress = null;
     queueMicrotask(() => {
@@ -449,7 +511,7 @@ export class Socket extends EventEmitter {
   }
 
   _receiveDatagram(bytes, rinfo) {
-    if (this._closed) return;
+    if (this._closed || !this[VIRTUAL_DGRAM_STATE].receiving) return;
     const family = rinfo?.family === 'IPv6' ? 'ipv6' : 'ipv4';
     if (this._receiveBlockList?.check?.(rinfo?.address, family)) return;
     this._receiveResource.runInAsyncScope(
@@ -460,6 +522,7 @@ export class Socket extends EventEmitter {
 
   getRecvBufferSize() { return 0; }
   getSendBufferSize() { return 0; }
+  getSendQueueCount() { return this[VIRTUAL_DGRAM_STATE].handle.getSendQueueCount(); }
   setRecvBufferSize() { return this; }
   setSendBufferSize() { return this; }
   setBroadcast() { return this; }
@@ -481,6 +544,56 @@ export class Socket extends EventEmitter {
     return this;
   }
 }
+
+// Deprecated private APIs retained for compatibility with Node's dgram
+// wrapper. The browser implementation stores the same state on its virtual
+// handle instead of exposing host socket internals.
+Object.defineProperty(Socket.prototype, '_handle', {
+  configurable: false,
+  enumerable: false,
+  get() { return this[VIRTUAL_DGRAM_STATE]?.handle || null; },
+  set(value) { this[VIRTUAL_DGRAM_STATE].handle = value; },
+});
+
+Object.defineProperty(Socket.prototype, '_receiving', {
+  configurable: false,
+  enumerable: false,
+  get() { return this[VIRTUAL_DGRAM_STATE].receiving; },
+  set(value) { this[VIRTUAL_DGRAM_STATE].receiving = value; },
+});
+
+Object.defineProperty(Socket.prototype, '_bindState', {
+  configurable: false,
+  enumerable: false,
+  get() { return this[VIRTUAL_DGRAM_STATE].bindState; },
+  set(value) {
+    this[VIRTUAL_DGRAM_STATE].bindState = value;
+    this._binding = value === BIND_STATE_BINDING;
+    this._bound = value === BIND_STATE_BOUND;
+  },
+});
+
+Object.defineProperty(Socket.prototype, '_queue', {
+  configurable: false,
+  enumerable: false,
+  get() { return this[VIRTUAL_DGRAM_STATE].queue; },
+  set(value) { this[VIRTUAL_DGRAM_STATE].queue = value; },
+});
+
+Object.defineProperty(Socket.prototype, '_reuseAddr', {
+  configurable: false,
+  enumerable: false,
+  get() { return this[VIRTUAL_DGRAM_STATE].reuseAddr; },
+  set(value) { this[VIRTUAL_DGRAM_STATE].reuseAddr = value; },
+});
+
+Socket.prototype._healthCheck = function _healthCheck() {
+  healthCheck(this);
+};
+
+Socket.prototype._stopReceiving = function _stopReceiving() {
+  stopReceiving(this);
+};
 
 export function createBrowserDgram({ network = sharedVirtualNetwork, transport, dns = createBrowserDns(), BufferClass, trackTask, diagnostics, cluster, clusterGroupId, onListening } = {}) {
   const configuredNetwork = transport && network === sharedVirtualNetwork ? createVirtualNetwork({ transport }) : network;

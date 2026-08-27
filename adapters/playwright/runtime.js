@@ -584,6 +584,25 @@ function createSourceMapClass() {
         name: entry[5],
       };
     }
+
+    findOrigin(lineNumber, columnNumber) {
+      const range = this.findEntry(lineNumber - 1, columnNumber - 1);
+      if (range.originalSource === undefined
+        || range.originalLine === undefined
+        || range.originalColumn === undefined
+        || range.generatedLine === undefined
+        || range.generatedColumn === undefined) {
+        return {};
+      }
+      const lineOffset = lineNumber - range.generatedLine;
+      const columnOffset = columnNumber - range.generatedColumn;
+      return {
+        name: range.name,
+        fileName: range.originalSource,
+        lineNumber: range.originalLine + lineOffset,
+        columnNumber: range.originalColumn + columnOffset,
+      };
+    }
   }
 
   return SourceMap;
@@ -2208,6 +2227,147 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         };
       };
       const globalPaths = [];
+      const modulePathCache = Object.create(null);
+      const moduleExtensions = Object.create(null);
+      const decodeModuleSource = (source) => typeof source === 'string'
+        ? source
+        : new TextDecoder().decode(source);
+      const tryModuleFile = (filename, isMain) => {
+        if (stat(filename) !== 0) return false;
+        if (isMain) return path.resolve(filename);
+        try { return fs.realpathSync(path.resolve(filename)); } catch { return path.resolve(filename); }
+      };
+      const tryModuleExtensions = (basePath, extensions, isMain) => {
+        for (const extension of extensions) {
+          const filename = tryModuleFile(`${basePath}${extension}`, isMain);
+          if (filename) return filename;
+        }
+        return false;
+      };
+      const tryModulePackage = (requestPath, extensions, isMain, originalPath) => {
+        const packageConfig = readPackage(requestPath);
+        const packageMain = packageConfig.main;
+        if (!packageMain) return tryModuleExtensions(path.resolve(requestPath, 'index'), extensions, isMain);
+
+        const mainPath = path.resolve(requestPath, packageMain);
+        const actual = tryModuleFile(mainPath, isMain)
+          || tryModuleExtensions(mainPath, extensions, isMain)
+          || tryModuleExtensions(path.resolve(mainPath, 'index'), extensions, isMain);
+        if (actual) return actual;
+
+        const fallback = tryModuleExtensions(path.resolve(requestPath, 'index'), extensions, isMain);
+        if (!fallback) {
+          const error = new Error(`Cannot find module '${mainPath}'. Please verify that the package.json has a valid "main" entry`);
+          error.code = 'MODULE_NOT_FOUND';
+          error.path = packageConfig.pjsonPath;
+          error.requestPath = originalPath;
+          throw error;
+        }
+        processObj.emitWarning?.(
+          `Invalid 'main' field in '${packageConfig.pjsonPath}' of '${packageMain}'. Please either fix that or report it to the module author`,
+          { code: 'DEP0128', type: 'DeprecationWarning' },
+        );
+        return fallback;
+      };
+      moduleExtensions['.js'] = (module, filename) => {
+        const source = decodeModuleSource(readSource(filename));
+        const format = filename.endsWith('.mjs') || isRuntimeEsmModule(filename, processObj.execArgv)
+          ? 'module'
+          : filename.endsWith('.cjs') ? 'commonjs' : undefined;
+        module._compile(source, filename, format);
+      };
+      moduleExtensions['.json'] = (module, filename) => {
+        try {
+          module.exports = JSON.parse(decodeModuleSource(readSource(filename)).replace(/^\uFEFF/, ''));
+        } catch (error) {
+          error.message = `${filename}: ${error.message}`;
+          throw error;
+        }
+      };
+      moduleExtensions['.node'] = (_module, filename) => rejectNativeAddon(filename, processObj);
+      const moduleDebug = (...args) => {
+        const sections = String(processObj.env?.NODE_DEBUG || '')
+          .split(',')
+          .map((section) => section.trim().toUpperCase())
+          .filter(Boolean);
+        if (!sections.includes('MODULE') && !sections.includes('*') && !sections.includes('DEBUG')) return;
+        childStderr?.(`MODULE ${processObj.pid || 0}: ${args.map(String).join(' ')}\n`);
+      };
+      const moduleDeprecatedDebug = createDeprecate(processObj)(
+        moduleDebug,
+        'Module._debug is deprecated.',
+        'DEP0077',
+      );
+      const moduleNodePaths = (from) => {
+        const absolute = path.resolve(from);
+        if (absolute === '/') return ['/node_modules'];
+        const paths = [];
+        const nodeModulesName = 'node_modules';
+        for (let index = absolute.length - 1, segmentLength = 0, last = absolute.length; index >= 0; index -= 1) {
+          const character = absolute[index];
+          if (character === '/') {
+            if (segmentLength !== nodeModulesName.length) {
+              paths.push(`${absolute.slice(0, last)}/node_modules`);
+            }
+            last = index;
+            segmentLength = 0;
+          } else if (segmentLength !== -1) {
+            if (nodeModulesName[nodeModulesName.length - 1 - segmentLength] === character) segmentLength += 1;
+            else segmentLength = -1;
+          }
+        }
+        paths.push('/node_modules');
+        return paths;
+      };
+      const moduleInitPaths = () => {
+        const homeDir = processObj.platform === 'win32' ? processObj.env?.USERPROFILE : processObj.env?.HOME;
+        const nodePath = processObj.platform === 'win32' ? processObj.env?.NODE_PATH : processObj.env?.NODE_PATH;
+        const prefixDir = processObj.platform === 'win32'
+          ? path.resolve(processObj.execPath, '..')
+          : path.resolve(processObj.execPath, '..', '..');
+        const paths = [path.resolve(prefixDir, 'lib', 'node')];
+        if (homeDir) {
+          paths.unshift(path.resolve(homeDir, '.node_libraries'));
+          paths.unshift(path.resolve(homeDir, '.node_modules'));
+        }
+        if (nodePath) paths.unshift(...String(nodePath).split(path.delimiter).filter(Boolean));
+        globalPaths.splice(0, globalPaths.length, ...paths);
+        moduleApi.globalPaths = [...globalPaths];
+      };
+      const isRelativeModuleRequest = (request) => request[0] === '.'
+        && (request.length === 1 || request === '..' || request.startsWith('./')
+          || request.startsWith('../') || request.startsWith('.\\') || request.startsWith('..\\'));
+      const moduleFindPath = (request, paths, isMain, _conditions) => {
+        const absoluteRequest = path.isAbsolute(request);
+        if (absoluteRequest) paths = [''];
+        else if (!paths || paths.length === 0) return false;
+
+        const cacheKey = `${request}\x00${paths.join('\x00')}`;
+        const cached = modulePathCache[cacheKey];
+        if (cached) return cached;
+
+        const trailingSlash = request.length > 0 && (request.endsWith('/') || request === '.'
+          || request.endsWith('/.') || request === '..' || request.endsWith('/..'));
+        let insidePath = true;
+        if (isRelativeModuleRequest(request) && path.normalize(request).startsWith('..')) insidePath = false;
+        const extensions = Object.keys(moduleExtensions);
+        for (const currentPath of paths) {
+          if (typeof currentPath !== 'string') throw moduleArgumentTypeError('paths', 'array of strings', paths);
+          if (insidePath && currentPath && stat(currentPath) < 1) continue;
+          const basePath = path.resolve(currentPath, request);
+          const result = !trailingSlash
+            ? tryModuleFile(basePath, isMain) || tryModuleExtensions(basePath, extensions, isMain)
+            : false;
+          const directoryResult = result || (stat(basePath) === 1
+            ? tryModulePackage(basePath, extensions, isMain, request)
+            : false);
+          if (directoryResult) {
+            modulePathCache[cacheKey] = directoryResult;
+            return directoryResult;
+          }
+        }
+        return false;
+      };
       const stat = (filename) => {
         if (typeof filename !== 'string') throw moduleArgumentTypeError('filename', 'string', filename);
         try {
@@ -2303,6 +2463,23 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       const moduleApi = Object.assign(Module, {
         builtinModules: BUILTIN_NAMES,
         globalPaths,
+        _debug: moduleDeprecatedDebug,
+        _extensions: moduleExtensions,
+        _findPath: moduleFindPath,
+        _initPaths: moduleInitPaths,
+        _nodeModulePaths: moduleNodePaths,
+        _pathCache: modulePathCache,
+        _preloadModules: (requests) => {
+          if (!Array.isArray(requests)) return;
+          processObj.__bnhModuleIsPreloading = true;
+          const parent = new Module('internal/preload', null);
+          try {
+            parent.paths = moduleApi._nodeModulePaths(processObj.cwd?.() || '/node');
+            for (const request of requests) parent.require(request);
+          } finally {
+            processObj.__bnhModuleIsPreloading = false;
+          }
+        },
         _readPackage: readPackage,
         _stat: stat,
         _resolveLookupPaths: resolveLookupPaths,

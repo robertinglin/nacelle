@@ -1,5 +1,6 @@
 import { ensureOutputStream } from './streams.js';
 import { AsyncResource } from './async-hooks.js';
+import { inspect as runtimeInspect } from './assert.js';
 
 export const kWeakHandler = Symbol.for('nodejs.internal.event_target.weakHandler');
 
@@ -242,45 +243,299 @@ export function createConstants() {
   });
 }
 
-function writeStream(stream, value) {
-  if (stream && typeof stream.write === 'function') stream.write(`${value}\n`);
+function quoteConsoleString(value) {
+  return `'${String(value)
+    .replaceAll('\\', '\\\\')
+    .replaceAll("'", "\\'")
+    .replaceAll('\n', '\\n')
+    .replaceAll('\r', '\\r')
+    .replaceAll('\t', '\\t')}'`;
 }
 
-function formatConsole(values) {
+function inspectConsole(value, options = {}, state = { seen: new WeakSet(), depth: 0 }) {
+  if (value === undefined) return 'undefined';
+  if (value === null) return 'null';
+  if (typeof value === 'string') return quoteConsoleString(value);
+  if (typeof value === 'number') {
+    if (Number.isNaN(value)) return 'NaN';
+    if (Object.is(value, -0)) return '-0';
+    return String(value);
+  }
+  if (typeof value === 'bigint' || typeof value === 'boolean' || typeof value === 'symbol') return String(value);
+  if (typeof value === 'function') return `[Function${value.name ? `: ${value.name}` : ' (anonymous)'}]`;
+  if (state.seen.has(value)) return '[Circular]';
+  if (options.depth !== null && state.depth >= (options.depth ?? 2)) {
+    if (Array.isArray(value)) return '[Array]';
+    return '[Object]';
+  }
+  state.seen.add(value);
+  const next = { ...state, depth: state.depth + 1 };
+  let result;
+  if (Array.isArray(value) || (ArrayBuffer.isView(value) && !(value instanceof DataView))) {
+    const items = Array.from(value, (entry) => inspectConsole(entry, options, next));
+    result = options.multiline && items.length
+      ? `[\n${items.map((entry) => `  ${entry}`).join(',\n')}\n]`
+      : items.length ? `[ ${items.join(', ')} ]` : '[]';
+  } else if (value instanceof Date) {
+    result = Number.isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString();
+  } else if (value instanceof Map) {
+    result = `Map(${value.size}) { ${[...value].map(([key, entry]) => `${inspectConsole(key, options, next)} => ${inspectConsole(entry, options, next)}`).join(', ')} }`;
+  } else if (value instanceof Set) {
+    result = `Set(${value.size}) { ${[...value].map((entry) => inspectConsole(entry, options, next)).join(', ')} }`;
+  } else {
+    const keys = Object.keys(value);
+    const entries = keys.map((key) => {
+      const label = /^[A-Za-z_$][\w$]*$/.test(key) ? key : quoteConsoleString(key);
+      return `${label}: ${inspectConsole(value[key], options, next)}`;
+    });
+    result = options.multiline && entries.length
+      ? `{\n${entries.map((entry) => `  ${entry}`).join(',\n')}\n}`
+      : entries.length ? `{ ${entries.join(', ')} }` : '{}';
+  }
+  state.seen.delete(value);
+  return result;
+}
+
+function inspectValue(value, inspectOptions, useRuntimeInspect) {
+  return useRuntimeInspect ? runtimeInspect(value, inspectOptions) : inspectConsole(value, inspectOptions);
+}
+
+function formatConsole(values, inspectOptions = {}, useRuntimeInspect = false) {
   if (!values.length) return '';
-  const first = String(values[0]);
+  if (typeof values[0] !== 'string') return values.map((value) => inspectValue(value, inspectOptions, useRuntimeInspect)).join(' ');
   let index = 1;
-  const formatted = first.replace(/%[sdifjoO%]/g, (token) => {
+  const first = values[0].replace(/%[sdifjoO%]/g, (token) => {
     if (token === '%%') return '%';
     if (index >= values.length) return token;
     const value = values[index++];
-    return token === '%j' ? JSON.stringify(value) : String(value);
+    if (token === '%j') {
+      try { return JSON.stringify(value); } catch { return '[Circular]'; }
+    }
+    if (token === '%o' || token === '%O') return inspectValue(value, inspectOptions, useRuntimeInspect);
+    if (token === '%d' || token === '%i') return String(Number(value));
+    if (token === '%f') return String(Number.parseFloat(value));
+    return String(value);
   });
-  return [formatted, ...values.slice(index).map((value) => String(value))].join(' ');
+  return [first, ...values.slice(index).map((value) => typeof value === 'string' ? value : inspectValue(value, inspectOptions, useRuntimeInspect))].join(' ');
+}
+
+function invalidConsoleType(name, value, expected) {
+  const received = value === null ? 'null' : value === undefined ? 'undefined' : typeof value === 'object'
+    ? `an instance of ${value.constructor?.name || 'Object'}` : `type ${typeof value} (${String(value)})`;
+  const error = new TypeError(`The "${name}" argument must be ${expected}. Received ${received}`);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function invalidInspectOptions(value) {
+  const received = value === null ? 'null' : typeof value === 'boolean' ? `type boolean (${value})`
+    : typeof value === 'string' ? `type string (${quoteConsoleString(value)})`
+      : typeof value === 'number' ? `type number (${value})`
+        : typeof value === 'symbol' ? `type symbol (${String(value)})` : String(value);
+  const error = new TypeError(`The "options.inspectOptions" property must be of type object. Received ${received}`);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function invalidConsoleValue(name, value) {
+  const error = new TypeError(`The argument '${name}' must be one of: 'auto', true, false. Received ${inspectConsole(value)}`);
+  error.code = 'ERR_INVALID_ARG_VALUE';
+  return error;
+}
+
+function writableConsoleStream(stream, name) {
+  if (stream && typeof stream.write === 'function') return stream;
+  const error = new TypeError(`Console expects a writable stream instance for ${name}`);
+  error.code = 'ERR_CONSOLE_WRITABLE_STREAM';
+  throw error;
+}
+
+function streamError(stream) {
+  return stream?._writableState?.errored || stream?.errored || null;
+}
+
+function writeStream(stream, value, ignoreErrors) {
+  try {
+    stream.write(`${value}\n`);
+  } catch (error) {
+    if (!ignoreErrors || error instanceof RangeError) throw error;
+    return;
+  }
+  const error = streamError(stream);
+  if (error && (!ignoreErrors || error instanceof RangeError)) throw error;
+}
+
+function stringWidth(value) {
+  return [...String(value)].reduce((width, character) => {
+    const code = character.codePointAt(0);
+    return width + ((code >= 0x1100 && (code <= 0x115f || code >= 0x2e80)) ? 2 : 1);
+  }, 0);
+}
+
+const TABLE_UNDEFINED = Symbol('console.table.undefined');
+
+function tableRows(data, properties) {
+  const iteratorTag = Object.prototype.toString.call(data);
+  if (data instanceof Map || iteratorTag === '[object Map Iterator]') {
+    const entries = data instanceof Map ? [...data] : [...data];
+    if (data instanceof Map || entries.every((entry) => Array.isArray(entry) && entry.length === 2)) {
+      return { index: '(iteration index)', rows: entries.map(([key, value], index) => ({ index, key, value })), columns: ['Key', 'Values'], values: (row, column) => column === 'Key' ? row.key : row.value };
+    }
+    return { index: '(iteration index)', rows: entries.map((value, index) => ({ index, value })), columns: ['Values'], values: (row) => row.value };
+  }
+  if (data && (data instanceof Set || iteratorTag === '[object Set Iterator]')) {
+    const values = data instanceof Set ? [...data] : [...data];
+    return { index: '(iteration index)', rows: values.map((value, index) => ({ index, value })), columns: ['Values'], values: (row) => row.value };
+  }
+  if (Array.isArray(data) || (ArrayBuffer.isView(data) && !(data instanceof DataView))) {
+    const rows = Array.from(data, (value, index) => ({ index, value }));
+    const nested = new Set();
+    let hasValues = false;
+    for (const row of rows) {
+      if (row.value && typeof row.value === 'object' && !Array.isArray(row.value)) for (const key of Object.keys(row.value)) nested.add(key);
+      if (Array.isArray(row.value)) for (let index = 0; index < row.value.length; index += 1) nested.add(String(index));
+      if (row.value === null || typeof row.value !== 'object') hasValues = true;
+    }
+    const columns = rows.length === 0 ? [] : [...nested, ...(hasValues ? ['Values'] : nested.size ? [] : ['Values'])];
+    return {
+      index: '(index)', rows, columns,
+      values: (row, column) => column === 'Values' && (row.value === null || typeof row.value !== 'object')
+        ? row.value === undefined ? TABLE_UNDEFINED : row.value
+        : row.value && Object.prototype.hasOwnProperty.call(row.value, column) ? row.value[column] : undefined,
+    };
+  }
+  const rows = Object.keys(Object(data)).map((key) => ({ index: key, value: data[key] }));
+  const nested = new Set();
+  let hasValues = false;
+  for (const row of rows) {
+    if (row.value && typeof row.value === 'object' && !Array.isArray(row.value)) for (const key of Object.keys(row.value)) nested.add(key);
+    if (Array.isArray(row.value)) for (let index = 0; index < row.value.length; index += 1) nested.add(String(index));
+    if (row.value === null || typeof row.value !== 'object') hasValues = true;
+  }
+  const columns = rows.length === 0 ? [] : [...nested, ...(hasValues ? ['Values'] : nested.size ? [] : ['Values'])];
+  return {
+    index: '(index)', rows, columns,
+    values: (row, column) => column === 'Values' && (row.value === null || typeof row.value !== 'object')
+      ? row.value === undefined ? TABLE_UNDEFINED : row.value
+      : row.value && Object.prototype.hasOwnProperty.call(row.value, column) ? row.value[column] : undefined,
+  };
+}
+
+function formatTable(data, properties) {
+  const table = tableRows(data, properties);
+  const columns = properties === undefined ? table.columns : properties;
+  const headers = [table.index, ...columns];
+  const rows = table.rows.map((row) => [row.index, ...columns.map((column) => table.values(row, column))]);
+  const rendered = rows.map((row) => row.map((value, index) => index === 0
+    ? String(value)
+    : value === TABLE_UNDEFINED ? inspectConsole(undefined) : value === undefined ? ''
+      : Array.isArray(value) || (ArrayBuffer.isView(value) && !(value instanceof DataView))
+        ? inspectConsole(value) : inspectConsole(value, { depth: 0 })));
+  const widths = headers.map((header, index) => Math.max(stringWidth(header), ...rendered.map((row) => stringWidth(row[index] || ''))));
+  const border = (left, join, right, fill = '─') => left + widths.map((width) => fill.repeat(width + 2)).join(join) + right;
+  const line = (row) => `│${row.map((value, index) => ` ${value}${' '.repeat(widths[index] - stringWidth(value))} `).join('│')}│`;
+  return [
+    border('┌', '┬', '┐'),
+    line(headers),
+    border('├', '┼', '┤'),
+    ...rendered.map(line),
+    border('└', '┴', '┘'),
+  ].join('\n');
 }
 
 export function createConsoleModule(processObject) {
-  class Console {
-    constructor(stdoutOrOptions = processObject.stdout, stderr = processObject.stderr) {
-      if (stdoutOrOptions && typeof stdoutOrOptions === 'object' && 'stdout' in stdoutOrOptions) {
-        this._stdout = stdoutOrOptions.stdout;
-        this._stderr = stdoutOrOptions.stderr || stderr;
-      } else {
-        this._stdout = stdoutOrOptions;
-        this._stderr = stderr;
-      }
+  const methods = ['log', 'info', 'debug', 'warn', 'error', 'dir', 'time', 'timeEnd', 'timeLog', 'timeStamp', 'trace', 'assert', 'clear', 'count', 'countReset', 'group', 'groupEnd', 'table', 'dirxml', 'groupCollapsed'];
+  function Console(stdoutOrOptions, stderr, ignoreErrors) {
+    if (!new.target) return new Console(...arguments);
+    let options = {};
+    if (stdoutOrOptions && typeof stdoutOrOptions === 'object' && Object.hasOwn(stdoutOrOptions, 'stdout')) options = stdoutOrOptions;
+    const stdout = options.stdout ?? stdoutOrOptions;
+    const error = options.stderr ?? stderr ?? processObject.stderr;
+    this._stdout = writableConsoleStream(stdout, 'stdout');
+    this._stderr = writableConsoleStream(error, 'stderr');
+    this._ignoreErrors = options.ignoreErrors ?? ignoreErrors ?? true;
+    this._inspectOptions = options.inspectOptions ?? {};
+    if (options.inspectOptions !== undefined && (options.inspectOptions === null || typeof options.inspectOptions !== 'object' || Array.isArray(options.inspectOptions))) {
+      throw invalidInspectOptions(options.inspectOptions);
     }
-
-    log(...values) { writeStream(this._stdout, formatConsole(values)); }
-    info(...values) { this.log(...values); }
-    debug(...values) { this.log(...values); }
-    warn(...values) { writeStream(this._stderr, formatConsole(values)); }
-    error(...values) { this.warn(...values); }
-    dir(value) { this.log(JSON.stringify(value)); }
-    assert(value, ...values) { if (!value) this.error('Assertion failed', ...values); }
+    if (options.colorMode !== undefined && !['auto', true, false].includes(options.colorMode)) throw invalidConsoleValue('colorMode', options.colorMode);
+    if (options.colorMode !== undefined && options.inspectOptions?.colors !== undefined) {
+      const incompatible = new TypeError('Option "options.inspectOptions.color" cannot be used in combination with option "colorMode"');
+      incompatible.code = 'ERR_INCOMPATIBLE_OPTION_PAIR';
+      throw incompatible;
+    }
+    this._colorMode = options.colorMode;
+    this._groupIndentation = options.groupIndentation === undefined ? 2 : options.groupIndentation;
+    if (options.groupIndentation !== undefined && typeof options.groupIndentation !== 'number') {
+      throw invalidConsoleType('options.groupIndentation', options.groupIndentation, 'of type number');
+    }
+    if (options.groupIndentation !== undefined && !Number.isInteger(options.groupIndentation)) {
+      const range = new RangeError('The property \'options.groupIndentation\' must be an integer');
+      range.code = 'ERR_OUT_OF_RANGE';
+      throw range;
+    }
+    if (this._groupIndentation < 0 || this._groupIndentation > 1000) {
+      const range = new RangeError('The property \'options.groupIndentation\' must be >= 0 && <= 1000');
+      range.code = 'ERR_OUT_OF_RANGE';
+      throw range;
+    }
+    this._groupIndent = 0;
+    this._times = new Map();
+    this._counts = new Map();
+    for (const name of methods) if (typeof this[name] === 'function') this[name] = this[name].bind(this);
   }
-  const consoleObject = new Console();
-  return Object.freeze({ Console, ...Object.fromEntries(['log', 'info', 'debug', 'warn', 'error', 'dir', 'assert'].map((name) => [name, consoleObject[name].bind(consoleObject)])) });
+  const write = (instance, stream, values) => {
+    const indentation = ' '.repeat(instance._groupIndent * instance._groupIndentation);
+    const inspectOptions = instance._colorMode !== undefined || Object.keys(instance._inspectOptions).length > 0
+      ? { ...instance._inspectOptions, multiline: true }
+      : instance._inspectOptions;
+    const text = formatConsole(values, inspectOptions, false).replaceAll('\n', `\n${indentation}`);
+    writeStream(stream, `${indentation}${text}`, instance._ignoreErrors);
+  };
+  Object.assign(Console.prototype, {
+    constructor: Console,
+    log(...values) { write(this, this._stdout, values); },
+    info(...values) { this.log(...values); },
+    debug(...values) { this.log(...values); },
+    warn(...values) { write(this, this._stderr, values); },
+    error(...values) { this.warn(...values); },
+    dir(value) {
+      const inspectOptions = this._colorMode !== undefined || Object.keys(this._inspectOptions).length > 0
+        ? { ...this._inspectOptions, multiline: true }
+        : this._inspectOptions;
+      write(this, this._stdout, [inspectValue(value, inspectOptions, false)]);
+    },
+    time(label = 'default') { if (!this._times.has(String(label))) this._times.set(String(label), Date.now()); },
+    timeEnd(label = 'default') { const key = String(label); if (!this._times.has(key)) return; const duration = Date.now() - this._times.get(key); this._times.delete(key); this.log(`${key}: ${duration}ms`); },
+    timeLog(label = 'default', ...values) { const key = String(label); if (!this._times.has(key)) return; const duration = Date.now() - this._times.get(key); this.log(`${key}: ${duration}ms`, ...values); },
+    timeStamp() {},
+    trace(...values) {
+      const stack = new Error().stack?.split('\n').slice(2).join('\n') || '';
+      const inspectOptions = this._colorMode !== undefined || Object.keys(this._inspectOptions).length > 0
+        ? { ...this._inspectOptions, multiline: true }
+        : this._inspectOptions;
+      write(this, this._stderr, [`Trace: ${formatConsole(values, inspectOptions, false)}${stack ? `\n${stack}` : ''}`]);
+    },
+    assert(value, ...values) { if (!value) this.error('Assertion failed', ...values); },
+    clear() {},
+    count(label = 'default') { const key = String(label); const count = (this._counts.get(key) || 0) + 1; this._counts.set(key, count); this.log(`${key}: ${count}`); },
+    countReset(label = 'default') { this._counts.delete(String(label)); },
+    group(...values) { if (values.length) this.log(...values); this._groupIndent += 1; },
+    groupEnd() { this._groupIndent = Math.max(0, this._groupIndent - 1); },
+    table(data, properties) {
+      if (properties !== undefined && !Array.isArray(properties)) throw invalidConsoleType('properties', properties, 'an instance of Array');
+      if (data === null || data === undefined || typeof data !== 'object') {
+        writeStream(this._stdout, typeof data === 'string' ? data : inspectConsole(data, this._inspectOptions), this._ignoreErrors);
+        return;
+      }
+      writeStream(this._stdout, formatTable(data, properties), this._ignoreErrors);
+    },
+    dirxml(...values) { this.log(...values); },
+    groupCollapsed(...values) { this.group(...values); },
+  });
+  const consoleObject = new Console(processObject.stdout, processObject.stderr);
+  consoleObject.Console = Console;
+  return Object.freeze(consoleObject);
 }
 
 async function readStream(stream) {

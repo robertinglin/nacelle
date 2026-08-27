@@ -6524,6 +6524,24 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       arch: processObject.arch,
     });
     const childConsole = createConsole(stdout, stderr, scope.console || {});
+    // The console builtin is also the global console object in Node. Reuse
+    // the browser output facade while giving it the shared Console prototype
+    // and stateful methods implemented by the compatibility module.
+    const consoleModule = builtins.console;
+    if (consoleModule?.Console) {
+      Object.setPrototypeOf(childConsole, consoleModule.Console.prototype);
+      childConsole.Console = consoleModule.Console;
+      childConsole._stdout = { write: (value) => { stdout(value); return true; } };
+      childConsole._stderr = { write: (value) => { stderr(value); return true; } };
+      childConsole._ignoreErrors = true;
+      childConsole._inspectOptions = {};
+      childConsole._colorMode = undefined;
+      childConsole._groupIndentation = 2;
+      childConsole._groupIndent = 0;
+      childConsole._times = new Map();
+      childConsole._counts = new Map();
+      builtins.console = childConsole;
+    }
     const onUnhandledRejection = (event) => {
       const dispatch = () => {
         const handled = processObject.emit('unhandledRejection', event.reason, event.promise);

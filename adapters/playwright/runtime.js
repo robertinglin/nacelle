@@ -3494,6 +3494,22 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       repeat,
       type,
     );
+    const scheduleLegacyTimer = (item, refed) => {
+      if (item?._bnhTimer) processObject._bnhClearTimer(item._bnhTimer);
+      if (item._idleTimeout < 0 || item._idleTimeout === undefined) return item;
+      const handle = processObject._bnhSetTimer(
+        function legacyTimerCallback() {
+          item._bnhTimer = null;
+          item._onTimeout?.call(item);
+        },
+        item._idleTimeout,
+        false,
+        'Timeout',
+      );
+      if (!refed) handle.unref?.();
+      item._bnhTimer = handle;
+      return item;
+    };
     const timers = {
       setTimeout: (callback, delay, ...args) => scheduleTimer(callback, delay, false, 'Timeout', args),
       clearTimeout: (handle) => processObject._bnhClearTimer(handle),
@@ -3518,20 +3534,12 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         item._idleStart = Date.now();
         return item;
       },
-      active(item) {
-        if (item._bnhTimer) processObject._bnhClearTimer(item._bnhTimer);
-        const handle = processObject._bnhSetTimer(
-          function legacyTimerCallback() {
-            item._bnhTimer = null;
-            item._onTimeout?.call(item);
-          },
-          item._idleTimeout,
-          false,
-          'Timeout',
-        );
-        item._bnhTimer = handle;
-        return item;
-      },
+      active(item) { return scheduleLegacyTimer(item, true); },
+      _unrefActive: createDeprecate(processObject)(
+        (item) => scheduleLegacyTimer(item, false),
+        'timers._unrefActive() is deprecated. Please use timeout.refresh() instead.',
+        'DEP0127',
+      ),
       unenroll(item) {
         if (item?._bnhTimer) processObject._bnhClearTimer(item._bnhTimer);
         else processObject._bnhClearTimer(item);
@@ -3539,6 +3547,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         return item;
       },
     };
+    Object.defineProperty(timers, 'promises', {
+      configurable: true,
+      enumerable: true,
+      get() { return timerPromises; },
+    });
     const timerPromises = createTimerPromises(scope, trackTask);
     const nodeTest = createNodeTest({ scope, processObject, stdout, stderr, trackTask, assert: assert.strict });
     const vm = createVmModule(scope);

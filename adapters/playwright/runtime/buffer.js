@@ -1,5 +1,6 @@
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+const MAX_BUFFER_LENGTH = 0x7fffffff;
 
 // ---------------------------------------------------------------------------
 // One byte/encoding layer shared by Buffer.from, Buffer#write,
@@ -233,8 +234,8 @@ function outOfRangeError(name, range, value) {
 
 function validateBufferSize(size) {
   if (typeof size !== 'number') throw invalidArgumentTypeError('size', ['number'], size);
-  if (!Number.isFinite(size) || size < 0 || size > 0x7fffffff) {
-    throw outOfRangeError('size', '>= 0 && <= 2147483647', size);
+  if (!Number.isFinite(size) || size < 0 || size > MAX_BUFFER_LENGTH) {
+    throw outOfRangeError('size', `>= 0 && <= ${MAX_BUFFER_LENGTH}`, size);
   }
   return Math.trunc(size);
 }
@@ -524,16 +525,29 @@ function formatList(items) {
 function invalidArgumentTypeError(name, expected, value) {
   const kinds = [];
   const instances = [];
+  const other = [];
+  const className = /^[A-Z][a-zA-Z0-9]*$/;
+  const typeNames = new Set(['string', 'function', 'number', 'object', 'Function', 'Object', 'boolean', 'bigint', 'symbol']);
   for (const item of expected) {
-    if (/^[a-z]/.test(item)) kinds.push(item.toLowerCase());
-    else instances.push(item);
+    if (typeNames.has(item)) kinds.push(item.toLowerCase());
+    else if (className.test(item)) instances.push(item);
+    else other.push(item);
   }
-  let message = `The "${name}" argument must be `;
+  let message = 'The ';
+  if (name.endsWith(' argument')) message += `${name} `;
+  else message += `"${name}" ${name.includes('.') ? 'property' : 'argument'} `;
+  message += 'must be ';
   if (kinds.length > 0) {
     message += `${kinds.length > 1 ? 'one of type' : 'of type'} ${formatList(kinds)}`;
-    if (instances.length > 0) message += ' or ';
+    if (instances.length > 0 || other.length > 0) message += ' or ';
   }
-  if (instances.length > 0) message += `an instance of ${formatList(instances)}`;
+  if (instances.length > 0) {
+    message += `an instance of ${formatList(instances)}`;
+    if (other.length > 0) message += ' or ';
+  }
+  if (other.length > 0) {
+    message += other.length > 1 ? `one of ${formatList(other)}` : `${other[0][0] === other[0][0].toUpperCase() ? 'an ' : ''}${other[0]}`;
+  }
   message += `. Received ${determineSpecificType(value)}`;
   const error = new TypeError(message);
   error.code = 'ERR_INVALID_ARG_TYPE';
@@ -976,6 +990,7 @@ export function createBufferClass(scope = globalThis) {
       if (typeof value === 'string') {
         super(bytesFrom(value, args[1]));
       } else if (typeof value === 'number') {
+        if (typeof args[1] === 'string') throw invalidArgumentTypeError('string', ['string'], value);
         super(validateBufferSize(value));
       } else if (value === null) {
         throw invalidArgumentTypeError('first argument', ['string', 'Buffer', 'ArrayBuffer', 'Array', 'Array-like Object'], value);
@@ -1286,7 +1301,7 @@ export function createBufferClass(scope = globalThis) {
   Object.setPrototypeOf(Buffer, NodeBuffer);
   Buffer.prototype = NodeBuffer.prototype;
   Object.defineProperty(NodeBuffer.prototype, 'constructor', { value: Buffer, configurable: true, writable: true });
-  const maxLength = 0x7fffffff;
+  const maxLength = MAX_BUFFER_LENGTH;
   const maxStringLength = 0x1fffffe8;
   const constants = Object.freeze({ MAX_LENGTH: maxLength, MAX_STRING_LENGTH: maxStringLength });
   Buffer.constants = constants;

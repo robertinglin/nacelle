@@ -71,6 +71,28 @@ implementation commit. Detached agent worktrees remain isolated validation
 worktrees; do not link multiple concurrent agent worktrees to the same shared
 adapter files.
 
+## Agent launch and long-running execution policy
+
+Codex builders MUST be spawned through the local agent workflow first. Use the
+local multi-agent spawn/wait/close workflow to create, monitor, and collect the
+three builders before attempting to drive an agent through a shell command.
+`codex exec` is a fallback for cases where the local agent workflow is
+unavailable or insufficient; it is not the first launch path and must not be
+used merely because a local agent has not reported back yet.
+
+If an `exec` fallback is necessary, the command MUST be run in escalated mode
+(`require_escalated`) with a justification. A sandboxed `exec` is not an
+acceptable substitute: agent bootstrap, browser access, and long-lived child
+processes may require the escalated environment.
+
+Agents and validation jobs are allowed to run for more than 30 minutes. Never
+terminate, retry, or declare an agent stuck solely because 30 minutes have
+elapsed. Launch long-running fallback jobs in a persistent/background session
+whose process survives the command's foreground timeout, retain its session or
+process identifier, and reconnect by polling it until completion. Use bounded
+poll intervals in the orchestrator so the unattended gap loop remains
+responsive while the job continues running.
+
 ## One round
 
 1. **Pick 3 cards.** Read `WORKLIST.md` (or `bnh gaps --list`). Take the top
@@ -110,7 +132,16 @@ adapter files.
      --worktree <worktree> <card acceptance_paths...>
    ```
 
-4. **Launch all three in parallel** (background):
+4. **Launch all three in parallel** using the local agent workflow first. Keep
+   each agent attached to its own worktree and retain its agent identifier so
+   it can be waited on and closed cleanly. Only if that workflow is unavailable
+   or insufficient, use an `exec` fallback (in escalated mode as required
+   above) and keep the process in a persistent session because it may exceed
+   30 minutes:
+
+   The surrounding tool invocation must set `sandbox_permissions:
+   require_escalated` and provide a user-facing justification; the CLI flag
+   below does not replace that escalation.
 
    ```bash
    /home/robert/.local/share/mise/installs/codex/0.149.0/bin/codex exec \

@@ -13,9 +13,16 @@ const constants = Object.freeze({
   Z_FULL_FLUSH: 3,
   Z_FINISH: 4,
   Z_BLOCK: 5,
+  Z_TREES: 6,
   Z_OK: 0,
   Z_STREAM_END: 1,
+  Z_NEED_DICT: 2,
+  Z_ERRNO: -1,
+  Z_FILTERED: 1,
   Z_STREAM_ERROR: -2,
+  Z_DATA_ERROR: -3,
+  Z_MEM_ERROR: -4,
+  Z_BUF_ERROR: -5,
   Z_VERSION_ERROR: -6,
   Z_RLE: 3,
   ZLIB_VERNUM: 4897,
@@ -64,8 +71,6 @@ const constants = Object.freeze({
   Z_DEFAULT_MEMLEVEL: 8,
   Z_DEFAULT_STRATEGY: 0,
   Z_DEFAULT_WINDOWBITS: 15,
-  Z_ERRNO: -1,
-  Z_FILTERED: 1,
   DEFLATE: 1,
   INFLATE: 2,
   GZIP: 3,
@@ -78,6 +83,29 @@ const constants = Object.freeze({
   ZSTD_COMPRESS: 10,
   ZSTD_DECOMPRESS: 11,
 });
+
+const codes = {
+  Z_OK: constants.Z_OK,
+  Z_STREAM_END: constants.Z_STREAM_END,
+  Z_NEED_DICT: constants.Z_NEED_DICT,
+  Z_ERRNO: constants.Z_ERRNO,
+  Z_STREAM_ERROR: constants.Z_STREAM_ERROR,
+  Z_DATA_ERROR: constants.Z_DATA_ERROR,
+  Z_MEM_ERROR: constants.Z_MEM_ERROR,
+  Z_BUF_ERROR: constants.Z_BUF_ERROR,
+  Z_VERSION_ERROR: constants.Z_VERSION_ERROR,
+};
+for (const [name, value] of Object.entries(codes)) codes[value] = name;
+Object.freeze(codes);
+
+const CRC32_TABLE = new Uint32Array(256);
+for (let index = 0; index < CRC32_TABLE.length; index += 1) {
+  let value = index;
+  for (let bit = 0; bit < 8; bit += 1) {
+    value = (value >>> 1) ^ (0xedb88320 & -(value & 1));
+  }
+  CRC32_TABLE[index] = value >>> 0;
+}
 
 function formatUnsupported(format, mode, error) {
   const result = new UnsupportedWebCapabilityError(
@@ -235,7 +263,8 @@ function operation(value, format, mode, BufferClass, scope, optionsOrCallback, c
     : typeof optionsOrCallback === 'function' ? optionsOrCallback : undefined;
   const result = (async () => {
     const input = new scope.Blob([value]).stream();
-    const transformed = input.pipeThrough(createWebTransform(scope, format, mode));
+    const streamFormat = typeof format === 'function' ? format(value, scope) : format;
+    const transformed = input.pipeThrough(createWebTransform(scope, streamFormat, mode));
     return new Uint8Array(await new scope.Response(transformed).arrayBuffer());
   })();
   if (typeof done !== 'function') return result.then((output) => new BufferClass(output));
@@ -249,6 +278,50 @@ function syncUnavailable(kind, method) {
   throw new Error(`synchronous ${kind} is unavailable in a browser; use zlib.${method}`);
 }
 
+function unzipFormat(value, scope) {
+  let bytes;
+  if (typeof value === 'string') {
+    bytes = new scope.TextEncoder().encode(value);
+  } else if (ArrayBuffer.isView(value)) {
+    bytes = new Uint8Array(value.buffer, value.byteOffset, Math.min(value.byteLength, 2));
+  } else if (value instanceof ArrayBuffer) {
+    bytes = new Uint8Array(value, 0, Math.min(value.byteLength, 2));
+  } else {
+    bytes = [];
+  }
+  return bytes[0] === 0x1f && bytes[1] === 0x8b ? 'gzip' : 'deflate';
+}
+
+function crc32(data, value = 0, scope = globalThis) {
+  if (typeof data !== 'string' && !ArrayBuffer.isView(data)) {
+    const error = new TypeError(
+      'The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received an invalid value',
+    );
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (typeof value !== 'number') {
+    const error = new TypeError('The "value" argument must be of type number');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (!Number.isInteger(value) || value < 0 || value > 0xffffffff) {
+    const error = new RangeError(
+      `The value of "value" is out of range. It must be an integer between 0 and 4294967295. Received ${value}`,
+    );
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  const bytes = typeof data === 'string'
+    ? new scope.TextEncoder().encode(data)
+    : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  let crc = (value ^ 0xffffffff) >>> 0;
+  for (const byte of bytes) {
+    crc = CRC32_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
 function createProperty(Constructor, bufferClass, scope) {
   return (options) => new Constructor(options, bufferClass, scope);
 }
@@ -256,6 +329,8 @@ function createProperty(Constructor, bufferClass, scope) {
 export function createZlibShim(scope, BufferClass) {
   const zlib = {
     constants,
+    codes,
+    crc32: (data, value) => crc32(data, value, scope),
     gzip: (value, callback) => operation(value, 'gzip', 'compress', BufferClass, scope, callback),
     gunzip: (value, callback) => operation(value, 'gzip', 'decompress', BufferClass, scope, callback),
     deflate: (value, callback) => operation(value, 'deflate', 'compress', BufferClass, scope, callback),
@@ -278,6 +353,10 @@ export function createZlibShim(scope, BufferClass) {
     createInflateRaw: createProperty(InflateRaw, BufferClass, scope),
     BrotliCompress,
     BrotliDecompress,
+    brotliCompress: (value, optionsOrCallback, callback) => operation(value, 'br', 'compress', BufferClass, scope, optionsOrCallback, callback),
+    brotliDecompress: (value, optionsOrCallback, callback) => operation(value, 'br', 'decompress', BufferClass, scope, optionsOrCallback, callback),
+    createBrotliCompress: createProperty(BrotliCompress, BufferClass, scope),
+    createBrotliDecompress: createProperty(BrotliDecompress, BufferClass, scope),
     ZstdCompress,
     ZstdDecompress,
     createZstdCompress: createProperty(ZstdCompress, BufferClass, scope),
@@ -287,6 +366,9 @@ export function createZlibShim(scope, BufferClass) {
     deflateSync() { syncUnavailable('compression', 'deflate'); },
     deflateRawSync() { syncUnavailable('compression', 'deflateRaw'); },
     inflateRawSync() { syncUnavailable('decompression', 'inflateRaw'); },
+    inflateSync() { syncUnavailable('decompression', 'inflate'); },
+    unzip: (value, optionsOrCallback, callback) => operation(value, (input, targetScope) => unzipFormat(input, targetScope), 'decompress', BufferClass, scope, optionsOrCallback, callback),
+    unzipSync() { syncUnavailable('decompression', 'unzip'); },
     brotliCompressSync() { syncUnavailable('Brotli compression', 'brotliCompress'); },
     brotliDecompressSync() { syncUnavailable('Brotli decompression', 'brotliDecompress'); },
     zstdCompress: (value, optionsOrCallback, callback) => operation(value, 'zstd', 'compress', BufferClass, scope, optionsOrCallback, callback),

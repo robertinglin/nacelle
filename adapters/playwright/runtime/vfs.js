@@ -1275,6 +1275,12 @@ export function createVfs(options = {}) {
     updateOwner(pathValue, normalizedUid, normalizedGid, 'lchown', false);
   }
 
+  function lchmodSync(pathValue, mode) {
+    resolve(pathValue);
+    const normalizedMode = modeValue(mode);
+    updateMode(pathValue, normalizedMode, 'lchmod', false);
+  }
+
   function lutimes(pathValue, atime, mtime, callback) {
     if (typeof callback !== 'function') throw invalidArgumentType('cb', callback, 'function');
     resolve(pathValue);
@@ -3034,6 +3040,7 @@ export function createVfs(options = {}) {
       updateOwner(pathValue, ownerId(uid, 'uid'), ownerId(gid, 'gid'));
     },
     lchownSync,
+    lchmodSync,
     linkSync,
     utimesSync,
     lutimesSync,

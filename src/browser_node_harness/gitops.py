@@ -369,8 +369,14 @@ class GitManager:
         source_root = self.config.root / "adapters" / "playwright"
         source_runtime = source_root / "runtime.js"
         source_modules = source_root / "runtime"
+        source_server = source_root / "server.js"
         source_bridge = source_root / "target-bridge.example.js"
-        if not source_runtime.is_file() or not source_modules.is_dir() or not source_bridge.is_file():
+        if (
+            not source_runtime.is_file()
+            or not source_modules.is_dir()
+            or not source_server.is_file()
+            or not source_bridge.is_file()
+        ):
             return None
 
         if not self._integration_is_new:
@@ -379,6 +385,7 @@ class GitManager:
             raise GitError("integration worktree is dirty before shared browser runtime bootstrap")
         target_runtime = self.integration / "runtime.js"
         target_modules = self.integration / "runtime"
+        target_server = self.integration / "server.js"
         target_bridge = self.integration / "target-bridge.js"
         target_harness = self.integration / "harness.html"
         existing_targets = [
@@ -386,12 +393,13 @@ class GitManager:
             for path in (
                 target_runtime,
                 target_modules,
+                target_server,
                 target_bridge,
                 target_harness,
             )
             if path.exists() or path.is_symlink()
         ]
-        if existing_targets and len(existing_targets) != 4:
+        if existing_targets and len(existing_targets) != 5:
             paths = ", ".join(str(path.relative_to(self.integration)) for path in existing_targets)
             raise GitError(
                 "new integration contains partial shared browser runtime paths; "
@@ -423,6 +431,7 @@ class GitManager:
             "harness.html",
             "runtime.js",
             "runtime",
+            "server.js",
             "target-bridge.js",
             cwd=self.integration,
             timeout=300,

@@ -135,6 +135,12 @@ that can be committed on the harness branch. The target worktree will show the
 links as local changes; do not commit those link replacements in the target
 repository.
 
+The same command links the target's `server.js` to the canonical
+`adapters/playwright/server.js`. The server runs from the target worktree,
+serves `harness.html` and its modules, and supplies the COOP/COEP headers needed
+for browser isolation. A new machine therefore does not need to create a
+target-specific server file.
+
 ## Start the loop with the dashboard
 
 Run the loop and its local status page together:

@@ -105,6 +105,7 @@ class GitOpsTests(unittest.TestCase):
             (source / "runtime").mkdir(parents=True)
             (source / "runtime.js").write_text("export const runtime = {};\n", encoding="utf-8")
             (source / "runtime" / "index.js").write_text("export {};\n", encoding="utf-8")
+            (source / "server.js").write_text("server\n", encoding="utf-8")
             (source / "target-bridge.example.js").write_text("globalThis.bridge = true;\n", encoding="utf-8")
 
             target = root / "target"
@@ -144,6 +145,8 @@ class GitOpsTests(unittest.TestCase):
             self.assertIsNotNone(commit)
             self.assertTrue((integration / "runtime.js").is_symlink())
             self.assertTrue((integration / "runtime").is_symlink())
+            self.assertTrue((integration / "server.js").is_symlink())
+            self.assertEqual((integration / "server.js").read_text(encoding="utf-8"), "server\n")
             self.assertEqual((integration / "runtime.js").read_text(encoding="utf-8"), "export const runtime = {};\n")
             self.assertTrue((integration / "runtime" / "index.js").is_file())
             self.assertTrue((integration / "target-bridge.js").is_file())
@@ -157,6 +160,7 @@ class GitOpsTests(unittest.TestCase):
             (source / "runtime").mkdir(parents=True)
             (source / "runtime.js").write_text("canonical runtime\n", encoding="utf-8")
             (source / "runtime" / "index.js").write_text("canonical module\n", encoding="utf-8")
+            (source / "server.js").write_text("canonical server\n", encoding="utf-8")
             (source / "target-bridge.example.js").write_text("canonical bridge\n", encoding="utf-8")
 
             target = root / "target"
@@ -212,6 +216,7 @@ class GitOpsTests(unittest.TestCase):
             (source / "runtime").mkdir(parents=True)
             (source / "runtime.js").write_text("canonical runtime\n", encoding="utf-8")
             (source / "runtime" / "index.js").write_text("canonical module\n", encoding="utf-8")
+            (source / "server.js").write_text("canonical server\n", encoding="utf-8")
             (source / "target-bridge.example.js").write_text("canonical bridge\n", encoding="utf-8")
 
             target = root / "target"
@@ -280,6 +285,7 @@ class GitOpsTests(unittest.TestCase):
             (source / "runtime").mkdir(parents=True)
             (source / "runtime.js").write_text("canonical runtime\n", encoding="utf-8")
             (source / "runtime" / "index.js").write_text("canonical module\n", encoding="utf-8")
+            (source / "server.js").write_text("canonical server\n", encoding="utf-8")
             (source / "target-bridge.example.js").write_text("canonical bridge\n", encoding="utf-8")
 
             target = root / "target"

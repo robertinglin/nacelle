@@ -127,14 +127,16 @@ def link_shared_runtime(
     *,
     backup_root: Path | None = None,
 ) -> tuple[Path, ...]:
-    """Link runtime.js and runtime/ from a target worktree to the adapter copy."""
+    """Link shared runtime files and the target server to the adapter copy."""
 
     source_root = source_root.resolve()
     target_root = target_root.resolve()
     source_entry = source_root / "runtime.js"
     source_modules = source_root / "runtime"
+    source_server = source_root / "server.js"
     target_entry = target_root / "runtime.js"
     target_modules = target_root / "runtime"
+    target_server = target_root / "server.js"
     if not source_entry.is_file() or not source_modules.is_dir():
         raise RuntimeLinkError(f"shared browser runtime is incomplete under {source_root}")
     if not target_root.is_dir():
@@ -142,7 +144,9 @@ def link_shared_runtime(
     if source_root == target_root:
         raise RuntimeLinkError("source and target runtime directories must be different")
 
-    entries = ((source_entry, target_entry), (source_modules, target_modules))
+    entries = [(source_entry, target_entry), (source_modules, target_modules)]
+    if source_server.is_file():
+        entries.append((source_server, target_server))
     for source, target in entries:
         if target.exists() or target.is_symlink():
             if (
@@ -164,12 +168,12 @@ def link_shared_runtime(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Link an integration worktree to adapters/playwright/runtime."
+        description="Link an integration worktree to the shared runtime and server."
     )
     parser.add_argument(
         "--source-root",
         type=Path,
-        help="adapter directory containing runtime.js and runtime/ (default: adapters/playwright)",
+        help="adapter directory containing runtime.js, runtime/, and optionally server.js (default: adapters/playwright)",
     )
     parser.add_argument(
         "--integration",

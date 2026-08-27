@@ -15,6 +15,7 @@ class RuntimeLinkTests(unittest.TestCase):
         (source / "runtime").mkdir(parents=True)
         (source / "runtime.js").write_text("export const runtime = {};\n", encoding="utf-8")
         (source / "runtime" / "index.js").write_text("export {};\n", encoding="utf-8")
+        (source / "server.js").write_text("server\n", encoding="utf-8")
         return source
 
     def test_links_runtime_and_is_idempotent(self) -> None:
@@ -26,11 +27,13 @@ class RuntimeLinkTests(unittest.TestCase):
 
             changed = link_shared_runtime(source, target)
 
-            self.assertEqual(changed, (target / "runtime.js", target / "runtime"))
+            self.assertEqual(changed, (target / "runtime.js", target / "runtime", target / "server.js"))
             self.assertTrue((target / "runtime.js").is_symlink())
             self.assertTrue((target / "runtime").is_symlink())
+            self.assertTrue((target / "server.js").is_symlink())
             self.assertFalse(Path((target / "runtime.js").readlink()).is_absolute())
             self.assertFalse(Path((target / "runtime").readlink()).is_absolute())
+            self.assertFalse(Path((target / "server.js").readlink()).is_absolute())
             self.assertEqual((target / "runtime.js").read_text(encoding="utf-8"), "export const runtime = {};\n")
             self.assertEqual(link_shared_runtime(source, target), ())
 
@@ -42,14 +45,17 @@ class RuntimeLinkTests(unittest.TestCase):
             (target / "runtime").mkdir(parents=True)
             (target / "runtime.js").write_bytes((source / "runtime.js").read_bytes())
             (target / "runtime" / "index.js").write_bytes((source / "runtime" / "index.js").read_bytes())
+            (target / "server.js").write_bytes((source / "server.js").read_bytes())
             backup = root / "backup"
 
             link_shared_runtime(source, target, backup_root=backup)
 
             self.assertTrue((target / "runtime.js").is_symlink())
             self.assertTrue((target / "runtime").is_symlink())
+            self.assertTrue((target / "server.js").is_symlink())
             self.assertEqual((backup / "runtime.js").read_text(encoding="utf-8"), "export const runtime = {};\n")
             self.assertEqual((backup / "runtime" / "index.js").read_text(encoding="utf-8"), "export {};\n")
+            self.assertEqual((backup / "server.js").read_text(encoding="utf-8"), "server\n")
 
     def test_replaces_older_subset_copy_without_losing_target_files(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

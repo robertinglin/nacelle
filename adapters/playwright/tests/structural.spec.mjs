@@ -75,4 +75,12 @@ test.describe('browser runtime test contracts', () => {
     expect(browserRunner).toContain('missing-primitives.spec.mjs');
     expect(browserRunner).toContain('platform-primitives.spec.mjs');
   });
+
+  test('ships the shared target server used by every integration worktree', async () => {
+    const server = await source('adapters/playwright/server.js');
+    expect(server).toContain('process.env.BNH_WORKTREE || process.cwd()');
+    expect(server).toContain("'/harness.html'");
+    expect(server).toContain("'Cross-Origin-Opener-Policy'");
+    expect(server).toContain("'Cross-Origin-Embedder-Policy'");
+  });
 });

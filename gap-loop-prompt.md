@@ -48,14 +48,20 @@ Do not copy a second runtime into the integration worktree and do not replace
 different target content silently. The link command refuses conflicts and
 backs up matching regular copies under `.bnh-state/` before converting them.
 The bridge and harness page remain target integration files; only
-`runtime.js` and `runtime/` are shared links.
+`runtime.js`, `runtime/`, and `server.js` are shared links. The canonical
+server is `/home/robert/workspace/browser-node-harness/adapters/playwright/server.js`;
+it serves `harness.html` and modules from the current target worktree and
+supplies the required COOP/COEP headers. Do not write a replacement server in
+the Node checkout when this link is missing; rerun `./link-runtime.py` and
+resolve any reported conflict without deleting the existing copy.
 
 When runtime code is edited through the integration path, the bytes change in
 the adapter paths above and must be committed from the harness repository:
 
 ```bash
 git -C /home/robert/workspace/browser-node-harness add \
-  adapters/playwright/runtime.js adapters/playwright/runtime
+  adapters/playwright/runtime.js adapters/playwright/runtime \
+  adapters/playwright/server.js
 git -C /home/robert/workspace/browser-node-harness commit \
   -m "Update shared browser runtime"
 ```

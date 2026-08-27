@@ -300,6 +300,15 @@ export function createVirtualNetwork({ transport } = {}) {
       client._runTcpResource?.(() => {});
     };
 
+    // A proxy is an egress capability. Keep connections to browser-local
+    // listeners on the in-memory network even when that capability is active.
+    // This is important for cluster workers and for HTTP/TCP servers created
+    // by the same browser run.
+    if (findBinding(tcpBindings, address, port)) {
+      schedule(connect);
+      return;
+    }
+
     const hook = transport && (transport.connect || (typeof transport === 'function' ? transport : null));
     if (!hook) {
       schedule(connect);
@@ -308,15 +317,34 @@ export function createVirtualNetwork({ transport } = {}) {
     schedule(() => {
       let result;
       try {
-        result = hook.call(transport, { address, port, client, localAddress, localPort });
+        result = hook.call(transport, {
+          address,
+          port,
+          target: virtualAddressFamily(address) === 6 ? `[${address}]:${port}` : `${address}:${port}`,
+          client,
+          localAddress,
+          localPort,
+        });
       } catch (error) {
         onError(error);
         return;
       }
+      const establishTransport = (value) => {
+        const connection = value && typeof value === 'object' && value.transport
+          ? value
+          : { transport: value };
+        onConnected({
+          ...connection,
+          localAddress: connection.localAddress || localAddress,
+          localPort: connection.localPort || localPort || 0,
+          remoteAddress: connection.remoteAddress || address,
+          remotePort: connection.remotePort || port,
+        });
+      };
       if (result && typeof result.then === 'function') {
-        result.then((value) => value ? onConnected({ transport: value }) : connect(), onError);
+        result.then((value) => value ? establishTransport(value) : connect(), onError);
       } else if (result) {
-        onConnected({ transport: result });
+        establishTransport(result);
       } else {
         connect();
       }

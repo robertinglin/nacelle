@@ -129,7 +129,9 @@ const UCS2_OPS = Object.freeze({
   decode: decodeUcs2,
 });
 const LATIN1_OPS = Object.freeze({ search: 'bytes', encode: (text) => encodeLatin1(text, false), decode: decodeSingleByte });
-const ASCII_OPS = Object.freeze({ search: 'bytes', encode: (text) => encodeLatin1(text, true), decode: decodeAscii });
+// Node's ASCII encoder is an 8-bit write; only ASCII decoding masks the high
+// bit.  This distinction matters for Buffer.from/write and transcode.
+const ASCII_OPS = Object.freeze({ search: 'bytes', encode: (text) => encodeLatin1(text, false), decode: decodeAscii });
 const HEX_OPS = Object.freeze({ search: 'bytes', encode: decodeHex, decode: encodeHex });
 const BASE64_OPS = Object.freeze({ search: 'bytes', encode: (text) => decodeBase64(text), decode: (bytes) => encodeBase64(bytes, false) });
 const BASE64URL_OPS = Object.freeze({ search: 'bytes', encode: (text) => decodeBase64(text), decode: (bytes) => encodeBase64(bytes, true) });
@@ -225,6 +227,165 @@ function bytesFrom(value, encoding = 'utf8') {
 
 function encoded(bytes, encoding = 'utf8') {
   return encodingOpsOrThrow(encoding).decode(bytes);
+}
+
+function outOfRangeIndexError() {
+  const error = new RangeError('Index out of range');
+  error.code = 'ERR_OUT_OF_RANGE';
+  return error;
+}
+
+function bufferBoundsError(name) {
+  const error = new RangeError(`"${name}" is outside of buffer bounds`);
+  error.code = 'ERR_BUFFER_OUT_OF_BOUNDS';
+  return error;
+}
+
+function nativeSliceRange(length, start, end) {
+  const normalize = (value, fallback) => {
+    if (value === undefined) return fallback;
+    const number = Number(value);
+    if (Number.isNaN(number)) return 0;
+    if (!Number.isFinite(number)) throw outOfRangeIndexError();
+    const index = Math.trunc(number);
+    if (index < 0 || index > length) throw outOfRangeIndexError();
+    return index;
+  };
+  return [normalize(start, 0), normalize(end, length)];
+}
+
+function nativeWriteRange(buffer, offset, length, strictLength) {
+  const numberOffset = offset === undefined ? 0 : Number(offset);
+  if (Number.isNaN(numberOffset)) {
+    offset = 0;
+  } else {
+    offset = Math.trunc(numberOffset);
+  }
+  if (!Number.isFinite(numberOffset) || offset < 0 || offset > buffer.length) {
+    if (!strictLength && offset < 0) throw outOfRangeIndexError();
+    throw bufferBoundsError('offset');
+  }
+
+  const numberLength = length === undefined ? buffer.length - offset : Number(length);
+  if (Number.isNaN(numberLength)) length = 0;
+  else length = Math.trunc(numberLength);
+  if (!Number.isFinite(numberLength) || length < 0) {
+    if (strictLength) throw bufferBoundsError('length');
+    throw outOfRangeIndexError();
+  }
+  if (strictLength && offset + length > buffer.length) throw bufferBoundsError('length');
+  return { offset, length: Math.min(length, buffer.length - offset) };
+}
+
+function completeUtf8Prefix(bytes, maximum) {
+  let end = Math.min(bytes.length, maximum);
+  while (end > 0 && (bytes[end - 1] & 0xc0) === 0x80) end -= 1;
+  if (end === 0 || end === bytes.length) return end;
+  const lead = bytes[end - 1];
+  const width = lead < 0x80 ? 1 : lead < 0xe0 ? 2 : lead < 0xf0 ? 3 : 4;
+  return end - 1 + width <= maximum ? end - 1 + width : end - 1;
+}
+
+function nativeWrite(buffer, value, offset, length, operations, strictLength = true) {
+  if (typeof value !== 'string') throw invalidArgumentTypeError('argument', ['string'], value);
+  const range = nativeWriteRange(buffer, offset, length, strictLength);
+  if (range.length === 0 || value.length === 0) return 0;
+  const bytes = operations.encode(value);
+  const written = operations === UTF8_OPS
+    ? completeUtf8Prefix(bytes, range.length)
+    : Math.min(bytes.length, range.length);
+  buffer.set(bytes.subarray(0, written), range.offset);
+  return written;
+}
+
+function transcodeEncoding(value) {
+  if (value === undefined || value === null || value === '') return 'utf8';
+  if (typeof value !== 'string') return undefined;
+  switch (value.toLowerCase()) {
+    case 'utf8':
+    case 'utf-8': return 'utf8';
+    case 'utf16le':
+    case 'utf-16le':
+    case 'ucs2':
+    case 'ucs-2': return 'utf16le';
+    case 'latin1':
+    case 'binary': return 'latin1';
+    case 'ascii': return 'ascii';
+    default: return undefined;
+  }
+}
+
+function transcodeError(code = 'U_ILLEGAL_ARGUMENT_ERROR') {
+  const error = new Error(`Unable to transcode Buffer [${code}]`);
+  error.code = code;
+  error.errno = code === 'U_INVALID_CHAR_FOUND' ? 10 : 1;
+  return error;
+}
+
+function decodeTranscode(bytes, encoding, target) {
+  if (encoding === 'utf8') {
+    try {
+      return new TextDecoder('utf-8', { fatal: target === 'utf16le' }).decode(bytes);
+    } catch {
+      throw transcodeError('U_INVALID_CHAR_FOUND');
+    }
+  }
+  if (encoding === 'utf16le') {
+    try {
+      // ICU ignores an incomplete trailing code unit, while its fatal mode
+      // still rejects unpaired surrogates.
+      const evenBytes = bytes.subarray(0, bytes.length & ~1);
+      return new TextDecoder('utf-16le', { fatal: target === 'utf8' }).decode(evenBytes);
+    } catch {
+      throw transcodeError('U_INVALID_CHAR_FOUND');
+    }
+  }
+  if (encoding === 'ascii' && target === 'utf16le') return decodeSingleByte(bytes);
+  if (encoding === 'latin1') return decodeSingleByte(bytes);
+  let text = '';
+  for (const byte of bytes) text += byte <= 0x7f ? String.fromCharCode(byte) : '\\ufffd';
+  return text;
+}
+
+function encodeTranscode(text, encoding) {
+  if (encoding === 'utf8') return textEncoder.encode(text);
+  if (encoding === 'utf16le') return encodeUcs2(text);
+  const bytes = new Uint8Array(text.length);
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    bytes[index] = encoding === 'ascii'
+      ? (code <= 0x7f ? code : 0x3f)
+      : (code <= 0xff ? code : 0x3f);
+  }
+  return bytes;
+}
+
+export function createTranscode(BufferClass) {
+  return function transcode(source, fromEncoding, toEncoding) {
+    const isUint8Array = source instanceof Uint8Array
+      || Object.prototype.toString.call(source) === '[object Uint8Array]';
+    if (!isUint8Array) {
+      throw invalidArgumentTypeError('source', ['Buffer', 'Uint8Array'], source);
+    }
+    const bytes = viewBytes(source);
+    if (bytes.length === 0) return BufferClass.alloc(0);
+    const from = transcodeEncoding(fromEncoding);
+    const to = transcodeEncoding(toEncoding);
+    if (from === undefined || to === undefined) throw transcodeError();
+    return BufferClass.from(encodeTranscode(decodeTranscode(bytes, from, to), to));
+  };
+}
+
+export function installBlobCompatibility(BlobClass) {
+  if (typeof BlobClass !== 'function' || typeof BlobClass.prototype?.bytes === 'function') return BlobClass;
+  Object.defineProperty(BlobClass.prototype, 'bytes', {
+    configurable: true,
+    writable: true,
+    value() {
+      return this.arrayBuffer().then((buffer) => new Uint8Array(buffer));
+    },
+  });
+  return BlobClass;
 }
 
 // ---------------------------------------------------------------------------
@@ -772,6 +933,10 @@ export function createBufferClass() {
       return new NodeBuffer(new Uint8Array(view.buffer, view.byteOffset + start, size), internalBuffer);
     }
     toString(encoding, start, end) { return encoded(this.subarray(start, end), encoding); }
+    utf8Slice(start, end) {
+      const [first, last] = nativeSliceRange(this.length, start, end);
+      return textDecoder.decode(this.subarray(first, last));
+    }
     equals(other) {
       if (!(other instanceof Uint8Array)) throw invalidArgumentTypeError('otherBuffer', ['Buffer', 'Uint8Array'], other);
       return NodeBuffer.compare(this, other) === 0;
@@ -913,11 +1078,23 @@ export function createBufferClass() {
           length = Math.min(length, remaining);
         }
       }
-      const bytes = encodingOpsOrThrow(encoding).encode(value);
-      const written = Math.min(bytes.length, length);
-      this.set(bytes.subarray(0, written), offset);
-      return written;
+      if (encoding === undefined || encoding === 'utf8') return this.utf8Write(value, offset, length);
+      if (encoding === 'ascii') return this.asciiWrite(value, offset, length);
+      const operations = encodingOpsOrThrow(encoding);
+      if (operations === BASE64_OPS) return this.base64Write(value, offset, length);
+      if (operations === BASE64URL_OPS) return this.base64urlWrite(value, offset, length);
+      if (operations === LATIN1_OPS) return this.latin1Write(value, offset, length);
+      if (operations === HEX_OPS) return this.hexWrite(value, offset, length);
+      if (operations === UCS2_OPS) return this.ucs2Write(value, offset, length);
+      return this.utf8Write(value, offset, length);
     }
+    asciiWrite(value, offset, length) { return nativeWrite(this, value, offset, length, ASCII_OPS); }
+    base64Write(value, offset, length) { return nativeWrite(this, value, offset, length, BASE64_OPS, false); }
+    base64urlWrite(value, offset, length) { return nativeWrite(this, value, offset, length, BASE64URL_OPS, false); }
+    latin1Write(value, offset, length) { return nativeWrite(this, value, offset, length, LATIN1_OPS); }
+    hexWrite(value, offset, length) { return nativeWrite(this, value, offset, length, HEX_OPS, false); }
+    ucs2Write(value, offset, length) { return nativeWrite(this, value, offset, length, UCS2_OPS, false); }
+    utf8Write(value, offset, length) { return nativeWrite(this, value, offset, length, UTF8_OPS); }
     toJSON() { return { type: 'Buffer', data: [...this] }; }
   }
   // Plain functions (not class methods): Buffer#lastIndexOf must remain

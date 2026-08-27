@@ -1,5 +1,11 @@
 import { createAssert, inspect as nodeInspect } from './runtime/assert.js';
-import { createBufferClass, isAscii, isUtf8 } from './runtime/buffer.js';
+import {
+  createBufferClass,
+  createTranscode,
+  installBlobCompatibility,
+  isAscii,
+  isUtf8,
+} from './runtime/buffer.js';
 import {
   createAsyncLocalStorage,
   assembleBrowserCapabilities,
@@ -57,6 +63,7 @@ import {
   verifySync,
 } from './runtime/crypto.js';
 import { createDiffieHellman, createDiffieHellmanGroup } from './runtime/diffie-hellman.js';
+import { createZlibShim as createZlibShimModule } from './runtime/zlib.js';
 import {
   createConsoleModule,
   createConstants,
@@ -2103,6 +2110,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
   const scope = globalObject;
   let vfs = createVfs();
   const Buffer = createBufferClass();
+  const Blob = installBlobCompatibility(scope.Blob);
+  const transcode = createTranscode(Buffer);
   let mounted = false;
   let activeChild = null;
   let capabilities = null;
@@ -3473,6 +3482,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       assert, 'assert/strict': assert.strict,
       buffer: {
         Buffer,
+        Blob,
+        transcode,
         SlowBuffer: Buffer.SlowBuffer,
         constants: Buffer.constants,
         kMaxLength: Buffer.kMaxLength,
@@ -3527,7 +3538,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       })(),
       'util/types': createUtilTypes(scope),
       worker_threads: { ...createBrowserIO(scope), isMainThread: true, parentPort: null, workerData: undefined },
-      zlib: createZlibShim(scope, Buffer), perf_hooks: performancePrimitives.perfHooks, v8,
+      zlib: createZlibShimModule(scope, Buffer), perf_hooks: performancePrimitives.perfHooks, v8,
       async_hooks: asyncHooks,
       diagnostics_channel: diagnosticsChannels,
       test: nodeTest,

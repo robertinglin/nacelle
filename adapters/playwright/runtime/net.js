@@ -168,6 +168,7 @@ export class Socket extends Duplex {
   connect(...args) {
     const { options, callback } = parseConnectArgs(args);
     if (callback) this.once('connect', callback);
+    if (options.timeout) this.setTimeout(options.timeout);
     if (this.connecting || !this.pending) {
       schedule(() => this.emit('error', socketError('ERR_SOCKET_ALREADY_CONNECTED', 'connect', options.host || 'localhost', options.port)));
       return this;
@@ -322,8 +323,6 @@ export class Socket extends Duplex {
         : undefined,
       port: connection.localPort || undefined,
     };
-    this.localPort = connection.localPort || undefined;
-    this.localFamily = this._sockname.family;
     this._peername = {
       address: connection.remoteAddress,
       port: connection.remotePort,

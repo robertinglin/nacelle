@@ -1836,11 +1836,77 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     let syncBuiltinESMExportsImpl = () => {};
     const moduleParents = new WeakMap();
     const SourceMap = createSourceMapClass();
+    const sourceMapsEnabledByFlag = (processObject.execArgv || runtimeOptions.execArgv || [])
+      .some((argument) => String(argument) === '--enable-source-maps');
     let sourceMapsSupport = Object.freeze({
-      enabled: false,
-      nodeModules: false,
-      generatedCode: false,
+      enabled: sourceMapsEnabledByFlag,
+      nodeModules: sourceMapsEnabledByFlag,
+      generatedCode: sourceMapsEnabledByFlag,
     });
+    const sourceMapCache = new Map();
+    const sourceMapComment = /\/[/*]#\s*sourceMappingURL=([^\s*]+)/g;
+    const sourceMapPayload = (value) => {
+      const comma = value.indexOf(',');
+      if (comma < 0) return null;
+      const body = value.slice(comma + 1);
+      const encoded = value.slice(0, comma).includes(';base64');
+      try {
+        const text = encoded
+          ? atob(body)
+          : decodeURIComponent(body);
+        return JSON.parse(text);
+      } catch {
+        return null;
+      }
+    };
+    const sourceMapFor = (filename, source) => {
+      let match;
+      let sourceMappingURL;
+      sourceMapComment.lastIndex = 0;
+      while ((match = sourceMapComment.exec(String(source)))) sourceMappingURL = match[1];
+      if (!sourceMappingURL) return undefined;
+      let payload;
+      let mapPath = filename;
+      if (sourceMappingURL.startsWith('data:')) {
+        payload = sourceMapPayload(sourceMappingURL);
+      } else {
+        mapPath = normalizePath(sourceMappingURL, path.dirname(filename));
+        try {
+          const mapSource = readSource(mapPath);
+          payload = JSON.parse(typeof mapSource === 'string' ? mapSource : new TextDecoder().decode(mapSource));
+        } catch {
+          return undefined;
+        }
+      }
+      if (!payload || typeof payload !== 'object') return undefined;
+      const map = new SourceMap(payload, { lineLengths: String(source).split(/\r?\n/).map((line) => line.length) });
+      sourceMapCache.set(filename, map);
+      sourceMapCache.set(`file://${filename}`, map);
+      if (mapPath !== filename) sourceMapCache.set(mapPath, map);
+      return map;
+    };
+    const findSourceMap = (sourceURL) => {
+      if (!sourceMapsSupport.enabled
+        || typeof sourceURL !== 'string'
+        || sourceURL.length === 0
+        || sourceURL.startsWith('node:')) return undefined;
+      if (!sourceMapsSupport.nodeModules && sourceURL.includes('/node_modules/')) return undefined;
+      let filename;
+      try {
+        filename = sourceURL.startsWith('file:') ? fileURLToPath(sourceURL) : normalizePath(sourceURL, processObj.cwd?.() || '/node');
+      } catch {
+        return undefined;
+      }
+      if (!sourceMapsSupport.nodeModules && filename.includes('/node_modules/')) return undefined;
+      const cached = sourceMapCache.get(sourceURL) || sourceMapCache.get(filename);
+      if (cached) return cached;
+      try {
+        return sourceMapFor(filename, readSource(filename));
+      } catch {
+        return undefined;
+      }
+    };
+    const getSourceMapsSupport = () => sourceMapsSupport;
     const childProcessArgumentTypeError = (name, expected, value) => {
       const received = value === null
         ? 'null'
@@ -1997,6 +2063,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       },
     });
     const createModuleApi = (processObj = processObject, childStderr = stderr) => {
+      if (processObj.__bnhModuleApi) return processObj.__bnhModuleApi;
       function Module(id = '', parent = null) {
         if (!(this instanceof Module)) return new Module(id, parent);
         this.id = id;
@@ -2140,8 +2207,106 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           },
         };
       };
+      const globalPaths = [];
+      const stat = (filename) => {
+        if (typeof filename !== 'string') throw moduleArgumentTypeError('filename', 'string', filename);
+        try {
+          const stats = fs.statSync(filename);
+          return stats.isDirectory?.() ? 1 : stats.isFile?.() ? 0 : -1;
+        } catch {
+          return -2;
+        }
+      };
+      const readPackage = (requestPath) => {
+        if (typeof requestPath !== 'string') throw moduleArgumentTypeError('requestPath', 'string', requestPath);
+        const pjsonPath = path.resolve(requestPath, 'package.json');
+        let parsed;
+        try {
+          const source = readSource(pjsonPath);
+          parsed = JSON.parse(typeof source === 'string' ? source : new TextDecoder().decode(source));
+        } catch (error) {
+          if (error?.code === 'ENOENT') return Object.assign(Object.create(null), {
+            type: 'none',
+            exists: false,
+            pjsonPath,
+          });
+          const invalid = new Error(`Invalid package config '${pjsonPath}'`);
+          invalid.code = 'ERR_INVALID_PACKAGE_CONFIG';
+          invalid.path = pjsonPath;
+          invalid.cause = error;
+          throw invalid;
+        }
+        const result = Object.create(null);
+        for (const key of ['name', 'main', 'type', 'imports', 'exports']) {
+          if (parsed[key] !== undefined) result[key] = parsed[key];
+        }
+        result.exists = true;
+        result.pjsonPath = pjsonPath;
+        return result;
+      };
+      const resolveLookupPaths = (request, parent) => {
+        if (typeof request !== 'string') throw moduleArgumentTypeError('request', 'string', request);
+        if (BUILTIN_NAMES.includes(builtinName(request))) return null;
+        const relative = request[0] === '.'
+          && (request.length === 1 || request[1] === '.' || request[1] === '/' || request[1] === '\\');
+        if (!relative) {
+          const parentPaths = parent?.paths?.length ? [...parent.paths] : [];
+          const paths = [...parentPaths, ...globalPaths];
+          return paths.length ? paths : null;
+        }
+        if (!parent?.id || !parent.filename) return ['.'];
+        return [path.dirname(parent.filename)];
+      };
+      const resolveFilename = (request, parent, isMain, options) => {
+        if (typeof request !== 'string') throw moduleArgumentTypeError('request', 'string', request);
+        if (BUILTIN_NAMES.includes(builtinName(request))) return request;
+        if (options !== undefined && (options === null || typeof options !== 'object' || Array.isArray(options))) {
+          throw moduleArgumentTypeError('options', 'object', options);
+        }
+        const importer = typeof parent === 'string' ? parent : parent?.filename || sourcePath;
+        const conditions = options?.conditions || ['node', 'require'];
+        let resolved;
+        try {
+          if (options?.paths !== undefined && !Array.isArray(options.paths)) {
+            const error = new TypeError(`The \"options.paths\" property must be an array of strings. Received ${String(options.paths)}`);
+            error.code = 'ERR_INVALID_ARG_VALUE';
+            throw error;
+          }
+          if (options?.paths?.length && !request.startsWith('.') && !request.startsWith('/')) {
+            const candidates = [];
+            for (const lookupPath of options.paths) {
+              if (typeof lookupPath !== 'string') throw moduleArgumentTypeError('options.paths', 'an array of strings', options.paths);
+              const fakeImporter = path.join(normalizePath(lookupPath, processObj.cwd?.() || '/node'), 'index.js');
+              candidates.push(esmLoader.resolve(request, fakeImporter, conditions));
+            }
+            resolved = candidates.find((candidate) => candidate && (candidate.startsWith('/') || candidate.startsWith('file:')));
+          } else {
+            resolved = esmLoader.resolve(request, importer, conditions);
+          }
+        } catch (error) {
+          if (error?.code && error.code !== 'MODULE_NOT_FOUND') throw error;
+        }
+        if (resolved?.startsWith('file:')) resolved = fileURLToPath(resolved);
+        if (resolved && (resolved.startsWith('/') || resolved.startsWith('file:'))) {
+          const candidate = moduleCandidates(resolved).find((pathname) => vfs.files.has(pathname));
+          if (candidate) return candidate;
+        }
+        const requireStack = [];
+        for (let cursor = typeof parent === 'object' ? parent : null; cursor; cursor = cursor.parent) {
+          requireStack.push(cursor.filename || cursor.id);
+        }
+        const error = new Error(`Cannot find module '${request}'${requireStack.length ? `\nRequire stack:\n- ${requireStack.join('\n- ')}` : ''}`);
+        error.code = 'MODULE_NOT_FOUND';
+        error.requireStack = requireStack;
+        throw error;
+      };
       const moduleApi = Object.assign(Module, {
         builtinModules: BUILTIN_NAMES,
+        globalPaths,
+        _readPackage: readPackage,
+        _stat: stat,
+        _resolveLookupPaths: resolveLookupPaths,
+        _resolveFilename: resolveFilename,
         _load: (name, parent, isMain) => runtimeRequire(
           name,
           typeof parent === 'string' ? parent : parent?.filename || sourcePath,
@@ -2156,6 +2321,14 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             : runtimeRequire(name, importer);
         },
         isBuiltin: (name) => BUILTIN_NAMES.includes(builtinName(name)),
+        findSourceMap,
+        getSourceMapsSupport,
+        runMain: (main = processObj.argv?.[1]) => {
+          const entryPath = main === undefined ? sourcePath : String(main);
+          const normalized = entryPath.startsWith('file:') ? fileURLToPath(entryPath) : normalizePath(entryPath, processObj.cwd?.() || '/node');
+          if (normalized === normalizePath(sourcePath, processObj.cwd?.() || '/node')) return undefined;
+          return moduleApi._load(normalized, null, true);
+        },
         findPackageJSON: (specifier, parentLocation) => {
           if (specifier === undefined) {
             const error = new TypeError('The "specifier" argument must be specified');
@@ -2283,6 +2456,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         configurable: true,
         value: (implementation) => { syncBuiltinESMExportsImpl = implementation; },
       });
+      Object.defineProperty(processObj, '__bnhModuleApi', { configurable: true, value: moduleApi });
       return moduleApi;
     };
     const moduleApi = createModuleApi(processObject);

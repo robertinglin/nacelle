@@ -23,6 +23,16 @@ const SERVICE_NAMES = Object.freeze({
 
 const DNS_HINTS = Object.freeze({ ADDRCONFIG: 32, ALL: 16, V4MAPPED: 8 });
 const VALID_DNS_HINTS = DNS_HINTS.ADDRCONFIG | DNS_HINTS.ALL | DNS_HINTS.V4MAPPED;
+const DNS_ERROR_CODES = Object.freeze({
+  ADDRGETNETWORKPARAMS: 'EADDRGETNETWORKPARAMS',
+  BADFAMILY: 'EBADFAMILY',
+  BADFLAGS: 'EBADFLAGS',
+  BADHINTS: 'EBADHINTS',
+  BADNAME: 'EBADNAME',
+  BADQUERY: 'EBADQUERY',
+  BADRESP: 'EBADRESP',
+  BADSTR: 'EBADSTR',
+});
 
 function isIPv4Literal(value) {
   const parts = String(value).split('.');
@@ -556,6 +566,7 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
   }
 
   const promises = {
+    ...DNS_ERROR_CODES,
     lookup(hostname, options) {
       validateLookupOptions(options);
       const lookupOptions = normalizeLookupOptions(options);
@@ -693,6 +704,7 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
       resultOrder = value;
     },
     ...DNS_HINTS,
+    ...DNS_ERROR_CODES,
     promises,
   };
 }

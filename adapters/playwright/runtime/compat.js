@@ -873,6 +873,11 @@ export function finished(stream, options, callbackArgument) {
       error.code = 'ERR_INVALID_ARG_TYPE';
       throw error;
     }
+    if (options?.cleanup !== undefined && typeof options.cleanup !== 'boolean') {
+      const error = new TypeError('The "options.cleanup" argument must be of type boolean');
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
     if (callback !== undefined && typeof callback !== 'function') {
       const error = new TypeError('The "callback" argument must be of type function');
       error.code = 'ERR_INVALID_ARG_TYPE';
@@ -886,6 +891,12 @@ export function finished(stream, options, callbackArgument) {
         if (settled) return;
         settled = true;
         try {
+          if (options?.cleanup) {
+            stream.off?.('finish', onFinish);
+            stream.off?.('end', onFinish);
+            stream.off?.('close', onClose);
+            stream.off?.('error', onError);
+          }
           if (callbackResource) callbackResource.runInAsyncScope(callback, undefined, error);
           if (error && !callbackResource) reject(error);
           else resolve();
@@ -898,6 +909,11 @@ export function finished(stream, options, callbackArgument) {
       const onClose = () => {
         const readableState = stream?._readableState;
         const writableState = stream?._writableState;
+        const streamError = readableState?.errored || writableState?.errored;
+        if (streamError) {
+          complete(streamError);
+          return;
+        }
         const premature = Boolean(
           (readableState?.readable !== false && !readableState?.endEmitted)
           || (writableState?.writable !== false && !writableState?.finished),
@@ -916,6 +932,11 @@ export function finished(stream, options, callbackArgument) {
         stream.on('close', onClose);
         if (options && options.error !== false) {
           stream.on('error', onError);
+        }
+        if (options?.signal?.addEventListener) {
+          const onAbort = () => complete(abortError());
+          if (options.signal.aborted) onAbort();
+          else options.signal.addEventListener('abort', onAbort, { once: true });
         }
     } else if (stream && typeof stream.getReader === 'function') {
       if (stream.locked) {

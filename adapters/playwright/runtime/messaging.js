@@ -260,25 +260,77 @@ export function createMessageEvent(scope = globalThis, {
           }
         }
       }
-      messageEventData.set(this, options.data === undefined ? null : options.data);
-      Object.defineProperties(this, {
-        origin: { enumerable: true, value: options.origin === undefined ? '' : String(options.origin) },
-        lastEventId: { enumerable: true, value: options.lastEventId === undefined ? '' : String(options.lastEventId) },
-        source: { enumerable: true, value: source },
-        ports: { enumerable: true, value: ports },
+      messageEventData.set(this, {
+        data: options.data === undefined ? null : options.data,
+        origin: options.origin === undefined ? '' : String(options.origin),
+        lastEventId: options.lastEventId === undefined ? '' : String(options.lastEventId),
+        source,
+        ports,
       });
     }
   };
-  Object.defineProperty(MessageEvent.prototype, 'data', {
-    configurable: true,
-    enumerable: true,
-    get() {
-      if (!messageEventData.has(this)) {
-        const error = new TypeError('Illegal invocation');
-        error.code = 'ERR_INVALID_THIS';
-        throw error;
-      }
-      return messageEventData.get(this);
+  function getMessageEventField(field) {
+    const data = messageEventData.get(this);
+    if (!data) {
+      const error = new TypeError('Illegal invocation');
+      error.code = 'ERR_INVALID_THIS';
+      throw error;
+    }
+    return data[field];
+  }
+  Object.defineProperties(MessageEvent.prototype, {
+    data: {
+      configurable: true,
+      enumerable: true,
+      get() { return getMessageEventField.call(this, 'data'); },
+    },
+    origin: {
+      configurable: true,
+      enumerable: true,
+      get() { return getMessageEventField.call(this, 'origin'); },
+    },
+    lastEventId: {
+      configurable: true,
+      enumerable: true,
+      get() { return getMessageEventField.call(this, 'lastEventId'); },
+    },
+    source: {
+      configurable: true,
+      enumerable: true,
+      get() { return getMessageEventField.call(this, 'source'); },
+    },
+    ports: {
+      configurable: true,
+      enumerable: true,
+      get() { return getMessageEventField.call(this, 'ports'); },
+    },
+    initMessageEvent: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: function initMessageEvent(
+        type,
+        bubbles = false,
+        cancelable = false,
+        data = null,
+        origin = '',
+        lastEventId = '',
+        source = null,
+        ports = [],
+      ) {
+        if (arguments.length === 0) {
+          throw new TypeError('MessageEvent.initMessageEvent: 1 argument required, but 0 found.');
+        }
+        return new MessageEvent(type, {
+          bubbles,
+          cancelable,
+          data,
+          origin,
+          lastEventId,
+          source,
+          ports,
+        });
+      },
     },
   });
   return MessageEvent;

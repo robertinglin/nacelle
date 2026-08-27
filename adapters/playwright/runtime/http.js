@@ -22,6 +22,7 @@ const httpParsers = { max: 1000 };
 const kOutgoingHeaders = Symbol('outgoingHeaders');
 const kOutgoingSocket = Symbol('outgoingSocket');
 const kOutgoingHighWaterMark = Symbol('outgoingHighWaterMark');
+const outgoingMessageState = new WeakMap();
 
 const METHODS = Object.freeze([
   'GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'CONNECT', 'TRACE',
@@ -70,6 +71,32 @@ function invalidArgumentType(name, expected, value, property = false) {
   );
   error.code = 'ERR_INVALID_ARG_TYPE';
   return error;
+}
+
+function initializeOutgoingMessageState(message) {
+  outgoingMessageState.set(message, {
+    errored: null,
+    closed: false,
+    writableFinished: false,
+  });
+}
+
+function setOutgoingMessageErrored(message, error) {
+  const state = outgoingMessageState.get(message);
+  if (state) state.errored = error || null;
+  if (message._writableState) message._writableState.errored = error || null;
+}
+
+function setOutgoingMessageFinished(message) {
+  const state = outgoingMessageState.get(message);
+  if (state) state.writableFinished = true;
+  if (message._writableState) message._writableState.finished = true;
+}
+
+function setOutgoingMessageClosed(message) {
+  const state = outgoingMessageState.get(message);
+  if (state) state.closed = true;
+  if (message._writableState) message._writableState.closed = true;
 }
 
 function invalidHttpToken(value, label = 'Header name') {
@@ -624,6 +651,7 @@ class VirtualServerRequest extends Readable {
 class OutgoingMessage extends EventEmitter {
   constructor() {
     super();
+    initializeOutgoingMessageState(this);
     this.outputData = [];
     this.outputSize = 0;
     this._needDrain = false;
@@ -645,7 +673,6 @@ class OutgoingMessage extends EventEmitter {
     this._corked = 0;
     this.finished = false;
     this.writableEnded = false;
-    this.writableFinished = false;
     this._writableState = {
       writable: true,
       destroyed: false,
@@ -734,6 +761,7 @@ class OutgoingMessage extends EventEmitter {
   destroy(error) {
     if (this.destroyed) return this;
     this.destroyed = true;
+    setOutgoingMessageErrored(this, error);
     this._writableState && (this._writableState.destroyed = true);
     if (this[kOutgoingSocket]) this[kOutgoingSocket].destroy?.(error);
     else this.once('socket', (socket) => socket.destroy?.(error));
@@ -1069,6 +1097,7 @@ class OutgoingMessage extends EventEmitter {
     this.finished = true;
     this.writableEnded = true;
     this._send('', 'latin1', () => {
+      setOutgoingMessageFinished(this);
       this.emit('finish');
       if (typeof callback === 'function') callback();
     });
@@ -1089,6 +1118,24 @@ class OutgoingMessage extends EventEmitter {
 }
 Object.setPrototypeOf(OutgoingMessage.prototype, Writable.prototype);
 Object.defineProperties(OutgoingMessage.prototype, {
+  errored: {
+    get() {
+      const state = outgoingMessageState.get(this);
+      return state ? state.errored : this._writableState?.errored;
+    },
+  },
+  closed: {
+    get() {
+      const state = outgoingMessageState.get(this);
+      return state ? state.closed : this._writableState?.closed;
+    },
+  },
+  writableFinished: {
+    get() {
+      const state = outgoingMessageState.get(this);
+      return state ? state.writableFinished : Boolean(this._writableState?.finished);
+    },
+  },
   writableObjectMode: {
     get() { return false; },
   },
@@ -1384,6 +1431,35 @@ class VirtualServerResponse extends Writable {
 
 VirtualServerResponse.prototype.statusCode = 200;
 VirtualServerResponse.prototype.statusMessage = undefined;
+// Writable initializes these fields during super(). OutgoingMessage exposes
+// getter-only versions, so keep the stream constructor assignments local to
+// the virtual ServerResponse prototype.
+Object.defineProperties(VirtualServerResponse.prototype, {
+  writableObjectMode: {
+    configurable: true,
+    enumerable: false,
+    get() { return false; },
+    set() {},
+  },
+  writableHighWaterMark: {
+    configurable: true,
+    enumerable: false,
+    get() { return this._writableState?.highWaterMark ?? this._virtualWritableHighWaterMark ?? 16 * 1024; },
+    set(value) { this._virtualWritableHighWaterMark = value; },
+  },
+  writableLength: {
+    configurable: true,
+    enumerable: false,
+    get() { return this._writableState?.length ?? 0; },
+    set(value) { this._virtualWritableLength = value; },
+  },
+  writableFinished: {
+    configurable: true,
+    enumerable: false,
+    get() { return Boolean(this._writableState?.finished || this._virtualWritableFinished); },
+    set(value) { this._virtualWritableFinished = Boolean(value); },
+  },
+});
 Object.defineProperty(VirtualServerResponse.prototype, 'writeHeader', {
   configurable: true,
   enumerable: false,
@@ -2651,6 +2727,7 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
   const ClientRequest = class ClientRequest extends EventEmitter {
     constructor(url, options = {}) {
       super();
+      initializeOutgoingMessageState(this);
       if (url && typeof url === 'object' && !isURL(url, scope)) {
         options = url;
         url = undefined;
@@ -2672,7 +2749,6 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       this.destroyed = false;
       this.finished = false;
       this.writableEnded = false;
-      this.writableFinished = false;
       this.timeout = 0;
       this.response = null;
       this._url = url;
@@ -2921,7 +2997,7 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       if (this._started) {
         this.finished = true;
         this.writableEnded = true;
-        this.writableFinished = true;
+        setOutgoingMessageFinished(this);
         this._runInAsyncScope(() => {
           this.emit('finish');
           callback?.();
@@ -2944,6 +3020,7 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
     destroy(error = undefined) {
       if (this.destroyed) return this;
       this.destroyed = true;
+      setOutgoingMessageErrored(this, error);
       this.aborted ||= !this.response;
       this._clearTimeout();
       this._signalCleanup?.();
@@ -2983,6 +3060,7 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
     _emitClose() {
       if (this._closed) return;
       this._closed = true;
+      setOutgoingMessageClosed(this);
       schedule(scope, () => this._runInAsyncScope(() => {
         try {
           this._runInOwnerContext(() => this.emit('close'));
@@ -3002,7 +3080,7 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       publishDiagnostic(diagnostics, 'http.client.request.start', { request: this });
       this._armTimeout();
       if (!this._headersOnlyDispatch) {
-        this.writableFinished = true;
+        setOutgoingMessageFinished(this);
         this._runInOwnerContext(() => {
           this.emit('finish');
           this._endCallback?.();

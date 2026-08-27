@@ -43,6 +43,45 @@ for (const [index, name] of ASYNC_WRAP_PROVIDER_NAMES.entries()) {
 }
 export const ASYNC_WRAP_PROVIDERS = Object.freeze(asyncWrapProviders);
 
+function typeDescription(value) {
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  switch (typeof value) {
+    case 'bigint': return `type bigint (${value}n)`;
+    case 'number':
+      if (Number.isNaN(value)) return 'type number (NaN)';
+      if (value === Infinity || value === -Infinity) return 'type number (null)';
+      if (Object.is(value, -0)) return 'type number (-0)';
+      return `type number (${value})`;
+    case 'boolean': return `type boolean (${value})`;
+    case 'symbol': return `type symbol (${String(value)})`;
+    case 'string': {
+      const short = value.length > 28 ? `${value.slice(0, 25)}...` : value;
+      return `type string ('${short.replaceAll("'", "\\'")}')`;
+    }
+    case 'function': return `function ${value.name || ''}`;
+    case 'object': {
+      const constructorName = value.constructor?.name;
+      return constructorName ? `an instance of ${constructorName}` : 'an instance of Object';
+    }
+    default: return `type ${typeof value} (${String(value)})`;
+  }
+}
+
+function invalidArgumentType(name, expected, value) {
+  const error = new TypeError(
+    `The "${name}" argument must be of type ${expected}. Received ${typeDescription(value)}`,
+  );
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function invalidAsyncType(type) {
+  const error = new TypeError(`Invalid name for async "type": ${type}`);
+  error.code = 'ERR_ASYNC_TYPE';
+  return error;
+}
+
 export class BrowserAsyncContextFrame extends Map {
   static enabled = false;
 
@@ -545,6 +584,13 @@ function initHooksExist() {
   return false;
 }
 
+function enabledHooksExist() {
+  for (const hook of hooks) {
+    if (hook.process === globalThis.process) return true;
+  }
+  return false;
+}
+
 function createInternalAsyncHooks() {
   return Object.freeze({
     newAsyncId: internalNewAsyncId,
@@ -572,10 +618,9 @@ function createInternalAsyncHooks() {
 
 export class AsyncResource {
   constructor(type, options = {}) {
-    if (typeof type !== 'string') {
-      const error = new TypeError('type must be a string');
-      error.code = 'ERR_INVALID_ARG_TYPE';
-      throw error;
+    if (typeof type !== 'string') throw invalidArgumentType('type', 'string', type);
+    if (initHooksExist() && enabledHooksExist() && type.length === 0) {
+      throw invalidAsyncType(type);
     }
     const triggerAsyncId = typeof options === 'number'
       ? options
@@ -628,11 +673,7 @@ export class AsyncResource {
   }
 
   bind(callback, thisArg) {
-    if (typeof callback !== 'function') {
-      const error = new TypeError('callback must be a function');
-      error.code = 'ERR_INVALID_ARG_TYPE';
-      throw error;
-    }
+    if (typeof callback !== 'function') throw invalidArgumentType('fn', 'function', callback);
     const bound = function boundAsyncResource(...args) {
       const receiver = thisArg === undefined ? this : thisArg;
       return thisResource.runInAsyncScope(callback, receiver, ...args);
@@ -644,7 +685,7 @@ export class AsyncResource {
   }
 
   static bind(callback, type, thisArg) {
-    return new AsyncResource(type || callback?.name || 'bound-anonymous-fn').bind(callback, thisArg);
+    return new AsyncResource(type || callback.name || 'bound-anonymous-fn').bind(callback, thisArg);
   }
 }
 

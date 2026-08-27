@@ -415,7 +415,11 @@ class Dirent {
 
   isFile() { return this._kind === 'file'; }
   isDirectory() { return this._kind === 'directory'; }
+  isBlockDevice() { return false; }
+  isCharacterDevice() { return false; }
   isSymbolicLink() { return this._kind === 'symlink'; }
+  isFIFO() { return false; }
+  isSocket() { return false; }
 }
 
 class Dir {
@@ -3189,6 +3193,7 @@ export function createVfs(options = {}) {
     WriteStream,
     FileReadStream: ReadStream,
     FileWriteStream: WriteStream,
+    F_OK: 0,
     R_OK: 4,
     W_OK: 2,
     X_OK: 1,

@@ -239,6 +239,13 @@ function checkInvalidHeaderChar(value) {
 
 const chunkExpression = /(?:^|\W)chunked(?:$|\W)/i;
 
+function prepareError(error, parser, rawPacket) {
+  error.rawPacket = rawPacket || parser.getCurrentBuffer();
+  if (typeof error.reason === 'string') {
+    error.message = `Parse Error: ${error.reason}`;
+  }
+}
+
 const STATUS_CODES = Object.freeze({
   200: 'OK',
   201: 'Created',
@@ -3702,11 +3709,13 @@ export function createHttpCompatibility(scope = globalThis, {
     http,
     https,
     httpCommon: {
+      methods: METHODS,
       parsers: httpParsers,
       HTTPParser,
       _checkInvalidHeaderChar: checkInvalidHeaderChar,
       _checkIsHttpToken: checkIsHttpToken,
       chunkExpression,
+      prepareError,
     },
     ClientRequest,
     IncomingMessage: http.IncomingMessage,

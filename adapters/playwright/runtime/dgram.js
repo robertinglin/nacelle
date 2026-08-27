@@ -52,6 +52,16 @@ function networkError(code, syscall, address, port) {
   return error;
 }
 
+function socketError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function healthCheck(socket) {
+  if (socket._closed) throw socketError('ERR_SOCKET_DGRAM_NOT_RUNNING', 'Not running');
+}
+
 function makeNodeBytes(bytes, BufferClass) {
   return typeof BufferClass?.from === 'function' ? BufferClass.from(bytes) : bytes;
 }
@@ -74,9 +84,16 @@ export class Socket extends EventEmitter {
     this._trackTask = internal.trackTask;
     this._diagnostics = internal.diagnostics;
     this._reuseAddr = Boolean(internal.reuseAddr);
+    this._reusePort = Boolean(internal.reusePort);
+    this._ipv6Only = Boolean(internal.ipv6Only);
+    this._cluster = internal.cluster;
+    this._clusterGroupId = internal.clusterGroupId;
+    this._onListening = internal.onListening;
     this._sendBlockList = internal.sendBlockList;
     this._receiveBlockList = internal.receiveBlockList;
     this._bound = false;
+    this._binding = false;
+    this._connecting = false;
     this._closed = false;
     this._connected = false;
     this._remoteAddress = null;
@@ -105,6 +122,8 @@ export class Socket extends EventEmitter {
   }
 
   bind(port_, address_, callback_) {
+    healthCheck(this);
+    if (this._bound || this._binding) throw socketError('ERR_SOCKET_ALREADY_BOUND', 'Socket is already bound');
     let options = {};
     let port = port_;
     let address = address_;
@@ -115,13 +134,21 @@ export class Socket extends EventEmitter {
       address = options.address;
       callback = address_;
       this._reuseAddr = Boolean(options.reuseAddr);
+      this._reusePort = Boolean(options.reusePort);
+      this._ipv6Only = Boolean(options.ipv6Only);
       if (options.fd !== undefined) {
         const descriptors = globalThis.__BNH_VIRTUAL_FD_TYPES__;
         const descriptorType = descriptors?.get(Number(options.fd));
-        const error = new Error(descriptorType === 'tcp' ? 'Unsupported fd type: TCP' : 'open EEXIST');
-        error.code = descriptorType === 'tcp' ? 'ERR_INVALID_FD_TYPE' : 'EEXIST';
-        error.name = descriptorType === 'tcp' ? 'TypeError' : 'Error';
-        throw error;
+        if (descriptorType !== 'udp') {
+          const error = new Error(descriptorType === 'tcp' ? 'Unsupported fd type: TCP' : 'open EEXIST');
+          error.code = descriptorType === 'tcp' ? 'ERR_INVALID_FD_TYPE' : 'EEXIST';
+          error.name = descriptorType === 'tcp' ? 'TypeError' : 'Error';
+          throw error;
+        }
+        const descriptor = globalThis.__BNH_VIRTUAL_UDP_HANDLES__?.get(Number(options.fd));
+        if (!descriptor?.bound) throw socketError('EEXIST', 'open EEXIST');
+        address = descriptor.address;
+        port = descriptor.port;
       }
     }
     if (typeof port === 'function') {
@@ -136,16 +163,14 @@ export class Socket extends EventEmitter {
     const family = this.type === 'udp6' ? 6 : 4;
     let normalizedAddress = normalizeVirtualAddress(address || (family === 6 ? '::' : '0.0.0.0'), family);
     const requestedPort = validatePort(port ?? 0);
+    this._binding = true;
     queueMicrotask(() => {
       if (this._closed) return;
-      if (this._bound) {
-        callback?.call(this);
-        return;
-      }
       const handle = this[VIRTUAL_DGRAM_STATE].handle;
       handle.lookup.call(handle, normalizedAddress, (lookupError, resolvedAddress, resolvedFamily) => {
         if (this._closed) return;
         if (lookupError) {
+          this._binding = false;
           this.emit('error', lookupError);
           return;
         }
@@ -154,14 +179,30 @@ export class Socket extends EventEmitter {
           resolvedFamily || family,
         );
         try {
-          const result = this._network.bindUdp(this, normalizedAddress, requestedPort, { reuseAddr: this._reuseAddr });
+          const cluster = typeof this._cluster === 'function' ? this._cluster() : this._cluster;
+          const groupId = this._clusterGroupId || cluster?.worker?.process?.ppid;
+          const result = cluster?.isWorker && typeof this._network.bindClusterUdp === 'function'
+            ? this._network.bindClusterUdp(groupId, normalizedAddress, requestedPort, {
+                reuseAddr: this._reuseAddr,
+                reusePort: this._reusePort,
+                ipv6Only: this._ipv6Only,
+                socket: this,
+              })
+            : this._network.bindUdp(this, normalizedAddress, requestedPort, {
+                reuseAddr: this._reuseAddr,
+                reusePort: this._reusePort,
+                ipv6Only: this._ipv6Only,
+              });
           this.boundPort = result.port;
           this.boundAddress = result.address;
           this._taskRelease = this._refed ? this._trackTask?.() || null : null;
+          this._binding = false;
           this._bound = true;
           this.emit('listening');
+          this._onListening?.(this.address());
           callback?.call(this);
         } catch (error) {
+          this._binding = false;
           this.emit('error', error);
         }
       });
@@ -170,7 +211,8 @@ export class Socket extends EventEmitter {
   }
 
   address() {
-    if (!this._bound) throw new Error('Not running');
+    healthCheck(this);
+    if (!this._bound) throw socketError('EBADF', 'getsockname EBADF');
     return {
       address: this.boundAddress,
       port: this.boundPort,
@@ -179,6 +221,7 @@ export class Socket extends EventEmitter {
   }
 
   send(message, ...args) {
+    healthCheck(this);
     let offset = 0;
     let length;
     let port;
@@ -209,6 +252,10 @@ export class Socket extends EventEmitter {
     if (typeof address === 'function') {
       callback = address;
       address = undefined;
+    }
+    const connected = this._connected;
+    if (connected && (port !== undefined || address !== undefined)) {
+      throw socketError('ERR_SOCKET_DGRAM_IS_CONNECTED', 'Already connected');
     }
     address = address ?? this._remoteAddress?.address ?? (this.type === 'udp6' ? virtualNetworkConstants.LOOPBACK_V6 : virtualNetworkConstants.LOOPBACK_V4);
     if (address === '') address = this.type === 'udp6' ? virtualNetworkConstants.LOOPBACK_V6 : virtualNetworkConstants.LOOPBACK_V4;
@@ -291,17 +338,27 @@ export class Socket extends EventEmitter {
     }
     address = normalizeVirtualAddress(address, this.type === 'udp6' ? 6 : 4);
     if (!this._bound) {
-      this.bind(0, this.type === 'udp6' ? '::' : '0.0.0.0', (error) => {
-        if (error) callback(error);
-        else transmit();
-      });
+      if (!this._binding) this.bind(0, this.type === 'udp6' ? '::' : '0.0.0.0');
+      if (this._bound) transmit();
+      else this.once('listening', transmit);
     } else {
       transmit();
     }
     return true;
   }
 
+  sendto(buffer, offset, length, port, address, callback) {
+    if (typeof offset !== 'number') throw socketError('ERR_INVALID_ARG_TYPE', 'The "offset" argument must be of type number');
+    if (typeof length !== 'number') throw socketError('ERR_INVALID_ARG_TYPE', 'The "length" argument must be of type number');
+    if (typeof port !== 'number') throw socketError('ERR_INVALID_ARG_TYPE', 'The "port" argument must be of type number');
+    if (typeof address !== 'string') throw socketError('ERR_INVALID_ARG_TYPE', 'The "address" argument must be of type string');
+    this.send(buffer, offset, length, port, address, callback);
+  }
+
   connect(port, address, callback) {
+    healthCheck(this);
+    if (this._connected || this._connecting) throw socketError('ERR_SOCKET_DGRAM_IS_CONNECTED', 'Already connected');
+    this._connecting = true;
     if (typeof address === 'function') {
       callback = address;
       address = undefined;
@@ -311,12 +368,14 @@ export class Socket extends EventEmitter {
     const requestedAddress = address || (family === 6 ? '::1' : '127.0.0.1');
     const finish = (error, resolvedAddress = requestedAddress, resolvedFamily = family) => {
       if (error) {
+        this._connecting = false;
         if (callback) callback.call(this, error);
         else queueMicrotask(() => this.emit('error', error));
         return;
       }
       if (this._sendBlockList?.check?.(resolvedAddress, resolvedFamily === 6 ? 'ipv6' : 'ipv4')) {
         const blocked = networkError('ERR_IP_BLOCKED', 'connect', resolvedAddress, requestedPort);
+        this._connecting = false;
         if (callback) callback.call(this, blocked);
         else queueMicrotask(() => this.emit('error', blocked));
         return;
@@ -331,6 +390,7 @@ export class Socket extends EventEmitter {
           return;
         }
         this._remoteAddress = remote;
+        this._connecting = false;
         this._connected = true;
         this.emit('connect');
         callback?.call(this);
@@ -345,19 +405,22 @@ export class Socket extends EventEmitter {
     } else {
       this._dns.lookup(requestedAddress, { family, all: false }, finish);
     }
-    return this;
+    return undefined;
   }
 
   disconnect() {
+    healthCheck(this);
+    if (!this._connected) throw socketError('ERR_SOCKET_DGRAM_NOT_CONNECTED', 'Not connected');
     this._remoteAddress = null;
     this._connected = false;
-    return this;
   }
 
   close(callback) {
+    healthCheck(this);
     if (typeof callback === 'function') this.once('close', callback);
     if (this._closed) return this;
     this._closed = true;
+    this._binding = false;
     if (this._bound) this._network.unbindUdp(this);
     this._taskRelease?.();
     this._taskRelease = null;
@@ -373,6 +436,16 @@ export class Socket extends EventEmitter {
       });
     });
     return this;
+  }
+
+  remoteAddress() {
+    healthCheck(this);
+    if (!this._connected) throw socketError('ERR_SOCKET_DGRAM_NOT_CONNECTED', 'Not connected');
+    return {
+      address: this._remoteAddress.address,
+      port: this._remoteAddress.port,
+      family: this.type === 'udp6' ? 'IPv6' : 'IPv4',
+    };
   }
 
   _receiveDatagram(bytes, rinfo) {
@@ -409,11 +482,20 @@ export class Socket extends EventEmitter {
   }
 }
 
-export function createBrowserDgram({ network = sharedVirtualNetwork, transport, dns = createBrowserDns(), BufferClass, trackTask, diagnostics } = {}) {
+export function createBrowserDgram({ network = sharedVirtualNetwork, transport, dns = createBrowserDns(), BufferClass, trackTask, diagnostics, cluster, clusterGroupId, onListening } = {}) {
   const configuredNetwork = transport && network === sharedVirtualNetwork ? createVirtualNetwork({ transport }) : network;
   const SocketWithDefaults = class BrowserDgramSocket extends Socket {
     constructor(type, listener) {
-      super(type, listener, { network: configuredNetwork, dns, BufferClass, trackTask, diagnostics });
+      super(type, listener, {
+        network: configuredNetwork,
+        dns,
+        BufferClass,
+        trackTask,
+        diagnostics,
+        cluster,
+        clusterGroupId,
+        onListening,
+      });
     }
   };
   return {

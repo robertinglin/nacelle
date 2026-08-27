@@ -3133,6 +3133,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     const internalBindingContract = createBrowserInternalBindings({
       globalObject: scope,
       constants: createConstants(),
+      network: virtualNetwork,
       onWorkerMessage: (message) => {
         if (!options.workerThread || typeof processObject?.send !== 'function') return;
         processObject.send({ __bnhInternalWorkerMessage: message?.type });

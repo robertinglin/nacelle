@@ -1123,10 +1123,13 @@ function createTaskQueueBinding(globalObject) {
   };
 }
 
-export function createBrowserInternalBindings({ globalObject = globalThis, constants = {}, onWorkerMessage } = {}) {
+export function createBrowserInternalBindings({ globalObject = globalThis, constants = {}, onWorkerMessage, network } = {}) {
   const descriptors = globalObject.__BNH_VIRTUAL_FD_TYPES__ || new Map();
   globalObject.__BNH_VIRTUAL_FD_TYPES__ = descriptors;
+  const udpHandles = globalObject.__BNH_VIRTUAL_UDP_HANDLES__ || new Map();
+  globalObject.__BNH_VIRTUAL_UDP_HANDLES__ = udpHandles;
   let nextTcpDescriptor = 2000;
+  let nextUdpDescriptor = 1000;
   class TCP {
     constructor() {
       this.fd = nextTcpDescriptor++;
@@ -1432,11 +1435,30 @@ export function createBrowserInternalBindings({ globalObject = globalThis, const
     },
     udp_wrap: {
       UDP: class UDP extends PendingWrap {
-        constructor() { super('UDP'); this._bnhInitialize(); }
-        bind() { return 0; }
-        getsockname(address) { if (address) Object.assign(address, { address: '0.0.0.0', family: 'IPv4', port: 0 }); return 0; }
+        constructor() {
+          super('UDP');
+          this._bnhInitialize();
+          this.fd = nextUdpDescriptor++;
+          this._bnhUdpState = { address: '0.0.0.0', family: 'IPv4', port: 0, bound: false };
+          descriptors.set(this.fd, 'udp');
+          udpHandles.set(this.fd, { handle: this, ...this._bnhUdpState });
+        }
+        bind(address = '0.0.0.0', port = 0) {
+          const state = this._bnhUdpState;
+          state.address = String(address || '0.0.0.0');
+          state.family = state.address.includes(':') ? 'IPv6' : 'IPv4';
+          state.port = Number(port) || network?.allocateUdpPort?.(state.address) || 51000;
+          state.bound = true;
+          udpHandles.set(this.fd, { handle: this, ...state });
+          return 0;
+        }
+        getsockname(address) {
+          const state = this._bnhUdpState;
+          if (address) Object.assign(address, state);
+          return 0;
+        }
         send(request) { request?._bnhInitialize(); queueMicrotask(() => request?.oncomplete?.(0)); return 0; }
-        close(callback) { callback?.(); }
+        close(callback) { descriptors.delete(this.fd); udpHandles.delete(this.fd); callback?.(); }
       },
       SendWrap,
     },

@@ -198,6 +198,9 @@ export class BrowserDiffieHellman {
 }
 
 export class BrowserDiffieHellmanGroup extends BrowserDiffieHellman {
+  getGenerator(encoding) { return super.getGenerator(encoding); }
+  getPublicKey(encoding) { return super.getPublicKey(encoding); }
+  getPrivateKey(encoding) { return super.getPrivateKey(encoding); }
   setPrivateKey() { return undefined; }
   setPublicKey() { return undefined; }
 }

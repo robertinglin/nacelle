@@ -1171,12 +1171,26 @@ export function createCertificateShim(globalObject = globalThis, name = 'X509Cer
     get infoAccess() { throw unsupportedCertificateProperty(name, 'infoAccess'); }
     get validFrom() { throw unsupportedCertificateProperty(name, 'validFrom'); }
     get validTo() { throw unsupportedCertificateProperty(name, 'validTo'); }
+    get ca() { throw unsupportedCertificateProperty(name, 'ca'); }
+    // These synchronous operations require the X.509 parser and certificate
+    // fields that Web Crypto does not expose in a browser.
+    toJSON() { throw unsupportedCertificateOperation(name, 'toJSON'); }
+    checkHost(hostname, options) { throw unsupportedCertificateOperation(name, 'checkHost'); }
+    checkEmail(email, options) { throw unsupportedCertificateOperation(name, 'checkEmail'); }
+    checkIP(ip, options) { throw unsupportedCertificateOperation(name, 'checkIP'); }
+    checkIssued(otherCertificate) { throw unsupportedCertificateOperation(name, 'checkIssued'); }
+    checkPrivateKey(privateKey) { throw unsupportedCertificateOperation(name, 'checkPrivateKey'); }
+    verify(publicKey) { throw unsupportedCertificateOperation(name, 'verify'); }
   };
 }
 
 function unsupportedCertificateProperty(name, property) {
+  return unsupportedCertificateOperation(name, property);
+}
+
+function unsupportedCertificateOperation(name, operation) {
   return new UnsupportedWebCapabilityError(
-    `${name}.${property}`,
+    `${name}.${operation}`,
     X509_PARSER_BLOCKER,
   );
 }

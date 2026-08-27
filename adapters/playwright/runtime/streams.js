@@ -19,6 +19,127 @@ export function getDefaultHighWaterMark(objectMode) {
   return objectMode ? defaultObjectHighWaterMark : defaultHighWaterMark;
 }
 
+function isNodeStream(value) {
+  return Boolean(value && (value._readableState || value._writableState)
+    && typeof value.on === 'function');
+}
+
+function hasReadableSide(value) {
+  if (value?.readable === false || value?._readableState?.readable === false) return false;
+  return Boolean(value && (typeof value.readable === 'boolean'
+    || typeof value[Symbol.asyncIterator] === 'function'));
+}
+
+function hasWritableSide(value) {
+  if (value?.writable === false || value?._writableState?.writable === false) return false;
+  return Boolean(value && typeof value.write === 'function');
+}
+
+function isIterable(value) {
+  return Boolean(value && (typeof value[Symbol.asyncIterator] === 'function'
+    || typeof value[Symbol.iterator] === 'function'));
+}
+
+function invalidComposeStage() {
+  return streamError(
+    'ERR_INVALID_ARG_VALUE',
+    'The argument must be a stream, an iterable, or an async function',
+  );
+}
+
+function readableObjectMode(value) {
+  return Boolean(value?.readableObjectMode ?? value?._readableState?.objectMode);
+}
+
+function writableObjectMode(value) {
+  return Boolean(value?.writableObjectMode ?? value?._writableState?.objectMode);
+}
+
+function likelyReadableFunction(value) {
+  const name = value?.constructor?.name;
+  return name !== 'AsyncFunction';
+}
+
+function invalidComposeReturn(value) {
+  const received = value === null ? 'null' : value?.constructor?.name || typeof value;
+  return streamError(
+    'ERR_INVALID_RETURN_VALUE',
+    `Expected nully to be returned from the "body" function but got ${received}`,
+  );
+}
+
+function asReadable(value) {
+  if (isNodeStream(value)) return value;
+  if (isIterable(value)) return Readable.from(value);
+  throw invalidComposeStage();
+}
+
+function waitForWritable(stream) {
+  if (stream?._writableState?.finished || stream?.writableFinished) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const onFinish = () => { cleanup(); resolve(); };
+    const onError = (error) => { cleanup(); reject(error); };
+    const cleanup = () => {
+      stream.off?.('finish', onFinish);
+      stream.off?.('error', onError);
+    };
+    stream.once('finish', onFinish);
+    stream.once('error', onError);
+  });
+}
+
+function pipeInto(source, destination) {
+  asReadable(source).pipe(destination);
+  return destination;
+}
+
+function consumeInto(output, source) {
+  return (async () => {
+    for await (const chunk of source) output.push(chunk);
+    output.push(null);
+  })();
+}
+
+// The browser runtime has one stream implementation, so the public state
+// predicates can read the same state objects used by the stream classes.
+export function isDestroyed(stream) {
+  if (!isNodeStream(stream)) return null;
+  return Boolean(stream.destroyed || stream._readableState?.destroyed || stream._writableState?.destroyed);
+}
+
+export function isDisturbed(stream) {
+  return Boolean(stream && (
+    stream.readableDidRead
+    || stream.readableAborted
+    || stream._readableState?.disturbed
+  ));
+}
+
+export function isErrored(stream) {
+  return Boolean(stream && (
+    stream.readableErrored
+    || stream.writableErrored
+    || stream._readableState?.errored
+    || stream._writableState?.errored
+    || stream._readableState?.errorEmitted
+    || stream._writableState?.errorEmitted
+  ));
+}
+
+export function isReadable(stream) {
+  if (!stream || typeof stream.readable !== 'boolean') return null;
+  if (isDestroyed(stream)) return false;
+  return Boolean(isNodeStream(stream) && stream.readable
+    && !stream._readableState?.endEmitted);
+}
+
+export function isWritable(stream) {
+  if (!stream || typeof stream.writable !== 'boolean') return null;
+  if (isDestroyed(stream)) return false;
+  return Boolean(isNodeStream(stream) && stream.writable
+    && !stream._writableState?.ended);
+}
+
 class StreamChunk extends Uint8Array {
   toString(encoding = 'utf8') {
     if (encoding === 'hex') return Array.from(this, (value) => value.toString(16).padStart(2, '0')).join('');
@@ -789,6 +910,20 @@ export class Readable extends EventEmitter {
     }
   }
 
+  compose(stage, options) {
+    if (stage === undefined || stage === null) {
+      throw streamError('ERR_INVALID_ARG_TYPE', 'The "stream" argument must be a stream, iterable, or function');
+    }
+    const validated = validateCombinatorOptions(options);
+    const composed = compose(this, stage);
+    if (validated.signal) {
+      const abort = () => composed.destroy(abortError(validated.signal));
+      if (validated.signal.aborted) abort();
+      else validated.signal.addEventListener('abort', abort, { once: true });
+    }
+    return composed;
+  }
+
   map(fn, options) {
     return Readable.from(mapValues(this, fn, options), { objectMode: true });
   }
@@ -1289,6 +1424,7 @@ class DuplexImpl extends Readable {
   }
 
   get writableFinished() { return this._writable?.writableFinished ?? false; }
+  get writableObjectMode() { return this._writable?.writableObjectMode ?? this._writableState?.objectMode ?? false; }
   get writableCorked() { return this._writable?.writableCorked ?? 0; }
   get writableEnded() { return this._writable?.writableEnded ?? false; }
   get writableNeedDrain() { return this._writable?.writableNeedDrain ?? false; }
@@ -1517,9 +1653,160 @@ export function createOutputCollector(options = {}) {
   return new OutputCollector(options);
 }
 
+export function compose(...stages) {
+  if (stages.length === 0) throw streamError('ERR_MISSING_ARGS', 'At least one stream is required');
+  for (const stage of stages) {
+    if (typeof stage !== 'function' && !isNodeStream(stage) && !isIterable(stage)) {
+      throw invalidComposeStage();
+    }
+  }
+
+  const first = stages[0];
+  const last = stages.at(-1);
+  const firstWritable = typeof first === 'function' || hasWritableSide(first);
+  const firstReadable = typeof first === 'function'
+    || hasReadableSide(first) || isIterable(first);
+  const lastWritable = typeof last === 'function' || hasWritableSide(last);
+  const lastReadable = typeof last === 'function'
+    ? likelyReadableFunction(last)
+    : hasReadableSide(last) || isIterable(last);
+
+  if (!firstReadable && stages.length > 1) throw invalidComposeStage();
+  if (!lastWritable && !lastReadable) throw invalidComposeStage();
+  for (let index = 0; index < stages.length - 1; index += 1) {
+    const stage = stages[index];
+    if (isNodeStream(stage) && !hasReadableSide(stage)) throw invalidComposeStage();
+  }
+  for (let index = 1; index < stages.length; index += 1) {
+    const stage = stages[index];
+    if (isNodeStream(stage) && !hasWritableSide(stage)) throw invalidComposeStage();
+  }
+
+  const input = new Readable({
+    objectMode: firstWritable && (typeof first === 'function'
+      ? true
+      : writableObjectMode(first)),
+    read() {},
+  });
+  let resolveCompletion;
+  let rejectCompletion;
+  const completion = new Promise((resolve, reject) => {
+    resolveCompletion = resolve;
+    rejectCompletion = reject;
+  });
+  completion.catch(() => {});
+
+  const output = new Duplex({
+    readable: lastReadable,
+    writable: firstWritable,
+    readableObjectMode: lastReadable && (typeof last === 'function'
+      ? true
+      : readableObjectMode(last)),
+    writableObjectMode: firstWritable && (typeof first === 'function'
+      ? true
+      : writableObjectMode(first)),
+    read() {},
+    write(chunk, encoding, callback) {
+      try {
+        input.push(chunk, encoding);
+        callback();
+      } catch (error) {
+        callback(error);
+      }
+    },
+    final(callback) {
+      input.push(null);
+      completion.then(() => callback(), callback);
+    },
+  });
+
+  const stageErrors = [input];
+  const onStageError = (error) => rejectCompletion(error);
+  input.on('error', onStageError);
+  for (const stage of stages) {
+    if (isNodeStream(stage)) {
+      stage.on('error', onStageError);
+      stageErrors.push(stage);
+    }
+  }
+
+  output._destroyHook = (error, callback) => {
+    input.destroy(error);
+    for (const stage of stages) if (typeof stage?.destroy === 'function') stage.destroy(error);
+    callback(error);
+  };
+
+  const run = async () => {
+    let current = input;
+    let terminal;
+    for (let index = 0; index < stages.length; index += 1) {
+      const stage = stages[index];
+      if (typeof stage === 'function') {
+        const returned = stage(current);
+        const result = await returned;
+        if (returned?.then && stage.constructor?.name === 'AsyncFunction' && result !== undefined) {
+          throw invalidComposeReturn(result);
+        }
+        if (result === undefined || result === null) {
+          terminal = true;
+          current = null;
+        } else if (isNodeStream(result) || isIterable(result)) {
+          current = result;
+          terminal = false;
+        } else {
+          throw invalidComposeStage();
+        }
+      } else if (isNodeStream(stage)) {
+        if (index === 0 && !hasWritableSide(stage)) {
+          current = stage;
+        } else {
+          if (!current || !hasWritableSide(stage)) throw invalidComposeStage();
+          current = pipeInto(current, stage);
+        }
+        terminal = !hasReadableSide(stage);
+      } else if (index === 0) {
+        current = stage;
+        terminal = false;
+      } else {
+        throw invalidComposeStage();
+      }
+
+      if (index < stages.length - 1 && (!current || terminal)) throw invalidComposeStage();
+    }
+
+    if (current && !terminal && (isNodeStream(current) || isIterable(current))) {
+      await consumeInto(output, asReadable(current));
+    } else if (terminal && stages.at(-1)?.on) {
+      await waitForWritable(stages.at(-1));
+    }
+  };
+
+  run().then(() => {
+    for (const stage of stageErrors) stage.off?.('error', onStageError);
+    resolveCompletion();
+    if (!lastReadable && !firstWritable) output._emitClose();
+  }, (error) => {
+    rejectCompletion(error);
+    if (!output.destroyed) output.destroy(error);
+    queueMicrotask(() => {
+      for (const stage of stageErrors) stage.off?.('error', onStageError);
+    });
+  });
+
+  return output;
+}
+
+export const promises = {
+  pipeline: (...streams) => new Promise((resolve, reject) => {
+    pipeline(...streams, (error) => error ? reject(error) : resolve());
+  }),
+};
+
 export function pipeline(...streams) {
   const callback = typeof streams.at(-1) === 'function' ? streams.pop() : () => {};
-  streams = streams.map((stream) => typeof stream?.pipe === 'function' ? stream : Readable.from(stream));
+  streams = streams.map((stream) => isNodeStream(stream) || typeof stream?.pipe === 'function'
+    ? stream
+    : Readable.from(stream));
   let completed = false;
   let failed = false;
   const finish = (error) => {
@@ -1533,6 +1820,15 @@ export function pipeline(...streams) {
     failed = true;
     for (const other of streams) if (other !== stream) other.destroy?.(error);
     finish(error);
+  });
+  for (const stream of streams) stream.once?.('close', () => {
+    if (completed || stream._endEmitted || stream._finishEmitted) return;
+    if (stream.destroyed || stream._readableState?.destroyed || stream._writableState?.destroyed) {
+      const error = streamError('ERR_STREAM_PREMATURE_CLOSE', 'Premature close');
+      failed = true;
+      for (const other of streams) if (other !== stream) other.destroy?.(error);
+      finish(error);
+    }
   });
   streams.at(-1)?.once?.('finish', () => {
     if (!failed) finish();

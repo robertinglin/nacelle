@@ -926,6 +926,8 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
   let exiting = false;
   let exitEventEmitted = false;
   let beforeExitEventEmitted = false;
+  const stdin = new Readable({ read() {} });
+  stdin.isTTY = false;
   const terminateBySignal = (signal) => {
     if (exited) return;
     exitSignal = signal;
@@ -1278,27 +1280,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     execPath: '/browser/node',
     execArgv: [],
     execve: createBrowserExecve(processObject),
-    stdin: {
-      isTTY: false,
-      on(...args) { processObject.on(...args); return this; },
-      once(...args) { processObject.once(...args); return this; },
-      removeListener(...args) { processObject.removeListener(...args); return this; },
-      off(...args) { processObject.off(...args); return this; },
-      listenerCount: (...args) => processObject.listenerCount(...args),
-      listeners: (...args) => processObject.listeners(...args),
-      push(value) {
-        if (value === null) processObject.emit('end');
-        else processObject.emit('data', value);
-        return true;
-      },
-      end(_value, _encoding, callback) {
-        if (typeof _encoding === 'function') callback = _encoding;
-        callback?.();
-        return this;
-      },
-      resume() {},
-      pause() {},
-    },
+    stdin,
     openStdin: () => processObject.stdin,
     stdout: {
       isTTY: false,
@@ -5370,6 +5352,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           // Preserve injected process identity and capabilities (stdout, stderr, exit control, IPC)
           processObject.stdout = injectedProcess.stdout || processObject.stdout;
           processObject.stderr = injectedProcess.stderr || processObject.stderr;
+          processObject.stdin = injectedProcess.stdin || processObject.stdin;
           processObject.exit = (code) => {
             processObject.exitCode = Number(code) || 0;
             processObject.emit('exit', processObject.exitCode);
@@ -5532,14 +5515,39 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         },
         workerDataTransferList,
       });
+      const workerStdout = new Readable({ read() {} });
+      const workerStdin = workerOptions.stdin === true
+        ? new Writable({
+            write(chunk, _encoding, callback) {
+              try {
+                child.send({ __bnhWorkerStdin: true, value: new Uint8Array(chunk) }, undefined, callback);
+              } catch (error) {
+                callback(error);
+              }
+            },
+            final(callback) {
+              try {
+                child.send({ __bnhWorkerStdinEnd: true }, undefined, callback);
+              } catch (error) {
+                callback(error);
+              }
+            },
+          })
+        : null;
+      child.stdout = workerStdout;
+      child.stdin = workerStdin;
+      child.once('exit', () => workerStdout.push(null));
+      if (workerOptions.stdout !== true) {
+        workerStdout.on('data', (chunk) => ownerProcess.stdout?.write?.(chunk));
+      }
       child.threadId = threadId;
       child.postMessage = (value, transferList) => child.send(value, transferList);
       child.terminate = async () => {
         try { child.kill('SIGKILL'); } catch (error) {
           if (error?.code !== 'ERR_PROCESS_EXITED') throw error;
         }
-        await child.wait();
-        return 1;
+        const terminal = await child.wait();
+        return terminal?.code ?? 1;
       };
       child.ref = () => child;
       child.unref = () => child;
@@ -5553,38 +5561,67 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       const worker = typeof source === 'string'
         ? createBrowserWorker(source, workerOptions, threadId, ownerProcess)
         : createRuntimeWorker(...args);
+      if (worker.stdout === undefined) worker.stdout = new Readable({ read() {} });
+      if (worker.stdin === undefined) worker.stdin = null;
       const workerResource = new AsyncResource('WORKER');
       let workerRefed = true;
       let workerExited = false;
+      let workerResourceDestroyed = false;
       let messagePortResource = null;
-      workerResource.hasRef = () => workerRefed;
+      const workerThreadName = workerOptions.name ? String(workerOptions.name).trim() : 'WorkerThread';
+      workerResource.hasRef = () => workerResourceDestroyed ? undefined : workerRefed;
       const refWorker = worker.ref?.bind(worker);
       const unrefWorker = worker.unref?.bind(worker);
       worker.ref = () => {
+        if (workerExited) return;
         workerRefed = true;
         if (!messagePortResource) {
           messagePortResource = new AsyncResource('MESSAGEPORT');
           messagePortResource.hasRef = () => workerRefed && !workerExited;
         }
         refWorker?.();
-        return worker;
       };
       worker.unref = () => {
+        if (workerExited) return;
         workerRefed = false;
         messagePortResource?.unref?.();
         unrefWorker?.();
-        return worker;
       };
       worker.hasRef = () => workerRefed;
+      const postMessage = worker.postMessage?.bind(worker);
+      worker.postMessage = (value, transferList) => {
+        if (workerExited) return;
+        return postMessage?.(value, transferList);
+      };
+      const terminate = worker.terminate?.bind(worker);
+      worker.terminate = (...terminateArgs) => {
+        if (workerExited) return Promise.resolve(undefined);
+        worker.ref();
+        return Promise.resolve(terminate?.(...terminateArgs));
+      };
       worker.once('spawn', () => worker.emit('online'));
       worker.once('exit', () => {
         workerExited = true;
         messagePortResource?.emitDestroy?.();
-        scope.setTimeout?.(() => workerResource.emitDestroy(), 0);
+        scope.setTimeout?.(() => {
+          workerResourceDestroyed = true;
+          workerResource.emitDestroy();
+        }, 0);
       });
       scope.__BNH_BROWSER_WORKERS__?.add(worker);
       worker.once('exit', () => scope.__BNH_BROWSER_WORKERS__?.delete(worker));
-      worker.threadId = threadId;
+      Object.defineProperties(worker, {
+        threadId: {
+          configurable: true,
+          enumerable: true,
+          get: () => workerExited ? -1 : threadId,
+        },
+        threadName: {
+          configurable: true,
+          enumerable: true,
+          get: () => workerExited ? null : workerThreadName,
+        },
+      });
       if (typeof ownerProcess._bnhWorkerCreated === 'function') {
         ownerProcess._bnhWorkerCreated();
         worker.once('error', (error) => ownerProcess._bnhWorkerError?.(error));

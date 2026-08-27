@@ -16,6 +16,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
   let lastUserSequence = 0;
   let exitCode = 0;
   let signalCode = null;
+  const processExitSignal = {};
   const remoteHandles = new Map();
 
   function errorRecord(error) {
@@ -220,6 +221,22 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     identity = message.identity;
     const process = makeEmitter();
     installProcessContract(process);
+    process.stdin = makeEmitter();
+    process.stdin.readable = true;
+    process.stdin.isTTY = false;
+    process.stdin.push = (value) => {
+      if (value === null) process.stdin.emit('end');
+      else process.stdin.emit('data', value);
+      return true;
+    };
+    process.stdin.resume = () => process.stdin;
+    process.stdin.pause = () => process.stdin;
+    process.stdin.pipe = (destination) => {
+      process.stdin.on('data', (value) => destination.write?.(value));
+      process.stdin.once('end', () => destination.end?.());
+      process.stdin.resume();
+      return destination;
+    };
     if (typeof self.addEventListener === 'function') self.addEventListener('error', uncaughtWorkerError);
     else self.onerror = uncaughtWorkerError;
     Object.assign(process, {
@@ -266,7 +283,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         return true;
       },
       kill: (signal = 'SIGTERM') => { sendControl('child-signal-request', { signal }); return true; },
-      exit(code = 0) { exitCode = Number(code) || 0; process.exitCode = exitCode; process.emit('exit', exitCode); finish('exit', exitCode); },
+      exit(code = 0) { exitCode = Number(code) || 0; process.exitCode = exitCode; process.emit('exit', exitCode); finish('exit', exitCode); throw processExitSignal; },
     });
     process.stdout = { isTTY: false, write(value) { sendControl('output', { stream: 'stdout', value: outputText(value) }); return true; } };
     process.stderr = { isTTY: false, write(value) { sendControl('output', { stream: 'stderr', value: outputText(value) }); return true; } };
@@ -292,7 +309,13 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         const target = remoteHandles.get(frame.payload?.handleId);
         if (target) target.emit(frame.payload.event, ...(frame.payload.args || []).map((value) => value?.id ? createRemoteHandle(value) : value));
       } else if (frame.type === 'message') {
-        process.emit('message', frame.payload, createRemoteHandle(frame.handle));
+        if (frame.payload?.__bnhWorkerStdin) {
+          process.stdin.push(frame.payload.value);
+        } else if (frame.payload?.__bnhWorkerStdinEnd) {
+          process.stdin.push(null);
+        } else {
+          process.emit('message', frame.payload, createRemoteHandle(frame.handle));
+        }
       }
     };
     control.start?.();

@@ -922,8 +922,8 @@ export function adaptWorker(nativeWorker, { revokeURL = null } = {}) {
         return 1;
       });
     },
-    ref() { return worker; },
-    unref() { return worker; },
+    ref() {},
+    unref() {},
   };
   return worker;
 }

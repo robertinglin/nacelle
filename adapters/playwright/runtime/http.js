@@ -17,6 +17,7 @@ const SymbolAsyncDispose = Symbol.asyncDispose || Symbol.for('nodejs.asyncDispos
 const BODYLESS_METHODS = new Set(['GET', 'HEAD']);
 const objectToString = Object.prototype.toString;
 const HTTP_TOKEN_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const HTTP_TOKEN_CHARACTERS = new Set("^_`a-zA-Z-0-9!#$%&'*+.|~".split(''));
 const INVALID_HEADER_CHAR_PATTERN = /[^\t\x20-\x7e\x80-\xff]/;
 const httpParsers = { max: 1000 };
 const kOutgoingHeaders = Symbol('outgoingHeaders');
@@ -27,6 +28,216 @@ const outgoingMessageState = new WeakMap();
 const METHODS = Object.freeze([
   'GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'CONNECT', 'TRACE',
 ]);
+
+const HTTP_PARSER_REQUEST = 0;
+const HTTP_PARSER_RESPONSE = 1;
+const HTTP_PARSER_ON_HEADERS = 0;
+const HTTP_PARSER_ON_HEADERS_COMPLETE = 1;
+const HTTP_PARSER_ON_BODY = 2;
+const HTTP_PARSER_ON_MESSAGE_COMPLETE = 3;
+const HTTP_PARSER_ON_EXECUTE = 4;
+const HTTP_PARSER_ON_TIMEOUT = 5;
+
+function createHTTPParserClass(scope, BufferClass, ownerProcess) {
+  const toBytes = (input, offset = 0, length = input?.byteLength || 0) => {
+    if (input instanceof Uint8Array) return input.subarray(offset, offset + length);
+    if (ArrayBuffer.isView(input)) {
+      return new Uint8Array(input.buffer, input.byteOffset + offset, length);
+    }
+    return new Uint8Array(input || 0, offset, length);
+  };
+
+  const copyBuffer = (bytes) => {
+    if (typeof BufferClass?.from === 'function') return BufferClass.from(bytes);
+    return bytes.slice();
+  };
+
+  class HTTPParser {
+    constructor() {
+      this._buffer = new Uint8Array();
+      this._currentBuffer = new Uint8Array();
+      this._paused = false;
+      this._stream = null;
+      this._resource = null;
+      this._ownerProcess = ownerProcess;
+    }
+
+    initialize(type, callbacks) {
+      this.close();
+      this.type = type;
+      this.callbacks = callbacks || {};
+      this._buffer = new Uint8Array();
+      this._currentBuffer = new Uint8Array();
+      this._paused = false;
+      this._stream = null;
+      this._resource = new AsyncResource(type === HTTP_PARSER_RESPONSE
+        ? 'HTTPCLIENTREQUEST' : 'HTTPINCOMINGMESSAGE');
+      return this;
+    }
+
+    reinitialize(type) {
+      return this.initialize(type, this.callbacks);
+    }
+
+    execute(input, offset = 0, length = input?.byteLength || 0) {
+      if (this._paused) return 0;
+      const bytes = toBytes(input, offset, length);
+      this._currentBuffer = bytes;
+      try {
+      const merged = new Uint8Array(this._buffer.byteLength + bytes.byteLength);
+      merged.set(this._buffer);
+      merged.set(bytes, this._buffer.byteLength);
+      this._buffer = merged;
+
+      const headerEnd = findHeaderEnd(merged);
+      if (headerEnd < 0) return 0;
+      const decoder = scope.TextDecoder || TextDecoder;
+      const headerText = new decoder().decode(merged.subarray(0, headerEnd));
+      const lines = headerText.split('\r\n');
+      const firstLine = lines.shift() || '';
+      const headers = [];
+      for (const line of lines) {
+        const separator = line.indexOf(':');
+        if (separator > 0) headers.push(line.slice(0, separator), line.slice(separator + 1).trim());
+      }
+      let contentLength = 0;
+      for (let index = 0; index < headers.length; index += 2) {
+        if (String(headers[index]).toLowerCase() === 'content-length') {
+          contentLength = Number(headers[index + 1]) || 0;
+          break;
+        }
+      }
+      const bodyStart = headerEnd + 4;
+      if (merged.byteLength < bodyStart + contentLength) return 0;
+
+      const parts = firstLine.split(' ');
+      const version = parts[parts.length - 1]?.match(/^HTTP\/(\d+)\.(\d+)$/);
+      const message = this.type === HTTP_PARSER_RESPONSE
+        ? {
+            versionMajor: Number(version?.[1] || 1),
+            versionMinor: Number(version?.[2] || 1),
+            statusCode: Number(parts[1] || 0),
+            statusMessage: parts.slice(2).join(' '),
+            headers,
+            shouldKeepAlive: true,
+            upgrade: false,
+          }
+        : {
+            versionMajor: Number(version?.[1] || 1),
+            versionMinor: Number(version?.[2] || 1),
+            method: METHODS.indexOf(parts[0]),
+            url: parts[1] || '/',
+            headers,
+            shouldKeepAlive: true,
+            upgrade: false,
+          };
+      const callback = this[HTTPParser.kOnHeadersComplete];
+      this._resource?.runInAsyncScope(
+        () => callback?.call(this, message),
+        this,
+      );
+      if (contentLength > 0) {
+        const bodyCallback = this[HTTPParser.kOnBody];
+        if (bodyCallback) {
+          const body = merged.subarray(bodyStart, bodyStart + contentLength);
+          this._resource?.runInAsyncScope(() => bodyCallback.call(this, copyBuffer(body)), this);
+        }
+      }
+      const complete = this[HTTPParser.kOnMessageComplete];
+      if (complete) this._resource?.runInAsyncScope(() => complete.call(this), this);
+      this._buffer = merged.subarray(bodyStart + contentLength);
+      return input?.byteLength || length;
+      } finally {
+        this._currentBuffer = new Uint8Array();
+      }
+    }
+
+    finish() { return 0; }
+
+    close() {
+      this._resource?.emitDestroy();
+      this._resource = null;
+    }
+
+    getAsyncId() { return this._resource?.asyncId() ?? -1; }
+    asyncId() { return this.getAsyncId(); }
+    triggerAsyncId() { return this._resource?.triggerAsyncId() ?? -1; }
+
+    pause() {
+      this._paused = true;
+    }
+
+    resume() {
+      this._paused = false;
+    }
+
+    consume(stream) {
+      if (stream === null || (typeof stream !== 'object' && typeof stream !== 'function')) {
+        const processObject = scope.process || this._ownerProcess;
+        if (typeof processObject?._bnhAbort === 'function') {
+          processObject._bnhAbort('SIGABRT');
+          throw new Error('HTTP parser consume failed');
+        }
+        if (typeof processObject?.abort === 'function') {
+          processObject.abort();
+          throw new Error('HTTP parser consume failed');
+        }
+        throw new TypeError('stream must be an object');
+      }
+      this._stream = stream;
+    }
+
+    unconsume() {
+      this._stream = null;
+    }
+
+    getCurrentBuffer() {
+      return copyBuffer(this._currentBuffer);
+    }
+  }
+
+  Object.assign(HTTPParser, {
+    REQUEST: HTTP_PARSER_REQUEST,
+    RESPONSE: HTTP_PARSER_RESPONSE,
+    kOnMessageBegin: 0,
+    kOnHeaders: HTTP_PARSER_ON_HEADERS,
+    kOnHeadersComplete: HTTP_PARSER_ON_HEADERS_COMPLETE,
+    kOnBody: HTTP_PARSER_ON_BODY,
+    kOnMessageComplete: HTTP_PARSER_ON_MESSAGE_COMPLETE,
+    kOnExecute: HTTP_PARSER_ON_EXECUTE,
+    kOnTimeout: HTTP_PARSER_ON_TIMEOUT,
+    kLenientNone: 0,
+    kLenientHeaders: 1,
+    kLenientChunkedLength: 2,
+    kLenientKeepAlive: 4,
+    kLenientAll: 0xffff,
+  });
+
+  return HTTPParser;
+}
+
+function findHeaderEnd(bytes) {
+  for (let index = 0; index + 3 < bytes.byteLength; index += 1) {
+    if (bytes[index] === 13 && bytes[index + 1] === 10
+        && bytes[index + 2] === 13 && bytes[index + 3] === 10) return index;
+  }
+  return -1;
+}
+
+function checkIsHttpToken(value) {
+  if (value.length >= 10) return HTTP_TOKEN_PATTERN.test(value);
+  if (value.length === 0) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    if (!HTTP_TOKEN_CHARACTERS.has(value[index])) return false;
+  }
+  return true;
+}
+
+function checkInvalidHeaderChar(value) {
+  return INVALID_HEADER_CHAR_PATTERN.test(value);
+}
+
+const chunkExpression = /(?:^|\W)chunked(?:$|\W)/i;
 
 const STATUS_CODES = Object.freeze({
   200: 'OK',
@@ -2729,7 +2940,7 @@ function proxyRequestOptions(url, init) {
   };
 }
 
-function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv, diagnostics) {
+function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv, diagnostics, ownerProcess) {
   const ClientRequest = class ClientRequest extends EventEmitter {
     constructor(url, options = {}) {
       super();
@@ -2767,11 +2978,21 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       this._clientTcpResource = null;
       this._clientTcpConnectResource = null;
       this._proxyEnv = { ...proxyEnv, ...scope.process?.env };
-      this._ownerProcess = scope.process;
+      this._ownerProcess = scope.process || ownerProcess;
       this._ownerConsole = scope.console;
       this.parser = {
-        consume: (length) => {
-          if (length === 0) this._ownerProcess?.abort?.();
+        consume: (stream) => {
+          if (stream === null || (typeof stream !== 'object' && typeof stream !== 'function')) {
+            const processObject = this._ownerProcess || scope.process;
+            if (typeof processObject?._bnhAbort === 'function') {
+              processObject._bnhAbort('SIGABRT');
+              throw new Error('HTTP parser consume failed');
+            }
+            if (typeof processObject?.abort === 'function') {
+              processObject.abort();
+              throw new Error('HTTP parser consume failed');
+            }
+          }
         },
       };
       Object.defineProperty(this, '_headers', {
@@ -3395,6 +3616,7 @@ function createProtocolModule(protocol, ClientRequest, Server, Agent, scope, net
 /** Create the browser-native Node-shaped http and https compatibility modules. */
 export function createHttpCompatibility(scope = globalThis, {
   Buffer: BufferClass = scope.Buffer,
+  process: ownerProcess,
   proxy: configuredProxy,
   net: configuredNet,
   proxyEnv,
@@ -3419,6 +3641,7 @@ export function createHttpCompatibility(scope = globalThis, {
     proxy,
     proxyEnv,
     diagnostics,
+    ownerProcess,
   );
   const HttpServer = createServerClass(DEFAULT_HTTP_PROTOCOL, scope, virtualNetwork, BufferClass, trackTask);
   const HttpsServer = createServerClass(DEFAULT_HTTPS_PROTOCOL, scope, virtualNetwork, BufferClass, trackTask);
@@ -3474,10 +3697,17 @@ export function createHttpCompatibility(scope = globalThis, {
     net,
     allowCrossProtocol,
   );
+  const HTTPParser = createHTTPParserClass(scope, BufferClass, ownerProcess);
   return Object.freeze({
     http,
     https,
-    httpCommon: { parsers: httpParsers },
+    httpCommon: {
+      parsers: httpParsers,
+      HTTPParser,
+      _checkInvalidHeaderChar: checkInvalidHeaderChar,
+      _checkIsHttpToken: checkIsHttpToken,
+      chunkExpression,
+    },
     ClientRequest,
     IncomingMessage: http.IncomingMessage,
     OutgoingMessage: http.OutgoingMessage,

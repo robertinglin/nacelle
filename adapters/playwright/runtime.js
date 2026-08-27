@@ -606,6 +606,71 @@ function moduleSynchronousEsmSource(source) {
   return transformed;
 }
 
+function moduleArgumentTypeError(name, expected, value) {
+  const received = value === null
+    ? 'null'
+    : value === undefined
+      ? 'undefined'
+      : Array.isArray(value)
+        ? 'an instance of Array'
+        : typeof value === 'object'
+          ? `an instance of ${value.constructor?.name || 'Object'}`
+          : `type ${typeof value} (${String(value)})`;
+  const error = new TypeError(`The "${name}" argument must be of type ${expected}. Received ${received}`);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function modulePropertyTypeError(name, expected, value) {
+  const received = value === null
+    ? 'null'
+    : value === undefined
+      ? 'undefined'
+      : Array.isArray(value)
+        ? 'an instance of Array'
+        : typeof value === 'object'
+          ? `an instance of ${value.constructor?.name || 'Object'}`
+          : `type ${typeof value} (${String(value)})`;
+  const error = new TypeError(`The "${name}" property must be of type ${expected}. Received ${received}`);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function blankTypeScriptText(value) {
+  return String(value).replace(/[^\r\n]/g, ' ');
+}
+
+function stripTypeScriptSource(source) {
+  let result = String(source);
+
+  // Declarations which have no JavaScript representation are blanked rather
+  // than removed so that generated stack locations remain stable.
+  result = result.replace(
+    /(^|[;\n])([ \t]*(?:(?:declare|export)\s+)*(?:interface|type)\s+[A-Za-z_$][\w$]*(?:\s+extends[^\{=]+)?\s*(?:\{[\s\S]*?\}\s*;?|=[\s\S]*?;))/g,
+    (_, prefix, declaration) => `${prefix}${blankTypeScriptText(declaration)}`,
+  );
+  result = result.replace(
+    /\b(?:import|export)\s+type\b[^;\n]*(?:;|(?=\n|$))/g,
+    (declaration) => blankTypeScriptText(declaration),
+  );
+
+  // Type annotations are recognized at JavaScript delimiters so ordinary
+  // object-literal properties and strings are left untouched.
+  result = result.replace(
+    /[!?]?\s*:\s*[A-Za-z_$][\w$]*(?:\s*<[^>\n]*>)?(?:\s*\[\s*\])?(?:\s*\|\s*[A-Za-z_$][\w$]*(?:\s*<[^>\n]*>)?(?:\s*\[\s*\])?)*(?=\s*(?:[,)=;{]|=>|$))/g,
+    (annotation) => blankTypeScriptText(annotation),
+  );
+  result = result.replace(
+    /\s+as\s+(?:const\b|[A-Za-z_$][\w$]*(?:\s*<[^>\n]*>)?(?:\s*\[\s*\])?)/g,
+    (assertion) => blankTypeScriptText(assertion),
+  );
+  result = result.replace(
+    /([A-Za-z_$][\w$]*)!\s*(?=[,.;)=])/g,
+    '$1 ',
+  );
+  return result;
+}
+
 function installAbortSignalCompatibility(scope) {
   const AbortSignalClass = scope.AbortSignal;
   if (typeof AbortSignalClass?.any !== 'function') return;
@@ -1771,6 +1836,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     let syncBuiltinESMExportsImpl = () => {};
     const moduleParents = new WeakMap();
     const SourceMap = createSourceMapClass();
+    let sourceMapsSupport = Object.freeze({
+      enabled: false,
+      nodeModules: false,
+      generatedCode: false,
+    });
     const childProcessArgumentTypeError = (name, expected, value) => {
       const received = value === null
         ? 'null'
@@ -2152,6 +2222,53 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         registerHooks,
         syncBuiltinESMExports: () => syncBuiltinESMExportsImpl(),
         SourceMap,
+        setSourceMapsSupport: (enabled, options = {}) => {
+          if (typeof enabled !== 'boolean') throw moduleArgumentTypeError('enabled', 'boolean', enabled);
+          if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+            throw moduleArgumentTypeError('options', 'object', options);
+          }
+          const nodeModules = options.nodeModules ?? false;
+          const generatedCode = options.generatedCode ?? false;
+          if (typeof nodeModules !== 'boolean') {
+            throw modulePropertyTypeError('options.nodeModules', 'boolean', nodeModules);
+          }
+          if (typeof generatedCode !== 'boolean') {
+            throw modulePropertyTypeError('options.generatedCode', 'boolean', generatedCode);
+          }
+          sourceMapsSupport = Object.freeze({ enabled, nodeModules, generatedCode });
+        },
+        stripTypeScriptTypes: (code, options = {}) => {
+          if (typeof code !== 'string') throw moduleArgumentTypeError('code', 'string', code);
+          if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+            throw moduleArgumentTypeError('options', 'object', options);
+          }
+          const mode = options.mode === undefined ? 'strip' : options.mode;
+          if (mode !== 'strip' && mode !== 'transform') {
+            const error = new TypeError(`The property 'options.mode' must be one of: 'strip', 'transform'. Received ${String(mode)}`);
+            error.code = 'ERR_INVALID_ARG_VALUE';
+            throw error;
+          }
+          const sourceMap = options.sourceMap === undefined ? false : options.sourceMap;
+          if (typeof sourceMap !== 'boolean') {
+            throw modulePropertyTypeError('options.sourceMap', 'boolean', sourceMap);
+          }
+          const sourceUrl = options.sourceUrl === undefined ? '' : options.sourceUrl;
+          if (typeof sourceUrl !== 'string') {
+            throw modulePropertyTypeError('options.sourceUrl', 'string', sourceUrl);
+          }
+          if (mode === 'strip' && sourceMap) {
+            const error = new TypeError("The property 'options.sourceMap' must be one of: false, undefined. Received true");
+            error.code = 'ERR_INVALID_ARG_VALUE';
+            throw error;
+          }
+          if (mode === 'transform' && sourceMap) {
+            const error = new Error('TypeScript source-map generation is unavailable in the browser runtime');
+            error.code = 'ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX';
+            throw error;
+          }
+          const transformed = stripTypeScriptSource(code);
+          return sourceUrl ? `${transformed}\n\n//# sourceURL=${sourceUrl}` : transformed;
+        },
       });
       moduleApi.Module = Module;
       Object.defineProperties(moduleApi, {

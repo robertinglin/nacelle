@@ -84,6 +84,12 @@ function validatePort(port, allowZero = false) {
   return value;
 }
 
+function serverNotRunningError() {
+  const error = new Error('Server is not running');
+  error.code = 'ERR_SERVER_NOT_RUNNING';
+  return error;
+}
+
 function parseConnectArgs(args) {
   const normalized = normalizeArgs(args);
   return { options: normalized[0], callback: normalized[1] };
@@ -655,8 +661,12 @@ export class Server extends EventEmitter {
     this._clusterHandle = null;
     this._handle = null;
     this._unref = false;
+    this._connections = 0;
+    this._usingWorkers = false;
+    this._workers = [];
+    this._closeEmitted = false;
     this._ownerProcess = internal.currentProcess?.() || null;
-    this.listening = false;
+    this._listening = false;
     this.maxConnections = undefined;
     if (typeof connectionListener === 'function') this.on('connection', connectionListener);
   }
@@ -666,7 +676,18 @@ export class Server extends EventEmitter {
     return this._config.runInProcessContext(this._ownerProcess, callback);
   }
 
+  _listen2(address, port, addressType) {
+    const family = addressType === 6 ? 6 : 4;
+    const host = address || (family === 6 ? '::' : '0.0.0.0');
+    return this.listen({ port: port ?? 0, host });
+  }
+
   listen(...args) {
+    if (this._handle) {
+      const error = new Error('Server is already listening');
+      error.code = 'ERR_SERVER_ALREADY_LISTEN';
+      throw error;
+    }
     const { options, callback } = parseListenArgs(args);
     if (callback) this.once('listening', callback);
     if (options.path !== undefined) return this._listenPipe(options.path, callback);
@@ -679,6 +700,7 @@ export class Server extends EventEmitter {
     const family = options.host ? (isIP(options.host) === 6 ? 6 : 4) : 6;
     const address = normalizeVirtualAddress(options.host || (family === 6 ? '::' : '0.0.0.0'), family);
     this._closeRequested = false;
+    this._closeEmitted = false;
     if (configuredCluster(this._config)?._getServer) return this._listenCluster(options, address, family, callback);
     const trackTask = this._config.getTaskTracker?.() || this._config.trackTask;
     const taskRelease = trackTask?.() || null;
@@ -690,7 +712,7 @@ export class Server extends EventEmitter {
       this._boundAddress = result.address;
       this._handle = this._createServerHandle();
       this._taskRelease = taskRelease;
-      this.listening = true;
+      this._listening = true;
       schedule(() => {
         if (this._closeRequested) return;
         const emitListening = () => this._runWithOwner(() => {
@@ -727,7 +749,7 @@ export class Server extends EventEmitter {
       try {
         this._network.bindPipe(this, path);
         this._taskRelease = taskRelease;
-        this.listening = true;
+        this._listening = true;
         this._runWithOwner(() => {
           this.emit('listening');
           try { this._config.onListening?.(path); } catch { /* parent may already be terminal */ }
@@ -768,7 +790,7 @@ export class Server extends EventEmitter {
           this._boundAddress = handle.address || address;
           this._boundPort = handle.port;
           this._taskRelease = this._config.trackTask?.() || null;
-          this.listening = true;
+          this._listening = true;
           this._runWithOwner(() => {
             this.emit('listening');
             try { this._config.onListening?.(this.address()); } catch { /* parent may already be terminal */ }
@@ -797,7 +819,7 @@ export class Server extends EventEmitter {
           this._pipeName = handle.path || path;
           this._pipeResource = new AsyncResource('PIPESERVERWRAP');
           this._taskRelease = this._config.trackTask?.() || null;
-          this.listening = true;
+          this._listening = true;
           this._runWithOwner(() => {
             this.emit('listening');
             try { this._config.onListening?.(this.address()); } catch { /* parent may already be terminal */ }
@@ -811,6 +833,10 @@ export class Server extends EventEmitter {
     return this;
   }
 
+  get listening() {
+    return this._listening;
+  }
+
   address() {
     if (!this.listening) return null;
     if (this._pipeName) return this._pipeName;
@@ -822,10 +848,13 @@ export class Server extends EventEmitter {
   }
 
   close(callback) {
-    if (callback) this.once('close', callback);
+    const wasListening = this.listening;
+    if (typeof callback === 'function') {
+      this.once('close', () => callback(wasListening ? undefined : serverNotRunningError()));
+    }
     this._closeRequested = true;
-    if (!this.listening) {
-      schedule(() => this.emit('close'));
+    if (!wasListening) {
+      this._emitCloseIfDrained();
       return this;
     }
     this._clusterHandle?.close();
@@ -838,24 +867,65 @@ export class Server extends EventEmitter {
     this._network.unbindPipe?.(this);
     this._taskRelease?.();
     this._taskRelease = null;
-    this.listening = false;
+    this._listening = false;
     this._boundPort = null;
     this._boundAddress = null;
-    const activeSockets = [...this._activeSockets];
     const pipeResource = this._pipeResource;
     this._pipeResource = null;
     this._pipeName = null;
     queueMicrotask(() => pipeResource?.emitDestroy());
     queueMicrotask(() => tcpResource?.emitDestroy());
-    schedule(() => {
-      this.emit('close');
-      schedule(() => activeSockets.forEach((socket) => socket.destroy()));
-    });
+    this._emitCloseIfDrained();
     return this;
   }
 
   getConnections(callback) {
-    schedule(() => callback?.(null, this._activeSockets.size));
+    const workers = this._usingWorkers ? [...this._workers] : [];
+    if (!workers.length) {
+      schedule(() => callback?.(null, this._connections));
+      return this;
+    }
+    let remaining = workers.length;
+    let total = this._connections;
+    let finished = false;
+    const done = (error, count = 0) => {
+      if (finished) return;
+      if (error) {
+        finished = true;
+        schedule(() => callback?.(error));
+        return;
+      }
+      total += count;
+      if (--remaining === 0) {
+        finished = true;
+        schedule(() => callback?.(null, total));
+      }
+    };
+    for (const worker of workers) {
+      try {
+        if (typeof worker.getConnections === 'function') worker.getConnections(done);
+        else done(null, 0);
+      } catch (error) {
+        done(error);
+      }
+    }
+    return this;
+  }
+
+  _emitCloseIfDrained() {
+    if (!this._closeRequested || this._handle || this._connections || this._closeEmitted) return;
+    this._closeEmitted = true;
+    schedule(() => this._runWithOwner(() => this.emit('close')));
+  }
+
+  _setupWorker(socketList) {
+    this._usingWorkers = true;
+    this._workers.push(socketList);
+    socketList?.once?.('exit', () => {
+      const index = this._workers.indexOf(socketList);
+      if (index !== -1) this._workers.splice(index, 1);
+    });
+    return this;
   }
 
   _createAcceptedSocket() {
@@ -895,7 +965,12 @@ export class Server extends EventEmitter {
       family: accepted.localFamily,
     };
     this._activeSockets.add(accepted);
-    accepted.once('close', () => this._activeSockets.delete(accepted));
+    this._connections += 1;
+    accepted.once('close', () => {
+      this._activeSockets.delete(accepted);
+      this._connections = Math.max(0, this._connections - 1);
+      this._emitCloseIfDrained();
+    });
     accepted._tcpResource = new AsyncResource('TCPWRAP', {
       triggerAsyncId: this._tcpResource?.asyncId(),
     });
@@ -1326,6 +1401,20 @@ export function createBrowserNet({ network = sharedVirtualNetwork, dns = createB
   const ConfiguredServer = class BrowserNetServer extends Server {
     constructor(options = {}, listener) { super(options, listener, { ...config, SocketClass: ConfiguredSocket }); }
   };
+  for (const name of [
+    '_listen2',
+    'listen',
+    'listening',
+    'address',
+    'getConnections',
+    'close',
+    '_emitCloseIfDrained',
+    '_setupWorker',
+  ]) {
+    Object.defineProperty(ConfiguredServer.prototype, name, {
+      ...Object.getOwnPropertyDescriptor(Server.prototype, name),
+    });
+  }
   function CallableSocket(...args) {
     const receiver = this;
     if (receiver && receiver instanceof ConfiguredSocket) {

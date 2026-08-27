@@ -440,6 +440,86 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
   let resultOrder = 'verbatim';
   let defaultResolverHandle;
 
+  function receivedArgument(value) {
+    if (value === undefined || value === null) return String(value);
+    if (typeof value === 'object') {
+      const constructorName = value.constructor?.name;
+      return constructorName ? `an instance of ${constructorName}` : String(value);
+    }
+    if (typeof value === 'function') return `function ${value.name || ''}`.trim();
+    const inspected = typeof value === 'string' ? `'${value}'` : String(value);
+    return `type ${typeof value} (${inspected})`;
+  }
+
+  function normalizeDnsServer(server) {
+    if (addressFamily(server)) return server;
+
+    const bracketed = /^\[([^\]]*)\](?::(\d+))?$/.exec(server);
+    if (bracketed && addressFamily(bracketed[1]) === 6) {
+      const port = bracketed[2];
+      return port && port !== '53' ? `[${bracketed[1]}]:${port}` : bracketed[1];
+    }
+
+    const separator = server.lastIndexOf(':');
+    if (separator > 0 && server.indexOf(':') === separator) {
+      const host = server.slice(0, separator);
+      const port = server.slice(separator + 1);
+      if (addressFamily(host) === 4 && /^\d+$/.test(port)) {
+        return port === '53' ? host : `${host}:${port}`;
+      }
+    }
+
+    throw invalidArgumentError(`Invalid IP address: ${server}`, 'ERR_INVALID_IP_ADDRESS');
+  }
+
+  function validateDnsServers(values) {
+    if (!Array.isArray(values)) {
+      throw invalidArgumentError(
+        `The "servers" argument must be an instance of Array. Received ${receivedArgument(values)}`,
+        'ERR_INVALID_ARG_TYPE',
+      );
+    }
+
+    const normalized = [];
+    const length = values.length;
+    for (let index = 0; index < length; index += 1) {
+      if (!(index in values)) continue;
+      const server = values[index];
+      if (typeof server !== 'string') {
+        throw invalidArgumentError(
+          `The "servers[${index}]" argument must be of type string. Received ${receivedArgument(server)}`,
+          'ERR_INVALID_ARG_TYPE',
+        );
+      }
+      normalized.push(normalizeDnsServer(server));
+    }
+    return normalized;
+  }
+
+  function getServers() {
+    return [...servers];
+  }
+
+  function setServers(values) {
+    servers = validateDnsServers(values);
+    defaultResolverHandle = null;
+  }
+
+  function getDefaultResultOrder() {
+    return resultOrder;
+  }
+
+  function setDefaultResultOrder(value) {
+    if (!['verbatim', 'ipv4first', 'ipv6first'].includes(value)) {
+      const received = typeof value === 'string' ? `'${value}'` : String(value);
+      throw invalidArgumentError(
+        `The argument 'dnsOrder' must be one of: 'verbatim', 'ipv4first', 'ipv6first'. Received ${received}`,
+        'ERR_INVALID_ARG_VALUE',
+      );
+    }
+    resultOrder = value;
+  }
+
   function lookupAddress(hostname, family = 0) {
     const host = String(hostname);
     const candidates = customRecords.get(host) || BUILTIN_RECORDS[host];
@@ -957,6 +1037,10 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
         else resolve({ hostname, service });
       }));
     },
+    getDefaultResultOrder,
+    getServers,
+    setDefaultResultOrder,
+    setServers,
   };
 
   class Resolver {
@@ -977,12 +1061,7 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     }
 
     setServers(values) {
-      if (!Array.isArray(values)) {
-        const error = new TypeError('The "servers" argument must be an instance of Array.');
-        error.code = 'ERR_INVALID_ARG_TYPE';
-        throw error;
-      }
-      this._servers = values.map(String);
+      this._servers = validateDnsServers(values);
       this._handle.setServers?.(this._servers);
     }
 
@@ -1095,16 +1174,10 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     resolveNaptr,
     resolveSoa,
     Resolver,
-    getServers: () => [...servers],
-    setServers: (values) => {
-      if (!Array.isArray(values)) throw new TypeError('servers must be an array');
-      servers = values.map(String);
-    },
-    getDefaultResultOrder: () => resultOrder,
-    setDefaultResultOrder: (value) => {
-      if (!['verbatim', 'ipv4first', 'ipv6first'].includes(value)) throw new TypeError('invalid DNS result order');
-      resultOrder = value;
-    },
+    getServers,
+    setServers,
+    getDefaultResultOrder,
+    setDefaultResultOrder,
     ...DNS_HINTS,
     ...DNS_ERROR_CODES,
     promises,

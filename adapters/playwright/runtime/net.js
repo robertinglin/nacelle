@@ -126,15 +126,13 @@ export class Socket extends Duplex {
     this._noDelay = Boolean(options.noDelay);
     this._keepAlive = Boolean(options.keepAlive);
     this._keepAliveInitialDelay = ~~(options.keepAliveInitialDelay / 1000);
-    this.localAddress = undefined;
     this.localPort = undefined;
     this.localFamily = undefined;
-    this.remoteAddress = undefined;
-    this.remotePort = undefined;
-    this.remoteFamily = undefined;
+    this._peername = null;
+    this._sockname = null;
     this.autoSelectFamilyAttemptedAddresses = undefined;
     this.path = undefined;
-    this.bytesRead = 0;
+    this._bytesRead = 0;
     this.bytesWritten = 0;
     this._peer = null;
     this._transportPeer = null;
@@ -304,12 +302,20 @@ export class Socket extends Duplex {
     this.connecting = false;
     this._pending = false;
     this._readyState = 'open';
-    this.localAddress = connection.localAddress || undefined;
+    this._sockname = {
+      address: connection.localAddress || undefined,
+      family: connection.localAddress
+        ? (virtualAddressFamily(connection.localAddress) === 6 ? 'IPv6' : 'IPv4')
+        : undefined,
+      port: connection.localPort || undefined,
+    };
     this.localPort = connection.localPort || undefined;
-    this.localFamily = this.localAddress ? (virtualAddressFamily(this.localAddress) === 6 ? 'IPv6' : 'IPv4') : undefined;
-    this.remoteAddress = connection.remoteAddress;
-    this.remotePort = connection.remotePort;
-    this.remoteFamily = family ? (family === 6 ? 'IPv6' : 'IPv4') : undefined;
+    this.localFamily = this._sockname.family;
+    this._peername = {
+      address: connection.remoteAddress,
+      port: connection.remotePort,
+      family: family ? (family === 6 ? 'IPv6' : 'IPv4') : undefined,
+    };
     this.path = connection.path;
     this._pipeResource = connection.pipeResource;
     this._pipeConnectResource = connection.pipeConnectResource;
@@ -353,7 +359,7 @@ export class Socket extends Duplex {
     this._transportPeer = peer;
     peer.on?.('data', (bytes) => {
       const value = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-      this.bytesRead += value.byteLength;
+      this._bytesRead += value.byteLength;
       this._runTcpResource(() => this.push(nodeBytes(value, this._bufferClass)));
     });
     peer.on?.('end', () => this._runTcpResource(() => this.push(null)));
@@ -388,7 +394,7 @@ export class Socket extends Duplex {
           return;
         }
         this.bytesWritten += bytes.byteLength;
-        peer.bytesRead += bytes.byteLength;
+        peer._bytesRead += bytes.byteLength;
         peer._runTcpResource?.(() => peer.push(nodeBytes(bytes, peer._bufferClass)));
         callback();
         return;
@@ -474,13 +480,7 @@ export class Socket extends Duplex {
   }
 
   address() {
-    if (this._handle?.getsockname) {
-      const address = {};
-      this._handle.getsockname(address);
-      return address;
-    }
-    if (this.localPort === undefined || this.localPort === null) return {};
-    return { address: this.localAddress, family: this.localFamily, port: this.localPort };
+    return this._getsockname();
   }
 
   get _connecting() {
@@ -531,6 +531,38 @@ export class Socket extends Duplex {
   ref() { this._unrefed = false; return this; }
   unref() { this._unrefed = true; return this; }
   destroySoon() { return this.destroy(); }
+  _reset() { return this.resetAndDestroy(); }
+
+  _getpeername() {
+    if (!this._handle || !this._handle.getpeername || this.connecting) {
+      return this._peername || {};
+    }
+    if (!this._peername) {
+      const out = {};
+      const error = this._handle.getpeername(out);
+      if (error) return out;
+      this._peername = out;
+    }
+    return this._peername;
+  }
+
+  _getsockname() {
+    if (!this._handle || !this._handle.getsockname) {
+      return this._sockname || {};
+    }
+    if (!this._sockname) {
+      this._sockname = {};
+      this._handle.getsockname(this._sockname);
+    }
+    return this._sockname;
+  }
+
+  get bytesRead() { return this._handle ? this._handle.bytesRead : this._bytesRead; }
+  get remoteAddress() { return this._getpeername().address; }
+  get remoteFamily() { return this._getpeername().family; }
+  get remotePort() { return this._getpeername().port; }
+  get localAddress() { return this._getsockname().address; }
+
   resetAndDestroy() {
     if (this.destroyed) return this;
     const error = socketError('ECONNRESET', 'read ECONNRESET', this.remoteAddress || 'socket', this.remotePort || 0);
@@ -832,14 +864,20 @@ export class Server extends EventEmitter {
     accepted.connecting = false;
     accepted._pending = false;
     accepted._readyState = 'open';
-    accepted.localAddress = connection.remoteAddress;
+    accepted._sockname = {
+      address: connection.remoteAddress,
+      family: connection.remoteAddress
+        ? (virtualAddressFamily(connection.remoteAddress) === 6 ? 'IPv6' : 'IPv4')
+        : undefined,
+      port: this._boundPort,
+    };
     accepted.localPort = this._boundPort;
-    accepted.localFamily = connection.remoteAddress
-      ? (virtualAddressFamily(connection.remoteAddress) === 6 ? 'IPv6' : 'IPv4')
-      : undefined;
-    accepted.remoteAddress = connection.localAddress;
-    accepted.remotePort = connection.localPort;
-    accepted.remoteFamily = accepted.localFamily;
+    accepted.localFamily = accepted._sockname.family;
+    accepted._peername = {
+      address: connection.localAddress,
+      port: connection.localPort,
+      family: accepted.localFamily,
+    };
     this._activeSockets.add(accepted);
     accepted.once('close', () => this._activeSockets.delete(accepted));
     accepted._tcpResource = new AsyncResource('TCPWRAP', {
@@ -1145,6 +1183,49 @@ export function createBrowserNet({ network = sharedVirtualNetwork, dns = createB
     constructor(options = {}) { super(options, config); }
   };
   Object.defineProperties(ConfiguredSocket.prototype, {
+    _reset: {
+      value: Socket.prototype._reset,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+    _getpeername: {
+      value: Socket.prototype._getpeername,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+    _getsockname: {
+      value: Socket.prototype._getsockname,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+    bytesRead: {
+      get: Object.getOwnPropertyDescriptor(Socket.prototype, 'bytesRead').get,
+      enumerable: true,
+      configurable: false,
+    },
+    remoteAddress: {
+      get: Object.getOwnPropertyDescriptor(Socket.prototype, 'remoteAddress').get,
+      enumerable: true,
+      configurable: false,
+    },
+    remoteFamily: {
+      get: Object.getOwnPropertyDescriptor(Socket.prototype, 'remoteFamily').get,
+      enumerable: true,
+      configurable: false,
+    },
+    remotePort: {
+      get: Object.getOwnPropertyDescriptor(Socket.prototype, 'remotePort').get,
+      enumerable: true,
+      configurable: false,
+    },
+    localAddress: {
+      get: Object.getOwnPropertyDescriptor(Socket.prototype, 'localAddress').get,
+      enumerable: true,
+      configurable: false,
+    },
     _onTimeout: {
       value: Socket.prototype._onTimeout,
       writable: true,

@@ -7,6 +7,14 @@ import { createGlob } from './fs-glob.js';
 
 const textEncoder = new TextEncoder();
 const READ_FILE_ASYNC_STAGES = 4;
+const S_IFMT = 0o170000;
+const S_IFIFO = 0o010000;
+const S_IFCHR = 0o020000;
+const S_IFDIR = 0o040000;
+const S_IFBLK = 0o060000;
+const S_IFREG = 0o100000;
+const S_IFLNK = 0o120000;
+const S_IFSOCK = 0o140000;
 
 function vfsError(code, path, operation, message = code) {
   const error = new Error(`${code}: ${message}${path ? `, ${operation} '${path}'` : ''}`);
@@ -381,13 +389,16 @@ class Stats {
     this._kind = kind;
   }
 
-  isFile() { return this._kind === 'file'; }
-  isDirectory() { return this._kind === 'directory'; }
-  isSymbolicLink() { return this._kind === 'symlink'; }
-  isBlockDevice() { return false; }
-  isCharacterDevice() { return false; }
-  isFIFO() { return false; }
-  isSocket() { return false; }
+  _checkModeProperty(property) {
+    return (this.mode & S_IFMT) === property;
+  }
+  isFile() { return this._checkModeProperty(S_IFREG); }
+  isDirectory() { return this._checkModeProperty(S_IFDIR); }
+  isSymbolicLink() { return this._checkModeProperty(S_IFLNK); }
+  isBlockDevice() { return this._checkModeProperty(S_IFBLK); }
+  isCharacterDevice() { return this._checkModeProperty(S_IFCHR); }
+  isFIFO() { return this._checkModeProperty(S_IFIFO); }
+  isSocket() { return this._checkModeProperty(S_IFSOCK); }
   get atime() { return new globalThis.Date(this.atimeMs); }
   get mtime() { return new globalThis.Date(this.mtimeMs); }
   get ctime() { return new globalThis.Date(this.ctimeMs); }
@@ -1279,6 +1290,13 @@ export function createVfs(options = {}) {
     resolve(pathValue);
     const normalizedMode = modeValue(mode);
     updateMode(pathValue, normalizedMode, 'lchmod', false);
+  }
+
+  function lchmod(pathValue, mode, callback) {
+    if (typeof callback !== 'function') throw invalidArgumentType('cb', callback, 'function');
+    resolve(pathValue);
+    const normalizedMode = modeValue(mode);
+    asyncFsOperation(callback, () => updateMode(pathValue, normalizedMode, 'lchmod', false));
   }
 
   function lutimes(pathValue, atime, mtime, callback) {
@@ -2393,6 +2411,166 @@ export function createVfs(options = {}) {
     callback(this._fsOpenError);
   };
 
+  function writeStreamDestroyedError(operation) {
+    const error = new Error(`Cannot call write after a stream was destroyed`);
+    error.code = 'ERR_STREAM_DESTROYED';
+    error.operation = operation;
+    return error;
+  }
+
+  function writeAll(stream, data, size, position, callback, retries = 0) {
+    let callbackCalled = false;
+    const complete = (error, bytesWritten, buffer) => {
+      callbackCalled = true;
+      if (error?.code === 'EAGAIN') {
+        error = null;
+        bytesWritten = 0;
+      }
+      if (stream.destroyed || error) {
+        callback(error || writeStreamDestroyedError('write'));
+        return;
+      }
+
+      bytesWritten ??= 0;
+      stream.bytesWritten += bytesWritten;
+      retries = bytesWritten ? 0 : retries + 1;
+      size -= bytesWritten;
+      if (position !== undefined) position += bytesWritten;
+      if (retries > 5) {
+        const writeError = new Error('write failed');
+        writeError.code = 'ERR_SYSTEM_ERROR';
+        callback(writeError);
+      } else if (size) {
+        writeAll(stream, (buffer || data).slice(bytesWritten), size, position, callback, retries);
+      } else {
+        callback();
+      }
+    };
+    try {
+      stream._fsApi.write(stream.fd, data, 0, size, position, complete);
+    } catch (error) {
+      if (callbackCalled) throw error;
+      callback(error);
+    }
+  }
+
+  function remainingWritevBuffers(buffers, bytesWritten) {
+    const remaining = [];
+    let skip = bytesWritten;
+    for (const buffer of buffers) {
+      if (skip >= buffer.length) {
+        skip -= buffer.length;
+      } else {
+        remaining.push(buffer.slice(skip));
+        skip = 0;
+      }
+    }
+    return remaining;
+  }
+
+  function writevAll(stream, buffers, size, position, callback, retries = 0) {
+    let callbackCalled = false;
+    const complete = (error, bytesWritten, writtenBuffers) => {
+      callbackCalled = true;
+      if (error?.code === 'EAGAIN') {
+        error = null;
+        bytesWritten = 0;
+      }
+      if (stream.destroyed || error) {
+        callback(error || writeStreamDestroyedError('writev'));
+        return;
+      }
+
+      bytesWritten ??= 0;
+      stream.bytesWritten += bytesWritten;
+      retries = bytesWritten ? 0 : retries + 1;
+      size -= bytesWritten;
+      if (position !== undefined) position += bytesWritten;
+      if (retries > 5) {
+        const writeError = new Error('writev failed');
+        writeError.code = 'ERR_SYSTEM_ERROR';
+        callback(writeError);
+      } else if (size) {
+        writevAll(
+          stream,
+          remainingWritevBuffers(writtenBuffers || buffers, bytesWritten),
+          size,
+          position,
+          callback,
+          retries,
+        );
+      } else {
+        callback();
+      }
+    };
+    try {
+      stream._fsApi.writev(stream.fd, buffers, position, complete);
+    } catch (error) {
+      if (callbackCalled) throw error;
+      callback(error);
+    }
+  }
+
+  WriteStream.prototype._write = function _write(data, _encoding, callback) {
+    this._fsPerformingIO = true;
+    let completed = false;
+    const complete = (error) => {
+      if (completed) return;
+      completed = true;
+      finishStreamIo(this, error);
+      callback(error);
+    };
+    const writeData = () => writeAll(
+      this,
+      data,
+      data.length,
+      this._fsPosition === null ? undefined : this._fsPosition,
+      complete,
+    );
+    try {
+      const opening = this._fsOpen();
+      if (opening?.then) {
+        opening.then((error) => error ? complete(error) : writeData(), complete);
+      } else {
+        writeData();
+      }
+    } catch (error) {
+      complete(error);
+    }
+    if (this._fsPosition !== null) this._fsPosition += data.length;
+  };
+
+  WriteStream.prototype._writev = function _writev(data, callback) {
+    const buffers = data.map((item) => item.chunk);
+    const size = buffers.reduce((total, buffer) => total + buffer.length, 0);
+    this._fsPerformingIO = true;
+    let completed = false;
+    const complete = (error) => {
+      if (completed) return;
+      completed = true;
+      finishStreamIo(this, error);
+      callback(error);
+    };
+    const writeData = () => writevAll(
+      this,
+      buffers,
+      size,
+      this._fsPosition === null ? undefined : this._fsPosition,
+      complete,
+    );
+    try {
+      const opening = this._fsOpen();
+      if (opening?.then) {
+        opening.then((error) => error ? complete(error) : writeData(), complete);
+      } else {
+        writeData();
+      }
+    } catch (error) {
+      complete(error);
+    }
+    if (this._fsPosition !== null) this._fsPosition += size;
+  };
+
   WriteStream.prototype._destroy = function _destroy(error, callback) {
     const close = (ioError) => closeStreamDescriptor(
       this,
@@ -2414,6 +2592,8 @@ export function createVfs(options = {}) {
     if (!this.autoClose) this.once('finish', () => this.destroy());
     this.end();
   };
+
+  WriteStream.prototype.destroySoon = WriteStream.prototype.end;
 
   Object.defineProperty(WriteStream.prototype, 'pending', {
     configurable: true,
@@ -2445,30 +2625,6 @@ export function createVfs(options = {}) {
       highWaterMark: options.highWaterMark,
       autoDestroy,
       decodeStrings: true,
-      write(bytes, _encoding, callback) {
-        const writeBytes = () => {
-          try {
-            const position = stream._fsPosition === null ? undefined : stream._fsPosition;
-            writeDescriptor(stream.fd, bytes, 0, bytes.length, position);
-            if (stream._fsPosition !== null) stream._fsPosition += bytes.length;
-            stream.bytesWritten += bytes.length;
-            callback();
-          } catch (error) { callback(error); }
-        };
-        try {
-          const opening = stream._fsOpen();
-          if (opening?.then) {
-            opening.then((error) => {
-              if (error) callback(error);
-              else writeBytes();
-            }, callback);
-            return;
-          }
-          writeBytes();
-        } catch (error) {
-          callback(error);
-        }
-      },
       final(callback) {
         callback();
       },
@@ -2476,6 +2632,12 @@ export function createVfs(options = {}) {
     if (target) Writable.call(stream, streamOptions);
     else stream = new Writable(streamOptions);
     if (!target) Object.setPrototypeOf(stream, WriteStream.prototype);
+    if (!target) {
+      stream._write = WriteStream.prototype._write;
+      stream._writev = WriteStream.prototype._writev;
+    }
+    if (!fsApi.write) stream._write = null;
+    if (!fsApi.writev) stream._writev = null;
     stream.path = pathValue ?? undefined;
     stream._fsApi = fsApi;
     stream._fsOptions = options;
@@ -3027,6 +3189,9 @@ export function createVfs(options = {}) {
     WriteStream,
     FileReadStream: ReadStream,
     FileWriteStream: WriteStream,
+    R_OK: 4,
+    W_OK: 2,
+    X_OK: 1,
     writeFileSync: writeFile,
     readFileSync: readFile,
     appendFileSync: appendFile,
@@ -3204,6 +3369,7 @@ export function createVfs(options = {}) {
     chmod,
     chown,
     lchown,
+    lchmod,
     link,
     lutimes,
     utimes,
@@ -3252,7 +3418,7 @@ export function createVfs(options = {}) {
     async chmod(...args) { return enqueueMutation(() => fs.chmodSync(...args)); },
     async chown(...args) { return enqueueMutation(() => fs.chownSync(...args)); },
     async lchown(...args) { return enqueueMutation(() => fs.lchownSync(...args)); },
-    async lchmod() { throw methodNotImplemented('lchmod()'); },
+    async lchmod(...args) { return enqueueMutation(() => lchmodSync(...args)); },
     async link(...args) { return enqueueMutation(() => fs.linkSync(...args)); },
     async lutimes(...args) { return enqueueMutation(() => fs.lutimesSync(...args)); },
     async utimes(...args) { return enqueueMutation(() => fs.utimesSync(...args)); },

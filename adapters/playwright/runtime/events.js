@@ -8,12 +8,45 @@
 import { installAbortSignalTimeout } from './timers.js';
 
 let defaultMaxListeners = 10;
+const kMaxEventTargetListeners = Symbol('events.maxEventTargetListeners');
+const kMaxEventTargetListenersWarned = Symbol('events.maxEventTargetListenersWarned');
 
-function validateMaxListeners(value) {
-  if (!Number.isInteger(value) || value < 0) {
-    throw new RangeError('The value of "n" is out of range. It must be a non-negative integer.');
+function receivedValue(value) {
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  if (typeof value === 'function') return 'function';
+  if (typeof value === 'string') return `type string ('${value}')`;
+  if (typeof value === 'number' || typeof value === 'boolean') return `type ${typeof value} (${value})`;
+  if (typeof value === 'bigint') return `type bigint (${value}n)`;
+  if (typeof value === 'symbol') return `type symbol (${String(value)})`;
+  return `an instance of ${value?.constructor?.name || typeof value}`;
+}
+
+function validateMaxListeners(value, name = 'n') {
+  if (typeof value !== 'number') {
+    const error = new TypeError(`The "${name}" argument must be of type number. Received ${receivedValue(value)}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (Number.isNaN(value) || value < 0) {
+    const error = new RangeError(`The value of "${name}" is out of range. It must be >= 0. Received ${receivedValue(value)}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
   }
   return value;
+}
+
+function isEventTarget(value) {
+  const EventTarget = globalThis.EventTarget;
+  return typeof EventTarget === 'function' && value instanceof EventTarget;
+}
+
+function invalidEventTargets(value) {
+  const error = new TypeError(
+    `The "eventTargets" argument must be an instance of EventEmitter or EventTarget. Received ${receivedValue(value)}`,
+  );
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
 }
 
 function activeProcess() {
@@ -58,7 +91,7 @@ export class BrowserEventEmitter {
   }
 
   static set defaultMaxListeners(value) {
-    defaultMaxListeners = validateMaxListeners(value);
+    defaultMaxListeners = validateMaxListeners(value, 'defaultMaxListeners');
   }
 
   on(name, listener) {
@@ -89,7 +122,7 @@ export class BrowserEventEmitter {
   }
 
   setMaxListeners(value) {
-    this._maxListeners = validateMaxListeners(value);
+    this._maxListeners = validateMaxListeners(value, 'setMaxListeners');
     return this;
   }
 
@@ -335,7 +368,46 @@ EventEmitter.prototype = BrowserEventEmitter.prototype;
 Object.defineProperty(EventEmitter, 'defaultMaxListeners', {
   configurable: true,
   get: () => defaultMaxListeners,
-  set: (value) => { defaultMaxListeners = validateMaxListeners(value); },
+  set: (value) => { defaultMaxListeners = validateMaxListeners(value, 'defaultMaxListeners'); },
+});
+
+EventEmitter.listenerCount = function listenerCount(emitter, name) {
+  if (typeof emitter?.listenerCount === 'function') return emitter.listenerCount(name);
+  return BrowserEventEmitter.prototype.listenerCount.call(emitter, name);
+};
+
+EventEmitter.setMaxListeners = function setMaxListeners(value = defaultMaxListeners, ...eventTargets) {
+  validateMaxListeners(value, 'setMaxListeners');
+  if (eventTargets.length === 0) {
+    defaultMaxListeners = value;
+    return;
+  }
+
+  for (const target of eventTargets) {
+    if (isEventTarget(target)) {
+      target[kMaxEventTargetListeners] = value;
+      target[kMaxEventTargetListenersWarned] = false;
+    } else if (typeof target?.setMaxListeners === 'function') {
+      target.setMaxListeners(value);
+    } else {
+      throw invalidEventTargets(target);
+    }
+  }
+};
+
+Object.defineProperties(EventEmitter, {
+  kMaxEventTargetListeners: {
+    value: kMaxEventTargetListeners,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  },
+  kMaxEventTargetListenersWarned: {
+    value: kMaxEventTargetListenersWarned,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  },
 });
 
 EventEmitter.on = function on(emitter, name, options = {}) {

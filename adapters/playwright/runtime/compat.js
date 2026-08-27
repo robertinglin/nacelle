@@ -365,6 +365,22 @@ function createWriteErrorHandler(instance, streamName) {
   };
 }
 
+export function installConsoleErrorHandlers(instance) {
+  Object.defineProperties(instance, {
+    _stdoutErrorHandler: {
+      configurable: true,
+      value: createWriteErrorHandler(instance, '_stdout'),
+      writable: true,
+    },
+    _stderrErrorHandler: {
+      configurable: true,
+      value: createWriteErrorHandler(instance, '_stderr'),
+      writable: true,
+    },
+  });
+  return instance;
+}
+
 function writeStream(stream, value, ignoreErrors, errorHandler) {
   const output = `${value}\n`;
   if (ignoreErrors === false) {
@@ -479,18 +495,7 @@ export function createConsoleModule(processObject) {
     const error = options.stderr ?? stderr ?? processObject.stderr;
     this._stdout = writableConsoleStream(stdout, 'stdout');
     this._stderr = writableConsoleStream(error, 'stderr');
-    Object.defineProperties(this, {
-      _stdoutErrorHandler: {
-        configurable: true,
-        value: createWriteErrorHandler(this, '_stdout'),
-        writable: true,
-      },
-      _stderrErrorHandler: {
-        configurable: true,
-        value: createWriteErrorHandler(this, '_stderr'),
-        writable: true,
-      },
-    });
+    installConsoleErrorHandlers(this);
     this._ignoreErrors = options.ignoreErrors ?? ignoreErrors ?? true;
     this._inspectOptions = options.inspectOptions ?? {};
     if (options.inspectOptions !== undefined && (options.inspectOptions === null || typeof options.inspectOptions !== 'object' || Array.isArray(options.inspectOptions))) {

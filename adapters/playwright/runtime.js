@@ -68,6 +68,7 @@ import { createDiffieHellman, createDiffieHellmanGroup } from './runtime/diffie-
 import { createZlibShim as createZlibShimModule } from './runtime/zlib.js';
 import {
   createConsoleModule,
+  installConsoleErrorHandlers,
   createConstants,
   createPromisify,
   createQuerystring,
@@ -6566,6 +6567,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       childConsole.Console = consoleModule.Console;
       childConsole._stdout = { write: (value) => { stdout(value); return true; } };
       childConsole._stderr = { write: (value) => { stderr(value); return true; } };
+      installConsoleErrorHandlers(childConsole);
       childConsole._ignoreErrors = true;
       childConsole._inspectOptions = {};
       childConsole._colorMode = undefined;

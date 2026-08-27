@@ -182,6 +182,25 @@ function toBytes(value) {
   throw new TypeError('stream chunks must be strings or Uint8Array values');
 }
 
+// These helpers are part of the legacy Stream surface and are still consumed
+// by Node's internal readable/writable implementations. Keep the checks
+// realm-safe and preserve the backing store when adapting a Uint8Array.
+function isArrayBufferView(value) {
+  return ArrayBuffer.isView(value);
+}
+
+function isUint8Array(value) {
+  return Object.prototype.toString.call(value) === '[object Uint8Array]';
+}
+
+function _uint8ArrayToBuffer(chunk) {
+  const BufferClass = globalThis.Buffer;
+  if (typeof BufferClass?.from === 'function') {
+    return BufferClass.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+  }
+  return streamChunk(chunk);
+}
+
 function appendBytes(previous, next) {
   const result = new Uint8Array(previous.byteLength + next.byteLength);
   result.set(previous);
@@ -289,6 +308,11 @@ Stream.prototype.pipe = function pipe(destination) {
   this.resume?.();
   return destination;
 };
+
+// Backwards-compatible hooks used by lib/internal/streams/*.
+Stream._isArrayBufferView = isArrayBufferView;
+Stream._isUint8Array = isUint8Array;
+Stream._uint8ArrayToBuffer = _uint8ArrayToBuffer;
 
 function validateCombinatorOptions(options) {
   if (options === undefined || options === null) return {};
@@ -1219,6 +1243,7 @@ class WritableImpl extends EventEmitter {
     const inheritedFinal = this._final;
     if (options.write) this._write = options.write;
     if (options.writev) this._writev = options.writev;
+    if (options.destroy) this._destroy = options.destroy;
     this._destroyHook = options.destroy || inheritedDestroy;
     this._final = options.final || inheritedFinal;
     this._owner = options.owner;
@@ -1260,6 +1285,7 @@ class WritableImpl extends EventEmitter {
       this._writableState.ended = true;
       this._writableState.finished = true;
     }
+    this._writableInitial = this._writableState.writable;
     const autoDestroyOnError = (error) => {
       if (this._writableState.autoDestroy && !this._destroyed) this.destroy(error);
     };
@@ -1283,9 +1309,44 @@ class WritableImpl extends EventEmitter {
   get writableBuffer() {
     return this._queue.map(({ bytes: chunk, encoding, callback }) => ({ chunk, encoding, callback }));
   }
+  get errored() { return this._writableState?.errored ?? null; }
   get writableAborted() { return this._destroyed && !this._finishEmitted; }
   get writableNeedDrain() { return this._needDrain; }
   get writableCorked() { return this._corked; }
+
+  _undestroy() {
+    const writable = this._writableInitial !== false;
+    this._destroyed = false;
+    this._closeEmitted = false;
+    this._errorEmitted = false;
+    this._current = null;
+    this._queue.length = 0;
+    this._pendingBytes = 0;
+    this._needDrain = false;
+    this._ending = !writable;
+    this._ended = !writable;
+    this._finishEmitted = !writable;
+    this._finishScheduled = false;
+    this._finalStarted = false;
+    this._writableFinished = !writable;
+    this.writableEnded = !writable;
+    this.writableLength = 0;
+    this._endCallbacks = [];
+    this._endCallbackCalled = false;
+    this._writableState.writable = writable;
+    this._writableState.destroyed = false;
+    this._writableState.errored = null;
+    this._writableState.closed = false;
+    this._writableState.errorEmitted = false;
+    this._writableState.ended = !writable;
+    this._writableState.finished = !writable;
+    this._writableState.length = 0;
+    this._writableFlag = writable;
+  }
+
+  _destroy(error, callback) {
+    callback(error);
+  }
 
   write(chunk, encoding = 'utf8', callback = () => {}) {
     if (typeof encoding === 'function') {
@@ -1427,7 +1488,10 @@ class WritableImpl extends EventEmitter {
       }
       this._emitClose();
     };
-    if (typeof this._destroyHook !== 'function') {
+    const destroyHook = this._destroyHook === WritableImpl.prototype._destroy
+      ? this._destroy
+      : this._destroyHook;
+    if (typeof destroyHook !== 'function') {
       queueMicrotask(finalize);
       return this;
     }
@@ -1438,7 +1502,7 @@ class WritableImpl extends EventEmitter {
       queueMicrotask(() => finalize(destroyError || error));
     };
     try {
-      const result = this._destroyHook.call(this, error, completeDestroy);
+      const result = destroyHook.call(this, error, completeDestroy);
       if (result?.then) result.then(() => completeDestroy(), completeDestroy);
     } catch (destroyError) {
       completeDestroy(destroyError);
@@ -1609,6 +1673,7 @@ WritableImpl.prototype._write = function _write(_chunk, _encoding, callback) {
 WritableImpl.prototype._writev = null;
 for (const property of [
   'closed', 'destroyed', 'writable', 'writableFinished', 'writableObjectMode', 'writableBuffer',
+  'errored',
 ]) Object.defineProperty(WritableImpl.prototype, property, { configurable: false });
 
 export function Writable(options = {}) {
@@ -1713,6 +1778,12 @@ class DuplexImpl extends Readable {
     if (this._destroyed) return this;
     this._writable.destroy(error);
     return super.destroy(error);
+  }
+
+  _undestroy() {
+    super._undestroy();
+    this._writable._undestroy();
+    this.writable = this._writable.writable;
   }
 }
 

@@ -817,21 +817,18 @@ export class Readable extends EventEmitter {
 class WritableImpl extends EventEmitter {
   constructor(options = {}) {
     super();
-    this.writable = true;
+    this._writableFlag = true;
     // Browser output is never a terminal. Pseudo-TTY behavior is intentionally
     // not emulated because the browser has no safe terminal primitive.
     this.isTTY = false;
-    this.writableObjectMode = Boolean(options.writableObjectMode ?? options.objectMode);
+    this._writableObjectMode = Boolean(options.writableObjectMode ?? options.objectMode);
     this.decodeStrings = options.decodeStrings !== false;
     this.writableHighWaterMark = options.highWaterMark
-      ?? (this.writableObjectMode ? defaultObjectHighWaterMark : defaultHighWaterMark);
-    const inheritedWrite = this._write;
+      ?? (this._writableObjectMode ? defaultObjectHighWaterMark : defaultHighWaterMark);
     const inheritedDestroy = this._destroy;
     const inheritedFinal = this._final;
-    this._write = options.write || (typeof inheritedWrite === 'function'
-      ? inheritedWrite
-      : (_chunk, _encoding, callback) => callback());
-    this._writev = options.writev || this._writev;
+    if (options.write) this._write = options.write;
+    if (options.writev) this._writev = options.writev;
     this._destroyHook = options.destroy || inheritedDestroy;
     this._final = options.final || inheritedFinal;
     this._owner = options.owner;
@@ -845,10 +842,9 @@ class WritableImpl extends EventEmitter {
     this._destroyed = false;
     this._closeEmitted = false;
     this._errorEmitted = false;
-    this.destroyed = false;
     this.writableLength = 0;
     this.writableEnded = false;
-    this.writableFinished = false;
+    this._writableFinished = false;
     this._endCallbacks = [];
     this._endCallbackCalled = false;
     this._corked = 0;
@@ -869,7 +865,7 @@ class WritableImpl extends EventEmitter {
       this._ending = true;
       this._ended = true;
       this.writableEnded = true;
-      this.writableFinished = true;
+      this._writableFinished = true;
       this._writableState.writable = false;
       this._writableState.ended = true;
       this._writableState.finished = true;
@@ -881,6 +877,22 @@ class WritableImpl extends EventEmitter {
     this.on('error', autoDestroyOnError);
   }
 
+  get closed() { return Boolean(this._writableState?.closed); }
+  get destroyed() { return Boolean(this._writableState?.destroyed ?? this._destroyed); }
+  set destroyed(value) {
+    this._destroyed = Boolean(value);
+    if (this._writableState) this._writableState.destroyed = this._destroyed;
+  }
+  get writable() { return this._writableState?.writable ?? this._writableFlag; }
+  set writable(value) {
+    this._writableFlag = Boolean(value);
+    if (this._writableState) this._writableState.writable = this._writableFlag;
+  }
+  get writableFinished() { return this._writableState?.finished ?? this._writableFinished; }
+  get writableObjectMode() { return this._writableState?.objectMode ?? this._writableObjectMode; }
+  get writableBuffer() {
+    return this._queue.map(({ bytes: chunk, encoding, callback }) => ({ chunk, encoding, callback }));
+  }
   get writableAborted() { return this._destroyed && !this._finishEmitted; }
   get writableNeedDrain() { return this._needDrain; }
   get writableCorked() { return this._corked; }
@@ -1178,7 +1190,7 @@ class WritableImpl extends EventEmitter {
       this._finishScheduled = false;
       if (this._finishEmitted || this._destroyed) return;
       this._finishEmitted = true;
-      this.writableFinished = true;
+      this._writableFinished = true;
       this._ended = true;
       this._writableState.finished = true;
       if (!this._endCallbackCalled) {
@@ -1200,6 +1212,14 @@ class WritableImpl extends EventEmitter {
     this.emit('close');
   }
 }
+
+WritableImpl.prototype._write = function _write(_chunk, _encoding, callback) {
+  callback(streamError('ERR_METHOD_NOT_IMPLEMENTED', 'The _write() method is not implemented'));
+};
+WritableImpl.prototype._writev = null;
+for (const property of [
+  'closed', 'destroyed', 'writable', 'writableFinished', 'writableObjectMode', 'writableBuffer',
+]) Object.defineProperty(WritableImpl.prototype, property, { configurable: false });
 
 export function Writable(options = {}) {
   if (new.target) return Reflect.construct(WritableImpl, [options], new.target);

@@ -75,6 +75,11 @@ function schedule(callback) {
   queueMicrotask(callback);
 }
 
+function publishDiagnostic(diagnostics, name, message) {
+  const channel = diagnostics?.channel?.(name);
+  if (channel?.hasSubscribers) channel.publish(message);
+}
+
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -85,33 +90,81 @@ function http2Error(code, message) {
   return error;
 }
 
-function bytesFor(value, scope) {
+function abortError() {
+  const error = new Error('The operation was aborted');
+  error.name = 'AbortError';
+  error.code = 'ABORT_ERR';
+  return error;
+}
+
+function bytesFor(value, scope, encoding = 'utf8') {
   if (value instanceof Uint8Array) return new Uint8Array(value);
-  if (typeof value === 'string') return new (scope.TextEncoder || TextEncoder)().encode(value);
-  if (value instanceof ArrayBuffer) return new Uint8Array(value.slice(0));
+  if (typeof value === 'string') {
+    encoding = String(encoding).toLowerCase();
+    if (encoding === 'utf8' || encoding === 'utf-8') {
+      return new (scope.TextEncoder || TextEncoder)().encode(value);
+    }
+    if (typeof scope.Buffer?.from === 'function') return new Uint8Array(scope.Buffer.from(value, encoding));
+    if (!['ascii', 'base64', 'base64url', 'binary', 'hex', 'latin1', 'ucs2', 'ucs-2', 'utf16le', 'utf-16le'].includes(encoding)) {
+      const error = new TypeError(`Unknown encoding: ${encoding}`);
+      error.code = 'ERR_UNKNOWN_ENCODING';
+      throw error;
+    }
+    throw new TypeError(`HTTP/2 stream encoding requires Buffer support: ${encoding}`);
+  }
+  if (value !== null && typeof value === 'object'
+    && ['[object ArrayBuffer]', '[object SharedArrayBuffer]'].includes(Object.prototype.toString.call(value))) {
+    return new Uint8Array(value.slice(0));
+  }
   if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
   throw new TypeError('HTTP/2 stream chunks must be strings or Uint8Array values');
 }
 
 function normalizeHeaders(headers) {
-  if (!isRecord(headers)) throw new TypeError('HTTP/2 headers must be an object');
-  const result = {};
-  for (const [name, value] of Object.entries(headers)) {
+  const isArray = Array.isArray(headers);
+  if (!isRecord(headers) && !isArray) throw new TypeError('HTTP/2 headers must be an object');
+  const result = Object.create(null);
+  const entries = isArray
+    ? Array.from({ length: Math.floor(headers.length / 2) }, (_, index) => [headers[index * 2], headers[index * 2 + 1]])
+    : Object.entries(headers);
+  for (const [name, value] of entries) {
+    if (name === undefined || name === null) throw new TypeError('HTTP/2 header names must be strings');
     const lower = String(name).toLowerCase();
-    if (!/^[a-z0-9!#$%&'*+.^_`|~-]+$/.test(lower) && !lower.startsWith(':')) {
+    const isPseudo = lower.startsWith(':');
+    if (isPseudo ? !/^:[a-z][a-z0-9-]*$/.test(lower) : !/^[a-z0-9!#$%&'*+.^_`|~-]+$/.test(lower)) {
       throw http2Error('ERR_HTTP2_INVALID_HEADER_NAME', `Invalid HTTP/2 header name: ${name}`);
+    }
+    if (isPseudo && ![':authority', ':method', ':path', ':protocol', ':scheme', ':status'].includes(lower)) {
+      throw http2Error('ERR_HTTP2_INVALID_PSEUDOHEADER', `Invalid HTTP/2 pseudo-header: ${name}`);
     }
     if (['connection', 'keep-alive', 'proxy-connection', 'transfer-encoding', 'upgrade'].includes(lower)) {
       throw http2Error('ERR_HTTP2_INVALID_CONNECTION_HEADERS', `HTTP/2 forbids the ${name} header`);
     }
-    if (lower !== name && !lower.startsWith(':')) {
-      throw http2Error('ERR_HTTP2_INVALID_HEADER_NAME', `HTTP/2 header names must be lowercase: ${name}`);
-    }
     if (value === undefined || value === null) continue;
-    if (lower === ':status' && !Array.isArray(value) && Number.isInteger(Number(value))) result[lower] = Number(value);
-    else result[lower] = Array.isArray(value) ? value.map(String) : String(value);
+    if (lower === ':status') {
+      if (Array.isArray(value) || !Number.isInteger(Number(value)) || Number(value) < 100 || Number(value) > 999) {
+        throw http2Error('ERR_HTTP2_INVALID_STATUS', `Invalid HTTP/2 status code: ${value}`);
+      }
+      result[lower] = Number(value);
+      continue;
+    }
+    const values = Array.isArray(value) ? value : [value];
+    for (const item of values) {
+      if (/\0|[\r\n]/.test(String(item))) {
+        throw http2Error('ERR_HTTP2_INVALID_HEADER_VALUE', `Invalid HTTP/2 header value for ${name}`);
+      }
+    }
+    result[isArray && !isPseudo ? String(name) : lower] = Array.isArray(value) ? values.map(String) : String(value);
   }
   return result;
+}
+
+function serverFor(host, port) {
+  const exact = SERVER_REGISTRY.get(registryKey(host, port));
+  if (exact) return exact;
+  return [...SERVER_REGISTRY.values()].find((server) => server._port === port
+    && (server._host === 'localhost' || host === 'localhost'
+      || (server._host === '127.0.0.1' && host === '127.0.0.1')));
 }
 
 function authorityParts(authority, scope) {
@@ -164,11 +217,24 @@ class VirtualHttp2Stream extends Duplex {
     this.closed = false;
     this.destroyed = false;
     this._scope = session._scope;
+    this._vfs = session._vfs;
+    this._diagnostics = session._diagnostics;
     this._role = options.role || 'client';
+    this._isPush = Boolean(options.push);
+    Object.defineProperty(this, 'constructor', {
+      configurable: true,
+      value: { name: this._role === 'server' ? 'ServerHttp2Stream' : 'ClientHttp2Stream' },
+    });
     this._headers = options.headers || {};
     this._body = [];
+    this._diagnosticChunks = [];
+    this._dispatched = false;
+    this._bodyDiagnosticsPublished = false;
+    this._finishDiagnosticsPublished = false;
+    this._closeDiagnosticsPublished = false;
     this._responseHeaders = null;
     this._responseComplete = false;
+    this._responseFile = null;
     this._peer = null;
     this._writable._write = (chunk, encoding, callback) => {
       try {
@@ -180,8 +246,10 @@ class VirtualHttp2Stream extends Duplex {
     };
     this._writable._final = (callback) => {
       schedule(() => {
-        if (this._role === 'client') this.session._dispatch(this);
-        else this._finishResponse();
+        if (this._role === 'client') {
+          this._publishBodyDiagnostics();
+          this.session._dispatch(this);
+        } else this._finishResponse();
       });
       callback();
     };
@@ -205,10 +273,62 @@ class VirtualHttp2Stream extends Duplex {
     return result;
   }
 
+  _publishBodyDiagnostics() {
+    if (this._bodyDiagnosticsPublished || this._role !== 'client') return;
+    this._bodyDiagnosticsPublished = true;
+    if (this._diagnosticChunks.length > 0) {
+      const writev = this._diagnosticChunks.length > 1;
+      const chunks = this._diagnosticChunks;
+      const data = writev
+        ? chunks.every(({ chunk }) => typeof chunk !== 'string')
+          ? chunks.map(({ chunk }) => chunk)
+          : chunks.map(({ chunk, encoding }) => ({ chunk, encoding }))
+        : chunks[0].chunk;
+      publishDiagnostic(this._diagnostics, 'http2.client.stream.bodyChunkSent', {
+        stream: this,
+        writev,
+        data,
+        encoding: writev ? '' : this._diagnosticChunks[0].encoding,
+      });
+    }
+    publishDiagnostic(this._diagnostics, 'http2.client.stream.bodySent', { stream: this });
+  }
+
+  _publishFinishDiagnostics(headers, flags = 0) {
+    if (this._finishDiagnosticsPublished) return;
+    this._finishDiagnosticsPublished = true;
+    publishDiagnostic(this._diagnostics, `http2.${this._role}.stream.finish`, {
+      stream: this,
+      headers,
+      flags,
+    });
+  }
+
+  _publishCreatedDiagnostics(headers) {
+    publishDiagnostic(this._diagnostics, `http2.${this._role}.stream.created`, {
+      stream: this,
+      headers,
+    });
+  }
+
+  _publishStartDiagnostics(headers) {
+    publishDiagnostic(this._diagnostics, `http2.${this._role}.stream.start`, {
+      stream: this,
+      headers,
+    });
+  }
+
+  _publishCloseDiagnostics() {
+    if (this._closeDiagnosticsPublished) return;
+    this._closeDiagnosticsPublished = true;
+    publishDiagnostic(this._diagnostics, `http2.${this._role}.stream.close`, { stream: this });
+  }
+
   _receiveResponse(headers, body, done = false) {
     if (!this._responseHeaders) {
       this._responseHeaders = headers;
       this.pending = false;
+      if (this._role === 'client') this._publishFinishDiagnostics(headers);
       this.emit('response', headers, 0);
       this.emit('headers', headers, 0);
     }
@@ -217,17 +337,132 @@ class VirtualHttp2Stream extends Duplex {
       this._responseComplete = true;
       this.closed = true;
       this.push(null);
+      this._publishCloseDiagnostics();
       schedule(() => this.emit('close'));
     }
   }
 
-  respond(headers, options = {}) {
+  respond(headers = {}, options = {}) {
     if (this._role !== 'server') throw http2Error('ERR_HTTP2_INVALID_STREAM', 'Only server streams can respond');
     if (this.headersSent) throw http2Error('ERR_HTTP2_HEADERS_SENT', 'Response headers already sent');
+    if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+      throw http2Error('ERR_INVALID_ARG_TYPE', 'options must be an object');
+    }
     this.sentHeaders = normalizeHeaders(headers);
+    if (!this.sentHeaders[':status']) this.sentHeaders[':status'] = 200;
     this.headersSent = true;
+    if (this._role === 'server') this._publishFinishDiagnostics(this.sentHeaders);
     this._peer?._receiveResponse(this.sentHeaders, null, Boolean(options.endStream));
     return this;
+  }
+
+  respondWithFD(fdValue, headers = {}, options = {}) {
+    if (this._role !== 'server') throw http2Error('ERR_HTTP2_INVALID_STREAM', 'Only server streams can respond');
+    if (this.closed || this.destroyed) throw http2Error('ERR_HTTP2_INVALID_STREAM', 'The stream has been destroyed');
+    if (this.headersSent) throw http2Error('ERR_HTTP2_HEADERS_SENT', 'Response headers already sent');
+    if (!this._vfs?.readDescriptor) {
+      throw http2Error('ERR_HTTP2_FD_UNAVAILABLE', 'HTTP/2 file descriptor responses require a VFS-backed runtime');
+    }
+
+    const fd = typeof fdValue === 'number' ? fdValue : fdValue?.fd;
+    if (!Number.isInteger(fd)) throw http2Error('ERR_INVALID_ARG_TYPE', 'fd must be a number or a FileHandle');
+    if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+      throw http2Error('ERR_INVALID_ARG_TYPE', 'options must be an object');
+    }
+    for (const name of ['offset', 'length']) {
+      if (options[name] !== undefined && (typeof options[name] !== 'number' || !Number.isFinite(options[name]))) {
+        throw http2Error('ERR_INVALID_ARG_VALUE', `options.${name} must be a number`);
+      }
+    }
+    if (options.statCheck !== undefined && typeof options.statCheck !== 'function') {
+      throw http2Error('ERR_INVALID_ARG_VALUE', 'options.statCheck must be a function');
+    }
+
+    let stat;
+    try {
+      stat = this._vfs.fs.fstatSync(fd);
+      const responseHeaders = normalizeHeaders(headers);
+      const responseOptions = {
+        ...options,
+        offset: options.offset ?? 0,
+        length: options.length ?? -1,
+      };
+      if (options.statCheck?.(stat, responseHeaders, responseOptions) === false) {
+        this._releaseResponseFile(fd);
+        return this;
+      }
+      if (this.headersSent) {
+        this._releaseResponseFile(fd);
+        return this;
+      }
+
+      const offset = Math.max(0, Math.trunc(responseOptions.offset));
+      const available = Math.max(0, stat.size - offset);
+      const length = responseOptions.length < 0
+        ? available
+        : Math.min(Math.max(0, Math.trunc(responseOptions.length)), available);
+      responseHeaders['content-length'] = String(length);
+      const status = Number(responseHeaders[':status'] ?? 200);
+      if ([204, 205, 304].includes(status) || this._headers[':method'] === 'HEAD') {
+        throw http2Error('ERR_HTTP2_PAYLOAD_FORBIDDEN', `Responses with ${status} status must not have a payload`);
+      }
+      this.respond(responseHeaders);
+
+      if (length === 0) {
+        this.end();
+        return this;
+      }
+
+      let position = offset;
+      let remaining = length;
+      const readNext = () => {
+        if (this.closed || this.destroyed) return;
+        const buffer = new Uint8Array(Math.min(remaining, 64 * 1024));
+        this._vfs.readDescriptor(fd, buffer, 0, buffer.length, position, (error, result) => {
+          if (error) {
+            this.destroy(error);
+            return;
+          }
+          if (!result.bytesRead) {
+            this.end();
+            return;
+          }
+          const chunk = buffer.subarray(0, result.bytesRead);
+          position += result.bytesRead;
+          remaining -= result.bytesRead;
+          this._sendResponseChunk(chunk);
+          if (remaining) readNext();
+          else this.end();
+        });
+      };
+      readNext();
+      return this;
+    } catch (error) {
+      this._releaseResponseFile(fd);
+      throw error;
+    }
+  }
+
+  respondWithFile(pathValue, headers = {}, options = {}) {
+    if (this._role !== 'server') throw http2Error('ERR_HTTP2_INVALID_STREAM', 'Only server streams can respond');
+    if (!this._vfs?.fs?.openSync) {
+      throw http2Error('ERR_HTTP2_FILE_UNAVAILABLE', 'HTTP/2 file responses require a VFS-backed runtime');
+    }
+    let fd;
+    try {
+      fd = this._vfs.fs.openSync(pathValue, 'r');
+      this._responseFile = { fd };
+      return this.respondWithFD(fd, headers, options);
+    } catch (error) {
+      this._releaseResponseFile(fd);
+      throw error;
+    }
+  }
+
+  _releaseResponseFile(fd = this._responseFile?.fd) {
+    if (!this._responseFile || this._responseFile.fd !== fd) return;
+    this._responseFile = null;
+    try { this._vfs.fs.closeSync(fd); } catch {}
   }
 
   additionalHeaders(headers) {
@@ -244,25 +479,51 @@ class VirtualHttp2Stream extends Duplex {
     if (!this.headersSent) this.respond({ ':status': 200 });
     this.closed = true;
     this._peer?._receiveResponse(null, this._bodyBytes(), true);
+    this._releaseResponseFile();
+    this._publishCloseDiagnostics();
     schedule(() => this.emit('close'));
   }
 
   write(chunk, encoding, callback) {
+    if (typeof encoding === 'function') {
+      callback = encoding;
+      encoding = 'utf8';
+    }
+    const diagnosticEncoding = typeof chunk === 'string' ? String(encoding || 'utf8') : 'buffer';
+    this._diagnosticChunks.push({ chunk, encoding: diagnosticEncoding });
+    if (typeof chunk === 'string') chunk = bytesFor(chunk, this._scope, encoding);
     if (this._role === 'server' && this.headersSent) {
-      const bytes = bytesFor(chunk, this._scope);
-      this._sendResponseChunk(bytes);
-      callback = typeof encoding === 'function' ? encoding : callback;
+      this._sendResponseChunk(chunk);
       callback?.();
       return true;
     }
     return super.write(chunk, encoding, callback);
   }
 
+  end(chunk, encoding, callback) {
+    if (typeof chunk === 'function') {
+      callback = chunk;
+      chunk = undefined;
+      encoding = 'utf8';
+    } else if (typeof encoding === 'function') {
+      callback = encoding;
+      encoding = 'utf8';
+    }
+    if (chunk !== undefined) {
+      const diagnosticEncoding = typeof chunk === 'string' ? String(encoding || 'utf8') : 'buffer';
+      this._diagnosticChunks.push({ chunk, encoding: diagnosticEncoding });
+    }
+    if (typeof chunk === 'string') chunk = bytesFor(chunk, this._scope, encoding);
+    return super.end(chunk, encoding, callback);
+  }
+
   close(code = constants.NGHTTP2_NO_ERROR, callback) {
     this.rstCode = code;
     this.aborted = code !== constants.NGHTTP2_NO_ERROR;
     this.closed = true;
+    this._releaseResponseFile();
     this._peer?._receiveResponse(null, null, true);
+    this._publishCloseDiagnostics();
     schedule(() => { this.emit('close'); callback?.(); });
     return this;
   }
@@ -270,16 +531,80 @@ class VirtualHttp2Stream extends Duplex {
   rstStream(code) { return this.close(code); }
   setTimeout(milliseconds, callback) { if (callback) this.once('timeout', callback); this._timeout = setTimeout(() => this.emit('timeout'), milliseconds); return this; }
   setNoDelay() { return this; }
-  setEncoding() { return this; }
   priority() { return this; }
-  pushStream() { throw http2Error('ERR_HTTP2_NESTED_PUSH', 'HTTP/2 push streams are unavailable in the virtual browser contract'); }
+  pushStream(headers = {}, options = {}, callback) {
+    if (typeof options === 'function') {
+      callback = options;
+      options = {};
+    }
+    if (!isRecord(options)) throw new TypeError('options must be an object');
+    if (this._role !== 'server') throw http2Error('ERR_HTTP2_INVALID_STREAM', 'Only server streams can push');
+    if (this._isPush) throw http2Error('ERR_HTTP2_NESTED_PUSH', 'Cannot create a push stream from a push stream');
+    if (this.closed || this.destroyed) throw http2Error('ERR_HTTP2_INVALID_STREAM', 'The stream has been destroyed');
+    if (this.session.remoteSettings.enablePush === false) {
+      throw http2Error('ERR_HTTP2_PUSH_DISABLED', 'HTTP/2 push streams are disabled');
+    }
+    if (typeof callback !== 'function') throw new TypeError('callback must be a function');
+    const normalized = normalizeHeaders(headers);
+    if (!normalized[':method']) normalized[':method'] = 'GET';
+    if (!normalized[':scheme']) normalized[':scheme'] = this._headers[':scheme'] || 'https';
+    if (!normalized[':authority']) normalized[':authority'] = this._headers[':authority'];
+    if (!normalized[':path']) normalized[':path'] = '/';
+    normalized[sensitiveHeaders] = [];
+    const id = nextStreamId;
+    nextStreamId += 2;
+    const pushServer = new VirtualHttp2Stream(this.session, {
+      id,
+      headers: normalized,
+      role: 'server',
+      push: true,
+      highWaterMark: options.highWaterMark,
+    });
+    const pushClient = new VirtualHttp2Stream(this.session, {
+      id,
+      headers: normalized,
+      role: 'client',
+      push: true,
+      highWaterMark: options.highWaterMark,
+    });
+    pushServer._peer = pushClient;
+    pushClient._peer = pushServer;
+    this.session._streams.add(pushClient);
+    pushClient.once('close', () => this.session._streams.delete(pushClient));
+    pushServer._publishCreatedDiagnostics(normalized);
+    pushServer._publishStartDiagnostics(normalized);
+    pushClient._publishCreatedDiagnostics(normalized);
+    pushClient._publishStartDiagnostics(normalized);
+    schedule(() => {
+      this.session.emit('stream', pushClient, { ...normalized }, 0);
+      callback(null, pushServer, { ...normalized });
+    });
+    return pushServer;
+  }
 
   destroy(error) {
     if (this.closed && this.destroyed) return this;
     this.destroyed = true;
     this.closed = true;
+    this._releaseResponseFile();
     this.aborted ||= Boolean(error);
-    if (error) this.emit('error', error);
+    if (error) {
+      if (this.rstCode === constants.NGHTTP2_NO_ERROR) {
+        this.rstCode = this._role === 'client' ? constants.NGHTTP2_CANCEL : constants.NGHTTP2_INTERNAL_ERROR;
+      }
+      publishDiagnostic(this._diagnostics, `http2.${this._role}.stream.error`, { stream: this, error });
+      this._publishCloseDiagnostics();
+      if (this._peer && !this._peer.destroyed) {
+        const peer = this._peer;
+        peer.rstCode = this.rstCode;
+        peer.aborted = true;
+        schedule(() => peer.destroy(http2Error(
+          'ERR_HTTP2_STREAM_ERROR',
+          `Stream closed with error code ${this.rstCode}`,
+        )));
+      }
+    }
+    if (!error) this._publishCloseDiagnostics();
     schedule(() => this.emit('close'));
     return super.destroy(error);
   }
@@ -289,10 +614,13 @@ export class ClientHttp2Session extends EventEmitter {
   constructor(authority, options, internal) {
     super();
     this._scope = internal.scope;
+    this._vfs = internal.vfs;
+    this._diagnostics = internal.diagnostics;
     this._authority = authority;
     this._options = options;
     this._proxy = internal.proxy;
     this._server = internal.server;
+    this._taskRelease = internal.trackTask?.() || null;
     this._pendingRequests = [];
     this._streams = new Set();
     this._connected = false;
@@ -302,8 +630,9 @@ export class ClientHttp2Session extends EventEmitter {
     this.type = 1;
     this.alpnProtocol = 'h2';
     this.encrypted = true;
+    this.timeout = 0;
     this.localSettings = { ...DEFAULT_SETTINGS };
-    this.remoteSettings = { ...DEFAULT_SETTINGS };
+    this.remoteSettings = { ...DEFAULT_SETTINGS, ...(this._server?._options?.settings || {}) };
     this.socket = Object.freeze({ encrypted: true, alpnProtocol: 'h2', authorized: true });
     schedule(() => void this._connect());
   }
@@ -322,6 +651,7 @@ export class ClientHttp2Session extends EventEmitter {
           throw http2Error('ERR_HTTP2_ALPN_PROTOCOL', `Proxy negotiated ${result.alpnProtocol}, not h2`);
         }
       }
+      if (this.closed || this.destroyed) return;
       this._connected = true;
       this.connecting = false;
       this.emit('connect');
@@ -334,26 +664,51 @@ export class ClientHttp2Session extends EventEmitter {
     }
   }
 
-  request(headers, options = {}) {
+  request(headers = {}, options = {}) {
     if (this.closed || this.destroyed) throw http2Error('ERR_HTTP2_INVALID_SESSION', 'Cannot create a stream on a closed session');
     const normalized = normalizeHeaders(headers);
     if (!normalized[':method']) normalized[':method'] = 'GET';
+    if (!normalized[':scheme'] && normalized[':method'] !== 'CONNECT') normalized[':scheme'] = this._authority.protocol.slice(0, -1);
+    if (!normalized[':authority']) {
+      const defaultPort = this._authority.protocol === 'http:' ? 80 : 443;
+      normalized[':authority'] = `${this._authority.host}${this._authority.port === defaultPort ? '' : `:${this._authority.port}`}`;
+    }
     if (!normalized[':path'] && normalized[':method'] !== 'CONNECT') normalized[':path'] = '/';
     const stream = new VirtualHttp2Stream(this, { ...options, headers: normalized, role: 'client' });
     stream._headers = normalized;
     this._streams.add(stream);
+    stream._publishCreatedDiagnostics(normalized);
+    schedule(() => this._dispatch(stream));
     stream.once('close', () => this._streams.delete(stream));
+    const { signal } = options;
+    if (signal) {
+      const abort = () => stream.destroy(abortError());
+      if (signal.aborted) abort();
+      else {
+        signal.addEventListener('abort', abort, { once: true });
+        stream.once('close', () => signal.removeEventListener('abort', abort));
+      }
+    }
     if (options.endStream) stream.end();
     return stream;
   }
 
   _dispatch(stream) {
     if (stream.closed) return;
-    if (!this._connected) { this._pendingRequests.push(stream); return; }
+    if (!this._connected) {
+      if (!this._pendingRequests.includes(stream)) this._pendingRequests.push(stream);
+      return;
+    }
+    if (stream._dispatched) return;
+    stream._dispatched = true;
+    stream._publishStartDiagnostics(stream._headers);
+    stream._publishBodyDiagnostics();
     if (this._server) {
       const serverStream = new VirtualHttp2Stream(this, { id: stream.id, role: 'server', headers: stream._headers });
       stream._peer = serverStream;
       serverStream._peer = stream;
+      serverStream._publishCreatedDiagnostics(stream._headers);
+      serverStream._publishStartDiagnostics(stream._headers);
       this._server.emit('stream', serverStream, { ...stream._headers }, 0);
       const body = stream._bodyBytes();
       if (body.byteLength) serverStream.push(body);
@@ -376,6 +731,16 @@ export class ClientHttp2Session extends EventEmitter {
     return this;
   }
 
+  setNextStreamID() {
+    if (this.closed || this.destroyed) throw http2Error('ERR_HTTP2_INVALID_SESSION', 'The session has been destroyed');
+    return nextStreamId;
+  }
+
+  setLocalWindowSize() {
+    if (this.closed || this.destroyed) throw http2Error('ERR_HTTP2_INVALID_SESSION', 'The session has been destroyed');
+    return this;
+  }
+
   ping(payload, callback) {
     if (typeof payload === 'function') { callback = payload; payload = undefined; }
     const value = payload === undefined ? new Uint8Array(8) : bytesFor(payload, this._scope);
@@ -394,10 +759,16 @@ export class ClientHttp2Session extends EventEmitter {
   unref() { return this; }
 
   close(callback) {
+    if (this.closed) {
+      schedule(() => callback?.());
+      return this;
+    }
     if (callback) this.once('close', callback);
-    if (this.closed) return this;
     this.closed = true;
+    this._connected = false;
     this.connecting = false;
+    this._taskRelease?.();
+    this._taskRelease = null;
     for (const stream of this._streams) stream.close(constants.NGHTTP2_CANCEL);
     schedule(() => this.emit('close'));
     return this;
@@ -407,7 +778,10 @@ export class ClientHttp2Session extends EventEmitter {
     if (this.destroyed) return this;
     this.destroyed = true;
     this.closed = true;
+    this._connected = false;
     this.connecting = false;
+    this._taskRelease?.();
+    this._taskRelease = null;
     if (error) this.emit('error', error);
     schedule(() => this.emit('close'));
     return this;
@@ -420,11 +794,16 @@ export class Http2Server extends EventEmitter {
     if (typeof options === 'function') { listener = options; options = {}; }
     this._scope = internal.scope;
     this._options = { ...options };
+    this._diagnostics = internal.diagnostics;
+    this._trackTask = internal.trackTask;
+    this._taskRelease = null;
     this._secure = Boolean(internal.secure);
     this._host = 'localhost';
     this._port = null;
     this.listening = false;
     this._sessions = new Set();
+    this.timeout = 0;
+    this.maxConnections = undefined;
     if (typeof listener === 'function') this.on('stream', listener);
   }
 
@@ -432,6 +811,7 @@ export class Http2Server extends EventEmitter {
     let callback;
     if (typeof args.at(-1) === 'function') callback = args.pop();
     const input = isRecord(args[0]) ? { ...args[0] } : { port: args[0], host: args[1] };
+    if (this.listening) throw http2Error('ERR_SERVER_ALREADY_LISTEN', 'Server is already listening');
     this._host = String(input.host || input.hostname || 'localhost');
     this._port = Number(input.port || 0) || allocatePort();
     if (!Number.isInteger(this._port) || this._port < 1 || this._port > 65535) throw http2Error('ERR_SOCKET_BAD_PORT', `Invalid port: ${input.port}`);
@@ -442,6 +822,7 @@ export class Http2Server extends EventEmitter {
       return this;
     }
     SERVER_REGISTRY.set(key, this);
+    this._taskRelease = this._trackTask?.() || null;
     this.listening = true;
     schedule(() => { this.emit('listening'); callback?.(); });
     return this;
@@ -458,12 +839,24 @@ export class Http2Server extends EventEmitter {
     if (callback) this.once('close', callback);
     if (!this.listening) { schedule(() => this.emit('close')); return this; }
     SERVER_REGISTRY.delete(registryKey(this._host, this._port));
+    this._taskRelease?.();
+    this._taskRelease = null;
     this.listening = false;
+    this._port = null;
     for (const session of this._sessions) session.close();
     schedule(() => this.emit('close'));
     return this;
   }
-  setTimeout(milliseconds, callback) { if (callback) this.once('timeout', callback); this._timeout = setTimeout(() => this.emit('timeout'), milliseconds); return this; }
+  setTimeout(milliseconds, callback) {
+    this.timeout = Number(milliseconds) || 0;
+    if (callback) this.once('timeout', callback);
+    if (this._timeout) clearTimeout(this._timeout);
+    if (this.timeout > 0) this._timeout = setTimeout(() => this.emit('timeout'), this.timeout);
+    return this;
+  }
+  getConnections(callback) { schedule(() => callback?.(null, this._sessions.size)); return this; }
+  closeAllConnections() { for (const session of this._sessions) session.close(); return this; }
+  closeIdleConnections() { return this; }
   ref() { return this; }
   unref() { return this; }
 }
@@ -479,22 +872,40 @@ export function createHttp2Module(scope = globalThis, options = {}) {
     scope = globalThis;
   }
   const proxy = normalizeProxy(options.proxy, options.capability);
+  const diagnostics = options.diagnostics;
 
   function connect(authority, connectOptions = {}, listener) {
     if (typeof connectOptions === 'function') { listener = connectOptions; connectOptions = {}; }
     const target = authorityParts(authority, scope);
-    const server = SERVER_REGISTRY.get(registryKey(target.host, target.port)) || SERVER_REGISTRY.get(registryKey('localhost', target.port));
-    const session = new ClientHttp2Session(target, { ...connectOptions }, { scope, proxy: normalizeProxy(connectOptions.proxy, connectOptions.capability) || proxy, server });
+    const server = serverFor(target.host, target.port);
+    const session = new ClientHttp2Session(target, { ...connectOptions }, {
+      scope,
+      vfs: options.vfs,
+      proxy: normalizeProxy(connectOptions.proxy, connectOptions.capability) || proxy,
+      server,
+      diagnostics,
+      trackTask: options.trackTask,
+    });
     if (typeof listener === 'function') session.once('connect', listener);
     return session;
   }
 
   function createServer(serverOptions, listener) {
-    return new Http2Server(serverOptions, listener, { scope, secure: false });
+    return new Http2Server(serverOptions, listener, {
+      scope,
+      secure: false,
+      diagnostics,
+      trackTask: options.trackTask,
+    });
   }
 
   function createSecureServer(serverOptions, listener) {
-    return new Http2Server(serverOptions, listener, { scope, secure: true });
+    return new Http2Server(serverOptions, listener, {
+      scope,
+      secure: true,
+      diagnostics,
+      trackTask: options.trackTask,
+    });
   }
 
   return Object.freeze({

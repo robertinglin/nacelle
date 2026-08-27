@@ -4,16 +4,6 @@ import { createBrowserProcess, createProcess } from './process.js';
 const TERMINAL_STATES = new Set(['exited', 'failed']);
 const SIGNALS = new Set(['SIGTERM', 'SIGINT', 'SIGKILL']);
 const PROCESS_REGISTRY_KEY = '__BNH_VIRTUAL_PROCESS_REGISTRY__';
-let nextInMemoryPid = 1000;
-
-function allocatePid(scope, requestedPid) {
-  if (requestedPid !== undefined && requestedPid !== null) return Number(requestedPid);
-  const registry = scope?.[PROCESS_REGISTRY_KEY];
-  let pid = nextInMemoryPid;
-  while (registry?.has(pid)) pid += 1;
-  nextInMemoryPid = pid + 1;
-  return pid;
-}
 
 function registerProcess(scope, processHandle) {
   const registry = scope[PROCESS_REGISTRY_KEY] || new Map();
@@ -78,15 +68,19 @@ function cloneMessage(value, transferList, scope) {
   }
 }
 
-function makeInMemoryIpcPair(scope) {
+function makeInMemoryIpcPair(scope, { preserveReferences = false } = {}) {
   let left;
   let right;
 
   const makeEndpoint = () => {
     const events = new BrowserEventEmitter();
     let connected = true;
+    let referenced = true;
     const endpoint = {
       get connected() { return connected; },
+      ref() { referenced = true; return endpoint; },
+      unref() { referenced = false; return endpoint; },
+      hasRef() { return referenced; },
       on(name, listener) { events.on(name, listener); return endpoint; },
       once(name, listener) { events.once(name, listener); return endpoint; },
       off(name, listener) { events.off(name, listener); return endpoint; },
@@ -98,6 +92,9 @@ function makeInMemoryIpcPair(scope) {
           callback = transferList;
           transferList = undefined;
         }
+        return endpoint.sendWithHandle(value, undefined, transferList, callback);
+      },
+      sendWithHandle(value, handle, transferList, callback) {
         if (!connected) {
           const error = errorWithCode('ERR_IPC_CLOSED', 'IPC channel is closed');
           if (callback) {
@@ -119,7 +116,7 @@ function makeInMemoryIpcPair(scope) {
         const peerWasConnected = Boolean(endpoint.peer?.connected);
         queueMicrotask(() => {
           // A queued postMessage is still delivered when the sender closes immediately after posting.
-          if (peerWasConnected) endpoint.peer?.emit('message', message);
+          if (peerWasConnected) endpoint.peer?.emit('message', message, preserveReferences ? handle : undefined);
         });
         callback?.(null);
         return true;
@@ -171,11 +168,11 @@ function makeTerminal(identity, state, kind, code, signal, error, forced) {
 
 function createInMemoryProcess(options) {
   const events = new BrowserEventEmitter();
-  const ipcPair = makeInMemoryIpcPair(options.scope || globalThis);
+  const ipcPair = makeInMemoryIpcPair(options.scope || globalThis, { preserveReferences: options.preserveReferences });
   const identity = {
     runId: String(options.runId || 'virtual-run'),
     childId: String(options.childId || 'virtual-child'),
-    pid: allocatePid(options.scope || globalThis, options.pid),
+    pid: Number(options.pid ?? 1000),
     ppid: Number(options.ppid ?? 0),
     argv: (Array.isArray(options.argv) ? options.argv : ['browser-worker']).map(String),
     env: Object.fromEntries(Object.entries(options.env || {}).map(([key, value]) => [String(key), String(value)])),
@@ -185,6 +182,7 @@ function createInMemoryProcess(options) {
   const history = ['created'];
   let terminal = null;
   let pendingFailure = null;
+  let pendingSignal = null;
   const abortController = typeof AbortController === 'function' ? new AbortController() : null;
   let disconnectEmitted = false;
   let resolveCompletion;
@@ -209,14 +207,12 @@ function createInMemoryProcess(options) {
   };
 
   const childProcess = createProcess({
-    argv: options.argv,
-    env: options.env,
-    cwd: options.cwd,
+    argv: [...identity.argv],
+    execArgv: [...(options.execArgv || [])].map(String),
+    env: { ...identity.env },
+    cwd: identity.cwd,
     pid: identity.pid,
     ppid: identity.ppid,
-    argv: [...identity.argv],
-    env: { ...identity.env },
-    cwd: () => identity.cwd,
     output,
     ipc: ipcPair.child,
     signalGrants: options.signalGrants,
@@ -236,12 +232,12 @@ function createInMemoryProcess(options) {
     resolveCompletion(terminal);
   };
 
-  childProcess.on('message', (message) => events.emit('child-message', message));
+  childProcess.on('message', (message, handle) => events.emit('child-message', message, handle));
   childProcess.on('disconnect', emitDisconnect);
-  childProcess.on('exit', (code) => finish(pendingFailure ? 'rejection' : 'exit', code, null, pendingFailure));
-  ipcPair.parent.on('message', (message) => events.emit('message', message));
+  childProcess.on('exit', (code) => finish(pendingSignal ? 'signal' : (pendingFailure ? 'rejection' : 'exit'), pendingSignal ? null : code, pendingSignal, pendingFailure));
+  ipcPair.parent.on('message', (message, handle) => events.emit('message', message, handle));
   ipcPair.parent.on('peerDisconnect', emitDisconnect);
-  ipcPair.child.on('message', (message) => childProcess.emit('message', message));
+  ipcPair.child.on('message', (message, handle) => childProcess.emit('message', message, handle));
   ipcPair.child.on('peerDisconnect', () => {
     if (!childProcess.connected) return;
     childProcess.connected = false;
@@ -262,10 +258,18 @@ function createInMemoryProcess(options) {
     get terminalRecord() { return terminal; },
     pid: identity.pid,
     ppid: identity.ppid,
+    argv: [...identity.argv],
+    execArgv: [...(options.execArgv || [])].map(String),
+    env: { ...identity.env },
+    cwd: () => identity.cwd,
     process: childProcess,
     stdout: options.stdout,
     stderr: options.stderr,
-    send(value, transferList, callback) { return ipcPair.parent.send(value, transferList, callback); },
+    send(value, sendHandle, sendOptions, callback) {
+      if (typeof sendHandle === 'function') return ipcPair.parent.sendWithHandle(value, undefined, undefined, sendHandle);
+      if (typeof sendOptions === 'function') return ipcPair.parent.sendWithHandle(value, sendHandle, undefined, sendOptions);
+      return ipcPair.parent.sendWithHandle(value, sendHandle, undefined, callback);
+    },
     disconnect() {
       if (!ipcPair.parent.disconnect()) return false;
       emitDisconnect();
@@ -283,7 +287,13 @@ function createInMemoryProcess(options) {
       }
       transition('stopping');
       const handled = childProcess.emit(name);
-      if (!handled) childProcess._markExited();
+      if (!handled) {
+        pendingFailure = null;
+        pendingSignal = name;
+        childProcess._markExited();
+      } else {
+        pendingSignal = null;
+      }
       return true;
     },
     terminate() { return processHandle.kill('SIGKILL'); },
@@ -310,6 +320,7 @@ function createInMemoryProcess(options) {
           vfs: options.vfs,
           signal: abortController?.signal || childProcess,
           cluster: options.cluster,
+          clusterGroupId: options.clusterGroupId,
         };
         runResult = typeof options.run === 'function' ? options.run(context) : runVfsEntry(options, context);
       } catch (error) {
@@ -328,8 +339,11 @@ function createInMemoryProcess(options) {
       });
     };
     if (options.deferRun) {
+      // Cluster exposes `online` from the spawn event. Start the entry first
+      // so its process message listener exists before the parent can send the
+      // first IPC message in that callback.
+      startEntry();
       events.emit('spawn');
-      queueMicrotask(startEntry);
     } else {
       startEntry();
       events.emit('spawn');

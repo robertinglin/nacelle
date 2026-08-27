@@ -13,11 +13,13 @@ function splitDefinition(name, options, callback) {
 }
 
 /** Run the useful node:test surface inside the browser process lifecycle. */
-export function createNodeTest({ scope, processObject, stdout, stderr, trackTask }) {
+export function createNodeTest({ scope, processObject, stdout, stderr, trackTask, assert }) {
   const schedule = typeof scope.queueMicrotask === 'function'
     ? scope.queueMicrotask.bind(scope)
     : (callback) => scope.setTimeout(callback, 0);
   const root = {
+    name: '<root>',
+    fullName: '<root>',
     parent: null,
     before: [],
     after: [],
@@ -38,7 +40,12 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
   }
 
   async function runHooks(hooks, context) {
-    for (const hook of hooks) await hook(context);
+    for (const hook of hooks) await Reflect.apply(hook, context, [context]);
+  }
+
+  function diagnostic(message) {
+    const text = String(message).replace(/\r?\n/g, '\n# ');
+    stdout(`# ${text}\n`);
   }
 
   function startSuite(suite) {
@@ -48,7 +55,13 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
     suite.beforeReady = (async () => {
       try {
         await Promise.resolve();
-        await runHooks(suite.before, { name: suite.name, signal: suite.signal });
+        await runHooks(suite.before, {
+          name: suite.name,
+          fullName: suite.fullName,
+          signal: suite.signal,
+          diagnostic,
+          assert,
+        });
         return null;
       } catch (error) {
         return error;
@@ -83,6 +96,7 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
   function createSuite(name, options, callback, parent) {
     const suite = {
       name: String(name ?? '(anonymous suite)'),
+      fullName: parent === root ? String(name ?? '(anonymous suite)') : `${parent.fullName} > ${String(name ?? '(anonymous suite)')}`,
       parent,
       signal: options.signal,
       before: [],
@@ -97,8 +111,15 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
     parent.children.push(startSuite(suite).completion);
     if (!options.skip && !options.todo && typeof callback === 'function') {
       suiteStack.push(suite);
+      const context = {
+        name: suite.name,
+        fullName: suite.fullName,
+        signal: suite.signal,
+        diagnostic,
+        assert,
+      };
       try {
-        callback();
+        Reflect.apply(callback, context, [context]);
       } finally {
         suiteStack.pop();
       }
@@ -106,12 +127,25 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
     return suite.completion;
   }
 
-  function register(name, options, callback, parent = suiteStack.at(-1)) {
+  function register(name, options, callback, parent = suiteStack.at(-1), ownerNode = null) {
     const task = splitDefinition(name, options, callback);
     const label = String(task.name ?? '(unnamed test)');
     const testOptions = task.options;
+    const fullNameLabel = label === '(anonymous)' ? '<anonymous>' : label;
+    const fullName = ownerNode?.fullName
+      ? `${ownerNode.fullName} > ${fullNameLabel}`
+      : parent === root ? fullNameLabel : `${parent.fullName} > ${fullNameLabel}`;
     const result = new Promise((resolve) => {
-      const node = { children: [] };
+      const node = {
+        children: [],
+        fullName,
+        before: [],
+        after: [],
+        beforeEach: [],
+        afterEach: [],
+        beforeReady: null,
+        context: null,
+      };
       const run = async () => {
         const release = trackTask();
         try {
@@ -134,27 +168,45 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
 
           const context = {
             name: label,
+            fullName,
             signal: testOptions.signal,
+            assert,
+            diagnostic,
+            before: (hookCallback) => node.before.push(hookCallback),
+            after: (hookCallback) => node.after.push(hookCallback),
+            beforeEach: (hookCallback) => node.beforeEach.push(hookCallback),
+            afterEach: (hookCallback) => node.afterEach.push(hookCallback),
             test: (childName, childOptions, childCallback) => {
-              const child = register(childName, childOptions, childCallback, parent);
+              node.beforeReady ||= Promise.resolve().then(() => runHooks(node.before, context));
+              const child = register(childName, childOptions, childCallback, parent, node);
               node.children.push(child);
               return child;
             },
           };
+          node.context = context;
           let failure = null;
           try {
             await runHooks(hookChain(parent, 'beforeEach'), context);
-            if (typeof task.callback === 'function') await task.callback(context);
+            if (ownerNode?.beforeReady) await ownerNode.beforeReady;
+            if (ownerNode) await runHooks(ownerNode.beforeEach, context);
+            if (typeof task.callback === 'function') await Reflect.apply(task.callback, context, [context]);
           } catch (error) {
             failure = error;
           } finally {
             try {
+              if (ownerNode) await runHooks([...ownerNode.afterEach].reverse(), context);
               await runHooks(hookChain(parent, 'afterEach'), context);
             } catch (error) {
               failure ||= error;
             }
           }
           const childResults = await Promise.all(node.children);
+          if (node.beforeReady) await node.beforeReady;
+          try {
+            await runHooks([...node.after].reverse(), context);
+          } catch (error) {
+            failure ||= error;
+          }
           if (!failure && childResults.some((child) => child.status === 'fail')) {
             failure = new Error(`subtest of '${label}' failed`);
           }
@@ -190,6 +242,25 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
     return createSuite(definition.name, definition.options, definition.callback, suiteStack.at(-1));
   }
 
+  function mockFunction(implementation = () => undefined) {
+    if (typeof implementation !== 'function') throw new TypeError('mock implementation must be a function');
+    const fn = function(...args) {
+      const call = { arguments: args, result: undefined, error: undefined };
+      fn.mock.calls.push(call);
+      try {
+        call.result = Reflect.apply(implementation, this, args);
+        return call.result;
+      } catch (error) {
+        call.error = error;
+        throw error;
+      }
+    };
+    fn.mock = { calls: [] };
+    return fn;
+  }
+
+  const mock = Object.freeze({ fn: mockFunction });
+
   test.test = test;
   test.it = test;
   test.describe = describe;
@@ -208,6 +279,7 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
   test.beforeEach = (callback) => hook('beforeEach', callback);
   test.afterEach = (callback) => hook('afterEach', callback);
   test.run = () => ({ concurrency: 1 });
+  test.mock = mock;
 
   describe.skip = (name, options, callback) => describe(name, { ...normalizeOptions(options), skip: true }, callback);
   describe.todo = (name, options, callback) => describe(name, { ...normalizeOptions(options), todo: true }, callback);

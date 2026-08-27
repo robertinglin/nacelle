@@ -1,3 +1,5 @@
+import { CallTracker } from './call-tracker.js';
+
 function isObject(value) {
   return value !== null && typeof value === 'object';
 }
@@ -21,6 +23,8 @@ class Comparison {
   }
 }
 
+const inspectCustomSymbol = Symbol.for('nodejs.util.inspect.custom');
+
 export { inspect, quote, indentMultiline, isObject, isPlainObject, Comparison, typeDescription };
 
 function quote(value) {
@@ -41,20 +45,65 @@ function inspect(value, options = {}, state = { seen: new Map(), nextReference: 
   if (value === null) return 'null';
   if (typeof value === 'string') return quote(value);
   if (typeof value === 'number') {
-    if (Number.isNaN(value)) return 'null';
+    if (Number.isNaN(value)) return 'NaN';
     if (Object.is(value, -0)) return '-0';
-    if (value === Infinity || value === -Infinity) return 'null';
+    if (value === Infinity) return 'Infinity';
+    if (value === -Infinity) return '-Infinity';
     return String(value);
   }
   if (typeof value === 'bigint') return `${value}n`;
   if (typeof value === 'boolean') return String(value);
   if (typeof value === 'symbol') return String(value);
   if (typeof value === 'function') return `[Function${value.name ? `: ${value.name}` : ' (anonymous)'}]`;
+  if (options.customInspect !== false) {
+    const customInspect = value?.[inspectCustomSymbol];
+    if (typeof customInspect === 'function' && customInspect !== inspect) {
+      const result = customInspect.call(value, options.depth ?? 2, options, inspect);
+      if (result !== value) return typeof result === 'string' ? result : inspect(result, options, state);
+    }
+  }
   if (value instanceof RegExp) return String(value);
   if (value instanceof Date) return Number.isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString();
   if (value instanceof Error) {
     const label = value.name || 'Error';
+    if (label === 'AssertionError' && ('actual' in value || 'expected' in value)) {
+      const propertyNames = ['generatedMessage', 'code', 'actual', 'expected', 'operator'];
+      const propertyText = propertyNames
+        .filter((key) => Object.prototype.hasOwnProperty.call(value, key))
+        .map((key) => {
+          const propertyValue = value[key];
+          let inspected;
+          if (typeof propertyValue === 'string' && propertyValue.includes('\n')) {
+            let end = propertyValue.length;
+            let newlineCount = 0;
+            for (let index = 0; index < propertyValue.length; index += 1) {
+              if (propertyValue[index] !== '\n') continue;
+              newlineCount += 1;
+              if (newlineCount === 10) {
+                end = index + 1;
+                break;
+              }
+            }
+            inspected = quote(`${propertyValue.slice(0, end)}${end < propertyValue.length ? '...' : ''}`);
+          } else if (typeof propertyValue === 'string' && propertyValue.length > 9_488) {
+            inspected = quote(`${propertyValue.slice(0, 9_488)}...`);
+          } else {
+            inspected = inspect(propertyValue, options, state);
+          }
+          return `  ${key}: ${inspected}`;
+        })
+        .join(',\n');
+      return `[${label}${value.message ? `: ${value.message}` : ''}] {\n${propertyText}\n}`;
+    }
     return `[${label}${value.message ? `: ${value.message}` : ''}]`;
+  }
+
+  if (value?.constructor?.name === 'AbortController' && value.signal) {
+    if (options.depth === null) return 'AbortController { signal: AbortSignal { aborted: false } }';
+    return 'AbortController { signal: [AbortSignal] }';
+  }
+  if (value?.constructor?.name === 'AbortSignal' && typeof value.aborted === 'boolean') {
+    return `AbortSignal { aborted: ${value.aborted} }`;
   }
 
   if (Object.prototype.toString.call(value) === '[object Arguments]') {
@@ -128,7 +177,7 @@ function typeDescription(value) {
     case 'function': return `function ${value.name || ''}`;
     case 'string': {
       const short = value.length > 28 ? `${value.slice(0, 25)}...` : value;
-      return `type string (${JSON.stringify(short)})`;
+      return `type string ('${short.replaceAll("'", "\\'")}')`;
     }
     case 'object': {
       const constructorName = value.constructor?.name;
@@ -221,8 +270,9 @@ function sourceExpression(readSource, sourcePath, value) {
   }
 }
 
-function same(actual, expected, seen = new Map()) {
-  if (Object.is(actual, expected)) return true;
+function same(actual, expected, seen = new Map(), strictNumbers = true) {
+  if (Object.is(actual, expected) || (!strictNumbers && actual === expected)) return true;
+  if (!strictNumbers && Number.isNaN(actual) && Number.isNaN(expected)) return true;
   if (!actual || !expected || typeof actual !== 'object' || typeof expected !== 'object') return false;
   if (actual.constructor !== expected.constructor) return false;
   if (seen.get(actual) === expected) return true;
@@ -230,33 +280,78 @@ function same(actual, expected, seen = new Map()) {
 
   if (actual instanceof Date) return actual.getTime() === expected.getTime();
   if (actual instanceof RegExp) return String(actual) === String(expected);
+  if (actual instanceof Error && expected instanceof Error) {
+    if (actual.name !== expected.name || actual.message !== expected.message) return false;
+    const actualHasCause = Object.prototype.hasOwnProperty.call(actual, 'cause');
+    const expectedHasCause = Object.prototype.hasOwnProperty.call(expected, 'cause');
+    if (actualHasCause !== expectedHasCause) return false;
+    if (actualHasCause && !same(actual.cause, expected.cause, seen, strictNumbers)) return false;
+  }
+  if (typeof URL === 'function' && actual instanceof URL && expected instanceof URL) {
+    return String(actual) === String(expected);
+  }
   if (actual instanceof Map && expected instanceof Map) {
-    return actual.size === expected.size && [...actual].every(([key, value]) => expected.has(key) && same(value, expected.get(key), seen));
+    return actual.size === expected.size && [...actual].every(([key, value]) => expected.has(key) && same(value, expected.get(key), seen, strictNumbers));
   }
   if (actual instanceof Set && expected instanceof Set) {
-    return actual.size === expected.size && [...actual].every((value) => expected.has(value));
+    return actual.size === expected.size && [...actual].every((value) => [...expected].some((candidate) => same(value, candidate, seen, strictNumbers)));
   }
   if (ArrayBuffer.isView(actual) && ArrayBuffer.isView(expected)) {
-    return actual.constructor === expected.constructor && actual.length === expected.length && actual.every((value, index) => same(value, expected[index], seen));
+    if (actual.constructor !== expected.constructor || actual.byteLength !== expected.byteLength) return false;
+    if (actual instanceof DataView || expected instanceof DataView) {
+      const actualBytes = new Uint8Array(actual.buffer, actual.byteOffset, actual.byteLength);
+      const expectedBytes = new Uint8Array(expected.buffer, expected.byteOffset, expected.byteLength);
+      return actualBytes.every((value, index) => same(value, expectedBytes[index], seen, strictNumbers));
+    }
+    return [...actual].every((value, index) => same(value, expected[index], seen, strictNumbers));
+  }
+  if (actual instanceof ArrayBuffer && expected instanceof ArrayBuffer) {
+    if (actual.byteLength !== expected.byteLength) return false;
+    const actualBytes = new Uint8Array(actual);
+    const expectedBytes = new Uint8Array(expected);
+    return actualBytes.every((value, index) => value === expectedBytes[index]);
+  }
+  if (typeof SharedArrayBuffer === 'function' && actual instanceof SharedArrayBuffer && expected instanceof SharedArrayBuffer) {
+    if (actual.byteLength !== expected.byteLength) return false;
+    return same(new Uint8Array(actual), new Uint8Array(expected), seen, strictNumbers);
   }
 
   const actualKeys = Reflect.ownKeys(actual).filter((key) => Object.prototype.propertyIsEnumerable.call(actual, key));
   const expectedKeys = Reflect.ownKeys(expected).filter((key) => Object.prototype.propertyIsEnumerable.call(expected, key));
   return actualKeys.length === expectedKeys.length
-    && actualKeys.every((key) => expectedKeys.includes(key) && same(actual[key], expected[key], seen));
+    && actualKeys.every((key) => expectedKeys.includes(key) && same(actual[key], expected[key], seen, strictNumbers));
 }
 
 function partialSame(actual, expected, seen = new Map()) {
   if (Object.is(actual, expected)) return true;
   if (!actual || !expected || typeof actual !== 'object' || typeof expected !== 'object') return false;
-  if (actual.constructor !== expected.constructor) return false;
+  const actualTag = Object.prototype.toString.call(actual);
+  const expectedTag = Object.prototype.toString.call(expected);
+  const plainRecords = Object.prototype.toString.call(actual) === '[object Object]'
+    && Object.prototype.toString.call(expected) === '[object Object]';
+  if (actual.constructor !== expected.constructor && !plainRecords && actualTag !== expectedTag) return false;
   if (seen.get(actual) === expected) return true;
   seen.set(actual, expected);
 
-  if (actual instanceof Date) return actual.getTime() === expected.getTime();
-  if (actual instanceof RegExp) return String(actual) === String(expected);
+  if (actualTag === '[object Date]') return actual.getTime() === expected.getTime();
+  if (actualTag === '[object RegExp]') return String(actual) === String(expected);
+  if (actual instanceof Error && expected instanceof Error) {
+    if (Object.prototype.hasOwnProperty.call(expected, 'name') && actual.name !== expected.name) return false;
+    if (Object.prototype.hasOwnProperty.call(expected, 'message') && actual.message !== expected.message) return false;
+    if (Object.prototype.hasOwnProperty.call(expected, 'cause')) {
+      if (!Object.prototype.hasOwnProperty.call(actual, 'cause')) return false;
+      if (!partialSame(actual.cause, expected.cause, seen)) return false;
+    }
+    if (expected.name === 'AggregateError' && Object.prototype.hasOwnProperty.call(expected, 'errors')) {
+      if (!Object.prototype.hasOwnProperty.call(actual, 'errors')) return false;
+      if (!partialSame(actual.errors, expected.errors, seen)) return false;
+    }
+  }
+  if (actualTag === '[object URL]') {
+    return String(actual) === String(expected);
+  }
 
-  if (actual instanceof Map && expected instanceof Map) {
+  if (actualTag === '[object Map]' && expectedTag === '[object Map]') {
     if (actual.size < expected.size) return false;
     const entries = [...actual];
     const used = new Set();
@@ -274,7 +369,7 @@ function partialSame(actual, expected, seen = new Map()) {
       return false;
     });
   }
-  if (actual instanceof Set && expected instanceof Set) {
+  if (actualTag === '[object Set]' && expectedTag === '[object Set]') {
     if (actual.size < expected.size) return false;
     const values = [...actual];
     const used = new Set();
@@ -291,20 +386,29 @@ function partialSame(actual, expected, seen = new Map()) {
     });
   }
   if (ArrayBuffer.isView(actual) && ArrayBuffer.isView(expected)) {
-    if (actual.constructor !== expected.constructor || actual.byteLength < expected.byteLength) return false;
-    const actualBytes = new Uint8Array(actual.buffer, actual.byteOffset, actual.byteLength);
-    const expectedBytes = new Uint8Array(expected.buffer, expected.byteOffset, expected.byteLength);
-    for (let start = 0; start <= actualBytes.length - expectedBytes.length; start += 1) {
-      let matches = true;
-      for (let offset = 0; offset < expectedBytes.length; offset += 1) {
-        if (actualBytes[start + offset] !== expectedBytes[offset]) {
-          matches = false;
+    if (actualTag !== expectedTag || actual.length < expected.length) return false;
+    if (actual instanceof DataView || expected instanceof DataView) {
+      const actualBytes = new Uint8Array(actual.buffer, actual.byteOffset, actual.byteLength);
+      const expectedBytes = new Uint8Array(expected.buffer, expected.byteOffset, expected.byteLength);
+      return expectedBytes.every((value, index) => actualBytes[index] === value);
+    }
+    let actualIndex = 0;
+    for (const expectedValue of expected) {
+      let matched = false;
+      for (; actualIndex < actual.length; actualIndex += 1) {
+        if (Object.is(actual[actualIndex], expectedValue)) {
+          actualIndex += 1;
+          matched = true;
           break;
         }
       }
-      if (matches) return true;
+      if (!matched) return false;
     }
-    return false;
+    const expectedKeys = Reflect.ownKeys(expected)
+      .filter((key) => !/^\d+$/.test(String(key))
+        && Object.prototype.propertyIsEnumerable.call(expected, key));
+    return expectedKeys.every((key) => Object.prototype.propertyIsEnumerable.call(actual, key)
+      && partialSame(actual[key], expected[key], seen));
   }
   if (actual instanceof ArrayBuffer && expected instanceof ArrayBuffer) {
     if (actual.byteLength < expected.byteLength) return false;
@@ -321,6 +425,12 @@ function partialSame(actual, expected, seen = new Map()) {
       if (matches) return true;
     }
     return false;
+  }
+  if (typeof SharedArrayBuffer === 'function' && actual instanceof SharedArrayBuffer && expected instanceof SharedArrayBuffer) {
+    if (actual.byteLength < expected.byteLength) return false;
+    const actualBytes = new Uint8Array(actual);
+    const expectedBytes = new Uint8Array(expected);
+    return expectedBytes.every((value, index) => actualBytes[index] === value);
   }
 
   if (Array.isArray(actual) && Array.isArray(expected)) {
@@ -390,6 +500,35 @@ function strictDiff(actual, expected, operator, message) {
       ? 'Expected values to be partially and strictly deep-equal:'
       : 'Expected values to be strictly equal:';
 
+  if (operator === 'deepStrictEqual' && actual instanceof Error && expected instanceof Error) {
+    const label = (error) => `[${error.name || 'Error'}${error.message ? `: ${error.message}` : ''}]`;
+    const signedCauseLines = (sign, error) => {
+      const lines = inspect(error.cause).split('\n');
+      return [
+        `${sign}   [cause]: ${lines[0]}`,
+        ...lines.slice(1).map((line) => line.trim() === '}'
+          ? `${sign}   }`
+          : `${sign}     ${line.replace(/^  /, '')}`),
+      ];
+    };
+    const actualHasCause = Object.prototype.hasOwnProperty.call(actual, 'cause');
+    const expectedHasCause = Object.prototype.hasOwnProperty.call(expected, 'cause');
+    if (actual.name === expected.name && actual.message === expected.message) {
+      if (actualHasCause && expectedHasCause) {
+        return `${message || title}\n+ actual - expected\n\n  ${label(actual)} {\n${signedCauseLines('+', actual).join('\n')}\n${signedCauseLines('-', expected).join('\n')}\n  }\n`;
+      }
+      if (actualHasCause !== expectedHasCause) {
+        const actualLines = actualHasCause
+          ? [`+ ${label(actual)} {`, ...signedCauseLines('+', actual), '+ }']
+          : [`+ ${label(actual)}`];
+        const expectedLines = expectedHasCause
+          ? [`- ${label(expected)} {`, ...signedCauseLines('-', expected), '- }']
+          : [`- ${label(expected)}`];
+        return `${message || title}\n+ actual - expected\n\n${[...actualLines, ...expectedLines].join('\n')}\n`;
+      }
+    }
+  }
+
   if (operator === 'strictEqual' && isObject(actual) && isObject(expected) && actualText === expectedText) {
     return `${message || 'Values have same structure but are not reference-equal:'}\n\n${actualText}\n`;
   }
@@ -407,7 +546,23 @@ function strictDiff(actual, expected, operator, message) {
     }
     return `${message || 'Expected "actual" to be reference-equal to "expected":'}\n+ actual - expected\n\n${diffLines(actualText, expectedLines.join('\n'))}\n`;
   }
+  if (operator === 'strictEqual'
+    && typeof actual === 'string'
+    && typeof expected === 'string'
+    && (actual.includes('\n') || expected.includes('\n'))
+    && actual.length + expected.length > 128) {
+    const render = (sign, value) => value
+      .split(/(?<=\n)/)
+      .map((line, index, lines) => `${sign} ${index === 0 ? quote(line) : `  ${quote(line)}`}${index < lines.length - 1 ? ' +' : ''}`)
+      .join('\n');
+    return `${message || title}\n+ actual - expected\n\n${render('+', actual)}\n${render('-', expected)}\n`;
+  }
   if (!actualText.includes('\n') && !expectedText.includes('\n')) {
+    if ((typeof actual === 'string' && typeof expected === 'string' && actualText.length + expectedText.length > 20)
+      || typeof actual === 'function' || typeof expected === 'function'
+      || actualText.length + expectedText.length > 80) {
+      return `${message || title}\n+ actual - expected\n\n+ ${actualText}\n- ${expectedText}\n`;
+    }
     let body = `${actualText} !== ${expectedText}`;
     if (typeof actual === 'string' && typeof expected === 'string' && actual.length + expected.length <= 80) {
       let divergence = -1;
@@ -424,8 +579,39 @@ function strictDiff(actual, expected, operator, message) {
   return `${message || title}\n+ actual - expected\n\n${diffLines(actualText, expectedText)}\n`;
 }
 
+function looseDeepDiff(actual, expected, full = false) {
+  const format = (value) => {
+    if (typeof value !== 'string') return inspect(value);
+    if (value.includes('\n') && value.length > 128) {
+      const chunks = value.split(/(?<=\n)/);
+      const limit = full ? chunks.length : Math.min(chunks.length, 51);
+      const selected = chunks.slice(0, limit);
+      const lines = selected
+        .map((chunk, index) => `${index === 0 ? quote(chunk) : `  ${quote(chunk)}`}${index < selected.length - 1 || !full ? ' +' : ''}`);
+      if (!full && chunks.length > limit) lines.push(' ...');
+      return lines.join('\n');
+    }
+    if (full || value.length <= 511) return quote(value);
+    return `'${value.slice(0, 508)}...`;
+  };
+  return `Expected values to be loosely deep-equal:\n\n${format(actual)}\n\nshould loosely deep-equal\n\n${format(expected)}`;
+}
+
+function notStrictDiff(actual, full = false) {
+  const lines = actual.split('\n');
+  const visibleLines = full ? lines : lines.slice(0, 48);
+  const body = visibleLines
+    .map((line, index) => quote(`${line}${index < visibleLines.length - 1 ? '\n' : ''}`))
+    .join(' +\n');
+  return `Expected "actual" to be strictly unequal to:\n\n${body}`;
+}
+
 function assertionMessage(actual, expected, operator, message, fallback) {
-  if (message instanceof Error) throw message;
+  if (message instanceof Error
+    && operator !== 'throws'
+    && operator !== 'rejects'
+    && operator !== 'doesNotThrow'
+    && operator !== 'doesNotReject') throw message;
   if (operator === 'strictEqual' || operator === 'deepStrictEqual' || operator === 'partialDeepStrictEqual') {
     return strictDiff(actual, expected, operator, message);
   }
@@ -435,13 +621,18 @@ function assertionMessage(actual, expected, operator, message, fallback) {
       const text = inspect(actual);
       return `Expected "actual" not to be reference-equal to "expected":${text.includes('\n') ? `\n\n${text}\n` : ` ${text}`}`;
     }
+    if (typeof actual === 'string' && typeof expected === 'string' && actual.length + expected.length > 50) {
+      return `Expected "actual" to be strictly unequal to:\n\n${inspect(actual)}`;
+    }
     return `Expected "actual" to be strictly unequal to: ${inspect(actual)}`;
   }
   if (operator === 'notDeepStrictEqual') return `Expected "actual" not to be strictly deep-equal to:\n\n${inspect(actual)}\n`;
   if (operator === 'equal') return `${inspect(actual)} != ${inspect(expected)}`;
+  if (operator === '!=') return `${inspect(actual)} != ${inspect(expected)}`;
   if (operator === 'notEqual') return `${inspect(actual)} == ${inspect(expected)}`;
-  if (operator === 'deepEqual') return 'Expected values to be loosely deep-equal';
+  if (operator === 'deepEqual') return looseDeepDiff(actual, expected);
   if (operator === 'notDeepEqual') return 'Expected values not to be loosely deep-equal';
+  if (operator !== 'fail') return `${inspect(actual)} ${operator} ${inspect(expected)}`;
   return fallback || `Expected ${inspect(expected)} but got ${inspect(actual)}`;
 }
 
@@ -472,7 +663,12 @@ export class AssertionError extends Error {
 function matcherResult(error, expected) {
   if (typeof expected === 'function') {
     if (expected.prototype !== undefined && error instanceof expected) return { matched: true };
-    if (expected.prototype && expected.prototype instanceof Error) return { matched: false };
+    const isErrorConstructor = expected.prototype
+      && (expected.prototype instanceof Error
+        || (typeof expected.name === 'string'
+          && expected.name.endsWith('Error')
+          && expected.prototype.name === expected.name));
+    if (isErrorConstructor) return { matched: false };
     const result = expected(error);
     return { matched: result === true, result };
   }
@@ -553,6 +749,7 @@ function missingException(expected, message) {
 
 function mismatchMessage(error, expected, message, match) {
   const objectExpectation = isObject(expected) && !(expected instanceof RegExp);
+  if (message && objectExpectation && !Object.prototype.hasOwnProperty.call(expected, 'message')) return message;
   if (message && !objectExpectation) return message;
   if (expected instanceof RegExp) return `The input did not match the regular expression ${inspect(expected)}. Input:\n\n${inspect(String(error))}\n`;
   if (typeof expected === 'function' && (expected === Error || (expected.prototype && expected.prototype instanceof Error))) {
@@ -586,7 +783,8 @@ function missingArguments() {
   return error;
 }
 
-export function createAssert({ strict = false, readSource, sourcePath } = {}) {
+export function createAssert({ strict = false, readSource, sourcePath, process: processObject } = {}) {
+  let failDeprecatedWarningEmitted = false;
   const assert = (value, message) => {
     if (!value) {
       const expression = sourceExpression(readSource, sourcePath, value);
@@ -597,7 +795,43 @@ export function createAssert({ strict = false, readSource, sourcePath } = {}) {
     }
   };
   assert.ok = assert;
-  assert.fail = (message) => fail(message, undefined, undefined, 'fail', 'Assertion failed');
+  assert.fail = function failAssertion(actual, expected, message, operator, stackFrameFunction) {
+    if (arguments.length > 1 && !failDeprecatedWarningEmitted) {
+      failDeprecatedWarningEmitted = true;
+      processObject?.emitWarning?.(
+        'assert.fail() with more than one argument is deprecated. Please use assert.strictEqual() instead or only pass a message.',
+        { code: 'DEP0094', type: 'DeprecationWarning' },
+      );
+    }
+    const throwFailure = (failure) => {
+      if (typeof stackFrameFunction === 'function' && typeof failure?.stack === 'string') {
+        const frame = `at ${stackFrameFunction.name || ''}`;
+        failure.stack = failure.stack.split('\n').filter((line) => !line.includes(frame)).join('\n');
+      }
+      throw failure;
+    };
+    if (arguments.length <= 1) {
+      if (actual instanceof Error) throwFailure(actual);
+      try {
+        fail(actual, undefined, undefined, 'fail', actual === undefined ? 'Failed' : 'Assertion failed');
+      } catch (error) {
+        throwFailure(error);
+      }
+    }
+    if (message instanceof Error) throwFailure(message);
+    const normalizedOperator = operator === undefined ? (arguments.length === 2 ? '!=' : 'fail') : String(operator);
+    try {
+      fail(
+        message,
+        actual,
+        expected,
+        normalizedOperator,
+        normalizedOperator === 'fail' ? 'Assertion failed' : undefined,
+      );
+    } catch (error) {
+      throwFailure(error);
+    }
+  };
 
   function strictEqual(actual, expected, message) {
     if (arguments.length < 2) throw missingArguments();
@@ -625,15 +859,15 @@ export function createAssert({ strict = false, readSource, sourcePath } = {}) {
   }
   function notEqual(actual, expected, message) {
     if (arguments.length < 2) throw missingArguments();
-    if (actual == expected || (Number.isNaN(actual) && Number.isNaN(expected))) fail(message, actual, expected, 'notEqual');
+    if (actual == expected || (Number.isNaN(actual) && Number.isNaN(expected))) fail(message, actual, expected, '!=' );
   }
   function deepEqual(actual, expected, message) {
     if (arguments.length < 2) throw missingArguments();
-    if (!same(actual, expected)) fail(message, actual, expected, 'deepEqual');
+    if (!same(actual, expected, new Map(), false)) fail(message, actual, expected, 'deepEqual');
   }
   function notDeepEqual(actual, expected, message) {
     if (arguments.length < 2) throw missingArguments();
-    if (same(actual, expected)) fail(message, actual, expected, 'notDeepEqual');
+    if (same(actual, expected, new Map(), false)) fail(message, actual, expected, 'notDeepEqual');
   }
 
   assert.strictEqual = strictEqual;
@@ -652,7 +886,19 @@ export function createAssert({ strict = false, readSource, sourcePath } = {}) {
     message = normalized.message;
     validateErrorExpectation(expected);
     const result = thrownValue(fn);
-    if (!result.threw) fail(message, undefined, expected, 'throws', missingException(expected, message));
+    if (!result.threw) {
+      try {
+        fail(undefined, undefined, expected, 'throws', missingException(expected, message));
+      } catch (error) {
+        if (typeof error?.stack === 'string') {
+          error.stack = error.stack
+            .split('\n')
+            .filter((line) => !line.includes('assert.throws') && !line.includes('Assert.throws'))
+            .join('\n');
+        }
+        throw error;
+      }
+    }
     if (normalized.stringExpectation !== undefined) ambiguousStringError(result.value, normalized.stringExpectation);
     const match = expected == null ? { matched: true } : matcherResult(result.value, expected);
     if (!match.matched) {
@@ -669,9 +915,22 @@ export function createAssert({ strict = false, readSource, sourcePath } = {}) {
     message = normalized.message;
     validateNoErrorExpectation(expected);
     const result = thrownValue(fn);
+    const match = matcherResult(result.value, expected);
     if (!result.threw) return;
-    if (expected == null || matcherResult(result.value, expected).matched) {
-      fail(message, result.value, expected, 'doesNotThrow', `Got unwanted exception${message ? `: ${message}` : '.'}\nActual message: "${result.value?.message}"`);
+    if (expected == null || match.matched) {
+      try {
+        fail(message, result.value, expected, 'doesNotThrow', `Got unwanted exception${message ? `: ${message}` : '.'}\nActual message: "${result.value?.message}"`);
+      } catch (error) {
+        if (typeof error?.stack === 'string') {
+          error.stack = error.stack
+            .split('\n')
+            .filter((line) => !line.includes('assert.doesNotThrow')
+              && !line.includes('Assert.doesNotThrow')
+              && !line.includes('as doesNotThrow'))
+            .join('\n');
+        }
+        throw error;
+      }
     }
     throw result.value;
   };
@@ -699,29 +958,113 @@ export function createAssert({ strict = false, readSource, sourcePath } = {}) {
   };
 
   assert.match = (actual, regexp, message) => {
+    if (!(regexp instanceof RegExp)) {
+      const error = new TypeError(
+        `The "regexp" argument must be an instance of RegExp. Received ${typeDescription(regexp)}`,
+      );
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
     if (typeof actual !== 'string') throw invalidArgumentType('string', actual, 'string');
-    if (!(regexp instanceof RegExp)) throw invalidArgumentType('regexp', regexp, 'an instance of RegExp');
     if (!regexp.test(actual)) fail(message, actual, regexp, 'match', `The input did not match the regular expression ${inspect(regexp)}. Input:\n\n${inspect(actual)}\n`);
   };
   assert.doesNotMatch = (actual, regexp, message) => {
+    if (!(regexp instanceof RegExp)) {
+      const error = new TypeError(
+        `The "regexp" argument must be an instance of RegExp. Received ${typeDescription(regexp)}`,
+      );
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
     if (typeof actual !== 'string') throw invalidArgumentType('string', actual, 'string');
-    if (!(regexp instanceof RegExp)) throw invalidArgumentType('regexp', regexp, 'an instance of RegExp');
     if (regexp.test(actual)) fail(message, actual, regexp, 'doesNotMatch', `The input was expected to not match the regular expression ${inspect(regexp)}. Input:\n\n${inspect(actual)}\n`);
   };
 
   assert.AssertionError = AssertionError;
-  assert.strict = strict ? assert : createAssert({ strict: true, readSource, sourcePath });
+  assert.CallTracker = class RuntimeCallTracker extends CallTracker {
+    constructor() { super(processObject); }
+  };
+  assert.strict = strict ? assert : createAssert({ strict: true, readSource, sourcePath, process: processObject });
   assert.ifError = (value) => {
-    if (value) {
-      const message = value instanceof Error ? value.message || String(value) : String(value);
+    if (value !== null && value !== undefined) {
+      let message = 'ifError got unwanted exception: ';
+      if (typeof value === 'object' && typeof value.message === 'string') {
+        if (value.message.length === 0 && value.constructor) message += value.constructor.name;
+        else message += value.message;
+      } else {
+        const keys = Object.keys(value);
+        if (value.constructor === Object && keys.length) {
+          message += `{ ${keys.map((key) => `${key}: ${inspect(value[key])}`).join(', ')} }`;
+        } else {
+          message += inspect(value);
+        }
+      }
       throw new AssertionError({
-        message: message || `ifError got unwanted exception: ${inspect(value)}`,
+        message,
         actual: value,
-        expected: undefined,
+        expected: null,
         operator: 'ifError',
-        generatedMessage: true,
+        generatedMessage: false,
       });
     }
   };
+
+  function Assert(options = {}) {
+    if (!new.target) {
+      const error = new TypeError('Class constructor Assert cannot be invoked without new');
+      error.code = 'ERR_CONSTRUCT_CALL_REQUIRED';
+      throw error;
+    }
+    if (options === null || typeof options !== 'object') {
+      throw invalidArgumentType('options', options, 'an object');
+    }
+    const configuredStrict = options.strict === undefined ? true : Boolean(options.strict);
+    if (options.diff !== undefined && options.diff !== 'simple' && options.diff !== 'full') {
+      const error = new TypeError(
+        `The property 'options.diff' must be one of: 'simple', 'full'. Received '${String(options.diff)}'`,
+      );
+      error.code = 'ERR_INVALID_ARG_VALUE';
+      throw error;
+    }
+    const base = configuredStrict ? assert.strict : assert;
+    const diff = options.diff;
+    const instance = this;
+    const wrap = (name) => function wrappedAssertMethod(...args) {
+      try {
+        return base[name](...args);
+      } catch (error) {
+        if (error instanceof AssertionError) {
+          const selectedDiff = this === instance ? (diff || 'simple') : 'simple';
+          error.diff = selectedDiff;
+          if (error.operator === 'deepEqual') {
+            error.message = looseDeepDiff(error.actual, error.expected, selectedDiff === 'full');
+          } else if (error.operator === 'notStrictEqual'
+            && typeof error.actual === 'string'
+            && error.actual.includes('\n')) {
+            error.message = notStrictDiff(error.actual, selectedDiff === 'full');
+          }
+        }
+        throw error;
+      }
+    };
+    for (const name of [
+      'ok', 'fail', 'equal', 'notEqual', 'deepEqual', 'notDeepEqual',
+      'strictEqual', 'notStrictEqual', 'deepStrictEqual', 'notDeepStrictEqual',
+      'partialDeepStrictEqual', 'throws', 'rejects', 'doesNotThrow', 'doesNotReject',
+      'match', 'doesNotMatch', 'ifError',
+    ]) {
+      this[name] = wrap(name);
+    }
+    if (configuredStrict) {
+      this.equal = this.strictEqual;
+      this.deepEqual = this.deepStrictEqual;
+      this.notEqual = this.notStrictEqual;
+      this.notDeepEqual = this.notDeepStrictEqual;
+    }
+    this.AssertionError = AssertionError;
+  }
+  Assert.prototype.constructor = Assert;
+  assert.Assert = Assert;
+  assert.strict.Assert = Assert;
   return assert;
 }

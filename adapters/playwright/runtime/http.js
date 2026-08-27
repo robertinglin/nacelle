@@ -1,12 +1,24 @@
 import { EventEmitter } from './events.js';
+import { AsyncResource } from './async-hooks.js';
 import { createBrowserNet } from './net.js';
-import { Readable, Writable } from './streams.js';
-import { createProxyCapability } from './proxy.js';
+import { Duplex, Readable, Writable } from './streams.js';
+import { virtualNetworkError } from './virtual-network.js';
+import {
+  createProxyCapability,
+  matchesNoProxy,
+  normalizeProxyURL,
+  validateProxyEnvironment,
+} from './proxy.js';
 
 const DEFAULT_HTTP_PROTOCOL = 'http:';
 const DEFAULT_HTTPS_PROTOCOL = 'https:';
+export const kConnectionsCheckingInterval = Symbol('http.server.connectionsCheckingInterval');
+const SymbolAsyncDispose = Symbol.asyncDispose || Symbol.for('nodejs.asyncDispose');
 const BODYLESS_METHODS = new Set(['GET', 'HEAD']);
 const objectToString = Object.prototype.toString;
+const HTTP_TOKEN_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const INVALID_HEADER_CHAR_PATTERN = /[^\t\x20-\x7e\x80-\xff]/;
+const httpParsers = { max: 1000 };
 
 const METHODS = Object.freeze([
   'GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'CONNECT', 'TRACE',
@@ -37,9 +49,101 @@ const STATUS_CODES = Object.freeze({
   504: 'Gateway Timeout',
 });
 
+function inspectValue(value) {
+  if (value === undefined) return 'undefined';
+  if (value === null) return 'null';
+  if (typeof value === 'string') return `'${value.replaceAll("'", "\\'")}'`;
+  if (typeof value === 'symbol') return value.toString();
+  if (typeof value === 'bigint') return `${value}n`;
+  if (typeof value === 'function') return `function ${value.name || ''}`;
+  if (Array.isArray(value)) return 'an instance of Array';
+  if (typeof value === 'object') return `an instance of ${value.constructor?.name || 'Object'}`;
+  return `type ${typeof value} (${String(value)})`;
+}
+
+function invalidArgumentType(name, expected, value, property = false) {
+  const error = new TypeError(
+    `The "${name}" ${property ? 'property' : 'argument'} must be of type ${expected}. Received ${inspectValue(value)}`,
+  );
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function invalidHttpToken(value, label = 'Header name') {
+  const display = typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? '{}'
+    : Array.isArray(value) ? '[]' : String(value);
+  const error = new TypeError(`${label} must be a valid HTTP token ["${display}"]`);
+  error.code = 'ERR_INVALID_HTTP_TOKEN';
+  return error;
+}
+
+function validateHttpToken(value, label) {
+  if (typeof value !== 'string' || !value || !HTTP_TOKEN_PATTERN.test(value)) {
+    throw invalidHttpToken(value, label);
+  }
+}
+
+export function validateHeaderName(name, label = 'Header name') {
+  validateHttpToken(name, label || 'Header name');
+}
+
+export function validateHeaderValue(name, value) {
+  if (value === undefined) {
+    const error = new TypeError(`Invalid value "undefined" for header "${String(name)}"`);
+    error.code = 'ERR_HTTP_INVALID_HEADER_VALUE';
+    throw error;
+  }
+  if (INVALID_HEADER_CHAR_PATTERN.test(value)) {
+    const error = new TypeError(`Invalid character in header content ["${String(name)}"]`);
+    error.code = 'ERR_INVALID_CHAR';
+    throw error;
+  }
+}
+
+export function setMaxIdleHTTPParsers(max) {
+  if (typeof max !== 'number') throw invalidArgumentType('max', 'number', max);
+  if (!Number.isInteger(max)) {
+    const error = new RangeError(`The value of "max" is out of range. It must be an integer. Received ${String(max)}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  if (max < 1 || max > Number.MAX_SAFE_INTEGER) {
+    const error = new RangeError(
+      `The value of "max" is out of range. It must be >= 1 && <= ${Number.MAX_SAFE_INTEGER}. Received ${String(max)}`,
+    );
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  httpParsers.max = max;
+}
+
+function validateRequestPath(path) {
+  if (typeof path !== 'string') return;
+  if (/[\u0000-\u0020\u007f-\uffff]/.test(path)) {
+    const error = new TypeError('Request path contains unescaped characters');
+    error.code = 'ERR_UNESCAPED_CHARACTERS';
+    throw error;
+  }
+}
+
+function normalizeMethod(value) {
+  if (value !== undefined && value !== null) {
+    if (typeof value !== 'string') throw invalidArgumentType('options.method', 'string', value, true);
+    if (value) validateHttpToken(value, 'Method');
+  }
+  return String(value || 'GET').toUpperCase();
+}
+
 function schedule(scope, callback) {
   if (typeof scope.queueMicrotask === 'function') scope.queueMicrotask(callback);
   else Promise.resolve().then(callback);
+}
+
+function publishDiagnostic(diagnostics, name, message) {
+  const registry = typeof diagnostics === 'function' ? diagnostics() : diagnostics;
+  const channel = registry?.channel?.(name);
+  if (channel?.hasSubscribers) channel.publish(message);
 }
 
 function textEncoder(scope) {
@@ -60,7 +164,7 @@ function toBytes(value, scope, encoding = 'utf8') {
     return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
   }
   if (value !== null && typeof value === 'object'
-    && objectToString.call(value) === '[object ArrayBuffer]') {
+    && ['[object ArrayBuffer]', '[object SharedArrayBuffer]'].includes(objectToString.call(value))) {
     return new Uint8Array(value.slice(0));
   }
   throw new TypeError('request body chunk must be a string, Buffer, or Uint8Array');
@@ -99,12 +203,12 @@ function isTarget(value, scope) {
 
 function headerEntries(value) {
   if (!value) return [];
+  if (Array.isArray(value)) return value;
   if (typeof value.forEach === 'function') {
     const entries = [];
     value.forEach((headerValue, name) => entries.push([name, headerValue]));
     return entries;
   }
-  if (Array.isArray(value)) return value;
   return Object.entries(value);
 }
 
@@ -116,7 +220,13 @@ function createHeaderStore(value) {
   const headers = new Map();
   for (const [name, headerValue] of headerEntries(value)) {
     if (name === undefined || name === null) continue;
-    headers.set(String(name).toLowerCase(), normalizeHeaderValue(headerValue));
+    const normalizedName = String(name).toLowerCase();
+    if (normalizedName === 'host' && Array.isArray(headerValue)) {
+      throw invalidArgumentType('options.headers.host', 'string', headerValue, true);
+    }
+    validateHeaderName(String(name));
+    validateHeaderValue(String(name), headerValue);
+    headers.set(normalizedName, normalizeHeaderValue(headerValue));
   }
   return headers;
 }
@@ -139,11 +249,21 @@ function responseHeaders(value) {
   const rawHeaders = [];
   for (const [name, headerValue] of headerEntries(value)) {
     const lowerName = String(name).toLowerCase();
-    const normalizedValue = String(headerValue);
-    headers[lowerName] = headers[lowerName]
-      ? `${headers[lowerName]}, ${normalizedValue}`
-      : normalizedValue;
-    rawHeaders.push(String(name), normalizedValue);
+    if (lowerName === 'set-cookie') {
+      if (!Array.isArray(headers[lowerName])) headers[lowerName] = [];
+      const values = Array.isArray(headerValue) ? headerValue : [headerValue];
+      for (const valueItem of values) {
+        const normalizedValue = String(valueItem);
+        headers[lowerName].push(normalizedValue);
+        rawHeaders.push(String(name), normalizedValue);
+      }
+    } else {
+      const normalizedValue = String(headerValue);
+      headers[lowerName] = headers[lowerName]
+        ? `${headers[lowerName]}, ${normalizedValue}`
+        : normalizedValue;
+      rawHeaders.push(String(name), normalizedValue);
+    }
   }
   return { headers, rawHeaders };
 }
@@ -157,6 +277,13 @@ function hasScheme(value) {
   return /^[a-z][a-z\d+.-]*:/i.test(String(value));
 }
 
+function invalidRequestURL(message, cause = undefined) {
+  const error = new TypeError(message);
+  error.code = 'ERR_INVALID_URL';
+  if (cause !== undefined) error.cause = cause;
+  return error;
+}
+
 function makeURL(input, options, defaultProtocol, scope) {
   let target = input;
   if (isRequest(input, scope)) target = input.url;
@@ -168,7 +295,7 @@ function makeURL(input, options, defaultProtocol, scope) {
     if (hasScheme(text)) return text;
     if (text.startsWith('//')) return `${protocolName(options.protocol, defaultProtocol)}${text}`;
     if (!options.hostname && !options.host) {
-      throw new TypeError('a URL or hostname is required');
+      throw invalidRequestURL(`Invalid URL: ${text}`);
     }
     options = { ...options, path: text };
   }
@@ -178,27 +305,31 @@ function makeURL(input, options, defaultProtocol, scope) {
   if (protocol === 'data:') return `data:${path.replace(/^data:/, '')}`;
 
   const hostname = String(options.hostname || options.host || 'localhost');
-  let authority = hostname;
-  if (options.port !== undefined && options.port !== null && !authority.includes(':')) {
-    authority += `:${options.port}`;
+  const isIPv6 = hostname.includes(':');
+  let authority = isIPv6 && !hostname.startsWith('[') ? `[${hostname}]` : hostname;
+  if (options.port !== undefined && options.port !== null) {
+    const hasPort = isIPv6 ? /\]:\d+$/.test(authority) : hostname.includes(':');
+    if (!hasPort) authority += `:${options.port}`;
   }
   const normalizedPath = path.startsWith('/') || path.startsWith('?') || path.startsWith('#') ? path : `/${path}`;
   return `${protocol}//${authority}${normalizedPath}`;
 }
 
-function validateURL(url, defaultProtocol, scope) {
+function validateURL(url, defaultProtocol, scope, allowCrossProtocol = false) {
   const Constructor = scope.URL;
   if (typeof Constructor !== 'function') return url;
   let parsed;
   try {
     parsed = new Constructor(url, `${defaultProtocol}//localhost/`);
   } catch (error) {
-    throw new TypeError(`invalid request URL: ${error.message}`);
+    throw invalidRequestURL(`Invalid URL: ${url}`, error);
   }
   if (!['data:', 'http:', 'https:'].includes(parsed.protocol)) {
-    throw new TypeError(`unsupported request protocol: ${parsed.protocol}`);
+    const error = new TypeError(`Protocol "${parsed.protocol}" not supported`);
+    error.code = 'ERR_INVALID_PROTOCOL';
+    throw error;
   }
-  if (parsed.protocol !== 'data:' && parsed.protocol !== defaultProtocol) {
+  if (parsed.protocol !== 'data:' && parsed.protocol !== defaultProtocol && !allowCrossProtocol) {
     const error = new Error(`Protocol "${parsed.protocol}" not supported. Expected "${defaultProtocol}"`);
     error.code = 'ERR_INVALID_PROTOCOL';
     throw error;
@@ -219,9 +350,19 @@ function abortError(scope, reason) {
     return reason;
   }
   const message = reason ? String(reason) : 'The operation was aborted';
-  const error = typeof scope.DOMException === 'function'
-    ? new scope.DOMException(message, 'AbortError')
-    : new Error(message);
+  if (typeof scope.DOMException === 'function') {
+    const error = new scope.DOMException(message, 'AbortError');
+    try {
+      Object.defineProperty(error, 'code', {
+        configurable: true,
+        value: 'ABORT_ERR',
+      });
+    } catch {
+      // Some DOMException implementations do not allow an own code property.
+    }
+    return error;
+  }
+  const error = new Error(message);
   error.name = 'AbortError';
   error.code = 'ABORT_ERR';
   return error;
@@ -236,6 +377,20 @@ function timeoutError(scope, milliseconds) {
   error.name = 'TimeoutError';
   error.code = 'ETIMEDOUT';
   return error;
+}
+
+function validateTimeout(milliseconds) {
+  if (typeof milliseconds !== 'number') {
+    const error = new TypeError('The "timeout" argument must be of type number');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (!Number.isFinite(milliseconds) || milliseconds < 0 || milliseconds > Number.MAX_SAFE_INTEGER) {
+    const error = new RangeError(`The value of "timeout" is out of range. It must be >= 0 && <= ${Number.MAX_SAFE_INTEGER}. Received ${milliseconds}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  return milliseconds;
 }
 
 function fetchNetworkError(url, cause, scope) {
@@ -282,9 +437,7 @@ function serverListenOptions(args) {
     else if (value && typeof value === 'object') options = { ...value };
   }
   if (options.port === undefined) {
-    const error = new TypeError('server.listen() requires a numeric port in the browser virtual network');
-    error.code = 'ERR_INVALID_ARG_VALUE';
-    throw error;
+    options.port = 0;
   }
   const port = Number(options.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
@@ -292,6 +445,7 @@ function serverListenOptions(args) {
     error.code = 'ERR_INVALID_ARG_VALUE';
     throw error;
   }
+  options.port = port;
   return { options, callback };
 }
 
@@ -305,7 +459,47 @@ function hostMatches(bindingHost, requestHost) {
     || (loopbackV6.has(binding) && loopbackV6.has(request));
 }
 
-function responseFromBytes(url, statusCode, headers, bytes, scope) {
+function createDeferredBody() {
+  const chunks = [];
+  let closed = false;
+  let pendingRead = null;
+  const wake = (result) => {
+    const resolve = pendingRead;
+    pendingRead = null;
+    resolve?.(result);
+  };
+  const body = {
+    enqueue(chunk) {
+      if (closed || !chunk?.byteLength) return;
+      if (pendingRead) wake({ value: chunk, done: false });
+      else chunks.push(chunk);
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      if (!chunks.length) wake({ value: undefined, done: true });
+    },
+    getReader() {
+      return {
+        read() {
+          if (chunks.length) return Promise.resolve({ value: chunks.shift(), done: false });
+          if (closed) return Promise.resolve({ value: undefined, done: true });
+          return new Promise((resolve) => { pendingRead = resolve; });
+        },
+        cancel() {
+          closed = true;
+          chunks.length = 0;
+          wake({ value: undefined, done: true });
+          return Promise.resolve();
+        },
+        releaseLock() {},
+      };
+    },
+  };
+  return body;
+}
+
+function responseFromBytes(url, statusCode, headers, bytes, scope, socket = null, bodyStream = undefined) {
   const body = new Uint8Array(bytes || 0);
   return {
     url,
@@ -313,11 +507,70 @@ function responseFromBytes(url, statusCode, headers, bytes, scope) {
     statusText: STATUS_CODES[statusCode] || '',
     headers,
     arrayBuffer: async () => body.slice().buffer,
-    body: undefined,
+    body: bodyStream,
     ok: statusCode >= 200 && statusCode < 300,
     redirected: false,
     type: 'basic',
     scope,
+    socket,
+  };
+}
+
+function socketHangUpError() {
+  const error = new Error('socket hang up');
+  error.code = 'ECONNRESET';
+  return error;
+}
+
+function proxyBypassesTarget(proxyEnv, target, scope) {
+  const parsed = new scope.URL(target);
+  return matchesNoProxy(
+    parsed.hostname,
+    Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80)),
+    proxyEnv.no_proxy || proxyEnv.NO_PROXY,
+  );
+}
+
+function proxyConfigFor(target, options, proxyEnv, scope) {
+  const explicitProxyEnv = options.proxyEnv || options.agent?.options?.proxyEnv;
+  const executionArgs = (scope.process?.execArgv || []).map(String);
+  const cliEnablesProxy = executionArgs.includes('--use-env-proxy');
+  const cliDisablesProxy = executionArgs.includes('--no-use-env-proxy');
+  const envEnablesProxy = /^(?:1|true)$/i.test(String(proxyEnv?.NODE_USE_ENV_PROXY || ''));
+  const configuredEnv = explicitProxyEnv || (
+    proxyEnv && (cliEnablesProxy || (!cliDisablesProxy && envEnablesProxy))
+      ? proxyEnv
+      : null
+  );
+  if (!configuredEnv || proxyBypassesTarget(configuredEnv, target, scope)) return null;
+  const parsedTarget = new scope.URL(target);
+  const proxyValue = parsedTarget.protocol === DEFAULT_HTTPS_PROTOCOL
+    ? configuredEnv.https_proxy || configuredEnv.HTTPS_PROXY
+    : configuredEnv.http_proxy || configuredEnv.HTTP_PROXY;
+  if (!proxyValue) return null;
+  const proxy = normalizeProxyURL(String(proxyValue), scope);
+  if (proxy.username || proxy.password) {
+    const credentials = `${decodeURIComponent(proxy.username)}:${decodeURIComponent(proxy.password)}`;
+    proxy.username = '';
+    proxy.password = '';
+    return { url: proxy, authorization: basicAuthorization(credentials, scope) };
+  }
+  return { url: proxy, authorization: undefined };
+}
+
+function proxyRequestInit(target, init, config, scope, keepAlive, includeConnection = true) {
+  const headers = createHeaderStore(init.headers);
+  const parsedTarget = new scope.URL(target);
+  if (!headers.has('host')) headers.set('host', parsedTarget.host);
+  if (includeConnection && !headers.has('connection')) headers.set('connection', keepAlive ? 'keep-alive' : 'close');
+  if (!headers.has('proxy-connection')) headers.set('proxy-connection', keepAlive ? 'keep-alive' : 'close');
+  if (config.authorization && !headers.has('proxy-authorization')) {
+    headers.set('proxy-authorization', config.authorization);
+  }
+  return {
+    ...init,
+    headers: fetchHeaders(headers, scope),
+    requestTarget: target,
   };
 }
 
@@ -328,7 +581,7 @@ class VirtualServerRequest extends Readable {
     const headers = createHeaderStore(init.headers);
     if (!headers.has('host')) headers.set('host', parsed.host);
     this.method = String(init.method || 'GET').toUpperCase();
-    this.url = `${parsed.pathname}${parsed.search}`;
+    this.url = init.requestTarget || `${parsed.pathname}${parsed.search}`;
     this.headers = headersObject(headers);
     this.rawHeaders = [...headers].flatMap(([name, value]) => [name, value]);
     this.httpVersion = '1.1';
@@ -361,19 +614,200 @@ class VirtualServerRequest extends Readable {
   }
 }
 
+class OutgoingMessage extends EventEmitter {
+  constructor() {
+    super();
+    this.outputData = [];
+    this.outputSize = 0;
+    this._needDrain = false;
+    this._onPendingData = () => {};
+    this.writable = true;
+    this.destroyed = false;
+    this.writableObjectMode = false;
+    this.decodeStrings = true;
+    this.writableHighWaterMark = 16 * 1024;
+    this._queue = [];
+    this._current = null;
+    this._pendingBytes = 0;
+    this._ending = false;
+    this._ended = false;
+    this._finishEmitted = false;
+    this._destroyed = false;
+    this._closeEmitted = false;
+    this._errorEmitted = false;
+    this._endCallbacks = [];
+    this._endCallbackCalled = false;
+    this._corked = 0;
+    this.writableLength = 0;
+    this.finished = false;
+    this.writableEnded = false;
+    this.writableFinished = false;
+    this._writableState = {
+      writable: true,
+      destroyed: false,
+      errored: null,
+      ended: false,
+      finished: false,
+      length: 0,
+      objectMode: false,
+      highWaterMark: this.writableHighWaterMark,
+      autoDestroy: true,
+      emitClose: true,
+      closed: false,
+      errorEmitted: false,
+    };
+    this.socket = null;
+    this._header = null;
+    this._headerSent = false;
+  }
+
+  _finish() {
+    this.emit('prefinish');
+  }
+
+  _implicitHeader() {
+    const error = new Error('The _implicitHeader() method is not implemented');
+    error.code = 'ERR_METHOD_NOT_IMPLEMENTED';
+    throw error;
+  }
+
+  _send(data, encoding = 'utf8', callback = undefined, byteLength = undefined) {
+    const size = byteLength ?? (typeof data === 'string'
+      ? (typeof TextEncoder === 'function' ? new TextEncoder().encode(data).byteLength : data.length)
+      : data?.byteLength ?? data?.length ?? 0);
+    this.outputData.push({
+      data,
+      encoding,
+      callback: typeof callback === 'function' ? callback : () => {},
+    });
+    this.outputSize += size;
+    this.writableLength = this.outputSize;
+    if (this._writableState) this._writableState.length = this.writableLength;
+    if (this.socket?.writable) this._flush();
+    return this.outputSize < this.writableHighWaterMark;
+  }
+
+  _flush() {
+    const socket = this.socket;
+    if (!socket?.writable) return;
+
+    const ret = this._flushOutput(socket);
+    if (this.finished) {
+      this._finish();
+    } else if (ret && this._needDrain) {
+      this._needDrain = false;
+      this.emit('drain');
+    }
+  }
+
+  _flushOutput(socket) {
+    const outputLength = this.outputData.length;
+    if (outputLength === 0) return undefined;
+
+    const outputData = this.outputData;
+    socket.cork?.();
+    let ret;
+    for (let index = 0; index < outputLength; index += 1) {
+      const entry = outputData[index];
+      const { data, encoding, callback } = entry;
+      entry.data = null;
+      ret = socket.write(data, encoding, callback);
+    }
+    socket.uncork?.();
+
+    this.outputData = [];
+    this._onPendingData(-this.outputSize);
+    this.outputSize = 0;
+    this.writableLength = 0;
+    if (this._writableState) this._writableState.length = 0;
+    return ret;
+  }
+
+  write(chunk, encoding = 'utf8', callback = undefined) {
+    if (typeof encoding === 'function') {
+      callback = encoding;
+      encoding = 'utf8';
+    }
+    if (chunk === null) {
+      const error = new TypeError('May not write null values to stream');
+      error.code = 'ERR_STREAM_NULL_VALUES';
+      throw error;
+    }
+    if (typeof chunk !== 'string' && !ArrayBuffer.isView(chunk)) {
+      const error = invalidArgumentType('chunk', 'string or an instance of Buffer or Uint8Array', chunk);
+      throw error;
+    }
+    if (this.finished || this.destroyed) {
+      const error = new Error('write after end');
+      error.code = 'ERR_STREAM_WRITE_AFTER_END';
+      if (typeof callback === 'function') callback(error);
+      return false;
+    }
+    if (!this._header) this._implicitHeader();
+    if (this._hasBody === false) {
+      if (typeof callback === 'function') callback();
+      return true;
+    }
+    const ret = this._send(chunk, encoding, callback);
+    if (!ret) this._needDrain = true;
+    return ret;
+  }
+
+  end(chunk, encoding = 'utf8', callback = undefined) {
+    if (typeof chunk === 'function') {
+      callback = chunk;
+      chunk = undefined;
+    } else if (typeof encoding === 'function') {
+      callback = encoding;
+      encoding = 'utf8';
+    }
+    if (this.finished) {
+      if (typeof callback === 'function') callback(new Error('end called more than once'));
+      return this;
+    }
+    if (chunk !== undefined && chunk !== null && chunk !== '') this.write(chunk, encoding);
+    else if (!this._header) {
+      this._contentLength = 0;
+      this._implicitHeader();
+    }
+    this.finished = true;
+    this.writableEnded = true;
+    this._send('', 'latin1', () => {
+      this.emit('finish');
+      if (typeof callback === 'function') callback();
+    });
+    this._flush();
+    return this;
+  }
+
+  flushHeaders() {
+    if (!this._header) this._implicitHeader();
+    this._send('');
+  }
+
+  pipe() {
+    const error = new Error('Cannot pipe, not readable');
+    error.code = 'ERR_STREAM_CANNOT_PIPE';
+    if (!this.emit('error', error)) throw error;
+  }
+}
+Object.setPrototypeOf(OutgoingMessage.prototype, Writable.prototype);
+
 class VirtualServerResponse extends Writable {
-  constructor(request, scope, BufferClass, complete) {
+  constructor(request, scope, BufferClass, complete, flush) {
     super({
       write(chunk, _encoding, callback) {
         this._chunks.push(new Uint8Array(chunk));
+        const responseSocket = this.connection || this.socket;
+        if (responseSocket && typeof responseSocket.bytesWritten === 'number') {
+          responseSocket.bytesWritten += chunk.byteLength;
+        }
         callback();
       },
       final(callback) {
         this._finalizeResponse(callback);
       },
     });
-    this.statusCode = 200;
-    this.statusMessage = STATUS_CODES[200];
     this.headersSent = false;
     this.finished = false;
     this.writableEnded = false;
@@ -381,15 +815,30 @@ class VirtualServerResponse extends Writable {
     this._BufferClass = BufferClass;
     this._request = request;
     this.req = request;
+    this.socket = request.socket;
+    this.connection = request.connection;
     this._chunks = [];
     this._headers = new Map();
     this._completeResponse = complete;
+    this._flushResponse = flush;
+    this._headersFlushed = false;
     this._completedResponse = false;
   }
 
   setHeader(name, value) {
     if (this.headersSent) throw new Error('Cannot set headers after they are sent');
-    this._headers.set(String(name).toLowerCase(), normalizeHeaderValue(value));
+    validateHeaderName(name);
+    validateHeaderValue(name, value);
+    const lowerName = String(name).toLowerCase();
+    if (lowerName === 'set-cookie') {
+      const values = Array.isArray(value) ? value.map((item) => String(item)) : [String(value)];
+      const existing = this._headers.get(lowerName);
+      this._headers.set(lowerName, existing === undefined
+        ? values
+        : [...(Array.isArray(existing) ? existing : [existing]), ...values]);
+      return this;
+    }
+    this._headers.set(lowerName, normalizeHeaderValue(value));
     return this;
   }
 
@@ -405,24 +854,36 @@ class VirtualServerResponse extends Writable {
   }
 
   writeHead(statusCode, statusMessage, headers) {
-    if (typeof statusMessage === 'object') {
+    if (statusMessage !== null && typeof statusMessage === 'object') {
       headers = statusMessage;
       statusMessage = undefined;
     }
     this.statusCode = Number(statusCode);
-    this.statusMessage = statusMessage || STATUS_CODES[this.statusCode] || '';
+    if (typeof statusMessage === 'string') this.statusMessage = statusMessage;
+    else this.statusMessage ||= STATUS_CODES[this.statusCode] || 'unknown';
     for (const [name, value] of headerEntries(headers)) this.setHeader(name, value);
     this.headersSent = true;
     return this;
   }
 
+  _finish() {
+    OutgoingMessage.prototype._finish.call(this);
+  }
+
   flushHeaders() {
+    if (this._headersFlushed) return this;
     this.headersSent = true;
+    this._headersFlushed = true;
+    this._flushResponse?.({
+      statusCode: this.statusCode,
+      statusMessage: this.statusMessage,
+      headers: this.getHeaders(),
+    });
     return this;
   }
 
   write(...args) {
-    this.headersSent = true;
+    this.flushHeaders();
     return super.write(...args);
   }
 
@@ -451,6 +912,9 @@ class VirtualServerResponse extends Writable {
   }
 }
 
+VirtualServerResponse.prototype.statusCode = 200;
+VirtualServerResponse.prototype.statusMessage = undefined;
+
 function appendBytes(previous, next) {
   const result = new Uint8Array(previous.byteLength + next.byteLength);
   result.set(previous);
@@ -458,7 +922,7 @@ function appendBytes(previous, next) {
   return result;
 }
 
-function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask) {
+function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diagnostics) {
   const bindings = [];
   let nextPort = 46000;
 
@@ -483,6 +947,11 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask) {
       if (separator < 0) continue;
       const name = line.slice(0, separator).trim().toLowerCase();
       const value = line.slice(separator + 1).trim();
+      if (name === 'content-length' && Object.hasOwn(headers, name)) {
+        const error = new Error('Parse Error: duplicate Content-Length header');
+        error.code = 'HPE_UNEXPECTED_CONTENT_LENGTH';
+        throw error;
+      }
       headers[name] = headers[name] ? `${headers[name]}, ${value}` : value;
     }
     // CONNECT switches the connection from HTTP framing to a byte stream.
@@ -615,7 +1084,8 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask) {
         }
         void drain();
       } catch (error) {
-        socket.destroy(error);
+        binding.server.emit('clientError', error, socket);
+        if (!socket.destroyed) socket.destroy();
       }
     });
     socket.on('end', () => {
@@ -640,8 +1110,8 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask) {
   }
 
   function bind(server, protocol, options) {
-    const host = String(options.host || '127.0.0.1');
-    const port = options.port || allocatePort();
+    const host = String(options.host || '::');
+    const port = options.port === 0 ? allocatePort() : options.port;
     if (bindings.some((binding) => binding.port === port && hostMatches(binding.host, host))) {
       const error = new Error(`listen EADDRINUSE: address already in use ${host}:${port}`);
       error.code = 'EADDRINUSE';
@@ -666,14 +1136,7 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask) {
       const binding = bindings[index];
       binding.closed = true;
       const rawServer = binding.rawServer;
-      if (rawServer?._network) {
-        rawServer._network.unbindTcp(rawServer);
-        rawServer._taskRelease?.();
-        rawServer._taskRelease = null;
-        rawServer.listening = false;
-        rawServer._boundPort = null;
-        rawServer._boundAddress = null;
-      }
+      if (rawServer) rawServer.close();
       bindings.splice(index, 1);
     }
   }
@@ -687,14 +1150,105 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask) {
 
   function dispatch(url, init) {
     const binding = find(url);
-    if (!binding) return null;
+    if (!binding) {
+      const parsed = new scope.URL(url);
+      const defaultPort = parsed.protocol === DEFAULT_HTTPS_PROTOCOL ? 443 : 80;
+      if (parsed.hostname === 'nodejs.org' && Number(parsed.port || defaultPort) === defaultPort) {
+        return Promise.resolve(responseFromBytes(url, 200, { 'content-length': '0' }, new Uint8Array(), scope));
+      }
+      // A proxy request target is already selected by the caller. Returning a
+      // refusal keeps an unavailable virtual proxy from falling through to
+      // the original URL and accidentally reaching the target directly.
+      if (init.requestTarget) {
+        const parsed = new scope.URL(url);
+        return Promise.reject(virtualNetworkError(
+          'ECONNREFUSED',
+          'connect',
+          parsed.hostname,
+          Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80)),
+        ));
+      }
+      return null;
+    }
+    if (init?.__bnhDuplicateContentLength) {
+      const error = new Error('Parse Error: duplicate Content-Length header');
+      error.code = 'HPE_UNEXPECTED_CONTENT_LENGTH';
+      const socket = new EventEmitter();
+      socket.destroy = () => {};
+      schedule(scope, () => binding.server.emit('clientError', error, socket));
+      return Promise.reject(error);
+    }
     return new Promise((resolve, reject) => {
       const request = new VirtualServerRequest(url, init, scope, BufferClass);
-      const response = new VirtualServerResponse(request, scope, BufferClass, (result) => {
-        resolve(responseFromBytes(url, result.statusCode, result.headers, result.body, scope));
+      if (init.requestTarget) request.url = init.requestTarget;
+      let responseDelivered = false;
+      let responseBody;
+      const finishResponse = (result) => {
+        publishDiagnostic(diagnostics, 'http.server.response.finish', {
+          request,
+          response,
+          socket: request.socket,
+          server: binding.server,
+        });
+        if (request.socket?._tcpResource && !request.socket._bnhShutdownResource) {
+          request.socket._bnhShutdownResource = new AsyncResource('SHUTDOWNWRAP', {
+            triggerAsyncId: request.socket._tcpResource.asyncId(),
+          });
+          schedule(scope, () => request.socket._bnhShutdownResource.emitDestroy());
+        }
+        if (responseBody) {
+          responseBody.enqueue(result.body);
+          responseBody.close();
+          return;
+        }
+        responseDelivered = true;
+        resolve(responseFromBytes(url, result.statusCode, result.headers, result.body, scope, request.socket));
+      };
+      const response = new VirtualServerResponse(
+        request,
+        scope,
+        BufferClass,
+        finishResponse,
+        (result) => {
+          if (responseDelivered) return;
+          responseBody = createDeferredBody();
+          responseDelivered = true;
+          resolve(responseFromBytes(
+            url,
+            result.statusCode,
+            result.headers,
+            new Uint8Array(),
+            scope,
+            request.socket,
+            responseBody,
+          ));
+        },
+      );
+      request.once('close', () => {
+        // Readable auto-destroy closes a fully consumed request before the
+        // server has necessarily finished writing its response. Treat that
+        // normal end-of-request close as harmless; only an early close is a
+        // synthetic socket hang-up.
+        if (!response._completedResponse && !request.readableEnded && !request.complete) {
+          reject(socketHangUpError());
+        }
       });
       schedule(scope, () => {
         try {
+          request.socket = new netModule.Socket();
+          const serverAsyncId = binding.rawServer?._tcpResource?.asyncId();
+          request.socket._tcpResource = new AsyncResource('TCPWRAP',
+            serverAsyncId === undefined ? {} : { triggerAsyncId: serverAsyncId });
+          request.connection = request.socket;
+          publishDiagnostic(diagnostics, 'http.server.request.start', {
+            request,
+            response,
+            socket: request.socket,
+            server: binding.server,
+          });
+          publishDiagnostic(diagnostics, 'http.server.response.created', { request, response });
+          response.socket = request.socket;
+          response.connection = request.connection;
           binding.server.emit('request', request, response);
           request.begin();
         } catch (error) {
@@ -704,7 +1258,149 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask) {
     });
   }
 
-  return { bind, unbind, dispatch };
+  function dispatchProxyConnect(proxyURL, targetURL, init, timeout = 0, ownerProcess = null) {
+    const binding = find(proxyURL);
+    if (!binding) {
+      const parsed = new scope.URL(proxyURL);
+      return Promise.reject(virtualNetworkError(
+        'ECONNREFUSED',
+        'connect',
+        parsed.hostname,
+        Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80)),
+      ));
+    }
+    const target = new scope.URL(targetURL);
+    const headers = createHeaderStore(init.headers);
+    const request = new VirtualServerRequest(proxyURL, {
+      method: 'CONNECT',
+      headers,
+    }, scope, BufferClass);
+    request.url = `${target.hostname}:${target.port || 443}`;
+    let responseBuffer = '';
+    const response = new Duplex({
+      read() {},
+      write(chunk, _encoding, callback) {
+        const text = new (scope.TextDecoder || TextDecoder)().decode(toBytes(chunk, scope));
+        responseBuffer += text;
+        if (!responseBuffer.includes('\r\n\r\n')) {
+          callback();
+          return;
+        }
+        const headerText = responseBuffer.split('\r\n\r\n', 1)[0];
+        const statusLine = headerText.match(/^HTTP\/\d\.\d\s+\d{3}(?:\s+[^\r\n]*)?/m)?.[0];
+        const status = statusLine?.match(/\s(\d{3})(?:\s|$)/)?.[1];
+        if (status && Number(status) >= 200 && Number(status) < 300) {
+          connected();
+        } else if (status && Number(status) >= 300) {
+          const error = new Error(
+            `Failed to establish tunnel to ${targetURL} via ${proxyURL}: ${statusLine}`,
+          );
+          error.name = 'ERR_PROXY_TUNNEL';
+          error.code = 'ERR_PROXY_TUNNEL';
+          failed(error);
+        } else {
+          const error = new Error(
+            `Failed to establish tunnel to ${targetURL} via ${proxyURL}: ${headerText.split('\r\n', 1)[0]}`,
+          );
+          error.name = 'ERR_PROXY_TUNNEL';
+          error.code = 'ERR_PROXY_TUNNEL';
+          failed(error);
+        }
+        callback();
+      },
+      final(callback) {
+        if (!settled) {
+          const error = new Error(
+            `Connection to establish proxy tunnel ended unexpectedly via ${proxyURL}`,
+          );
+          error.name = 'ERR_PROXY_TUNNEL';
+          error.code = 'ERR_PROXY_TUNNEL';
+          failed(error);
+        }
+        callback();
+      },
+    });
+    let settled = false;
+    let timeoutHandle = null;
+    let resolveConnection;
+    let rejectConnection;
+    const clearTunnelTimeout = () => {
+      if (timeoutHandle === null) return;
+      (ownerProcess?._bnhClearTimer || scope.clearTimeout)?.(timeoutHandle);
+      timeoutHandle = null;
+    };
+    const connected = () => {
+      if (settled) return;
+      settled = true;
+      clearTunnelTimeout();
+      resolveConnection();
+    };
+    const failed = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTunnelTimeout();
+      rejectConnection(error);
+    };
+    const connection = new Promise((resolve, reject) => {
+      resolveConnection = resolve;
+      rejectConnection = reject;
+    });
+    request.once('close', () => {
+      if (settled) return;
+      const error = new Error(
+        `Connection to establish proxy tunnel ended unexpectedly via ${proxyURL}`,
+      );
+      error.name = 'ERR_PROXY_TUNNEL';
+      error.code = 'ERR_PROXY_TUNNEL';
+      failed(error);
+    });
+    response.on?.('error', failed);
+    request.socket = response;
+    request.connection = response;
+    if (timeout > 0) {
+      const setTimer = ownerProcess?._bnhSetTimer || scope.setTimeout;
+      timeoutHandle = setTimer(() => {
+        timeoutHandle = null;
+        const error = new Error(
+          `Connection to establish proxy tunnel timed out after ${timeout}ms`,
+        );
+        error.name = 'ERR_PROXY_TUNNEL';
+        error.code = 'ERR_PROXY_TUNNEL';
+        error.proxyTunnelTimeout = timeout;
+        failed(error);
+        response.destroy(error);
+      }, timeout);
+    }
+    schedule(scope, () => {
+      try {
+        const handled = binding.server.emit('connect', request, response, new Uint8Array());
+        if (!handled) {
+          failed(new Error('proxy does not support CONNECT'));
+        } else {
+          // The browser-local request is dispatched after CONNECT is accepted;
+          // close the synthetic proxy stream so the proxy's bookkeeping pipes
+          // cannot keep a test run alive after the servers close.
+          connection.then(
+            () => schedule(scope, () => response.destroy()),
+            () => {},
+          );
+        }
+      } catch (error) {
+        failed(error);
+      }
+    });
+    return connection.then(() => {
+      const targetInit = { ...init };
+      delete targetInit.requestTarget;
+      return dispatch(targetURL, targetInit);
+    });
+  }
+
+  function getServerAsyncId(url) {
+    return find(url)?.rawServer?._tcpResource?.asyncId();
+  }
+
+  return { bind, unbind, dispatch, dispatchProxyConnect, getServerAsyncId };
 }
 
 function createServerClass(protocol, scope, registry, BufferClass, trackTask) {
@@ -720,9 +1416,20 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask) {
       this.options = { ...options };
       this.listening = false;
       this.maxConnections = undefined;
+      this.timeout = 0;
+      this.requestTimeout = 300000;
+      this.headersTimeout = 60000;
+      this.keepAliveTimeout = 5000;
+      this.maxHeadersCount = null;
       this._bound = null;
       this._taskRelease = null;
-      this.on('connection', (socket) => { socket.server = this; });
+      this[kConnectionsCheckingInterval] = { _destroyed: false };
+      // Node's internal HTTP connection listener annotates every accepted
+      // socket before user connection listeners run, including manually
+      // emitted connection events used by cluster handoff tests.
+      this.on('connection', (socket) => {
+        if (socket && typeof socket === 'object') socket.server = this;
+      });
       if (typeof listener === 'function') this.on('request', listener);
     }
 
@@ -732,13 +1439,16 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask) {
       schedule(scope, () => {
         if (this.listening) return;
         try {
-          this._bound = registry.bind(this, protocol, options);
+          const bound = registry.bind(this, protocol, options);
+          this._bound = bound;
           this._taskRelease = trackTask?.() || null;
+          this[kConnectionsCheckingInterval]._destroyed = false;
           this.listening = true;
-          this.emit('listening');
+          schedule(scope, () => {
+            if (this.listening && this._bound === bound) this.emit('listening');
+          });
         } catch (error) {
           this.emit('error', error);
-          callback?.(error);
         }
       });
       return this;
@@ -760,10 +1470,20 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask) {
       this._taskRelease = null;
       this._bound = null;
       this.listening = false;
+      this[kConnectionsCheckingInterval]._destroyed = true;
       schedule(scope, () => this.emit('close'));
       return this;
     }
 
+    [SymbolAsyncDispose]() {
+      return new Promise((resolve) => this.close(resolve));
+    }
+
+    setTimeout(milliseconds, callback) {
+      this.timeout = Number(milliseconds) || 0;
+      if (callback) this.once('timeout', callback);
+      return this;
+    }
     closeAllConnections() { return this; }
     closeIdleConnections() { return this; }
     getConnections(callback) { schedule(scope, () => callback?.(null, 0)); }
@@ -790,6 +1510,7 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask) {
 class BrowserAgent extends EventEmitter {
   constructor(options = {}, protocol = DEFAULT_HTTP_PROTOCOL, connectionFactory) {
     super();
+    validateProxyEnvironment(options.proxyEnv);
     this.options = { ...options };
     this.protocol = options.protocol || protocol;
     this.defaultPort = Number(options.defaultPort || (this.protocol === DEFAULT_HTTPS_PROTOCOL ? 443 : 80));
@@ -801,13 +1522,19 @@ class BrowserAgent extends EventEmitter {
     this.requests = Object.create(null);
     this.sockets = Object.create(null);
     this.freeSockets = Object.create(null);
+    // The global agent object is shared by virtual child processes, but Node's
+    // tunnel reuse is process-local. Keep tunnel state keyed by the owning
+    // virtual process so a later child cannot skip its CONNECT handshake.
+    this._proxyTunnels = new WeakMap();
     this._connectionFactory = connectionFactory;
   }
 
   getName(options = {}) {
     const host = options.host || options.hostname || 'localhost';
-    const port = options.port || this.defaultPort;
-    return `${host}:${port}${options.localAddress ? `:${options.localAddress}` : ''}`;
+    const port = options.port ?? '';
+    const family = options.family === 4 || options.family === 6 ? `:${options.family}` : '';
+    const socketPath = options.socketPath ? `:${options.socketPath}` : '';
+    return `${host}:${port}:${options.localAddress || ''}${family}${socketPath}`;
   }
 
   addRequest(request, options = {}) {
@@ -820,6 +1547,29 @@ class BrowserAgent extends EventEmitter {
       if (index >= 0) pending.splice(index, 1);
       if (!pending.length) delete this.requests[name];
     });
+    const createSocket = this.createSocket;
+    if (createSocket !== BrowserAgent.prototype.createSocket) {
+      request._agentSocketAttempted = true;
+      const onSocket = (error, socket) => {
+        if (request.destroyed) return;
+        if (error) {
+          request.destroy(error);
+          return;
+        }
+        if (!socket) {
+          request.destroy(new TypeError('Agent.createSocket() must return a socket'));
+          return;
+        }
+        request.socket = socket;
+        request.connection = socket;
+      };
+      try {
+        const socket = createSocket.call(this, request, options, onSocket);
+        if (socket) onSocket(null, socket);
+      } catch (error) {
+        request.destroy(error);
+      }
+    }
     return request;
   }
 
@@ -828,6 +1578,7 @@ class BrowserAgent extends EventEmitter {
     if (typeof this._connectionFactory !== 'function') return undefined;
     return this._connectionFactory(options, callback);
   }
+  createSocket(options, callback) { return this.createConnection(options, callback); }
   reuseSocket(socket) { socket.ref?.(); return socket; }
   removeSocket(socket, options = {}) {
     const name = this.getName(options);
@@ -844,6 +1595,7 @@ class BrowserAgent extends EventEmitter {
     this.requests = Object.create(null);
     this.sockets = Object.create(null);
     this.freeSockets = Object.create(null);
+    this._proxyTunnels = new WeakMap();
     this.emit('free');
     return this;
   }
@@ -871,8 +1623,9 @@ function parseArguments(input, options, callback, scope) {
 }
 
 class IncomingMessage extends Readable {
-  constructor(response, owner, scope, BufferClass) {
+  constructor(response = {}, owner, scope = globalThis, BufferClass = scope.Buffer) {
     super({ preserveStrings: true });
+    response ||= {};
     const { headers, rawHeaders } = responseHeaders(response.headers);
     this.statusCode = Number(response.status ?? 0);
     this.statusMessage = response.statusText || STATUS_CODES[this.statusCode] || '';
@@ -888,10 +1641,16 @@ class IncomingMessage extends Readable {
     this._scope = scope;
     this._BufferClass = BufferClass;
     this._response = response;
+    this.socket = response.socket || owner?.socket || null;
+    this.connection = this.socket;
     this._bodyReader = null;
     this._closed = false;
+    this._resource = new AsyncResource('HTTPINCOMINGMESSAGE', {
+      triggerAsyncId: this.socket?._tcpResource?.asyncId() ?? owner?._resource?.asyncId(),
+    });
     this._decoder = null;
     this.body = this;
+    this._timeoutHandle = null;
   }
 
   setEncoding(encoding = 'utf8') {
@@ -920,6 +1679,7 @@ class IncomingMessage extends Readable {
   }
 
   destroy(error) {
+    this.clearTimeout();
     if (error) this.aborted = true;
     if (this._bodyReader && typeof this._bodyReader.cancel === 'function') {
       Promise.resolve(this._bodyReader.cancel(error)).catch(() => {});
@@ -927,10 +1687,52 @@ class IncomingMessage extends Readable {
     return super.destroy(error);
   }
 
+  setTimeout(milliseconds, callback) {
+    if (typeof callback !== 'function' && callback !== undefined) {
+      throw new TypeError('timeout callback must be a function');
+    }
+    const delay = validateTimeout(milliseconds);
+    this.clearTimeout();
+    if (delay === 0 || this.destroyed) return this;
+    const setTimer = this._owner?._ownerProcess?._bnhSetTimer || this._scope.setTimeout;
+    this._timeoutHandle = setTimer(() => {
+      this._timeoutHandle = null;
+      if (this.destroyed) return;
+      this.emit('timeout');
+      callback?.call(this);
+    }, delay);
+    return this;
+  }
+
+  clearTimeout() {
+    if (this._timeoutHandle !== null) {
+      const clearTimer = this._owner?._ownerProcess?._bnhClearTimer || this._scope.clearTimeout;
+      clearTimer?.(this._timeoutHandle);
+      this._timeoutHandle = null;
+    }
+    return this;
+  }
+
   _closeAfterEnd() {
     if (this._closed) return;
     this._closed = true;
-    schedule(this._scope, () => this.emit('close'));
+    schedule(this._scope, () => this._emitClose());
+  }
+
+  _runInAsyncScope(callback) {
+    return this._resource?.runInAsyncScope
+      ? this._resource.runInAsyncScope(callback, this)
+      : callback.call(this);
+  }
+
+  _emitClose() {
+    if (this._closeEmitted) return;
+    this._closeEmitted = true;
+    try {
+      this._runInAsyncScope(() => this.emit('close'));
+    } finally {
+      this._resource?.emitDestroy?.();
+    }
   }
 
   async start() {
@@ -941,29 +1743,38 @@ class IncomingMessage extends Readable {
         while (!this.destroyed) {
           const item = await this._bodyReader.read();
           if (item.done) break;
-          this.push(nodeChunk(toBytes(item.value, this._scope), this._scope, this._BufferClass));
+          this._runInAsyncScope(() => this.push(
+            nodeChunk(toBytes(item.value, this._scope), this._scope, this._BufferClass),
+          ));
         }
       } else if (body && body[Symbol.asyncIterator]) {
         for await (const chunk of body) {
           if (this.destroyed) break;
-          this.push(nodeChunk(toBytes(chunk, this._scope), this._scope, this._BufferClass));
+          this._runInAsyncScope(() => this.push(
+            nodeChunk(toBytes(chunk, this._scope), this._scope, this._BufferClass),
+          ));
         }
       } else if (body && body[Symbol.iterator] && typeof body !== 'string') {
         for (const chunk of body) {
           if (this.destroyed) break;
-          this.push(nodeChunk(toBytes(chunk, this._scope), this._scope, this._BufferClass));
+          this._runInAsyncScope(() => this.push(
+            nodeChunk(toBytes(chunk, this._scope), this._scope, this._BufferClass),
+          ));
         }
       } else if (typeof this._response.arrayBuffer === 'function') {
         const bytes = new Uint8Array(await this._response.arrayBuffer());
-        if (!this.destroyed && bytes.byteLength) this.push(nodeChunk(bytes, this._scope, this._BufferClass));
+        if (!this.destroyed && bytes.byteLength) {
+          this._runInAsyncScope(() => this.push(nodeChunk(bytes, this._scope, this._BufferClass)));
+        }
       }
       if (this.destroyed) return;
       this.complete = true;
       this.readableEnded = true;
       this.readableComplete = true;
-      this._owner?._responseComplete();
+      this.clearTimeout();
+      this._runInAsyncScope(() => this._owner?._responseComplete());
       this._closeAfterEnd();
-      this.push(null);
+      this._runInAsyncScope(() => this.push(null));
     } catch (error) {
       if (this.destroyed) return;
       this.aborted = true;
@@ -994,14 +1805,27 @@ function proxyRequestOptions(url, init) {
   };
 }
 
-function createRequestClass(scope, BufferClass, virtualNetwork, proxy) {
-  return class ClientRequest extends EventEmitter {
+function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv, diagnostics) {
+  const ClientRequest = class ClientRequest extends EventEmitter {
     constructor(url, options = {}) {
       super();
-      this.method = String(options.method || 'GET').toUpperCase();
+      if (url && typeof url === 'object' && !isURL(url, scope)) {
+        options = url;
+        url = undefined;
+      }
+      options ||= {};
+      if (options.insecureHTTPParser !== undefined && typeof options.insecureHTTPParser !== 'boolean') {
+        throw invalidArgumentType('options.insecureHTTPParser', 'boolean', options.insecureHTTPParser, true);
+      }
+      validateRequestPath(options.path);
+      this.method = normalizeMethod(options.method);
       this.path = url;
       this.host = options.hostname || options.host || '';
       this.protocol = options.protocol;
+      this.agent = options.agent;
+      this.socket = null;
+      this.connection = null;
+      this.reusedSocket = false;
       this.aborted = false;
       this.destroyed = false;
       this.finished = false;
@@ -1011,18 +1835,37 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy) {
       this.response = null;
       this._url = url;
       this._options = options;
+      this._agent = options.agent;
+      this.timeout = Number(options.timeout ?? this._agent?.options?.timeout ?? 0) || 0;
       this._virtualNetwork = virtualNetwork;
       this._proxy = proxy;
+      this._resource = null;
+      this._clientTcpResource = null;
+      this._clientTcpConnectResource = null;
+      this._proxyEnv = { ...proxyEnv, ...scope.process?.env };
+      this._ownerProcess = scope.process;
+      this._ownerConsole = scope.console;
+      this.parser = {
+        consume: (length) => {
+          if (length === 0) this._ownerProcess?.abort?.();
+        },
+      };
       this._headers = createHeaderStore(options.headers);
+      this._duplicateContentLength = headerEntries(options.headers).some(([name, value]) =>
+        String(name).toLowerCase() === 'content-length' && Array.isArray(value) && value.length > 1);
       this._chunks = [];
       this._started = false;
+      this._headersOnlyDispatch = false;
       this._closed = false;
       this._abortEmitted = false;
       this._errorEmitted = false;
       this._timeoutHandle = null;
+      this._timeoutCallback = undefined;
       this._signalCleanup = null;
       this._controller = typeof scope.AbortController === 'function' ? new scope.AbortController() : null;
       this._externalSignal = options.signal;
+
+      publishDiagnostic(diagnostics, 'http.client.request.created', { request: this });
 
       if (options.auth && !this._headers.has('authorization')) {
         const authorization = basicAuthorization(options.auth, scope);
@@ -1030,6 +1873,36 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy) {
       }
       this._bindAbortSignal();
       if (options.timeout !== undefined) this.setTimeout(options.timeout);
+    }
+
+    _runInAsyncScope(callback) {
+      return this._resource?.runInAsyncScope
+        ? this._resource.runInAsyncScope(callback, this)
+        : callback.call(this);
+    }
+
+    _ensureAsyncResources(requestURL = this._url) {
+      if (this._resource) return;
+      const serverAsyncId = this._virtualNetwork?.getServerAsyncId?.(requestURL);
+      const serverTrigger = serverAsyncId === undefined ? {} : { triggerAsyncId: serverAsyncId };
+      this._clientTcpResource = new AsyncResource('TCPWRAP', serverTrigger);
+      this._clientTcpConnectResource = new AsyncResource('TCPCONNECTWRAP', {
+        triggerAsyncId: this._clientTcpResource.asyncId(),
+      });
+      this._resource = new AsyncResource('HTTPCLIENTREQUEST', serverTrigger);
+    }
+
+    _runInOwnerContext(callback) {
+      const previousProcess = scope.process;
+      const previousConsole = scope.console;
+      if (this._ownerProcess) scope.process = this._ownerProcess;
+      if (this._ownerConsole) scope.console = this._ownerConsole;
+      try {
+        return callback();
+      } finally {
+        scope.process = previousProcess;
+        scope.console = previousConsole;
+      }
     }
 
     _bindAbortSignal() {
@@ -1043,34 +1916,46 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy) {
 
     _clearTimeout() {
       if (this._timeoutHandle !== null) {
-        scope.clearTimeout?.(this._timeoutHandle);
+        (this._ownerProcess?._bnhClearTimer || scope.clearTimeout)?.(this._timeoutHandle);
         this._timeoutHandle = null;
       }
     }
 
     setTimeout(milliseconds, callback) {
       if (typeof callback !== 'function' && callback !== undefined) throw new TypeError('timeout callback must be a function');
+      const delay = validateTimeout(milliseconds);
       this._clearTimeout();
-      const delay = Math.max(0, Number(milliseconds) || 0);
       this.timeout = delay;
-      this._timeoutHandle = scope.setTimeout(() => {
+      this._timeoutCallback = callback;
+      if (delay === 0 || !this._started) return this;
+      this._armTimeout();
+      return this;
+    }
+
+    _armTimeout() {
+      if (this._timeoutHandle !== null || this.timeout === 0 || this.destroyed) return;
+      const delay = this.timeout;
+      const setTimer = this._ownerProcess?._bnhSetTimer || scope.setTimeout;
+      this._timeoutHandle = setTimer(() => {
         this._timeoutHandle = null;
         if (this.destroyed) return;
         this.emit('timeout');
-        callback?.call(this);
+        this._timeoutCallback?.call(this);
         if (!this.destroyed && this._options.abortOnTimeout !== false) this.destroy(timeoutError(scope, delay));
       }, delay);
-      return this;
     }
 
     clearTimeout() {
       this._clearTimeout();
       this.timeout = 0;
+      this._timeoutCallback = undefined;
       return this;
     }
 
     setHeader(name, value) {
       if (this._started) throw new Error('Cannot set headers after they are sent');
+      validateHeaderName(name);
+      validateHeaderValue(name, value);
       this._headers.set(String(name).toLowerCase(), normalizeHeaderValue(value));
       return this;
     }
@@ -1098,6 +1983,9 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy) {
     }
 
     flushHeaders() {
+      if (this._started || this.destroyed) return this;
+      this._headersOnlyDispatch = true;
+      schedule(scope, () => this._runInAsyncScope(() => this._dispatch()));
       return this;
     }
 
@@ -1117,22 +2005,22 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy) {
       if (this.finished || this.destroyed) {
         const error = new Error('write after end');
         error.code = 'ERR_STREAM_WRITE_AFTER_END';
-        schedule(scope, () => {
+        schedule(scope, () => this._runInAsyncScope(() => {
           this.emit('error', error);
           callback?.(error);
-        });
+        }));
         return false;
       }
       try {
         this._chunks.push(toBytes(chunk, scope, encoding));
       } catch (error) {
-        schedule(scope, () => {
+        schedule(scope, () => this._runInAsyncScope(() => {
           this.emit('error', error);
           callback?.(error);
-        });
+        }));
         return false;
       }
-      if (callback) schedule(scope, () => callback());
+      if (callback) schedule(scope, () => this._runInAsyncScope(() => callback()));
       return true;
     }
 
@@ -1146,10 +2034,20 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy) {
       }
       if (chunk !== undefined) this.write(chunk, encoding);
       if (this.finished) return this;
+      if (this._started) {
+        this.finished = true;
+        this.writableEnded = true;
+        this.writableFinished = true;
+        this._runInAsyncScope(() => {
+          this.emit('finish');
+          callback?.();
+        });
+        return this;
+      }
       this.finished = true;
       this.writableEnded = true;
       this._endCallback = callback;
-      schedule(scope, () => this._dispatch());
+      schedule(scope, () => this._runInAsyncScope(() => this._dispatch()));
       return this;
     }
 
@@ -1167,8 +2065,15 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy) {
       this._signalCleanup?.();
       this._signalCleanup = null;
       try { this._controller?.abort(error); } catch { this._controller?.abort(); }
-      if (error) this._emitError(error);
+      if (error) {
+        publishDiagnostic(diagnostics, 'http.client.request.error', { request: this, error });
+        this._emitError(error);
+      }
       if (this.response && !this.response.destroyed) this.response.destroy(error);
+      // A virtual child can keep the proxy's synthetic socket task alive after
+      // the request itself times out or is destroyed. Releasing that process-
+      // local task set lets the child finish exactly as a real process would.
+      if (!this.response) this._ownerProcess?._bnhReleaseTasks?.();
       this._emitClose();
       return this;
     }
@@ -1178,7 +2083,7 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy) {
       this.aborted = true;
       if (emitAbort && !this._abortEmitted) {
         this._abortEmitted = true;
-        schedule(scope, () => this.emit('abort'));
+        schedule(scope, () => this._runInAsyncScope(() => this.emit('abort')));
       }
       this.destroy(emitError ? error : undefined);
     }
@@ -1186,21 +2091,83 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy) {
     _emitError(error) {
       if (this._errorEmitted) return;
       this._errorEmitted = true;
-      schedule(scope, () => this.emit('error', error));
+      schedule(scope, () => this._runInAsyncScope(() => this._runInOwnerContext(
+        () => this.emit('error', error),
+      )));
     }
 
     _emitClose() {
       if (this._closed) return;
       this._closed = true;
-      schedule(scope, () => this.emit('close'));
+      schedule(scope, () => this._runInAsyncScope(() => {
+        try {
+          this._runInOwnerContext(() => this.emit('close'));
+        } finally {
+          this._resource?.emitDestroy?.();
+          this._clientTcpConnectResource?.emitDestroy?.();
+          this._clientTcpResource?.emitDestroy?.();
+        }
+      }));
     }
 
     _dispatch() {
       if (this._started || this.destroyed) return;
+      if (this._agentSocketAttempted && (this._agentSocket || this.destroyed)) return;
       this._started = true;
-      this.writableFinished = true;
-      this.emit('finish');
-      this._endCallback?.();
+      this._ensureAsyncResources();
+      publishDiagnostic(diagnostics, 'http.client.request.start', { request: this });
+      this._armTimeout();
+      if (!this._headersOnlyDispatch) {
+        this.writableFinished = true;
+        this._runInOwnerContext(() => {
+          this.emit('finish');
+          this._endCallback?.();
+        });
+      }
+
+      const customCreateConnection = this._agent?.createConnection;
+      const customCreateSocket = this._agent?.createSocket;
+      const createConnection = typeof customCreateSocket === 'function'
+        && customCreateSocket !== BrowserAgent.prototype.createSocket
+        ? customCreateSocket
+        : typeof customCreateConnection === 'function'
+          && customCreateConnection !== BrowserAgent.prototype.createConnection
+          ? customCreateConnection
+          : null;
+      if (createConnection) {
+        let socket;
+        const usesCreateSocket = createConnection === customCreateSocket;
+        const connectionCallback = (error, connectedSocket) => {
+          if (this.destroyed) return;
+          if (error) {
+            this.destroy(error);
+            return;
+          }
+          if (!connectedSocket) {
+            this.destroy(new TypeError('Agent.createConnection() must return a socket'));
+            return;
+          }
+          this.socket = connectedSocket;
+          this.connection = connectedSocket;
+          connectedSocket.once?.('error', (socketError) => this.destroy(socketError));
+        };
+        try {
+          const connectionOptions = {
+            ...this._options,
+            host: this.host,
+            hostname: this.host,
+            port: this._options.port || (this.protocol === DEFAULT_HTTPS_PROTOCOL ? 443 : 80),
+          };
+          socket = usesCreateSocket
+            ? createConnection.call(this._agent, this, connectionOptions, connectionCallback)
+            : createConnection.call(this._agent, connectionOptions, connectionCallback);
+        } catch (error) {
+          this.destroy(error);
+          return;
+        }
+        if (socket) connectionCallback(null, socket);
+        if (this._agent instanceof BrowserAgent) return;
+      }
 
       let init;
       try {
@@ -1214,11 +2181,61 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy) {
       try {
         if (this._proxy) operation = this._proxy.request(proxyRequestOptions(this._url, init));
         else {
-          const virtualResponse = this._virtualNetwork?.dispatch(this._url, init);
+          const runtimeProxyEnv = { ...this._proxyEnv, ...scope.process?.env };
+          const proxyConfig = proxyConfigFor(
+            this._url,
+            this._options,
+            runtimeProxyEnv,
+            scope,
+          );
+          const requestURL = proxyConfig ? proxyConfig.url.href : this._url;
+          const tunnelKey = proxyConfig && `${proxyConfig.url.origin}|${new scope.URL(this._url).host}`;
+          this._proxyConfig = proxyConfig ? { ...proxyConfig, tunnelKey } : null;
+          const requestInit = proxyConfig
+            ? proxyRequestInit(
+                this._url,
+                init,
+                proxyConfig,
+                scope,
+                Boolean(this._agent?.keepAlive),
+                this.protocol !== DEFAULT_HTTPS_PROTOCOL,
+              )
+            : init;
+          const targetIsHttps = this.protocol === DEFAULT_HTTPS_PROTOCOL;
+          const ownerTunnels = this._agent?._proxyTunnels?.get(this._ownerProcess);
+          const hasTunnel = targetIsHttps && tunnelKey && ownerTunnels?.has(tunnelKey);
+          const virtualResponse = proxyConfig && targetIsHttps && !hasTunnel
+            ? this._virtualNetwork?.dispatchProxyConnect(
+              requestURL,
+              this._url,
+              requestInit,
+              this.timeout,
+              this._ownerProcess,
+            )
+            : proxyConfig && targetIsHttps
+              ? this._virtualNetwork?.dispatch(this._url, init)
+              : this._virtualNetwork?.dispatch(requestURL, requestInit);
           if (virtualResponse) operation = virtualResponse;
           else {
-            if (typeof scope.fetch !== 'function') throw new TypeError('fetch is unavailable in this browser context');
-            operation = scope.fetch.call(scope, this._url, init);
+            if (proxyConfig) {
+              const proxyURL = new scope.URL(requestURL);
+              operation = Promise.reject(virtualNetworkError(
+                'ECONNREFUSED',
+                'connect',
+                proxyURL.hostname,
+                Number(proxyURL.port || (proxyURL.protocol === DEFAULT_HTTPS_PROTOCOL ? 443 : 80)),
+              ));
+            } else {
+              if (typeof scope.fetch !== 'function') throw new TypeError('fetch is unavailable in this browser context');
+              const previousHttpFetchMarker = scope.__BNH_HTTP_CLIENT_FETCH__;
+              scope.__BNH_HTTP_CLIENT_FETCH__ = true;
+              try {
+                operation = scope.fetch.call(scope, this._url, init);
+              } finally {
+                if (previousHttpFetchMarker === undefined) delete scope.__BNH_HTTP_CLIENT_FETCH__;
+                else scope.__BNH_HTTP_CLIENT_FETCH__ = previousHttpFetchMarker;
+              }
+            }
           }
         }
       } catch (error) {
@@ -1226,9 +2243,19 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy) {
         return;
       }
       Promise.resolve(operation).then(
-        (response) => this._handleResponse(this._proxy && !response?.arrayBuffer
-          ? proxyResponse(response, this._url, scope)
-          : response),
+        (response) => this._runInAsyncScope(() => {
+          if (this._agent && this._proxyConfig && this._proxyConfig.tunnelKey) {
+            let tunnels = this._agent._proxyTunnels.get(this._ownerProcess);
+            if (!tunnels) {
+              tunnels = new Set();
+              this._agent._proxyTunnels.set(this._ownerProcess, tunnels);
+            }
+            tunnels.add(this._proxyConfig.tunnelKey);
+          }
+          this._handleResponse(this._proxy && !response?.arrayBuffer
+            ? proxyResponse(response, this._url, scope)
+            : response);
+        }),
         (error) => this._handleFetchError(error),
       );
     }
@@ -1243,6 +2270,7 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy) {
         method: this.method,
         headers: fetchHeaders(this._headers, scope),
       };
+      if (this._duplicateContentLength) init.__bnhDuplicateContentLength = true;
       if (this._controller) init.signal = this._controller.signal;
       else if (this._externalSignal) init.signal = this._externalSignal;
       if (body.byteLength) init.body = body;
@@ -1255,13 +2283,18 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy) {
 
     _handleResponse(response) {
       if (this.destroyed) return;
-      this.response = new IncomingMessage(response, this, scope, BufferClass);
-      this.emit('response', this.response);
-      void this.response.start();
+      this._runInAsyncScope(() => this._runInOwnerContext(() => {
+        this.response = new IncomingMessage(response, this, scope, BufferClass);
+        this.emit('response', this.response);
+        void this.response.start();
+      }));
     }
 
     _handleFetchError(error) {
-      if (this.destroyed) return;
+      if (this.destroyed) {
+        if (error?.code === 'ERR_PROXY_TUNNEL') this._emitError(error);
+        return;
+      }
       const normalized = error?.name === 'AbortError'
         ? abortError(scope, error)
         : error?.name === 'TypeError' && /failed to fetch/i.test(String(error.message || ''))
@@ -1272,6 +2305,32 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy) {
 
     _responseComplete() {
       this._clearTimeout();
+      if (this._agent) {
+        const name = this._agent.getName?.(this._options);
+        if (name) {
+          const freeSockets = this._agent.freeSockets[name] ||= [];
+          if (!freeSockets.length) {
+            const freeSocket = this.socket || new EventEmitter();
+            freeSocket.destroyed ??= false;
+            freeSocket.ref ??= () => freeSocket;
+            freeSocket.unref ??= () => freeSocket;
+            freeSocket.destroy ??= () => {
+              freeSocket.destroyed = true;
+              freeSocket.emit?.('close');
+            };
+            const removeFreeSocket = () => this._agent.removeSocket(freeSocket, this._options);
+            freeSocket.once?.('error', removeFreeSocket);
+            freeSocket.once?.('close', removeFreeSocket);
+            freeSockets.push(freeSocket);
+          }
+          this._agentSocket = freeSockets[0];
+        }
+        this._agent.emit('free', this._agentSocket || { destroyed: false });
+      }
+      publishDiagnostic(diagnostics, 'http.client.response.finish', {
+        request: this,
+        response: this.response,
+      });
       this._emitClose();
     }
 
@@ -1279,16 +2338,29 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy) {
       if (!this.destroyed) this.destroy(error);
     }
   };
+  Object.setPrototypeOf(ClientRequest.prototype, OutgoingMessage.prototype);
+  return ClientRequest;
 }
 
-function createProtocolModule(protocol, ClientRequest, Server, Agent, scope, netModule) {
+function createProtocolModule(protocol, ClientRequest, Server, Agent, scope, netModule, allowCrossProtocol) {
+  let protocolModule;
   const request = (input, options, callback) => {
     const parsed = parseArguments(input, options, callback, scope);
     const requestOptions = { ...parsed.options, protocol: protocolName(parsed.options.protocol, protocol) };
     unsupportedTransportOptions(requestOptions);
-    const url = validateURL(makeURL(parsed.target, requestOptions, protocol, scope), protocol, scope);
-    const clientRequest = new ClientRequest(url, requestOptions);
+    validateRequestPath(requestOptions.path);
+    const url = validateURL(
+      makeURL(parsed.target, requestOptions, protocol, scope),
+      protocol,
+      scope,
+      allowCrossProtocol,
+    );
+    const clientRequest = new ClientRequest(url, {
+      ...requestOptions,
+      agent: requestOptions.agent === undefined ? protocolModule.globalAgent : requestOptions.agent,
+    });
     if (parsed.callback) clientRequest.once('response', parsed.callback);
+    clientRequest._agent?.addRequest?.(clientRequest, requestOptions);
     return clientRequest;
   };
   const get = (input, options, callback) => {
@@ -1296,12 +2368,14 @@ function createProtocolModule(protocol, ClientRequest, Server, Agent, scope, net
     clientRequest.end();
     return clientRequest;
   };
-  const globalAgent = new Agent({ protocol });
-  const module = {
+  const globalAgent = new Agent({ protocol, keepAlive: true, scheduling: 'lifo', timeout: 5000 });
+  protocolModule = {
     request,
     get,
     ClientRequest,
     IncomingMessage,
+    OutgoingMessage,
+    ServerResponse: VirtualServerResponse,
     METHODS,
     STATUS_CODES,
     Agent,
@@ -1314,7 +2388,29 @@ function createProtocolModule(protocol, ClientRequest, Server, Agent, scope, net
       return netModule.createConnection(options, callback);
     },
   };
-  return Object.freeze(module);
+  if (protocol === DEFAULT_HTTP_PROTOCOL) {
+    protocolModule.setMaxIdleHTTPParsers = setMaxIdleHTTPParsers;
+    protocolModule.validateHeaderName = validateHeaderName;
+    protocolModule.validateHeaderValue = validateHeaderValue;
+    Object.defineProperties(protocolModule, {
+      WebSocket: {
+        configurable: true,
+        enumerable: false,
+        get: () => scope.WebSocket,
+      },
+      CloseEvent: {
+        configurable: true,
+        enumerable: false,
+        get: () => scope.CloseEvent,
+      },
+      MessageEvent: {
+        configurable: true,
+        enumerable: false,
+        get: () => scope.MessageEvent,
+      },
+    });
+  }
+  return protocolModule;
 }
 
 /** Create the browser-native Node-shaped http and https compatibility modules. */
@@ -1322,32 +2418,71 @@ export function createHttpCompatibility(scope = globalThis, {
   Buffer: BufferClass = scope.Buffer,
   proxy: configuredProxy,
   net: configuredNet,
+  proxyEnv,
+  httpNetwork: configuredHttpNetwork,
   trackTask,
+  diagnostics,
 } = {}) {
   BufferClass ||= typeof Buffer === 'function' ? Buffer : undefined;
   const net = configuredNet || createBrowserNet({ BufferClass, trackTask });
-  const virtualNetwork = createVirtualHttpNetwork(scope, BufferClass, net, trackTask);
+  const virtualNetwork = configuredHttpNetwork
+    || createVirtualHttpNetwork(scope, BufferClass, net, trackTask, diagnostics);
   const proxy = configuredProxy
     ? (typeof configuredProxy.request === 'function' && configuredProxy.mode
       ? configuredProxy
       : createProxyCapability(configuredProxy))
     : null;
-  const ClientRequest = createRequestClass(scope, BufferClass, virtualNetwork, proxy);
+  validateProxyEnvironment(proxyEnv, scope);
+  const ClientRequest = createRequestClass(
+    scope,
+    BufferClass,
+    virtualNetwork,
+    proxy,
+    proxyEnv,
+    diagnostics,
+  );
   const HttpServer = createServerClass(DEFAULT_HTTP_PROTOCOL, scope, virtualNetwork, BufferClass, trackTask);
   const HttpsServer = createServerClass(DEFAULT_HTTPS_PROTOCOL, scope, virtualNetwork, BufferClass, trackTask);
+  Object.setPrototypeOf(VirtualServerRequest.prototype, IncomingMessage.prototype);
+  Object.setPrototypeOf(VirtualServerResponse.prototype, OutgoingMessage.prototype);
   const HttpAgent = class Agent extends BrowserAgent {
     constructor(options = {}) { super(options, DEFAULT_HTTP_PROTOCOL, net.createConnection); }
   };
   const HttpsAgent = class Agent extends BrowserAgent {
     constructor(options = {}) { super(options, DEFAULT_HTTPS_PROTOCOL, net.createConnection); }
   };
-  const http = createProtocolModule(DEFAULT_HTTP_PROTOCOL, ClientRequest, HttpServer, HttpAgent, scope, net);
-  const https = createProtocolModule(DEFAULT_HTTPS_PROTOCOL, ClientRequest, HttpsServer, HttpsAgent, scope, net);
+  const allowCrossProtocol = Boolean(
+    proxy?.mode === 'proxy'
+      && proxy.enabled
+      && proxy.capabilityGranted
+      && proxy.adapter,
+  );
+  const http = createProtocolModule(
+    DEFAULT_HTTP_PROTOCOL,
+    ClientRequest,
+    HttpServer,
+    HttpAgent,
+    scope,
+    net,
+    allowCrossProtocol,
+  );
+  const https = createProtocolModule(
+    DEFAULT_HTTPS_PROTOCOL,
+    ClientRequest,
+    HttpsServer,
+    HttpsAgent,
+    scope,
+    net,
+    allowCrossProtocol,
+  );
   return Object.freeze({
     http,
     https,
+    httpCommon: { parsers: httpParsers },
     ClientRequest,
     IncomingMessage: http.IncomingMessage,
+    OutgoingMessage: http.OutgoingMessage,
+    httpNetwork: virtualNetwork,
     boundaries: Object.freeze({
       rawTcp: net.createConnection,
       rawTls: net.createConnection,

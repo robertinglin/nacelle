@@ -1,14 +1,12 @@
 import { BrowserEventEmitter } from './events.js';
 import { createVirtualProcess } from './virtual-process.js';
+import { sharedVirtualNetwork } from './virtual-network.js';
 
 const INTERNAL = Symbol('browser-cluster-worker');
 const DEFAULT_EXEC = '/browser/node';
+let nextClusterGroupId = 1;
 const DEFAULT_SETTINGS = Object.freeze({
-  args: Object.freeze([]),
-  exec: DEFAULT_EXEC,
-  execArgv: Object.freeze([]),
   silent: false,
-  stdio: undefined,
 });
 
 function errorWithCode(code, message, details = {}) {
@@ -22,16 +20,16 @@ function nextTick(callback, ...args) {
   queueMicrotask(() => callback(...args));
 }
 
-function cloneSettings(settings = {}) {
+function cloneSettings(settings = {}, defaults = DEFAULT_SETTINGS) {
   if (settings === null || typeof settings !== 'object' || Array.isArray(settings)) {
     throw errorWithCode('ERR_INVALID_ARG_TYPE', 'cluster settings must be an object');
   }
   const next = {
-    ...DEFAULT_SETTINGS,
+    ...defaults,
     ...settings,
-    args: [...(settings.args || DEFAULT_SETTINGS.args)].map(String),
-    execArgv: [...(settings.execArgv || DEFAULT_SETTINGS.execArgv)].map(String),
   };
+  if (next.args !== undefined) next.args = [...(next.args || [])].map(String);
+  if (next.execArgv !== undefined) next.execArgv = [...(next.execArgv || [])].map(String);
   if (next.stdio !== undefined && !Array.isArray(next.stdio)) {
     throw errorWithCode('ERR_INVALID_ARG_TYPE', 'cluster settings stdio must be an array');
   }
@@ -68,27 +66,8 @@ function parseSendArguments(sendHandle, options, callback) {
     done = sendOptions;
     sendOptions = undefined;
   }
-  if (handle !== undefined && handle !== null) {
-    const virtualHandle = handle && typeof handle === 'object' && handle._network
-      && (typeof handle.destroy === 'function'
-        || (typeof handle.close === 'function' && 'boundPort' in handle));
-    if (!virtualHandle && (typeof handle !== 'object' || !('keepOpen' in handle))) throw unsupportedHandleError();
-  }
-  return { options: sendOptions, callback: done };
-}
-
-function sendVirtualHandle(processHandle, message, handle, callback) {
-  const childProcess = processHandle?.process;
-  if (!childProcess || typeof childProcess.emit !== 'function') return false;
-  queueMicrotask(() => {
-    if (!processHandle.connected) {
-      callback?.(errorWithCode('ERR_IPC_CLOSED', 'IPC channel is closed'));
-      return;
-    }
-    childProcess.emit('message', message, handle);
-    callback?.(null);
-  });
-  return true;
+  if (handle !== undefined && handle !== null && (typeof handle !== 'object' || typeof handle === 'function')) throw unsupportedHandleError();
+  return { handle, options: sendOptions, callback: done };
 }
 
 function callbackFromArguments(...values) {
@@ -149,8 +128,12 @@ class ClusterWorker extends BrowserEventEmitter {
       throw errorWithCode('ERR_INVALID_ARG_TYPE', 'worker send options must be an object');
     }
     try {
-      if (sendHandle && sendVirtualHandle(this.process, message, sendHandle, parsed.callback)) return true;
-      return this.process.send(message, parsed.callback ? (error) => parsed.callback(error) : undefined);
+      return this.process.send(
+        message,
+        parsed.handle,
+        parsed.options,
+        parsed.callback ? (error) => parsed.callback(error) : undefined,
+      );
     } catch (error) {
       if (parsed.callback) {
         nextTick(parsed.callback, error);
@@ -196,9 +179,47 @@ function makeWorkerCluster(options) {
   }
   const emitter = new BrowserEventEmitter();
   const workers = Object.create(null);
+  const network = options.network || sharedVirtualNetwork;
+  const groupId = options.clusterGroupId ?? processObject.ppid ?? 'browser-cluster';
+  const serverHandles = new Set();
   const worker = new ClusterWorker(INTERNAL, processObject, Number(options.id ?? processObject.pid ?? 1), null, { child: true });
   const cluster = attachEmitterMethods({}, emitter);
   worker._cluster = cluster;
+  const closeServerHandles = () => {
+    for (const handle of [...serverHandles]) handle.close();
+  };
+  const getServer = (server, query, callback) => {
+    try {
+      const binding = query.port < 0
+        ? network.bindClusterPipe(groupId, query.address)
+        : network.bindClusterTcp(groupId, query.address, query.port, { ipv6Only: query.ipv6Only === true });
+      const handle = {
+        address: binding.address,
+        port: binding.port,
+        path: binding.path,
+        listen() { return 0; },
+        ref() { return this; },
+        unref() { return this; },
+        close() {
+          if (!serverHandles.delete(handle)) return;
+          binding.removeServer(server);
+        },
+        getsockname(out) {
+          if (binding.address !== undefined) {
+            Object.assign(out, { address: binding.address, family: binding.address.includes(':') ? 'IPv6' : 'IPv4', port: binding.port });
+          }
+          return 0;
+        },
+      };
+      serverHandles.add(handle);
+      binding.addServer(server);
+      nextTick(callback, null, handle);
+    } catch (error) {
+      nextTick(callback, error);
+    }
+  };
+  processObject.on?.('disconnect', closeServerHandles);
+  processObject.on?.('exit', closeServerHandles);
   Object.assign(cluster, {
     isPrimary: false,
     isMaster: false,
@@ -209,6 +230,7 @@ function makeWorkerCluster(options) {
     SCHED_NONE: 1,
     SCHED_RR: 2,
     schedulingPolicy: 1,
+    _getServer: getServer,
     settings: cloneSettings(options.settings),
     setupPrimary(settings) {
       cluster.settings = cloneSettings(settings);
@@ -247,14 +269,29 @@ function makePrimaryCluster(options) {
   const emitter = new BrowserEventEmitter();
   const processObject = options.process || null;
   const processFactory = options.processFactory || createVirtualProcess;
-  const primaryState = { workers: Object.create(null), nextWorkerId: 1, closed: false };
-  const clusterGroupId = String(options.clusterGroupId || options.runId || `cluster-${Date.now()}`);
+  const initialSettings = options.settings === undefined ? {} : cloneSettings(options.settings);
+  const primaryState = {
+    workers: Object.create(null),
+    nextWorkerId: 1,
+    closed: false,
+    disconnecting: false,
+    groupId: options.clusterGroupId || `browser-cluster-${nextClusterGroupId++}`,
+    settings: cloneSettings(initialSettings),
+  };
   const processStates = new WeakMap();
   if (processObject && typeof processObject === 'object') processStates.set(processObject, primaryState);
-  let settings = cloneSettings(options.settings);
   const baseEnvironment = normalizeEnvironment(options.environment || processObject?.env);
   const run = options.workerRun || options.run;
   const activeProcess = () => options.scope?.process || processObject;
+  const currentProcessSettings = () => {
+    const currentProcess = activeProcess();
+    return {
+      args: Array.isArray(currentProcess?.argv) ? currentProcess.argv.slice(2) : [],
+      exec: currentProcess?.argv?.[1] || DEFAULT_EXEC,
+      execArgv: Array.isArray(currentProcess?.execArgv) ? [...currentProcess.execArgv] : [],
+      silent: false,
+    };
+  };
   const runInProcessContext = (parentProcess, callback) => {
     const scope = options.scope;
     const timers = parentProcess?._bnhTimerContext;
@@ -288,10 +325,7 @@ function makePrimaryCluster(options) {
     // Browser process termination is synchronous from the parent’s point of
     // view. Remove a worker immediately when its terminal state is observable;
     // the process exit listener remains responsible for the normal async path.
-    if (worker.isDead()) {
-      worker._disconnected = true;
-      delete state.workers[worker.id];
-    }
+    if (worker.isDead()) delete state.workers[worker.id];
   };
   const watchPrimary = (parentProcess, state) => {
     parentProcess.once?.('exit', () => {
@@ -307,7 +341,14 @@ function makePrimaryCluster(options) {
     if (!parentProcess || typeof parentProcess !== 'object') return primaryState;
     let state = processStates.get(parentProcess);
     if (state) return state;
-    state = { workers: Object.create(null), nextWorkerId: 1, closed: false };
+    state = {
+      workers: Object.create(null),
+      nextWorkerId: 1,
+      closed: false,
+      disconnecting: false,
+      groupId: options.clusterGroupId || `browser-cluster-${nextClusterGroupId++}`,
+      settings: cloneSettings(initialSettings),
+    };
     processStates.set(parentProcess, state);
     watchPrimary(parentProcess, state);
     return state;
@@ -321,12 +362,13 @@ function makePrimaryCluster(options) {
     isWorker: { enumerable: true, value: false },
     worker: { enumerable: true, value: null },
     workers: { enumerable: true, get: () => stateFor(activeProcess()).workers },
-    settings: { enumerable: true, get: () => settings },
+    settings: { enumerable: true, get: () => stateFor(activeProcess()).settings },
   });
 
   const setupPrimary = (nextSettings = {}) => {
-    settings = cloneSettings(nextSettings);
-    emitter.emit('setup', settings);
+    const state = stateFor(activeProcess());
+    state.settings = cloneSettings(nextSettings, { ...currentProcessSettings(), ...state.settings });
+    emitter.emit('setup', state.settings);
   };
 
   Object.assign(cluster, {
@@ -337,9 +379,11 @@ function makePrimaryCluster(options) {
     setupPrimary,
     setupMaster: setupPrimary,
     fork(environment) {
+      setupPrimary();
       const parentProcess = activeProcess();
       const state = stateFor(parentProcess);
-      if (state.closed) throw errorWithCode('ERR_CLUSTER_CLOSED', 'cluster is disconnected');
+      const settings = state.settings;
+      if (state.closed || state.disconnecting) throw errorWithCode('ERR_CLUSTER_CLOSED', 'cluster is disconnected');
       if (options.maxChildren !== undefined && Object.keys(state.workers).length >= options.maxChildren) {
         throw errorWithCode('ERR_CLUSTER_MAX_CHILDREN', 'cluster child limit has been reached');
       }
@@ -354,16 +398,25 @@ function makePrimaryCluster(options) {
         run,
         runSource: options.runSource,
         env,
-        argv: [settings.exec, ...settings.args],
+        argv: [parentProcess?.execPath || '/browser/node', settings.exec, ...settings.args],
+        execArgv: settings.execArgv,
+        cwd: settings.cwd || parentProcess?.cwd?.(),
         ppid: Number(parentProcess?.pid || 0),
         pid: options.pidBase === undefined ? undefined : options.pidBase + id,
+        clusterGroupId: state.groupId,
         childId: `cluster-worker-${id}`,
         runId: String(options.runId || `cluster-${Date.now()}`),
         signalGrants: options.signalGrants,
+        preserveReferences: true,
         stdout: settings.silent ? undefined : options.stdout,
         stderr: settings.silent ? undefined : options.stderr,
       });
-      processHandle.process._bnhClusterGroupId = clusterGroupId;
+      if (options.childProcessClass?.prototype) {
+        Object.setPrototypeOf(processHandle, options.childProcessClass.prototype);
+      }
+      const diagnostics = options.diagnostics;
+      const channel = diagnostics?.channel?.('child_process');
+      if (channel?.hasSubscribers) channel.publish({ process: processHandle });
       const worker = new ClusterWorker(INTERNAL, processHandle, id, cluster);
       state.workers[id] = worker;
       emitter.emit('fork', worker);
@@ -409,16 +462,20 @@ function makePrimaryCluster(options) {
     disconnect(callback) {
       if (callback !== undefined && typeof callback !== 'function') throw errorWithCode('ERR_INVALID_ARG_TYPE', 'cluster disconnect callback must be a function');
       const state = stateFor(activeProcess());
-      state.closed = true;
+      state.disconnecting = true;
       const activeWorkers = Object.values(state.workers);
       if (!activeWorkers.length) {
+        state.disconnecting = false;
         if (callback) nextTick(callback);
         return;
       }
       let remaining = activeWorkers.length;
       const done = () => {
         remaining -= 1;
-        if (remaining === 0) callback?.();
+        if (remaining === 0) {
+          state.disconnecting = false;
+          callback?.();
+        }
       };
       for (const worker of activeWorkers) worker.disconnect(done);
     },

@@ -24,7 +24,16 @@ const NODE_ERROR_CODES = new Set([
   'ERR_PROXY_CONNECTION_FAILED',
   'ERR_TLS_CERT_ALTNAME_INVALID',
   'ERR_TLS_HANDSHAKE_TIMEOUT',
+  'ERR_PROXY_INVALID_CONFIG',
 ]);
+
+const PROXY_PROTOCOLS = new Set(['http:', 'https:']);
+
+function invalidProxyConfig(message, details = {}, cause = undefined) {
+  const error = proxyError('ERR_PROXY_INVALID_CONFIG', message, details, cause);
+  error.name = 'TypeError';
+  return error;
+}
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -55,6 +64,122 @@ function errorCode(value) {
   if (value?.name === 'AbortError') return 'ABORT_ERR';
   if (value?.name === 'TimeoutError') return 'ETIMEDOUT';
   return 'ERR_PROXY';
+}
+
+function hasLineBreak(value) {
+  return /[\r\n]/.test(String(value));
+}
+
+/** Normalize an HTTP proxy URL before it can become a browser request target. */
+export function normalizeProxyURL(value, scope = globalThis) {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw invalidProxyConfig('Invalid proxy URL', { value });
+  }
+  if (hasLineBreak(value)) {
+    throw invalidProxyConfig('Invalid proxy URL: credentials and authority must not contain CR or LF', { value });
+  }
+  let parsed;
+  try {
+    parsed = new scope.URL(value);
+    if (!PROXY_PROTOCOLS.has(parsed.protocol) || !parsed.hostname) throw new Error('unsupported proxy protocol');
+    // Accessing port makes URL implementations validate malformed numeric ports.
+    const port = parsed.port ? Number(parsed.port) : null;
+    if (port !== null && (!Number.isInteger(port) || port < 1 || port > 65535)) {
+      throw new Error('invalid proxy port');
+    }
+    if (hasLineBreak(parsed.username) || hasLineBreak(parsed.password)) {
+      throw new Error('invalid proxy credentials');
+    }
+  } catch (error) {
+    throw invalidProxyConfig(`Invalid URL (invalid proxy URL): ${value}`, { value }, error);
+  }
+  return parsed;
+}
+
+/** Validate proxy environment values at configuration time, before any fetch. */
+export function validateProxyEnvironment(proxyEnv, scope = globalThis) {
+  if (proxyEnv === undefined || proxyEnv === null) return proxyEnv;
+  for (const key of ['http_proxy', 'HTTP_PROXY', 'https_proxy', 'HTTPS_PROXY']) {
+    if (proxyEnv[key] !== undefined && proxyEnv[key] !== '') normalizeProxyURL(String(proxyEnv[key]), scope);
+  }
+  return proxyEnv;
+}
+
+/** Reject request option values that could become injected HTTP authority data. */
+export function validateProxyRequestOptions(options = {}) {
+  for (const field of ['host', 'hostname', 'port']) {
+    if (options[field] !== undefined && hasLineBreak(options[field])) {
+      const error = new TypeError(`Invalid character in ${field}`);
+      error.code = 'ERR_INVALID_CHAR';
+      error.field = field;
+      throw error;
+    }
+  }
+  return options;
+}
+
+function ipv4Parts(value) {
+  const parts = String(value).split('.');
+  if (parts.length !== 4 || !parts.every((part) => /^(?:0|[1-9]\d{0,2})$/.test(part) && Number(part) <= 255)) return null;
+  return parts.map(Number);
+}
+
+function ipv4Number(parts) {
+  return (((parts[0] * 256) + parts[1]) * 256 + parts[2]) * 256 + parts[3];
+}
+
+function matchesIPv4Range(hostname, entry) {
+  const [start, end] = entry.split('-', 2);
+  const hostParts = ipv4Parts(hostname);
+  const startParts = ipv4Parts(start);
+  const endParts = ipv4Parts(end);
+  return hostParts && startParts && endParts
+    && ipv4Number(hostParts) >= ipv4Number(startParts)
+    && ipv4Number(hostParts) <= ipv4Number(endParts);
+}
+
+function matchesIPv4Cidr(hostname, entry) {
+  const [network, prefixText] = entry.split('/', 2);
+  const hostParts = ipv4Parts(hostname);
+  const networkParts = ipv4Parts(network);
+  const prefix = Number(prefixText);
+  if (!hostParts || !networkParts || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) return false;
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  return (ipv4Number(hostParts) & mask) === (ipv4Number(networkParts) & mask);
+}
+
+/** Match Node's useful browser-safe NO_PROXY forms without resolving hostnames. */
+export function matchesNoProxy(hostname, port, noProxy) {
+  const host = String(hostname || '').replace(/^\[|\]$/g, '').toLowerCase();
+  if (!host) return false;
+  const targetPort = Number(port);
+  return String(noProxy || '').split(',').some((rawEntry) => {
+    const entry = rawEntry.trim().toLowerCase();
+    if (!entry) return false;
+    if (entry === '*') return true;
+    let entryHost = entry;
+    let entryPort;
+    if (entry.startsWith('[')) {
+      const closingBracket = entry.indexOf(']');
+      if (closingBracket > -1) {
+        entryHost = entry.slice(1, closingBracket);
+        if (entry[closingBracket + 1] === ':') entryPort = entry.slice(closingBracket + 2);
+      }
+    } else {
+      const separator = entry.lastIndexOf(':');
+      if (separator > -1 && entry.indexOf(':') === separator) {
+        entryHost = entry.slice(0, separator);
+        entryPort = entry.slice(separator + 1);
+      }
+    }
+    if (entryPort !== undefined && Number(entryPort) !== targetPort) return false;
+    entryHost = entryHost.replace(/^\[|\]$/g, '');
+    if (entryHost.includes('-') && matchesIPv4Range(host, entryHost)) return true;
+    if (entryHost.includes('/') && matchesIPv4Cidr(host, entryHost)) return true;
+    if (entryHost.startsWith('*.')) return host.endsWith(entryHost.slice(1));
+    if (entryHost.startsWith('.')) return host.endsWith(entryHost) || host === entryHost.slice(1);
+    return host === entryHost || host.endsWith(`.${entryHost}`);
+  });
 }
 
 /** Convert adapter failures into errors that Node network callers understand. */

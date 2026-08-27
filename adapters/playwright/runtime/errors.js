@@ -28,6 +28,12 @@ export class UnsupportedNativeAddonError extends Error {
   }
 }
 
+export function nativeAddonDisabledError() {
+  const error = new Error('Cannot load native addon because loading addons is disabled.');
+  error.code = 'ERR_DLOPEN_DISABLED';
+  return error;
+}
+
 export class UnsupportedWebCapabilityError extends Error {
   constructor(capability, reason) {
     super(`${capability} is unavailable in this browser: ${reason}`);

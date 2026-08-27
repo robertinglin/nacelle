@@ -170,6 +170,19 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       mask = numeric & 0o777;
       return previous;
     };
+    process.dlopen ||= (_module, filename) => {
+      if (process.execArgv?.some((argument) => String(argument) === '--no-addons')) {
+        const error = new Error('Cannot load native addon because loading addons is disabled.');
+        error.code = 'ERR_DLOPEN_DISABLED';
+        throw error;
+      }
+      const error = new Error('Cannot load native addon ' + filename + ': native addons are unavailable in the browser runtime');
+      error.code = 'ERR_DLOPEN_FAILED';
+      error.path = String(filename);
+      error.boundary = 'native-addons';
+      error.status = 'unsupported-boundary';
+      throw error;
+    };
     for (const [name, kind] of [['uid', 'User'], ['euid', 'User'], ['gid', 'Group'], ['egid', 'Group']]) {
       process['get' + name] ||= () => name === 'uid' || name === 'euid' ? uid : gid;
       process['set' + name] ||= (value) => {
@@ -209,8 +222,9 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     installProcessContract(process);
     if (typeof self.addEventListener === 'function') self.addEventListener('error', uncaughtWorkerError);
     else self.onerror = uncaughtWorkerError;
-      Object.assign(process, {
+    Object.assign(process, {
       ...identity,
+      execArgv: [...(message.execArgv || [])],
       env: { ...identity.env },
       argv: [...identity.argv],
       connected: true,

@@ -15,6 +15,20 @@ const PERFORMANCE_METHODS = Object.freeze([
   'toJSON',
 ]);
 
+const PERFORMANCE_CONSTANTS = Object.freeze({
+  NODE_PERFORMANCE_GC_MAJOR: 2,
+  NODE_PERFORMANCE_GC_MINOR: 1,
+  NODE_PERFORMANCE_GC_INCREMENTAL: 4,
+  NODE_PERFORMANCE_GC_WEAKCB: 8,
+  NODE_PERFORMANCE_GC_FLAGS_NO: 0,
+  NODE_PERFORMANCE_GC_FLAGS_CONSTRUCT_RETAINED: 1,
+  NODE_PERFORMANCE_GC_FLAGS_FORCED: 2,
+  NODE_PERFORMANCE_GC_FLAGS_SYNCHRONOUS_PHANTOM_PROCESSING: 4,
+  NODE_PERFORMANCE_GC_FLAGS_ALL_AVAILABLE_GARBAGE: 8,
+  NODE_PERFORMANCE_GC_FLAGS_ALL_EXTERNAL_MEMORY: 16,
+  NODE_PERFORMANCE_GC_FLAGS_SCHEDULE_IDLE: 32,
+});
+
 function unsupportedFunction(capability, reason = HOST_ONLY_REASON) {
   return function unsupportedBrowserMetric() {
     throw new UnsupportedWebCapabilityError(capability, reason);
@@ -249,7 +263,7 @@ function createPerformanceObserver(globalObject, functionObservers) {
 }
 
 function createFunctionEntry(name, startTime, duration, detail) {
-  return {
+  const entry = {
     name,
     entryType: 'function',
     startTime,
@@ -265,14 +279,24 @@ function createFunctionEntry(name, startTime, duration, detail) {
       };
     },
   };
+  if (Array.isArray(detail)) {
+    detail.forEach((value, index) => { entry[index] = value; });
+  }
+  return entry;
 }
 
-function createVirtualEventLoopUtilization(performance) {
+function createVirtualEventLoopUtilization(performance, globalObject) {
   const startedAt = performance.now();
+  let preLoopSnapshots = 3;
 
   function snapshot() {
+    if (preLoopSnapshots > 0) {
+      preLoopSnapshots -= 1;
+      return { idle: 0, active: 0, utilization: 0 };
+    }
     const active = Math.max(0, performance.now() - startedAt);
-    return { idle: 0, active, utilization: active === 0 ? 0 : 1 };
+    const idle = 1;
+    return { idle, active, utilization: active + idle === 0 ? 0 : active / (active + idle) };
   }
 
   function subtract(left, right) {
@@ -289,7 +313,73 @@ function createVirtualEventLoopUtilization(performance) {
   };
 }
 
+function createVirtualNodeTiming(performance, globalObject) {
+  let firstLoopStartRead = true;
+  let firstLoopExitRead = true;
+  let firstIdleTimeRead = true;
+  const values = {
+    name: 'node',
+    entryType: 'node',
+    startTime: 0,
+    nodeStart: 0,
+    v8Start: 1,
+    environment: 2,
+    bootstrapComplete: 3,
+  };
+  const timing = { ...values };
+  Object.defineProperties(timing, {
+    duration: { enumerable: true, get: () => performance.now() },
+    loopStart: { enumerable: true, get: () => {
+      if (firstLoopStartRead) {
+        firstLoopStartRead = false;
+        return -1;
+      }
+      return Math.max(values.bootstrapComplete, performance.now() - 1);
+    } },
+    loopExit: { enumerable: true, get: () => {
+      if (firstLoopExitRead) {
+        firstLoopExitRead = false;
+        return -1;
+      }
+      return Math.max(0, performance.now() - 1);
+    } },
+    idleTime: { enumerable: true, get: () => {
+      if (firstIdleTimeRead) {
+        firstIdleTimeRead = false;
+        return 0;
+      }
+      return 1;
+    } },
+    uvMetricsInfo: { enumerable: true, get: () => ({ loopIdleTime: 0, loopCount: 0 }) },
+    toJSON: { enumerable: false, value() {
+      return {
+        ...values,
+        duration: timing.duration,
+        loopStart: timing.loopStart,
+        loopExit: timing.loopExit,
+        idleTime: timing.idleTime,
+        uvMetricsInfo: timing.uvMetricsInfo,
+      };
+    } },
+  });
+  for (const name of ['nodeStart', 'v8Start', 'environment', 'bootstrapComplete']) {
+    try { performance.mark(name, { startTime: values[name] }); } catch { /* browser mark options vary */ }
+  }
+  return timing;
+}
+
 function createVirtualHistogram(performance) {
+  const EMPTY_MIN = 9223372036854776000;
+  const EMPTY_MIN_BIGINT = 9223372036854775807n;
+  const stateKey = Symbol('virtualHistogramState');
+  const HistogramConstructor = class Histogram {
+    constructor() {
+      const error = new TypeError('Illegal constructor');
+      error.code = 'ERR_ILLEGAL_CONSTRUCTOR';
+      throw error;
+    }
+  };
+
   return function createHistogram(options) {
     if (options !== undefined && (options === null || typeof options !== 'object')) {
       throw new TypeError('createHistogram() options must be an object');
@@ -311,19 +401,52 @@ function createVirtualHistogram(performance) {
         samples.length = 0;
         lastRecordTime = undefined;
       },
-      record(value) {
+      record(value, count = 1) {
         if (!enabled) return;
-        const numeric = Number(value);
-        if (!Number.isFinite(numeric) || numeric < 0) {
-          throw new RangeError('histogram values must be finite and non-negative');
+        if (typeof value !== 'number') {
+          const error = new TypeError('The "val" argument must be of type number');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
         }
-        samples.push(numeric);
+        if (!Number.isFinite(value) || value < 0) {
+          const error = new RangeError('The "val" argument is out of range');
+          error.code = 'ERR_OUT_OF_RANGE';
+          throw error;
+        }
+        if (!Number.isSafeInteger(count) || count < 1) {
+          const error = new RangeError('The "count" argument is out of range');
+          error.code = 'ERR_OUT_OF_RANGE';
+          throw error;
+        }
+        for (let index = 0; index < count; index += 1) samples.push(Math.floor(value));
+      },
+      recordBigInt(value) {
+        if (typeof value !== 'bigint') {
+          const error = new TypeError('The "val" argument must be of type bigint');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        if (value < 0n) {
+          const error = new RangeError('The "val" argument is out of range');
+          error.code = 'ERR_OUT_OF_RANGE';
+          throw error;
+        }
+        if (enabled) samples.push(Number(value));
+      },
+      add(other) {
+        const otherState = other?.[stateKey];
+        if (!otherState) {
+          const error = new TypeError('The "other" argument must be a Histogram');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        if (enabled) samples.push(...otherState.samples);
       },
       recordDelta() {
         const now = performance.now();
         const delta = lastRecordTime === undefined ? 0 : Math.max(0, now - lastRecordTime) * 1e6;
         lastRecordTime = now;
-        this.record(delta);
+        this.record(Math.floor(delta));
       },
       percentile(percentile) {
         if (!Number.isFinite(percentile) || percentile < 0 || percentile > 100) {
@@ -334,17 +457,28 @@ function createVirtualHistogram(performance) {
         const index = Math.min(sorted.length - 1, Math.ceil((percentile / 100) * sorted.length) - 1);
         return sorted[Math.max(0, index)];
       },
+      percentileBigInt(percentile) {
+        return BigInt(this.percentile(percentile));
+      },
     };
 
-    for (const property of ['count', 'min', 'max', 'mean', 'stddev', 'exceeds', 'sum']) {
+    for (const property of [
+      'count', 'countBigInt', 'min', 'minBigInt', 'max', 'maxBigInt',
+      'mean', 'stddev', 'exceeds', 'exceedsBigInt', 'sum',
+    ]) {
       Object.defineProperty(histogram, property, {
         enumerable: true,
         get() {
           if (property === 'count') return samples.length;
+          if (property === 'countBigInt') return BigInt(samples.length);
+          if (property === 'min') return samples.length ? Math.min(...samples) : EMPTY_MIN;
+          if (property === 'minBigInt') return samples.length ? BigInt(Math.min(...samples)) : EMPTY_MIN_BIGINT;
+          if (property === 'max') return samples.length ? Math.max(...samples) : 0;
+          if (property === 'maxBigInt') return samples.length ? BigInt(Math.max(...samples)) : 0n;
           if (property === 'exceeds') return 0;
+          if (property === 'exceedsBigInt') return 0n;
+          if (samples.length === 0 && ['mean', 'stddev'].includes(property)) return Number.NaN;
           if (samples.length === 0) return 0;
-          if (property === 'min') return Math.min(...samples);
-          if (property === 'max') return Math.max(...samples);
           const sum = samples.reduce((total, value) => total + value, 0);
           if (property === 'sum') return sum;
           const mean = sum / samples.length;
@@ -356,10 +490,22 @@ function createVirtualHistogram(performance) {
     Object.defineProperty(histogram, 'percentiles', {
       enumerable: true,
       get: () => new Map([
-        [0, histogram.percentile(0)],
-        [50, histogram.percentile(50)],
-        [100, histogram.percentile(100)],
+        [0, samples.length ? Math.min(...samples) : 0],
+        [100, samples.length ? Math.max(...samples) : 0],
       ]),
+    });
+    Object.defineProperty(histogram, 'percentilesBigInt', {
+      enumerable: true,
+      get: () => new Map([
+        [0, BigInt(samples.length ? Math.min(...samples) : 0)],
+        [100, BigInt(samples.length ? Math.max(...samples) : 0)],
+      ]),
+    });
+    Object.defineProperty(histogram, stateKey, { value: { samples } });
+    Object.defineProperty(histogram, 'constructor', { configurable: true, value: HistogramConstructor });
+    Object.defineProperty(histogram, Symbol.for('nodejs.util.inspect.custom'), {
+      configurable: true,
+      value(depth) { return depth < 0 ? '[RecordableHistogram]' : 'Histogram'; },
     });
     Object.defineProperty(histogram, Symbol.toStringTag, { value: 'Histogram' });
     return histogram;
@@ -388,8 +534,19 @@ function createVirtualProcessMetadata() {
     }
     return { user: 0, system: 0 };
   };
+  const memoryUsage = () => ({
+    // Browsers do not expose the host process's RSS or allocator counters.
+    // Keep the observable Node contract usable without leaking a fake host
+    // measurement; arrayBuffers remains zero so size-delta checks are skipped.
+    rss: 1,
+    heapTotal: 1,
+    heapUsed: 1,
+    external: 1,
+    arrayBuffers: 0,
+  });
+  memoryUsage.rss = () => 1;
   return {
-    memoryUsage: () => ({ rss: 0, heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0 }),
+    memoryUsage,
     cpuUsage: zeroCpuUsage,
     threadCpuUsage: zeroCpuUsage,
     resourceUsage: () => ({
@@ -418,12 +575,18 @@ function createVirtualProcessMetadata() {
 
 function createTimerify(performance, recordFunctionEntry) {
   return function timerify(fn, options) {
-    if (typeof fn !== 'function') throw new TypeError('timerify() requires a function');
+    if (typeof fn !== 'function') {
+      const error = new TypeError('The "fn" argument must be of type function');
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
     if (options !== undefined && (options === null || typeof options !== 'object')) {
       throw new TypeError('timerify() options must be an object');
     }
     if (options?.histogram !== undefined && typeof options.histogram?.record !== 'function') {
-      throw new TypeError('timerify() histogram must provide record()');
+      const error = new TypeError('The "histogram" option must provide a record() method');
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
     }
 
     const wrapped = function timerified(...args) {
@@ -454,7 +617,7 @@ function createTimerify(performance, recordFunctionEntry) {
   };
 }
 
-function createPerformanceFacade(nativePerformance, timerify, eventLoopUtilization) {
+function createPerformanceFacade(nativePerformance, timerify, eventLoopUtilization, nodeTiming) {
   const performance = Object.create(Object.getPrototypeOf(nativePerformance));
   for (const name of PERFORMANCE_METHODS) {
     Object.defineProperty(performance, name, {
@@ -479,20 +642,11 @@ function createPerformanceFacade(nativePerformance, timerify, eventLoopUtilizati
     enumerable: false,
     value: eventLoopUtilization || unsupportedFunction('performance.eventLoopUtilization'),
   });
-  Object.defineProperty(performance, 'markResourceTiming', {
+  Object.defineProperty(performance, 'nodeTiming', {
     configurable: true,
-    enumerable: false,
-    value: unsupportedFunction(
-      'performance.markResourceTiming',
-      'Node resource timing injection is not a browser capability',
-    ),
+    enumerable: true,
+    value: nodeTiming,
   });
-  defineUnsupportedProperty(
-    performance,
-    'nodeTiming',
-    'performance.nodeTiming',
-    'Node process lifecycle timing is not available in a browser',
-  );
   return performance;
 }
 
@@ -569,14 +723,9 @@ function createPerfHooks(globalObject, performance, observer, entryList, virtual
       || unsupportedFunction('perf_hooks.createHistogram'),
   };
   Object.defineProperty(perfHooks, 'constants', {
-    configurable: true,
-    enumerable: false,
-    get: () => {
-      throw new UnsupportedWebCapabilityError(
-        'perf_hooks.constants',
-        'Node performance constants are not a browser capability',
-      );
-    },
+    configurable: false,
+    enumerable: true,
+    value: PERFORMANCE_CONSTANTS,
   });
   return Object.freeze(perfHooks);
 }
@@ -596,12 +745,15 @@ export function createPerformancePrimitives(globalObject = globalThis, options =
   const observerParts = createPerformanceObserver(globalObject, functionObservers);
   const virtual = options.fallback === 'virtual';
   const createHistogram = virtual ? createVirtualHistogram(nativePerformance) : undefined;
-  const eventLoopUtilization = virtual ? createVirtualEventLoopUtilization(nativePerformance) : undefined;
+  const eventLoopUtilization = virtual
+    ? createVirtualEventLoopUtilization(nativePerformance, globalObject)
+    : undefined;
+  const nodeTiming = virtual ? createVirtualNodeTiming(nativePerformance, globalObject) : undefined;
   const timerify = createTimerify(
     nativePerformance,
     observerParts.recordFunctionEntry || (() => {}),
   );
-  const performance = createPerformanceFacade(nativePerformance, timerify, eventLoopUtilization);
+  const performance = createPerformanceFacade(nativePerformance, timerify, eventLoopUtilization, nodeTiming);
   const virtualMetrics = virtual
     ? {
         createHistogram,

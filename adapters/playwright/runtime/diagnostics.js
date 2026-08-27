@@ -21,7 +21,8 @@ export function createDiagnosticsChannel(name) {
       return listeners.delete(listener);
     },
     publish(message) {
-      for (const listener of [...listeners]) listener(message);
+      const snapshot = [...listeners];
+      for (let index = 0; index < snapshot.length; index += 1) snapshot[index](message);
     },
     clear() {
       listeners.clear();

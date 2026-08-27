@@ -2,6 +2,8 @@ import { EventEmitter } from './events.js';
 import { Writable, ensureOutputStream } from './streams.js';
 import { adaptMessagePort, adaptWorker, createIpcError, createMessageChannel, createScopedIpcEndpoint, createWorkerFactory } from './messaging.js';
 import { createProcessWorkerSource } from './process-worker.js';
+import { browserCryptoVersion } from './crypto.js';
+import { installWarningContract } from './warnings.js';
 
 export { PROCESS_WORKER_SOURCE } from './process-worker.js';
 
@@ -9,6 +11,31 @@ const SIGNALS = Object.freeze(new Set(['SIGTERM', 'SIGINT', 'SIGKILL']));
 const STATES = Object.freeze(['created', 'starting', 'running', 'stopping', 'exited', 'failed']);
 let nextProcessId = 1000;
 let nextRunId = 1;
+const sharedFileBuffers = new WeakMap();
+
+function shareFileBytes(bytes, scope) {
+  if (!(bytes instanceof Uint8Array)) return bytes;
+  if (bytes.buffer instanceof scope.SharedArrayBuffer) return bytes;
+  let shared = sharedFileBuffers.get(bytes);
+  if (!shared) {
+    shared = new scope.SharedArrayBuffer(bytes.byteLength);
+    new Uint8Array(shared).set(bytes);
+    sharedFileBuffers.set(bytes, shared);
+  }
+  return new Uint8Array(shared);
+}
+
+function prepareWorkerVfs(vfs, scope) {
+  if (!vfs?.files || scope.crossOriginIsolated !== true
+    || typeof scope.SharedArrayBuffer !== 'function') return vfs;
+  const files = Object.fromEntries(
+    Object.entries(vfs.files).map(([path, bytes]) => [path, shareFileBytes(bytes, scope)]),
+  );
+  const artifacts = Array.isArray(vfs.artifacts)
+    ? vfs.artifacts.map((artifact) => ({ ...artifact, bytes: shareFileBytes(artifact.bytes, scope) }))
+    : vfs.artifacts;
+  return { ...vfs, files, artifacts };
+}
 
 function format(...values) {
   if (!values.length) return '';
@@ -61,6 +88,13 @@ const PROCESS_CONFIG = Object.freeze({
 
 const PROCESS_FEATURES = Object.freeze({ inspector: false, debug: false });
 
+function processVersions(scope = globalThis) {
+  const versions = { node: '22.0.0', v8: '12.0.0' };
+  const openssl = browserCryptoVersion(scope);
+  if (openssl) versions.openssl = openssl;
+  return versions;
+}
+
 function credentialError(kind, value) {
   const error = new Error(`${kind} identifier does not exist: ${value}`);
   error.code = 'ERR_UNKNOWN_CREDENTIAL';
@@ -87,7 +121,7 @@ function normalizeCredential(value, kind) {
 }
 
 /** Add browser-local process capabilities to an injected worker process. */
-export function installProcessContract(process, { uid = 1000, gid = 1000, umask = 0o022 } = {}) {
+export function installProcessContract(process, { uid = 1000, gid = 1000, umask = 0o022, scope = globalThis } = {}) {
   let currentUid = uid;
   let currentGid = gid;
   let currentUmask = umask & 0o777;
@@ -95,7 +129,8 @@ export function installProcessContract(process, { uid = 1000, gid = 1000, umask 
   process.features ||= PROCESS_FEATURES;
   process.execPath ||= '/browser/node';
   process.argv0 ||= 'node';
-  process.versions ||= { node: '22.0.0', v8: '12.0.0' };
+  process.versions ||= processVersions(scope);
+  if (browserCryptoVersion(scope)) process.versions.openssl ||= browserCryptoVersion(scope);
   process.umask ||= (mask) => {
     const previous = currentUmask;
     if (mask === undefined) return previous;
@@ -221,7 +256,7 @@ function createTerminalRecord(identity, state, frame) {
 }
 
 /** Create the compatibility process object used inside a browser realm. */
-export function createProcess({ argv, env, cwd, output = {}, platform = 'linux', arch = 'x64', exit, pid = 1, ppid = 0, ipc, signalGrants } = {}) {
+export function createProcess({ argv, env, cwd, execArgv, output = {}, platform = 'linux', arch = 'x64', exit, pid = 1, ppid = 0, ipc, signalGrants, scope = globalThis } = {}) {
   let logicalCwd = String(cwd || '/node');
   let exitCode = 0;
   let exited = false;
@@ -229,17 +264,18 @@ export function createProcess({ argv, env, cwd, output = {}, platform = 'linux',
   const grants = new Set(signalGrants || SIGNALS);
   const process = new EventEmitter();
   process.version = 'v22.0.0-browser';
-  process.versions = { node: '22.0.0', v8: '12.0.0' };
+  process.versions = processVersions(scope);
   process.platform = platform;
   process.arch = arch;
   process.pid = pid;
   process.ppid = ppid;
   process.argv = [...(argv || ['node'])].map(String);
-  process.execArgv = [];
+  process.execArgv = [...(execArgv || [])].map(String);
   process.env = stringEnvironment(env);
   process.exitCode = 0;
   process.title = 'node';
   process.connected = Boolean(ipc);
+  if (ipc) process.channel = ipc;
   process.state = 'running';
   process.cwd = () => logicalCwd;
   process.chdir = (value) => { logicalCwd = String(value); };
@@ -270,6 +306,12 @@ export function createProcess({ argv, env, cwd, output = {}, platform = 'linux',
   };
   process.send = (...args) => {
     if (!ipc) throw errorWithCode('ERR_IPC_CLOSED', 'IPC channel is closed');
+    if (typeof ipc.sendWithHandle === 'function') {
+      const [value, sendHandle, sendOptions, callback] = args;
+      if (typeof sendHandle === 'function') return ipc.sendWithHandle(value, undefined, undefined, sendHandle);
+      if (typeof sendOptions === 'function') return ipc.sendWithHandle(value, sendHandle, undefined, sendOptions);
+      return ipc.sendWithHandle(value, sendHandle, undefined, callback);
+    }
     return ipc.send(...args);
   };
   process.disconnect = () => {
@@ -286,10 +328,16 @@ export function createProcess({ argv, env, cwd, output = {}, platform = 'linux',
   process._exitRequested = () => exitRequested;
   process._markExited = () => { if (!exited) process.exit(exitCode); };
   process.stdin = new EventEmitter();
+  process.stdin.end = function end(_chunk, _encoding, callback) {
+    if (typeof _encoding === 'function') callback = _encoding;
+    callback?.();
+    return this;
+  };
   process.stdin.isTTY = false;
   process.stdout.isTTY = false;
   process.stderr.isTTY = false;
-  installProcessContract(process);
+  installProcessContract(process, { scope });
+  installWarningContract(process);
   return process;
 }
 
@@ -342,6 +390,7 @@ export function createBrowserProcess(options = {}) {
   const child = {
     on(name, listener) { events.on(name, listener); return child; },
     once(name, listener) { events.once(name, listener); return child; },
+    emit(name, ...args) { return events.emit(name, ...args); },
     off(name, listener) { events.off(name, listener); return child; },
     removeListener(name, listener) { events.off(name, listener); return child; },
     removeAllListeners(name) { events.removeAllListeners(name); return child; },
@@ -418,7 +467,8 @@ export function createBrowserProcess(options = {}) {
     // That is an intentional lifecycle result, not a failed browser bootstrap.
     // Resolving this path also keeps the expected primary-exit cleanup from
     // surfacing an unhandled startup rejection in the outer test process.
-    if (!spawned && !frame.forced) completionReject(error || errorWithCode('ERR_PROCESS_STARTUP', 'worker failed during startup'));
+    const startupFailure = !spawned && (!frame.forced || frame.kind === 'timeout');
+    if (startupFailure) completionReject(error || errorWithCode('ERR_PROCESS_STARTUP', 'worker failed during startup'));
     if (error && !frame.forced) events.emit('error', error);
     events.emit('terminal', terminalRecord);
     events.emit('exit', terminalRecord.code, terminalRecord.signal, terminalRecord);
@@ -473,9 +523,24 @@ export function createBrowserProcess(options = {}) {
     worker.on('message', onControlFrame);
     worker.on('error', (error) => finalize({ status: 'failed', kind: 'worker-error', code: null, signal: null, forced: false, error: { name: error?.name, message: error?.message || String(error), stack: error?.stack, code: error?.code || 'ERR_WORKER_EXCEPTION' } }));
     worker.on('messageerror', () => finalize({ status: 'failed', kind: 'serialization', code: null, signal: null, forced: false, error: { name: 'MessageError', message: 'worker message could not be deserialized', code: 'ERR_IPC_SERIALIZATION' } }));
-    const initialData = { type: 'bnh-process-init', key, runId, childId, identity, runSource: makeRunSource(options), controlPort: controlChannel.raw.port2, userPort: userChannel.raw.port2 };
-    if (options.vfs !== undefined) initialData.vfs = options.vfs;
-    worker.postMessage(initialData, [controlChannel.raw.port2, userChannel.raw.port2]);
+    const initialData = {
+      type: 'bnh-process-init',
+      key,
+      runId,
+      childId,
+      identity,
+      execArgv: Array.isArray(options.execArgv) ? options.execArgv.map(String) : [],
+      runSource: makeRunSource(options),
+      controlPort: controlChannel.raw.port2,
+      userPort: userChannel.raw.port2,
+    };
+    if (options.vfs !== undefined) initialData.vfs = prepareWorkerVfs(options.vfs, scope);
+    const transferList = [
+      controlChannel.raw.port2,
+      userChannel.raw.port2,
+      ...(options.workerDataTransferList || []),
+    ];
+    worker.postMessage(initialData, transferList);
     const timeout = options.startupTimeout ?? options.timeout;
     if (timeout !== undefined) startupTimer = setTimeout(() => { worker?.terminate?.(); finalize({ status: 'failed', kind: 'timeout', code: null, signal: 'SIGKILL', forced: true, error: { name: 'TimeoutError', message: 'worker startup timed out', code: 'ERR_PROCESS_TIMEOUT' } }); }, timeout);
     if (options.signal?.addEventListener) {

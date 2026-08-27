@@ -4,7 +4,10 @@ export function toUint8Array(value, TextEncoderClass = globalThis.TextEncoder) {
   if (ArrayBuffer.isView(value)) {
     return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
   }
-  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (value !== null && typeof value === 'object'
+    && ['[object ArrayBuffer]', '[object SharedArrayBuffer]'].includes(Object.prototype.toString.call(value))) {
+    return new Uint8Array(value);
+  }
   throw new TypeError('expected a string, ArrayBuffer, or typed-array view');
 }
 
@@ -19,5 +22,17 @@ export function hex(value) {
 export function assertByteLength(value, label) {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new RangeError(`${label} must be a non-negative safe integer`);
+  }
+}
+
+export function allocateBytes(length, label = 'length') {
+  assertByteLength(length, label);
+  try {
+    return new Uint8Array(length);
+  } catch (error) {
+    const allocationError = new RangeError('Array buffer allocation failed');
+    allocationError.code = 'ERR_ARRAY_BUFFER_ALLOCATION_FAILED';
+    allocationError.cause = error;
+    throw allocationError;
   }
 }

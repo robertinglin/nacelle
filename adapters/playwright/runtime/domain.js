@@ -199,7 +199,7 @@ export function createDomainModule(processObject) {
         value: this,
         writable: true,
       });
-      er.domainThrown = true;
+      if (er.domainEmitter === undefined) er.domainThrown = true;
     }
     while (active === this) {
       this.exit();

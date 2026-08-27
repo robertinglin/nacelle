@@ -119,7 +119,6 @@ function createNodeUrlSearchParams(scope) {
     'searchParams',
   )?.get;
   const nativeByWrapper = new WeakMap();
-  const wrapperByUrl = new WeakMap();
 
   class NodeURLSearchParams {
     constructor(init) {
@@ -237,10 +236,13 @@ function createNodeUrlSearchParams(scope) {
     get searchParams() {
       if (typeof nativeSearchParamsGetter !== 'function') return new NodeURLSearchParams();
       const native = nativeSearchParamsGetter.call(this);
-      const existing = wrapperByUrl.get(this);
+      const existing = this.__bnhSearchParamsWrapper;
       if (existing?.native === native) return existing.wrapper;
       const wrapper = wrapNative(native);
-      wrapperByUrl.set(this, { native, wrapper });
+      Object.defineProperty(this, '__bnhSearchParamsWrapper', {
+        configurable: true,
+        value: { native, wrapper },
+      });
       return wrapper;
     }
   }

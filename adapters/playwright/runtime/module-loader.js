@@ -1,7 +1,6 @@
 import { posix } from './path.js';
 import { fileURLToPath } from './vfs.js';
 import { unsupportedNativeAddon } from './errors.js';
-import { isWasmModuleBytes, loadWasmAddon } from './addon-napi.js';
 
 const RESERVED_EXPORT_NAMES = new Set([
   'await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default',
@@ -11,6 +10,8 @@ const RESERVED_EXPORT_NAMES = new Set([
 ]);
 
 const NATIVE_ADDON_EXTENSION = '.node';
+const SYNC_HOOKS_WRAPPED = Symbol('bnhSyncHooksWrapped');
+const REGISTERED_HOOKS = Symbol('bnhRegisteredHooks');
 let nextLoaderId = 0;
 
 function normalize(value) {
@@ -21,18 +22,108 @@ function isValidExportName(value) {
   return /^[$A-Z_a-z][$\w]*$/.test(value) && !RESERVED_EXPORT_NAMES.has(value);
 }
 
-function quote(value) {
-  return JSON.stringify(value);
+function hasEsmSyntax(source) {
+  return /(?:^|[;\n])\s*export\s+(?:default\b|(?:const|let|var|function|class)\b|[*{])/.test(source);
 }
 
 function decodeStaticString(value) {
-  return value.replace(/\\([\\'"`])/g, '$1');
+  return value
+    .replace(/\\u\{([0-9a-f]+)\}/gi, (_, codePoint) => String.fromCodePoint(parseInt(codePoint, 16)))
+    .replace(/\\u([0-9a-f]{4})/gi, (_, codePoint) => String.fromCharCode(parseInt(codePoint, 16)))
+    .replace(/\\x([0-9a-f]{2})/gi, (_, codePoint) => String.fromCharCode(parseInt(codePoint, 16)))
+    .replace(/\\([\\'"`])/g, '$1');
 }
 
-function packageError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
+function isWellFormedString(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xDC00 || next > 0xDFFF || Number.isNaN(next)) return false;
+      index += 1;
+    } else if (code >= 0xDC00 && code <= 0xDFFF) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function cjsExportMetadata(source) {
+  const names = [];
+  const reexports = [];
+  const addName = (name) => {
+    if (typeof name === 'string' && isWellFormedString(name) && !names.includes(name)) names.push(name);
+  };
+  const addReexport = (specifier) => {
+    if (typeof specifier === 'string' && !reexports.includes(specifier)) reexports.push(specifier);
+  };
+
+  if (hasEsmSyntax(source)) return { names, reexports, esmSyntax: true };
+
+  const propertyPattern = /\b(?:exports|module\.exports)\s*\.\s*([$_\p{ID_Start}][$_\p{ID_Continue}]*)/gu;
+  for (const match of source.matchAll(propertyPattern)) addName(match[1]);
+  const bracketPattern = /\b(?:exports|module\.exports)\s*\[\s*(['"])(.*?)\1\s*\]/gs;
+  for (const match of source.matchAll(bracketPattern)) addName(decodeStaticString(match[2]));
+  const definePropertyPattern = /Object\.defineProperty\(\s*exports\s*,\s*(['"])(.*?)\1/g;
+  for (const match of source.matchAll(definePropertyPattern)) addName(decodeStaticString(match[2]));
+
+  const objectAssignment = /\bmodule\.exports\s*=\s*\{([\s\S]*?)\}/g;
+  for (const match of source.matchAll(objectAssignment)) {
+    const propertyPattern = /(?:^|,)\s*(?:(['"])(.*?)\1|([$_\p{ID_Start}][$_\p{ID_Continue}]*)|([$_\p{ID_Start}][$_\p{ID_Continue}]*)\s*:)/gu;
+    for (const property of match[1].matchAll(propertyPattern)) {
+      addName(property[2] === undefined ? property[3] || property[4] : decodeStaticString(property[2]));
+    }
+  }
+
+  const moduleAssignmentPattern = /\bmodule\.exports\s*=\s*require\(\s*(['"])(.*?)\1\s*\)/g;
+  for (const match of source.matchAll(moduleAssignmentPattern)) addReexport(match[2]);
+  const requiredBindings = new Map();
+  const requirePattern = /\b(?:var|let|const)\s+([$_\p{ID_Start}][$_\p{ID_Continue}]*)\s*=\s*require\(\s*(['"])(.*?)\2\s*\)/gu;
+  for (const match of source.matchAll(requirePattern)) requiredBindings.set(match[1], match[3]);
+  const objectKeysPattern = /Object\.keys\(\s*([$_\p{ID_Start}][$_\p{ID_Continue}]*)\s*\)/gu;
+  for (const match of source.matchAll(objectKeysPattern)) addReexport(requiredBindings.get(match[1]));
+  return { names, reexports, esmSyntax: false };
+}
+
+function synchronousEsmSource(source) {
+  let transformed = String(source);
+  transformed = transformed.replace(
+    /(^|[;\n])\s*export\s+(const|let|var)\s+([$_\p{ID_Start}][$_\p{ID_Continue}]*)\s*=\s*([^;\n]+);?/gu,
+    (_, prefix, declaration, name, value) => `${prefix}${declaration} ${name} = ${value};\nexports[${quote(name)}] = ${name};`,
+  );
+  return transformed;
+}
+
+function wrapSynchronousLoadHook(moduleApi) {
+  if (!moduleApi || typeof moduleApi.registerHooks !== 'function') return [];
+  if (moduleApi[SYNC_HOOKS_WRAPPED]) return moduleApi[REGISTERED_HOOKS] || [];
+  const registerHooks = moduleApi.registerHooks;
+  const hooksRegistry = [];
+  const normalizeResult = (result) => {
+    if (!result || typeof result !== 'object' || result.source === undefined) return result;
+    const source = typeof result.source === 'string' ? result.source : new TextDecoder().decode(result.source);
+    if (!hasEsmSyntax(source)) return result;
+    return { ...result, source: synchronousEsmSource(source) };
+  };
+  const wrapped = (hooks = {}) => {
+    hooksRegistry.push(hooks);
+    return registerHooks({
+      ...hooks,
+    load: typeof hooks.load === 'function'
+      ? (url, context, nextLoad) => normalizeResult(hooks.load(url, context, (nextURL, nextContext) => (
+        normalizeResult(nextLoad(nextURL, nextContext))
+      )))
+      : hooks.load,
+    });
+  };
+  Object.defineProperty(moduleApi, 'registerHooks', { configurable: true, value: wrapped });
+  Object.defineProperty(moduleApi, SYNC_HOOKS_WRAPPED, { configurable: true, value: true });
+  Object.defineProperty(moduleApi, REGISTERED_HOOKS, { configurable: true, value: hooksRegistry });
+  return hooksRegistry;
+}
+
+function quote(value) {
+  return JSON.stringify(value);
 }
 
 function isPathSpecifier(value) {
@@ -135,17 +226,28 @@ export function createModuleLoader({
   builtins,
   globalObject = globalThis,
   evaluateCommonJS,
+  runModuleHook: sharedRunModuleHook,
+  defaultModuleType = 'commonjs',
 } = {}) {
+  const registeredHooks = sharedRunModuleHook ? [] : wrapSynchronousLoadHook(builtins?.module);
   const cache = new Map();
   const moduleURLs = new Map();
   const importCache = new Map();
+  const nativeSpecifierHints = new Map();
   let mainModule = null;
   let moduleSequence = 0;
   const registryName = `__bnhEsmRegistry_${Date.now()}_${nextLoaderId++}_${moduleSequence++}`;
   const registry = Object.create(null);
   globalObject[registryName] = registry;
 
-  const hasFile = (path) => (typeof files?.has === 'function' ? files.has(path) : Object.hasOwn(files || {}, path));
+  const hasFile = (path) => {
+    // A package pattern keeps repeated separators in its substituted target.
+    // The VFS intentionally normalizes ordinary filesystem paths, so guard
+    // this resolver boundary before delegating to it; otherwise a missing
+    // `sub//internal/test` target aliases an existing `sub/internal/test.js`.
+    if (typeof path === 'string' && path.startsWith('/') && path.includes('//')) return false;
+    return typeof files?.has === 'function' ? files.has(path) : Object.hasOwn(files || {}, path);
+  };
   const readFile = (path) => (typeof files?.get === 'function' ? files.get(path) : files[path]);
   const hasBuiltin = (name) => Object.prototype.hasOwnProperty.call(builtins || {}, name)
     || Object.prototype.hasOwnProperty.call(builtins || {}, `node:${name}`);
@@ -157,17 +259,116 @@ export function createModuleLoader({
     if (!hasBuiltin(name)) return undefined;
     return builtins[name] ?? builtins[`node:${name}`];
   };
+  const isBuiltinSpecifier = (specifier) => hasBuiltin(builtinName(specifier));
+
+  const fileURL = (path) => `file://${path}`;
+  const hookContext = (specifier, importer) => ({
+    conditions: ['node', 'import'],
+    importAttributes: {},
+    parentURL: importer.startsWith('data:') ? importer : fileURL(importer),
+    source: specifier,
+  });
+
+  const defaultResolve = (specifier, importer, conditions = ['node', 'import']) => {
+    const resolved = resolve(specifier, importer, conditions);
+    return {
+      url: isBuiltinSpecifier(resolved) || resolved.startsWith('node:')
+        ? `node:${builtinName(resolved)}`
+        : resolved.startsWith('data:') ? resolved : fileURL(resolved),
+      format: isBuiltinSpecifier(resolved)
+        ? 'builtin'
+        : resolved.endsWith('.json') ? 'json' : moduleFormat(resolved),
+    };
+  };
+
+  const runResolveHooks = (specifier, importer) => {
+    const context = hookContext(specifier, importer);
+    const fallback = (nextSpecifier, nextContext) => defaultResolve(
+      nextSpecifier,
+      nextContext?.parentURL?.startsWith('file:')
+        ? fileURLToPath(nextContext.parentURL)
+        : importer,
+      nextContext?.conditions || ['node', 'import'],
+    );
+    if (sharedRunModuleHook) return sharedRunModuleHook('resolve', specifier, context, fallback);
+    let next = (nextSpecifier, nextContext) => defaultResolve(
+      nextSpecifier,
+      nextContext?.parentURL?.startsWith('file:')
+        ? fileURLToPath(nextContext.parentURL)
+        : importer,
+      nextContext?.conditions || ['node', 'import'],
+    );
+    for (let index = registeredHooks.length - 1; index >= 0; index -= 1) {
+      const hook = registeredHooks[index]?.resolve;
+      if (typeof hook !== 'function') continue;
+      const previous = next;
+      next = (nextSpecifier, nextContext) => hook(nextSpecifier, nextContext, previous);
+    }
+    const result = next(specifier, context);
+    if (!result || typeof result !== 'object' || typeof result.url !== 'string') {
+      throw new TypeError('module resolve hook must return an object with a string url');
+    }
+    return result;
+  };
+
+  const defaultLoad = (url) => {
+    if (url.startsWith('node:')) return { format: 'builtin', source: null };
+    if (url.startsWith('data:')) return { format: 'module', source: null };
+    const resolved = url.startsWith('file:') ? fileURLToPath(url) : url;
+    if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) unsupportedNativeAddon(resolved);
+    const value = read(resolved, resolved).value;
+    return {
+      format: resolved.endsWith('.json') ? 'json' : moduleFormat(resolved),
+      source: value,
+    };
+  };
+
+  const runLoadHooks = (resolved, format) => {
+    const url = format === 'builtin'
+      ? `node:${builtinName(resolved)}`
+      : resolved.startsWith('custom-') ? resolved
+      : resolved.startsWith('data:') ? resolved : fileURL(resolved);
+    const context = {
+      format,
+      conditions: ['node', 'import'],
+      importAttributes: {},
+      parentURL: fileURL(resolved),
+    };
+    if (sharedRunModuleHook) {
+      const result = sharedRunModuleHook('load', url, context, (nextURL) => defaultLoad(nextURL));
+      if (!result || typeof result !== 'object') throw new TypeError('module load hook must return an object');
+      return { ...result, url: result.url || url };
+    }
+    let next = (nextURL) => defaultLoad(nextURL);
+    for (let index = registeredHooks.length - 1; index >= 0; index -= 1) {
+      const hook = registeredHooks[index]?.load;
+      if (typeof hook !== 'function') continue;
+      const previous = next;
+      next = (nextURL, nextContext) => hook(nextURL, nextContext, previous);
+    }
+    const result = next(url, context);
+    if (!result || typeof result !== 'object') throw new TypeError('module load hook must return an object');
+    if (result.source === undefined && result.format !== 'builtin' && !result.shortCircuit) {
+      return { ...defaultLoad(result.url || url), ...result };
+    }
+    return { ...result, url: result.url || url };
+  };
+
+  const hookURLToSpecifier = (url) => {
+    if (url.startsWith('file:')) return fileURLToPath(url);
+    if (url.startsWith('node:')) return url;
+    return url;
+  };
 
   const sourceText = (value) => typeof value === 'string'
     ? value
     : new TextDecoder().decode(value);
 
-  const packageEntry = (base) => {
+  const packageConfig = (base) => {
     const packagePath = posix.join(base, 'package.json');
     if (!hasFile(packagePath)) return undefined;
-    let packageConfig;
     try {
-      packageConfig = JSON.parse(sourceText(readFile(packagePath)));
+      return JSON.parse(sourceText(readFile(packagePath)));
     } catch (cause) {
       const error = new Error(`Invalid package config '${packagePath}'`);
       error.code = 'ERR_INVALID_PACKAGE_CONFIG';
@@ -175,7 +376,36 @@ export function createModuleLoader({
       error.cause = cause;
       throw error;
     }
-    const exportsValue = packageConfig.exports;
+  };
+
+  const packageScopeType = (resolved) => {
+    let directory = posix.dirname(resolved);
+    while (true) {
+      const config = packageConfig(directory);
+      if (config !== undefined) {
+        if (config.type === 'module' || config.type === 'commonjs') return config.type;
+        return 'untyped';
+      }
+      if (directory === '/') return undefined;
+      directory = posix.dirname(directory);
+    }
+  };
+
+  const moduleFormat = (resolved) => {
+    if (resolved.endsWith('.mjs')) return 'module';
+    if (resolved.endsWith('.cjs')) return 'commonjs';
+    const type = packageScopeType(resolved);
+    if (type === 'module' || type === 'commonjs') return type;
+    if (resolved.includes('/node_modules/')) return 'commonjs';
+    if (defaultModuleType === 'module') return 'module';
+    return 'commonjs';
+  };
+
+  const packageEntry = (base) => {
+    const packagePath = posix.join(base, 'package.json');
+    if (!hasFile(packagePath)) return undefined;
+    const config = packageConfig(base);
+    const exportsValue = config.exports;
     const rootExport = typeof exportsValue === 'string'
       ? exportsValue
       : exportsValue && typeof exportsValue === 'object'
@@ -183,7 +413,140 @@ export function createModuleLoader({
           ? exportsValue['.']
           : exportsValue['.']?.import || exportsValue['.']?.default || exportsValue['.']?.node)
         : undefined;
-    return typeof rootExport === 'string' ? rootExport : packageConfig.main;
+    return typeof rootExport === 'string' ? rootExport : config.main;
+  };
+
+  const packageError = (code, message) => {
+    const error = new Error(message);
+    error.code = code;
+    return error;
+  };
+
+  const PACKAGE_TARGET_BLOCKED = Symbol('package-target-blocked');
+
+  const invalidPackageTargetMessage = (kind, target) => (
+    `Invalid "${kind}" target '${target}'`
+  );
+
+  const matchingPackageEntry = (map, request) => {
+    if (Object.prototype.hasOwnProperty.call(map, request)) {
+      return { key: request, target: map[request], match: '' };
+    }
+    const candidates = Object.keys(map)
+      .filter((key) => key.includes('*'))
+      .filter((key) => {
+        const [prefix, suffix] = key.split('*');
+        return request.startsWith(prefix) && request.endsWith(suffix) && request.length >= prefix.length + suffix.length;
+      })
+      .sort((left, right) => {
+        const leftPrefix = left.slice(0, left.indexOf('*')).length;
+        const rightPrefix = right.slice(0, right.indexOf('*')).length;
+        return rightPrefix - leftPrefix || right.length - left.length;
+      });
+    if (!candidates.length) return undefined;
+    const key = candidates[0];
+    const prefixLength = key.indexOf('*');
+    const suffixLength = key.length - prefixLength - 1;
+    return {
+      key,
+      target: map[key],
+      match: request.slice(prefixLength, request.length - suffixLength || undefined),
+    };
+  };
+
+  const resolvePackageTarget = (target, packageRoot, match, conditions, kind) => {
+    if (target === null) return PACKAGE_TARGET_BLOCKED;
+    if (Array.isArray(target)) {
+      for (const candidate of target) {
+        try {
+          const resolved = resolvePackageTarget(candidate, packageRoot, match, conditions, kind);
+          if (resolved !== undefined && resolved !== PACKAGE_TARGET_BLOCKED) return resolved;
+        } catch (error) {
+          if (error.code !== 'ERR_PACKAGE_TARGET_NOT_FOUND') throw error;
+        }
+      }
+      return undefined;
+    }
+    if (target && typeof target === 'object') {
+      for (const [condition, candidate] of Object.entries(target)) {
+        if (condition !== 'default' && !conditions.includes(condition)) continue;
+        const resolved = resolvePackageTarget(candidate, packageRoot, match, conditions, kind);
+        if (resolved === PACKAGE_TARGET_BLOCKED) return PACKAGE_TARGET_BLOCKED;
+        if (resolved !== undefined) return resolved;
+      }
+      return undefined;
+    }
+    if (typeof target !== 'string') {
+      throw packageError('ERR_INVALID_PACKAGE_TARGET', `Invalid "${kind}" target in '${packageRoot}/package.json'`);
+    }
+    const substituted = target.replace(/\*/g, match);
+    if (substituted.includes('%2f') || substituted.includes('%2F')
+      || substituted.includes('%5c') || substituted.includes('%5C')) {
+      throw packageError(
+        'ERR_INVALID_MODULE_SPECIFIER',
+        `Invalid module specifier '${target}': must not include encoded "/" or "\\"`,
+      );
+    }
+    if (substituted.startsWith('./')) {
+      // Package pattern substitution preserves repeated separators. Collapsing
+      // them here can turn a missing target such as `sub//internal/test` into
+      // an existing file and incorrectly make the import succeed.
+      const resolved = substituted.slice(2).includes('//')
+        ? `${packageRoot}/${substituted.slice(2)}`
+        : posix.normalize(posix.join(packageRoot, substituted));
+      if (resolved !== packageRoot && !resolved.startsWith(`${packageRoot}/`)) {
+        if (kind === 'imports') {
+          throw packageError(
+            'ERR_INVALID_MODULE_SPECIFIER',
+            `Invalid module specifier '${target}': request is not a valid match in pattern`,
+          );
+        }
+        throw packageError('ERR_INVALID_PACKAGE_TARGET', invalidPackageTargetMessage(kind, target));
+      }
+      if (substituted.includes('/node_modules/') || substituted.startsWith('./node_modules/')) {
+        throw packageError('ERR_INVALID_PACKAGE_TARGET', invalidPackageTargetMessage(kind, target));
+      }
+      return resolved;
+    }
+    if (substituted.startsWith('.')) {
+      throw packageError('ERR_INVALID_PACKAGE_TARGET', invalidPackageTargetMessage(kind, target));
+    }
+    if (kind === 'imports' && !substituted.startsWith('#') && !substituted.includes(':')) {
+      return resolvePackage(substituted, packageRoot, conditions);
+    }
+    throw packageError('ERR_INVALID_PACKAGE_TARGET', invalidPackageTargetMessage(kind, target));
+  };
+
+  const resolvePackageImports = (specifier, importer, conditions) => {
+    if (!specifier.startsWith('#')) return undefined;
+    if (specifier === '#' || specifier.startsWith('#/')) {
+      throw packageError('ERR_INVALID_MODULE_SPECIFIER', `Invalid module '${specifier}'`);
+    }
+    let directory = posix.dirname(importer);
+    while (true) {
+      const config = packageConfig(directory);
+      if (config?.imports) {
+        const entry = matchingPackageEntry(config.imports, specifier);
+        if (!entry) break;
+        try {
+          const resolved = resolvePackageTarget(entry.target, directory, entry.match, conditions, 'imports');
+          if (resolved === PACKAGE_TARGET_BLOCKED) break;
+          if (resolved !== undefined) return resolved;
+        } catch (error) {
+          if (error.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED' || error.code === 'MODULE_NOT_FOUND') {
+            throw packageError('ERR_PACKAGE_IMPORT_NOT_DEFINED', `Package import '${specifier}' is not defined`);
+          }
+          error.message = `${error.message}; ${specifier}`;
+          throw error;
+        }
+        break;
+      }
+      if (directory === '/') break;
+      directory = posix.dirname(directory);
+    }
+    const packageResolved = resolvePackage(specifier, importer, conditions);
+    if (packageResolved !== undefined) return packageResolved;
+    throw packageError('ERR_PACKAGE_IMPORT_NOT_DEFINED', `Package import '${specifier}' is not defined`);
   };
 
   const resolveFileOrDirectory = (base) => {
@@ -197,13 +560,28 @@ export function createModuleLoader({
     return directoryCandidates(base).find((candidate) => hasFile(candidate));
   };
 
-  const resolvePackage = (specifier, importer) => {
+  const resolvePackage = (specifier, importer, conditions = ['node', 'import']) => {
     const parts = specifier.split('/');
     const packageName = specifier.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
     const subpath = parts.slice(packageName.split('/').length).join('/');
     let directory = posix.dirname(importer);
     for (;;) {
       const packageRoot = posix.join(directory, 'node_modules', packageName);
+      const config = packageConfig(packageRoot);
+      if (config?.exports !== undefined) {
+        const request = subpath ? `./${subpath}` : '.';
+        const exportsMap = typeof config.exports === 'string' || Array.isArray(config.exports)
+          ? { '.': config.exports }
+          : config.exports;
+        const entry = matchingPackageEntry(exportsMap, request);
+        if (!entry) throw packageError('ERR_PACKAGE_PATH_NOT_EXPORTED', `Package subpath '${request}' is not defined`);
+        const exported = resolvePackageTarget(entry.target, packageRoot, entry.match, conditions, 'exports');
+        if (exported === PACKAGE_TARGET_BLOCKED) {
+          throw packageError('ERR_PACKAGE_PATH_NOT_EXPORTED', `Package subpath '${request}' is not defined`);
+        }
+        if (exported !== undefined) return exported;
+        throw packageError('ERR_PACKAGE_PATH_NOT_EXPORTED', `Package subpath '${request}' is not defined`);
+      }
       const base = subpath ? posix.join(packageRoot, subpath) : packageRoot;
       const resolved = resolveFileOrDirectory(base);
       if (resolved) return resolved;
@@ -213,7 +591,24 @@ export function createModuleLoader({
     return undefined;
   };
 
-  const resolve = (specifier, importer = '/node/index.js') => {
+  const resolveInternalModule = (specifier) => {
+    if (!specifier.startsWith('internal/')) return undefined;
+    return resolveFileOrDirectory(posix.join('/node/lib', specifier));
+  };
+
+  const resolveNodeLibrary = (specifier) => {
+    const name = builtinName(specifier);
+    if (!name || name.startsWith('internal/')) return undefined;
+    return resolveFileOrDirectory(posix.join('/node/lib', name));
+  };
+
+  const isInvalidPackageSpecifier = (specifier) => {
+    if (/[\\]/.test(specifier) || /%(?:2f|5c)/i.test(specifier)) return true;
+    return specifier.startsWith('@')
+      && (!specifier.includes('/') || specifier.slice(1).includes('@'));
+  };
+
+  const resolve = (specifier, importer = '/node/index.js', conditions = ['node', 'import']) => {
     const rawValue = String(specifier);
     let value = rawValue;
     if (rawValue.startsWith('file:')) value = fileURLToPath(rawValue);
@@ -229,29 +624,34 @@ export function createModuleLoader({
     }
     const name = builtinName(value);
     if (hasBuiltin(name)) return value.startsWith('node:') ? `node:${name}` : name;
-    if (value.startsWith('node:')) return `node:${name}`;
+    if (value.startsWith('node:')) {
+      const libraryFile = resolveNodeLibrary(name);
+      if (libraryFile) return libraryFile;
+      throw packageError('ERR_UNKNOWN_BUILTIN_MODULE', `No such built-in module: ${name}`);
+    }
     if (value.startsWith('data:')) return value;
-    if (!isPathSpecifier(value)) return resolvePackage(value, importer) || value;
+    if (/^[A-Za-z][A-Za-z\d+.-]*:/.test(value)) {
+      throw packageError('ERR_UNSUPPORTED_ESM_URL_SCHEME', 'Only file, data, and node URLs are supported');
+    }
+    if (value.startsWith('#')) {
+      return resolvePackageImports(value, importer, conditions);
+    }
+    if (!isPathSpecifier(value)) {
+      if (isInvalidPackageSpecifier(value)) {
+        throw packageError('ERR_INVALID_MODULE_SPECIFIER', `Invalid module specifier '${value}'`);
+      }
+      return resolveInternalModule(value)
+        || resolveNodeLibrary(value)
+        || resolvePackage(value, importer, conditions)
+        || value;
+    }
     const base = value.startsWith('/') ? value : posix.join(posix.dirname(importer), value);
     return resolveFileOrDirectory(base) || base;
   };
 
-  // A .node file whose bytes carry the WASM magic is a wasm32 addon built by
-  // the host pipeline; it loads through the N-API layer. Any other .node file
-  // is a real native binary and keeps the unsupported-browser boundary.
-  const addonBytes = (path) => {
-    const value = readFile(path);
-    if (value instanceof Uint8Array) return value;
-    return new TextEncoder().encode(sourceText(value));
-  };
-  const isWasmAddon = (path) => isWasmModuleBytes(addonBytes(path));
-  const wasmAddonExports = (path) => loadWasmAddon(addonBytes(path), { name: path });
-
   const read = (specifier, importer) => {
     const resolved = resolve(specifier, importer);
-    if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved) && !isWasmAddon(resolved)) {
-      unsupportedNativeAddon(resolved);
-    }
+    if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) unsupportedNativeAddon(resolved);
     let value;
     try {
       value = readFile(resolved);
@@ -270,6 +670,24 @@ export function createModuleLoader({
     const token = String(moduleSequence++);
     registry[token] = factory;
     return token;
+  };
+
+  const cjsExportNames = (resolved, source, seen = new Set()) => {
+    if (seen.has(resolved)) return { names: new Set(), esmSyntax: false };
+    seen.add(resolved);
+    const metadata = cjsExportMetadata(source);
+    const names = new Set(metadata.names);
+    for (const specifier of metadata.reexports) {
+      try {
+        const child = read(specifier, resolved);
+        if (child.resolved.endsWith('.mjs') || child.resolved.endsWith('.json')) continue;
+        const childMetadata = cjsExportNames(child.resolved, sourceText(child.value), seen);
+        for (const name of childMetadata.names) names.add(name);
+      } catch {
+        // Node keeps the statically detected names when a re-export cannot be resolved.
+      }
+    }
+    return { names, esmSyntax: metadata.esmSyntax };
   };
 
   const builtinModuleSource = (resolved, value) => {
@@ -292,50 +710,94 @@ export function createModuleLoader({
     ].join('\n');
   };
 
-  const cjsModuleSource = (resolved, loadValue) => {
+  const cjsModuleSource = (resolved, source) => {
+    const analysis = cjsExportNames(resolved, source);
+    if (analysis.esmSyntax) return `throw new SyntaxError(${quote("Unexpected token 'export'")});`;
     let evaluated = false;
     let exports;
     const load = () => {
       if (!evaluated) {
-        exports = loadValue ? loadValue() : evaluateCommonJS(resolved, resolved);
+        if (resolved.startsWith('custom-')) {
+          const module = { exports: {} };
+          const require = (specifier) => evaluate(specifier, resolved);
+          const fn = new Function('exports', 'require', 'module', '__filename', '__dirname', source);
+          fn(module.exports, require, module, resolved, posix.dirname(resolved));
+          exports = module.exports;
+        } else {
+          exports = evaluateCommonJS(resolved, resolved);
+        }
         evaluated = true;
       }
       return exports;
     };
     const token = register(load);
     const access = `globalThis[${quote(registryName)}][${quote(token)}]()`;
-    const names = [];
     load();
-    if (exports && (typeof exports === 'object' || typeof exports === 'function')) {
-      names.push(...Object.keys(exports).filter(isValidExportName).filter((name) => name !== 'default'));
-    }
+    const names = [...analysis.names].filter((name) => name !== 'default');
+    const namedExports = names.map((name, index) => {
+      const local = `__bnhCjsExport${index}`;
+      return `const ${local} = moduleValue?.[${quote(name)}];\nexport { ${local} as ${quote(name)} };`;
+    });
     return [
       `const moduleValue = ${access};`,
       'export default moduleValue;',
-      ...names.map((name) => `export const ${name} = moduleValue[${quote(name)}];`),
+      ...namedExports,
     ].join('\n');
   };
 
-  function rewriteSpecifier(specifier, importer) {
+  const invalidCjsModuleURL = (specifier, exportName) => {
+    const message = `The requested module '${specifier}' does not provide an export named '${exportName}'`;
+    const source = `export default undefined;\nthrow new SyntaxError(${quote(message)});`;
+    return `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}_${moduleSequence++}`;
+  };
+
+  const cjsHasEsmSyntax = (resolved) => {
+    if (resolved.endsWith('.mjs') || resolved.endsWith('.json') || isBuiltinSpecifier(resolved)) return false;
+    try {
+      const source = sourceText(read(resolved, resolved).value);
+      return cjsExportNames(resolved, source).esmSyntax;
+    } catch {
+      return false;
+    }
+  };
+
+  const requestedExportName = (prefix) => {
+    const isImport = /^\s*import\b/.test(prefix);
+    const clause = prefix
+      .replace(/^\s*(?:import|export)\s+/, '')
+      .replace(/\s+from\s*$/, '')
+      .trim();
+    if (!clause || clause.startsWith('*')) return undefined;
+    if (clause.startsWith('{')) {
+      const first = clause.slice(1).split(',')[0].trim();
+      return first.split(/\s+as\s+/)[0].trim().replace(/^(['"])(.*?)\1$/, '$2');
+    }
+    return isImport ? 'default' : clause.split(',')[0].trim();
+  };
+
+  function rewriteSpecifier(specifier, importer, exportName) {
     specifier = decodeStaticString(specifier);
-    const resolved = resolve(specifier, importer);
-    return moduleURL(resolved);
+    const resolved = hookURLToSpecifier(runResolveHooks(specifier, importer).url);
+    if (exportName && cjsHasEsmSyntax(resolved)) return invalidCjsModuleURL(specifier, exportName);
+    const url = moduleURL(resolved);
+    nativeSpecifierHints.set(url, specifier);
+    return url;
   }
 
   function rewriteImports(source, importer) {
     let rewritten = String(source);
     rewritten = rewritten.replace(
-      /(\b(?:import|export)\s+(?:[^;\n]*?\s+from\s+))(['"])((?:\\.|[^'"])*)\2/g,
-      (match, prefix, delimiter, specifier) => `${prefix}${quote(rewriteSpecifier(specifier, importer))}`,
+      /(^|[;\n])([ \t]*(?:import|export)\s+[^;]*?\s+from\s+)(['"])((?:\\.|[^'"])*)\3/gm,
+      (match, boundary, prefix, delimiter, specifier) => `${boundary}${prefix}${quote(rewriteSpecifier(specifier, importer, requestedExportName(prefix)))}`,
     );
     rewritten = rewritten.replace(
-      /(\bimport\s*)(['"])((?:\\.|[^'"])*)\2/g,
-      (match, prefix, delimiter, specifier) => `${prefix}${quote(rewriteSpecifier(specifier, importer))}`,
+      /(^|[;\n])([ \t]*import[ \t]*)(['"])((?:\\.|[^'"])*)\3/gm,
+      (match, boundary, prefix, delimiter, specifier) => `${boundary}${prefix}${quote(rewriteSpecifier(specifier, importer))}`,
     );
-    rewritten = rewritten.replace(
-      /(\bimport\s*\(\s*)(['"])((?:\\.|[^'"])*)\2(\s*\))/g,
-      (match, prefix, delimiter, specifier, suffix) => `${prefix}${quote(rewriteSpecifier(specifier, importer))}${suffix}`,
-    );
+    if (/\bimport\s*\(/.test(rewritten)) {
+      const token = register((dynamicSpecifier, options) => importModule(dynamicSpecifier, importer, {}, options));
+      rewritten = rewritten.replace(/\bimport\s*\(/g, `globalThis[${quote(registryName)}][${quote(token)}](`);
+    }
     // Native data modules do not have a file URL. Preserve the Node-facing
     // identity used by code that builds URLs relative to import.meta.url.
     rewritten = rewritten.replace(/\bimport\.meta\.url\b/g, quote(importer.startsWith('data:') ? importer : `file://${importer}`));
@@ -354,20 +816,80 @@ export function createModuleLoader({
     return `${rewriteImports(source, value)}\n//# sourceURL=${value}`;
   };
 
+  const isWasmBytes = (value) => {
+    const bytes = value instanceof Uint8Array
+      ? value
+      : value instanceof ArrayBuffer
+        ? new Uint8Array(value)
+        : ArrayBuffer.isView(value)
+          ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+          : null;
+    return bytes && bytes.length >= 4
+      && bytes[0] === 0x00 && bytes[1] === 0x61 && bytes[2] === 0x73 && bytes[3] === 0x6d;
+  };
+
+  const wasmModuleSource = (value, resolved) => {
+    const bytes = value instanceof Uint8Array
+      ? value
+      : value instanceof ArrayBuffer
+        ? new Uint8Array(value)
+        : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    const encoded = btoa(Array.from(bytes, (byte) => String.fromCharCode(byte)).join(''));
+    const module = new WebAssembly.Module(bytes);
+    const exports = WebAssembly.Module.exports(module)
+      .map(({ name }) => name)
+      .filter((name) => /^[$A-Z_a-z][$\w]*$/.test(name));
+    const importedModules = new Map();
+    for (const { module: moduleName, name } of WebAssembly.Module.imports(module)) {
+      if (!importedModules.has(moduleName)) importedModules.set(moduleName, new Set());
+      importedModules.get(moduleName).add(name);
+    }
+    const dependencies = [...importedModules.entries()].map(([moduleName, names], index) => {
+      const dependency = resolve(moduleName, resolved, ['node', 'import']);
+      return {
+        alias: `__bnhWasmDependency${index}`,
+        moduleName,
+        names: [...names],
+        url: moduleURL(dependency),
+      };
+    });
+    const importObject = dependencies.length === 0 ? 'undefined' : `{\n${dependencies.map(({ alias, moduleName, names }) => (
+      `  ${quote(moduleName)}: { ${names.map((name) => `${quote(name)}: ${alias}[${quote(name)}]`).join(', ')} }`
+    )).join(',\n')}\n}`;
+    return [
+      ...dependencies.map(({ alias, url }) => `import * as ${alias} from ${quote(url)};`),
+      `const __bnhBytes = Uint8Array.from(atob(${quote(encoded)}), (value) => value.charCodeAt(0));`,
+      `const __bnhInstance = new WebAssembly.Instance(new WebAssembly.Module(__bnhBytes), ${importObject});`,
+      'export default __bnhInstance.exports;',
+      ...exports.map((name) => `export const ${name} = __bnhInstance.exports[${quote(name)}];`),
+      `//# sourceURL=${resolved}`,
+    ].join('\n');
+  };
+
   function moduleSource(resolved) {
     const builtinValue = builtin(resolved);
-    if (builtinValue !== undefined) return builtinModuleSource(resolved, builtinValue);
+    const format = isBuiltinSpecifier(resolved) ? 'builtin'
+      : resolved.endsWith('.json') ? 'json' : moduleFormat(resolved);
+    const loaded = runLoadHooks(resolved, format);
+    const loadedResolved = loaded.url ? hookURLToSpecifier(loaded.url) : resolved;
+    if (loaded.format === 'builtin' && isBuiltinSpecifier(loadedResolved)) {
+      return builtinModuleSource(loadedResolved, builtin(loadedResolved));
+    }
+    if (loaded.source !== undefined && loaded.source !== null) {
+      if (isWasmBytes(loaded.source)) return wasmModuleSource(loaded.source, loadedResolved);
+      const loadedText = sourceText(loaded.source);
+      if (loaded.format === 'json') return `export default ${JSON.stringify(JSON.parse(loadedText))};`;
+      if (loaded.format === 'module') return `${rewriteImports(loadedText, loadedResolved)}\n//# sourceURL=${loadedResolved}`;
+      return cjsModuleSource(loadedResolved, loadedText);
+    }
+    if (isBuiltinSpecifier(resolved)) return builtinModuleSource(resolved, builtinValue);
     if (resolved.startsWith('node:')) {
       const error = new Error(`Cannot find builtin module '${resolved}'`);
       error.code = 'MODULE_NOT_FOUND';
       throw error;
     }
     if (resolved.startsWith('data:')) return dataModuleSource(resolved);
-    if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) {
-      return isWasmAddon(resolved)
-        ? cjsModuleSource(resolved, () => wasmAddonExports(resolved))
-        : nativeAddonModuleSource(resolved);
-    }
+    if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) return nativeAddonModuleSource(resolved);
     let value;
     try {
       value = read(resolved, resolved).value;
@@ -375,10 +897,11 @@ export function createModuleLoader({
       if (error?.code === 'MODULE_NOT_FOUND') return missingModuleSource(resolved);
       throw error;
     }
+    if (isWasmBytes(value)) return wasmModuleSource(value, resolved);
     if (resolved.endsWith('.json')) {
       return `export default ${JSON.stringify(JSON.parse(sourceText(value)))};`;
     }
-    if (!resolved.endsWith('.mjs')) return cjsModuleSource(resolved);
+    if (moduleFormat(resolved) !== 'module') return cjsModuleSource(resolved, sourceText(value));
     return `${rewriteImports(sourceText(value), resolved)}\n//# sourceURL=${resolved}`;
   }
 
@@ -394,26 +917,18 @@ export function createModuleLoader({
   }
 
   const evaluate = (specifier, importer, globals) => {
-    const resolved = resolve(specifier, importer);
+    const resolved = resolve(specifier, importer, ['node', 'require']);
     const builtinValue = builtin(resolved);
-    if (builtinValue !== undefined) return builtinValue;
+    if (isBuiltinSpecifier(resolved)) return builtinValue;
     if (resolved.startsWith('node:')) {
       const error = new Error(`Cannot find builtin module '${specifier}'`);
       error.code = 'MODULE_NOT_FOUND';
       throw error;
     }
     if (resolved.startsWith('data:')) return importData(resolved);
-    if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) {
-      if (isWasmAddon(resolved)) {
-        if (cache.has(resolved)) return cache.get(resolved).exports;
-        const wasmExports = wasmAddonExports(resolved);
-        cache.set(resolved, { exports: wasmExports, id: resolved, filename: resolved, loaded: true });
-        return wasmExports;
-      }
-      unsupportedNativeAddon(resolved);
-    }
+    if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) unsupportedNativeAddon(resolved);
     if (cache.has(resolved)) return cache.get(resolved).exports;
-    if (evaluateCommonJS && !resolved.endsWith('.mjs') && !resolved.endsWith('.json')) {
+    if (evaluateCommonJS && moduleFormat(resolved) !== 'module' && !resolved.endsWith('.json')) {
       const exports = evaluateCommonJS(resolved, importer);
       cache.set(resolved, { exports, id: resolved, filename: resolved, loaded: true });
       return exports;
@@ -427,7 +942,7 @@ export function createModuleLoader({
     else {
       const dirname = posix.dirname(resolved);
       const require = (child) => evaluate(child, resolved, globals);
-      require.resolve = (child) => resolve(child, resolved);
+      require.resolve = (child) => resolve(child, resolved, ['node', 'require']);
       require.cache = cache;
       require.main = mainModule;
       module.require = require;
@@ -484,7 +999,26 @@ export function createModuleLoader({
   };
 
   const importNative = async (resolved) => {
-    if (!importCache.has(resolved)) importCache.set(resolved, import(moduleURL(resolved)));
+    if (!importCache.has(resolved)) {
+      let url;
+      try {
+        url = moduleURL(resolved);
+      } catch (error) {
+        if (error?.code === 'MODULE_NOT_FOUND') error.code = 'ERR_MODULE_NOT_FOUND';
+        throw error;
+      }
+      importCache.set(resolved, import(url).catch((error) => {
+        if (error?.code === 'MODULE_NOT_FOUND') error.code = 'ERR_MODULE_NOT_FOUND';
+        const message = String(error?.message || '');
+        const hint = [...nativeSpecifierHints.entries()].find(([internalURL]) => message.includes(internalURL));
+        if (hint) {
+          const [internalURL, originalSpecifier] = hint;
+          error.message = message.replaceAll(internalURL, originalSpecifier);
+          if (typeof error.stack === 'string') error.stack = error.stack.replaceAll(internalURL, originalSpecifier);
+        }
+        throw error;
+      }));
+    }
     return importCache.get(resolved);
   };
 
@@ -511,17 +1045,29 @@ export function createModuleLoader({
   };
 
   const importModule = async (specifier, importer, globals, options) => {
-    const resolved = resolve(specifier, importer);
+    const resolvedResult = runResolveHooks(specifier, importer);
+    const resolved = hookURLToSpecifier(resolvedResult.url);
     if (resolved.startsWith('data:')) return importData(resolved, options);
     validateImportAttributes(resolved, options);
-    if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved) && !isWasmAddon(resolved)) {
-      unsupportedNativeAddon(resolved);
+    if (resolved.startsWith('node:') && !isBuiltinSpecifier(resolved)) {
+      throw packageError('ERR_UNKNOWN_BUILTIN_MODULE', `No such built-in module: ${resolved.slice(5)}`);
     }
-    if (resolved.endsWith('.mjs') || builtin(resolved) !== undefined) return importNative(resolved);
-    const exports = evaluate(resolved, importer, globals);
+    if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) unsupportedNativeAddon(resolved);
+    if (moduleFormat(resolved) === 'module' || isBuiltinSpecifier(resolved)) return importNative(resolved);
+    let exports;
+    try {
+      exports = evaluate(resolved, importer, globals);
+    } catch (error) {
+      if (error?.code === 'ENOENT' || error?.code === 'MODULE_NOT_FOUND') {
+        const missing = new Error(`Cannot find module '${specifier}' imported from '${importer}'`);
+        missing.code = 'ERR_MODULE_NOT_FOUND';
+        throw missing;
+      }
+      throw error;
+    }
     const module = cache.get(resolved);
     if (module?.promise) await module.promise;
-    return exports;
+    return { default: exports };
   };
 
   return {

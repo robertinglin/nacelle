@@ -1,9 +1,14 @@
 import { EventEmitter } from './events.js';
 import { Duplex } from './streams.js';
 import { createBrowserNet } from './net.js';
+import { AsyncResource } from './async-hooks.js';
 import { createProxyCapability } from './proxy.js';
+import { createHmacShim, hashSync } from './crypto.js';
 
 const DEFAULT_CIPHERS = 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256';
+const DEFAULT_ROOT_CERTIFICATES = Object.freeze([
+  '-----BEGIN CERTIFICATE-----\nBROWSER-VIRTUAL-CA\n-----END CERTIFICATE-----',
+]);
 const CIPHERS = Object.freeze([
   'TLS_AES_256_GCM_SHA384',
   'TLS_CHACHA20_POLY1305_SHA256',
@@ -27,11 +32,19 @@ const constants = Object.freeze({
 });
 
 const tlsError = (code, message, details = {}) => {
-  const error = new Error(message);
+  const error = code === 'ERR_INVALID_ARG_TYPE' ? new TypeError(message) : new Error(message);
   error.code = code;
   Object.assign(error, details);
   return error;
 };
+
+function localIssuerError() {
+  return tlsError('UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'unable to get local issuer certificate');
+}
+
+function verifyLeafError() {
+  return tlsError('UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'unable to verify the first certificate');
+}
 
 function schedule(callback) {
   queueMicrotask(callback);
@@ -111,6 +124,13 @@ function normalizeAuthority(options = {}) {
   return { host, port };
 }
 
+function isVirtualInternetBackingSocket(socket) {
+  const options = socket?._connectOptions;
+  const host = String(options?.host || options?.hostname || '').toLowerCase();
+  return Boolean(options && Number(options.port) === 443
+    && host && !['localhost', '127.0.0.1', '::1'].includes(host));
+}
+
 function validateCiphers(value) {
   if (value === undefined) return;
   if (typeof value !== 'string') {
@@ -132,7 +152,7 @@ function validateCiphers(value) {
 
 function virtualCertificate(hostname) {
   const host = String(hostname || 'localhost');
-  return {
+  const certificate = {
     subject: { CN: host },
     issuer: { CN: 'Browser Virtual CA' },
     subjectaltname: isIpAddress(host) ? `IP Address:${host}` : `DNS:${host}`,
@@ -141,6 +161,46 @@ function virtualCertificate(hostname) {
     fingerprint: '00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00',
     fingerprint256: '00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00',
     serialNumber: '00',
+  };
+  return certificate;
+}
+
+function certificateCommonNames(value) {
+  if (typeof value !== 'string' || !value.includes('BEGIN CERTIFICATE')) return undefined;
+  const body = value
+    .replace(/-----BEGIN CERTIFICATE-----|-----END CERTIFICATE-----|\s+/g, '');
+  let bytes;
+  try {
+    const binary = atob(body);
+    bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  } catch {
+    return undefined;
+  }
+  const oid = [0x06, 0x03, 0x55, 0x04, 0x03];
+  const names = [];
+  for (let index = 0; index <= bytes.length - oid.length; index += 1) {
+    if (!oid.every((byte, offset) => bytes[index + offset] === byte)) continue;
+    const tag = bytes[index + oid.length];
+    const length = bytes[index + oid.length + 1];
+    if (!tag || length === undefined || (length & 0x80) || index + oid.length + 2 + length > bytes.length) continue;
+    const start = index + oid.length + 2;
+    const text = new TextDecoder().decode(bytes.subarray(start, start + length));
+    if (text) names.push(text);
+  }
+  return names;
+}
+
+function certificateCommonName(value) {
+  return certificateCommonNames(value).at(-1);
+}
+
+function certificateDetails(value, fallbackHostname) {
+  const commonName = certificateCommonName(value);
+  if (!commonName) return virtualCertificate(fallbackHostname);
+  return {
+    ...virtualCertificate(commonName),
+    subject: { CN: commonName },
+    issuer: { CN: certificateCommonNames(value)[0] || commonName },
   };
 }
 
@@ -157,7 +217,10 @@ function normalizeProxy(proxy, capability) {
 function bytesFor(value, scope) {
   if (value instanceof Uint8Array) return value;
   if (typeof value === 'string') return new (scope.TextEncoder || TextEncoder)().encode(value);
-  if (value instanceof ArrayBuffer) return new Uint8Array(value.slice(0));
+  if (value !== null && typeof value === 'object'
+    && ['[object ArrayBuffer]', '[object SharedArrayBuffer]'].includes(Object.prototype.toString.call(value))) {
+    return new Uint8Array(value.slice(0));
+  }
   if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
   throw new TypeError('TLS stream chunks must be strings or Uint8Array values');
 }
@@ -183,10 +246,233 @@ function tlsClientAuthPeerError(serverOptions, clientOptions) {
   return null;
 }
 
+const createHmac = createHmacShim(Uint8Array, null);
+const PKCS12_DIGESTS = Object.freeze({
+  '2b0e03021a': 'sha1',
+  '608648016503040201': 'sha256',
+  '608648016503040202': 'sha384',
+  '608648016503040203': 'sha512',
+  '608648016503040204': 'sha224',
+});
+
+function pfxError(message) {
+  return new Error(message);
+}
+
+function readDerElement(bytes, offset) {
+  if (offset >= bytes.length) throw pfxError('not enough data');
+  const tag = bytes[offset++];
+  if (offset >= bytes.length) throw pfxError('not enough data');
+  const lengthByte = bytes[offset++];
+  if ((lengthByte & 0x80) === 0) {
+    const end = offset + lengthByte;
+    if (end > bytes.length) throw pfxError('not enough data');
+    return { tag, contentStart: offset, end };
+  }
+  const lengthBytes = lengthByte & 0x7f;
+  if (lengthBytes === 0 || lengthBytes > 4 || offset + lengthBytes > bytes.length) {
+    throw pfxError('not enough data');
+  }
+  let length = 0;
+  for (let index = 0; index < lengthBytes; index += 1) length = length * 256 + bytes[offset++];
+  const end = offset + length;
+  if (end > bytes.length) throw pfxError('not enough data');
+  return { tag, contentStart: offset, end };
+}
+
+function readDerChildren(bytes, element) {
+  const children = [];
+  for (let offset = element.contentStart; offset < element.end;) {
+    const child = readDerElement(bytes, offset);
+    children.push(child);
+    offset = child.end;
+  }
+  return children;
+}
+
+function derContent(bytes, element) {
+  return bytes.subarray(element.contentStart, element.end);
+}
+
+function expectDer(bytes, offset, tag) {
+  const element = readDerElement(bytes, offset);
+  if (element.tag !== tag) throw pfxError('not enough data');
+  return element;
+}
+
+function derInteger(bytes, element) {
+  const value = derContent(bytes, element);
+  if (!value.length || value.length > 4) throw pfxError('not enough data');
+  let result = 0;
+  for (const byte of value) result = result * 256 + byte;
+  return result;
+}
+
+function hexBytes(value) {
+  return [...value].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function pkcs12PasswordBytes(value) {
+  const text = String(value ?? '');
+  const codeUnits = [];
+  for (const character of text) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint <= 0xffff) codeUnits.push(codePoint);
+    else {
+      const scalar = codePoint - 0x10000;
+      codeUnits.push(0xd800 + (scalar >> 10), 0xdc00 + (scalar & 0x3ff));
+    }
+  }
+  const result = new Uint8Array(codeUnits.length * 2 + 2);
+  codeUnits.forEach((codeUnit, index) => {
+    result[index * 2] = codeUnit >> 8;
+    result[index * 2 + 1] = codeUnit & 0xff;
+  });
+  return result;
+}
+
+function repeatToBlock(value, blockSize) {
+  if (value.length === 0) return new Uint8Array();
+  const result = new Uint8Array(Math.ceil(value.length / blockSize) * blockSize);
+  for (let offset = 0; offset < result.length; offset += value.length) {
+    result.set(value.subarray(0, Math.min(value.length, result.length - offset)), offset);
+  }
+  return result;
+}
+
+function concatenate(...values) {
+  const result = new Uint8Array(values.reduce((total, value) => total + value.length, 0));
+  let offset = 0;
+  for (const value of values) {
+    result.set(value, offset);
+    offset += value.length;
+  }
+  return result;
+}
+
+function pkcs12DeriveKey(password, salt, id, iterations, digestName, length) {
+  const digestSize = hashSync(digestName, new Uint8Array()).length;
+  const blockSize = digestName === 'sha512' ? 128 : 64;
+  const diversifier = new Uint8Array(blockSize).fill(id);
+  const input = concatenate(
+    repeatToBlock(salt, blockSize),
+    repeatToBlock(pkcs12PasswordBytes(password), blockSize),
+  );
+  const result = new Uint8Array(length);
+  for (let block = 0; block < Math.ceil(length / digestSize); block += 1) {
+    let value = hashSync(digestName, concatenate(diversifier, input));
+    for (let round = 1; round < iterations; round += 1) value = hashSync(digestName, value);
+    const b = new Uint8Array(blockSize);
+    for (let index = 0; index < b.length; index += 1) b[index] = value[index % value.length];
+    for (let offset = 0; offset < input.length; offset += blockSize) {
+      let carry = 1;
+      for (let index = blockSize - 1; index >= 0; index -= 1) {
+        const sum = input[offset + index] + b[index] + carry;
+        input[offset + index] = sum & 0xff;
+        carry = sum >> 8;
+      }
+    }
+    result.set(value.subarray(0, Math.min(value.length, length - block * digestSize)), block * digestSize);
+  }
+  return result;
+}
+
+function constantTimeEqual(left, right) {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) difference |= left[index] ^ right[index];
+  return difference === 0;
+}
+
+function readPfxMac(bytes) {
+  const outer = expectDer(bytes, 0, 0x30);
+  if (outer.end !== bytes.length) throw pfxError('not enough data');
+  const outerChildren = readDerChildren(bytes, outer);
+  if (outerChildren.length < 2) throw pfxError('not enough data');
+  const authSafe = outerChildren[1];
+  const authSafeChildren = readDerChildren(bytes, authSafe);
+  if (authSafeChildren.length < 2) throw pfxError('not enough data');
+  const authSafeContentWrapper = authSafeChildren[1];
+  if (authSafeContentWrapper.tag !== 0xa0) throw pfxError('not enough data');
+  const authSafeContent = expectDer(bytes, authSafeContentWrapper.contentStart, 0x04);
+  if (outerChildren.length < 3) return null;
+
+  const macData = outerChildren[2];
+  const macDataChildren = readDerChildren(bytes, macData);
+  if (macDataChildren.length < 2) throw pfxError('not enough data');
+  const digestInfo = macDataChildren[0];
+  const digestInfoChildren = readDerChildren(bytes, digestInfo);
+  if (digestInfoChildren.length < 2) throw pfxError('not enough data');
+  const digestAlgorithm = digestInfoChildren[0];
+  const digestAlgorithmChildren = readDerChildren(bytes, digestAlgorithm);
+  if (!digestAlgorithmChildren.length) throw pfxError('not enough data');
+  const digestName = PKCS12_DIGESTS[hexBytes(derContent(bytes, digestAlgorithmChildren[0]))];
+  if (!digestName) throw pfxError('unsupported PKCS#12 MAC digest');
+  const expected = derContent(bytes, digestInfoChildren[1]);
+  const salt = derContent(bytes, macDataChildren[1]);
+  const iterations = macDataChildren[2] === undefined ? 1 : derInteger(bytes, macDataChildren[2]);
+  if (!Number.isInteger(iterations) || iterations < 1) throw pfxError('not enough data');
+  return { content: derContent(bytes, authSafeContent), digestName, expected, salt, iterations };
+}
+
+/** Check the authenticated envelope; certificate/key extraction remains virtual. */
+function validatePfx(pfx, passphrase) {
+  const values = Array.isArray(pfx) ? pfx : [pfx];
+  for (const entry of values) {
+    const value = entry?.buf ?? entry;
+    const entryPassphrase = entry?.passphrase ?? passphrase;
+    let bytes;
+    if (typeof value === 'string') bytes = new TextEncoder().encode(value);
+    else if (value instanceof ArrayBuffer) bytes = new Uint8Array(value);
+    else if (ArrayBuffer.isView(value)) bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    else throw pfxError('not enough data');
+    const mac = readPfxMac(bytes);
+    if (!mac) continue;
+    const key = pkcs12DeriveKey(entryPassphrase, mac.salt, 3, mac.iterations, mac.digestName, mac.expected.length);
+    const actual = createHmac(mac.digestName, key).update(mac.content).digest();
+    if (!constantTimeEqual(actual, mac.expected)) throw pfxError('mac verify failure');
+  }
+}
+
 class SecureContext {
   constructor(options = {}) {
     if (!isRecord(options)) throw new TypeError('secure context options must be an object');
-    this.context = Object.freeze({ ...options });
+    const context = { ...options };
+    const requireReceiver = (receiver) => {
+      if (receiver !== context) throw new TypeError('Illegal invocation');
+    };
+    Object.defineProperties(context, {
+      setOptions: {
+        configurable: true,
+        value(optionsToApply = {}) {
+          requireReceiver(this);
+          if (!isRecord(optionsToApply)) throw new TypeError('secure context options must be an object');
+          Object.assign(context, optionsToApply);
+        },
+      },
+      setCiphers: {
+        configurable: true,
+        value(ciphers) {
+          requireReceiver(this);
+          validateCiphers(ciphers);
+          context.ciphers = ciphers;
+        },
+      },
+      addCACert: {
+        configurable: true,
+        value(certificate) {
+          requireReceiver(this);
+          if (typeof certificate !== 'string' && !(certificate instanceof Uint8Array)) {
+            throw new TypeError('certificate must be a string or Uint8Array');
+          }
+          const current = context.ca === undefined ? [] : [].concat(context.ca);
+          current.push(certificate);
+          context.ca = current;
+        },
+      },
+    });
+    if (context.pfx !== undefined) validatePfx(context.pfx, context.passphrase);
+    this.context = context;
     this.options = this.context;
   }
 
@@ -206,7 +492,9 @@ export class TLSSocket extends Duplex {
     this._scope = internal.scope || globalThis;
     this._BufferClass = internal.BufferClass || this._scope.Buffer;
     this._proxy = internal.proxy;
+    this._diagnostics = internal.diagnostics;
     this._socket = socket || null;
+    this._resource = internal.resource || new AsyncResource('TLSWRAP');
     this._options = { ...options };
     this._authority = normalizeAuthority(options);
     this.authorized = false;
@@ -222,6 +510,7 @@ export class TLSSocket extends Duplex {
     this._secureContext = options.secureContext || new SecureContext(options);
     this._closed = false;
     this._handshakeStarted = false;
+    this._virtualInternetBackingSocket = isVirtualInternetBackingSocket(socket);
     this._underlyingEnded = false;
     this._writable._write = (chunk, encoding, callback) => this._writeTransport(chunk, encoding, callback);
     this._writable._final = (callback) => this._endTransport(callback);
@@ -238,8 +527,29 @@ export class TLSSocket extends Duplex {
       this._underlyingEnded = true;
       this.push(null);
     });
-    socket.on?.('error', (error) => this.destroy(error));
+    socket.on?.('error', (error) => {
+      const virtualInternetBackingSocket = this._virtualInternetBackingSocket
+        || isVirtualInternetBackingSocket(socket);
+      if (virtualInternetBackingSocket && error?.code === 'ECONNREFUSED') {
+        this._socket = null;
+        this.remoteAddress = this.servername;
+        this.remotePort = this._authority.port;
+        void this._handshake();
+        return;
+      }
+      this.destroy(error);
+    });
     socket.on?.('close', () => this._emitClose());
+  }
+
+  _emitClose() {
+    if (this._closed) return;
+    this._closed = true;
+    this.connecting = false;
+    this.pending = false;
+    this.readyState = 'closed';
+    this._resource.runInAsyncScope(() => super.destroy(), this);
+    this._resource.emitDestroy();
   }
 
   _writeTransport(chunk, encoding, callback) {
@@ -292,8 +602,8 @@ export class TLSSocket extends Duplex {
         });
       }
       if (result?.peerCertificate) this._peerCertificate = result.peerCertificate;
-      else if (!this._options._isServer && serverOptions?.cert && clientOptions?.checkServerIdentity) {
-        this._peerCertificate = virtualCertificate('agent10.example.com');
+      else if (!this._options._isServer && serverOptions?.cert) {
+        this._peerCertificate = certificateDetails(serverOptions.cert, this.servername);
       }
       if (result?.alpnProtocol !== undefined) this.alpnProtocol = result.alpnProtocol;
       if (result?.protocol) this.protocol = result.protocol;
@@ -303,13 +613,41 @@ export class TLSSocket extends Duplex {
       this.authorizationError = result?.authorized === false
         ? tlsError('ERR_TLS_CERT_ALTNAME_INVALID', 'virtual peer was not authorized')
         : identityError || null;
+      if (this._options._isServer && this._options.requestCert) {
+        const clientCertificate = certificateDetails(clientOptions?.cert, '');
+        const issuers = [].concat(this._options.ca || [])
+          .map((certificate) => certificateDetails(certificate, '').subject?.CN)
+          .filter(Boolean);
+        this.authorizationError = issuers.includes(clientCertificate.issuer?.CN)
+          ? null
+          : verifyLeafError();
+      }
+      // A direct `ca` option replaces the compiled-in roots. The browser
+      // cannot perform OpenSSL validation, but it must preserve this visible
+      // distinction from a default or SecureContext-backed connection.
+      if (!this._options._isServer && this._options.secureContext
+        && !this._options.secureContext.context?.ca) {
+        this.authorizationError = verifyLeafError();
+      }
       this.authorized = result?.authorized ?? !this.authorizationError;
+      if (this._options._isServer) {
+        // A server-side TLSSocket is not an authenticated peer unless the
+        // server requested a client certificate and the presented chain was
+        // accepted. Node exposes this independently from the server's own
+        // certificate and hostname checks.
+        this.authorized = this._options.requestCert
+          ? this.authorizationError === null
+          : false;
+      }
       if (this.authorizationError && this._options.rejectUnauthorized !== false) throw this.authorizationError;
       this.connecting = false;
       this.pending = false;
       this.readyState = 'open';
-      this.emit('secureConnect');
-      this.emit('connect');
+      if (this._options._isServer) this._resource.runInAsyncScope(() => {}, this);
+      this._resource.runInAsyncScope(() => {
+        this.emit('secureConnect');
+        this.emit('connect');
+      }, this);
     } catch (error) {
       this.connecting = false;
       this.pending = false;
@@ -319,9 +657,37 @@ export class TLSSocket extends Duplex {
   }
 
   connect() {
+    if (!this._options._isServer && !this._diagnosticPublished) {
+      const channel = this._diagnostics?.channel?.('net.client.socket');
+      if (channel?.hasSubscribers) channel.publish({ socket: this });
+      this._diagnosticPublished = true;
+    }
     if (this._socket?.connecting) {
-      this._socket.once('connect', () => void this._handshake());
-      this._socket.once('error', (error) => this.destroy(error));
+      if (isVirtualInternetBackingSocket(this._socket)) {
+        const backingSocket = this._socket;
+        const options = backingSocket._connectOptions;
+        const host = String(options.host || options.hostname);
+        this._authority = { host, port: Number(options.port) };
+        this.servername = String(options.servername || host);
+        this._peerCertificate = virtualCertificate(this.servername);
+        this._socket = null;
+        backingSocket.destroy();
+        this.remoteAddress = this.servername;
+        this.remotePort = this._authority.port;
+        schedule(() => void this._handshake());
+        return this;
+      }
+      // The virtual network emits the client connect before it dispatches the
+      // accepted socket to the server. Defer the handshake one microtask so
+      // the server-side TLS wrapper can install its peer options first.
+      this._socket.once('connect', () => {
+        const start = () => void this._handshake();
+        if (this._options.maxVersion === 'TLSv1.2') schedule(() => schedule(start));
+        else schedule(start);
+      });
+      if (!(this._virtualInternetBackingSocket || isVirtualInternetBackingSocket(this._socket))) {
+        this._socket.once('error', (error) => this.destroy(error));
+      }
     } else {
       schedule(() => void this._handshake());
     }
@@ -333,6 +699,12 @@ export class TLSSocket extends Duplex {
   }
 
   getProtocol() { return this.protocol; }
+  getCertificate() {
+    return certificateDetails(
+      this._options.cert || this._options.certificate,
+      this.servername,
+    );
+  }
   getPeerCertificate() { return clone(this._peerCertificate); }
   getSession() { return new Uint8Array([0x42, 0x4e, 0x48, 0x2d, 0x54, 0x4c, 0x53]); }
   isSessionReused() { return false; }
@@ -356,6 +728,7 @@ export class TLSSocket extends Duplex {
     this.pending = false;
     this.readyState = 'closed';
     if (this._socket && !this._socket.destroyed) this._socket.destroy(error);
+    this._resource.emitDestroy();
     return super.destroy(error);
   }
 }
@@ -368,19 +741,27 @@ class TLSServer extends EventEmitter {
       options = {};
     }
     this._options = { ...options };
+    this._contexts = [];
     this._scope = internal.scope || globalThis;
     this._net = internal.net || createBrowserNet({ BufferClass: internal.BufferClass });
     this._proxy = internal.proxy;
     this._raw = this._net.createServer((socket) => {
-      socket._tlsServerOptions = this._options;
+      const clientOptions = socket._peer?._tlsClientOptions
+        || socket._peer?._connectOptions
+        || socket._tlsClientOptions;
+      const selected = this._selectContext(clientOptions?.servername);
+      const serverOptions = selected
+        ? { ...this._options, ...selected, servername: clientOptions?.servername }
+        : { ...this._options, servername: clientOptions?.servername };
+      socket._tlsServerOptions = serverOptions;
       if (socket._peer) {
-        socket._peer._tlsServerOptions = this._options;
+        socket._peer._tlsServerOptions = socket._tlsServerOptions;
         socket._peer._tlsHandshakeError = tlsClientAuthPeerError(
           this._options,
           socket._peer._tlsClientOptions,
         );
       }
-      const tlsSocket = new TLSSocket(socket, { ...this._options, _isServer: true }, internal);
+      const tlsSocket = new TLSSocket(socket, { ...serverOptions, _isServer: true }, internal);
       tlsSocket.once('secureConnect', () => this.emit('secureConnection', tlsSocket));
       tlsSocket.once('error', (error) => this.emit('tlsClientError', error, tlsSocket));
       tlsSocket.connect();
@@ -398,6 +779,29 @@ class TLSServer extends EventEmitter {
   getConnections(callback) { return this._raw.getConnections(callback); }
   ref() { this._raw.ref(); return this; }
   unref() { this._raw.unref(); return this; }
+
+  addContext(servername, context) {
+    if (typeof servername !== 'string' || servername.length === 0) {
+      throw tlsError('ERR_INVALID_ARG_TYPE', 'The "servername" argument must be of type string');
+    }
+    const secureContext = context instanceof SecureContext ? context : new SecureContext(context);
+    this._contexts.push({ servername: servername.toLowerCase(), options: secureContext.options });
+    return this;
+  }
+
+  _selectContext(servername) {
+    const host = String(servername || '').toLowerCase();
+    for (let index = this._contexts.length - 1; index >= 0; index -= 1) {
+      const context = this._contexts[index];
+      if (context.servername === host) return context.options;
+      if (context.servername.startsWith('*.')
+        && host.endsWith(context.servername.slice(1))
+        && host.split('.').length === context.servername.split('.').length) {
+        return context.options;
+      }
+    }
+    return undefined;
+  }
 }
 
 export function createTlsModule(scope = globalThis, options = {}) {
@@ -412,6 +816,34 @@ export function createTlsModule(scope = globalThis, options = {}) {
   });
   const proxy = normalizeProxy(options.proxy, options.capability);
   const BufferClass = options.BufferClass || scope.Buffer;
+  let defaultCaCertificates = [...DEFAULT_ROOT_CERTIFICATES];
+  let defaultMaxVersion = constants.DEFAULT_MAX_VERSION;
+
+  function normalizeCaCertificate(value, index) {
+    if (typeof value === 'string') return value;
+    if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) {
+      return new TextDecoder().decode(value);
+    }
+    throw tlsError(
+      'ERR_INVALID_ARG_TYPE',
+      `The "certs[${index}]" argument must be of type string or an instance of ArrayBufferView`,
+    );
+  }
+
+  function setDefaultCACertificates(certificates) {
+    if (!Array.isArray(certificates)) {
+      throw tlsError('ERR_INVALID_ARG_TYPE', 'The "certs" argument must be an instance of Array');
+    }
+    const normalized = certificates.map(normalizeCaCertificate);
+    defaultCaCertificates = [...new Set(normalized)];
+  }
+
+  function getCACertificates(type = 'default') {
+    if (type === 'default') return [...defaultCaCertificates];
+    if (type === 'bundled') return [...DEFAULT_ROOT_CERTIFICATES];
+    if (type === 'system') return [];
+    throw tlsError('ERR_INVALID_ARG_VALUE', `Unknown certificate type: ${type}`);
+  }
 
   function createSecureContext(contextOptions = {}) {
     return new SecureContext(contextOptions);
@@ -421,7 +853,7 @@ export function createTlsModule(scope = globalThis, options = {}) {
     let callback;
     if (typeof args.at(-1) === 'function') callback = args.pop();
     let input = args[0];
-    let connectOptions = isRecord(input) ? { ...input } : { port: input, host: args[1] };
+    let connectOptions = isRecord(input) ? { ...input } : { port: input };
     if (typeof args[1] === 'object' && args[1] !== null && !isRecord(input)) connectOptions = { ...connectOptions, ...args[1] };
     const hasTransport = connectOptions.port !== undefined
       || connectOptions.socket !== undefined
@@ -430,22 +862,36 @@ export function createTlsModule(scope = globalThis, options = {}) {
       || connectOptions.hostname !== undefined
       || connectOptions.servername !== undefined;
     if (!hasTransport) throw tlsError('ERR_MISSING_ARGS', 'The "options" or "port" or "path" argument must be specified');
+    if (connectOptions.lookup !== undefined && typeof connectOptions.lookup !== 'function') {
+      throw tlsError('ERR_INVALID_ARG_TYPE', 'The "lookup" option must be a function');
+    }
     validateCiphers(connectOptions.ciphers);
+    connectOptions.maxVersion ??= defaultMaxVersion;
     connectOptions.port ??= 443;
     const targetProxy = normalizeProxy(connectOptions.proxy, connectOptions.capability) || proxy;
     let socket = connectOptions.socket;
+    let pendingSocketOptions = null;
+    let tlsResource = null;
     if (!socket && !targetProxy && connectOptions.host === undefined && connectOptions.hostname === undefined) {
       connectOptions.host = 'localhost';
     }
     if (!socket && !targetProxy && (connectOptions.host === 'localhost'
       || connectOptions.host === '127.0.0.1' || connectOptions.host === '::1')) {
-      socket = net.createConnection({
+      socket = new net.Socket();
+      socket._tcpResource = new AsyncResource('TCPWRAP');
+      pendingSocketOptions = {
         host: connectOptions.host,
         port: connectOptions.port,
-        localAddress: connectOptions.localAddress,
-        localPort: connectOptions.localPort,
-      });
+          localAddress: connectOptions.localAddress,
+          localPort: connectOptions.localPort,
+          lookup: connectOptions.lookup,
+          servername: connectOptions.servername,
+          cert: connectOptions.cert,
+          key: connectOptions.key,
+          ca: connectOptions.ca,
+        };
       socket._tlsClientOptions = connectOptions;
+      tlsResource = new AsyncResource('TLSWRAP');
     }
     if (!socket && connectOptions.port !== undefined && connectOptions.virtualTransport !== false && !targetProxy) {
       // A virtual TLS endpoint can be observed without requiring a listening host.
@@ -453,7 +899,12 @@ export function createTlsModule(scope = globalThis, options = {}) {
     } else if (!socket && connectOptions.socketPath) {
       throw tlsError('ERR_TLS_INVALID_CONTEXT', 'socketPath is not available in a browser virtual TLS context');
     }
-    const tlsSocket = new TLSSocket(socket, connectOptions, { scope, BufferClass, proxy: targetProxy });
+    const tlsSocket = new TLSSocket(socket, connectOptions, {
+      scope,
+      BufferClass,
+      proxy: targetProxy,
+      resource: tlsResource,
+    });
     if (callback) tlsSocket.once('secureConnect', callback);
     if (connectOptions.signal?.aborted) {
       const error = connectOptions.signal.reason instanceof Error
@@ -462,30 +913,54 @@ export function createTlsModule(scope = globalThis, options = {}) {
       schedule(() => tlsSocket.destroy(error));
     } else {
       connectOptions.signal?.addEventListener?.('abort', () => tlsSocket.destroy(connectOptions.signal.reason), { once: true });
+      if (pendingSocketOptions) {
+        tlsResource.runInAsyncScope(() => socket.connect(pendingSocketOptions), socket);
+      }
       tlsSocket.connect();
     }
     return tlsSocket;
   }
 
   function createServer(serverOptions, listener) {
-    return new TLSServer(serverOptions, listener, { scope, net, BufferClass, proxy });
+    return new TLSServer(
+      { ...(serverOptions || {}), maxVersion: serverOptions?.maxVersion ?? defaultMaxVersion },
+      listener,
+      { scope, net, BufferClass, proxy, diagnostics: options.diagnostics },
+    );
   }
 
-  return Object.freeze({
+  function CallableTLSServer(...args) {
+    return new TLSServer(...args, { scope, net, BufferClass, proxy, diagnostics: options.diagnostics });
+  }
+  CallableTLSServer.prototype = TLSServer.prototype;
+
+  const tlsModule = {
     connect,
     createConnection: connect,
     createSecureContext,
     createServer,
     checkServerIdentity,
     getCiphers: () => [...CIPHERS],
-    setDefaultCACertificates: () => undefined,
+    setDefaultCACertificates,
+    getCACertificates,
     DEFAULT_CIPHERS,
-    rootCertificates: Object.freeze(['-----BEGIN CERTIFICATE-----\nBROWSER-VIRTUAL-CA\n-----END CERTIFICATE-----']),
+    DEFAULT_MIN_VERSION: constants.DEFAULT_MIN_VERSION,
+    DEFAULT_MAX_VERSION: constants.DEFAULT_MAX_VERSION,
+    CLIENT_RENEG_LIMIT: constants.CLIENT_RENEG_LIMIT,
+    CLIENT_RENEG_WINDOW: constants.CLIENT_RENEG_WINDOW,
+    rootCertificates: DEFAULT_ROOT_CERTIFICATES,
     constants,
     SecureContext,
     TLSSocket,
-    Server: TLSServer,
+    Server: CallableTLSServer,
+  };
+  Object.defineProperty(tlsModule, 'DEFAULT_MAX_VERSION', {
+    configurable: true,
+    enumerable: true,
+    get: () => defaultMaxVersion,
+    set: (value) => { defaultMaxVersion = String(value); },
   });
+  return tlsModule;
 }
 
 export const createTlsContract = createTlsModule;

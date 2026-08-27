@@ -1,5 +1,26 @@
 import { BrowserEventEmitter } from './events.js';
 
+const uncloneableValues = new WeakSet();
+const nativeMessageChannels = new WeakMap();
+const cloneablePrototypeMarker = Symbol.for('bnh.messaging.cloneablePrototype');
+
+export function markAsUncloneable(value) {
+  if (!value || (typeof value !== 'object' && typeof value !== 'function')) return;
+  if (value instanceof ArrayBuffer || (typeof SharedArrayBuffer === 'function' && value instanceof SharedArrayBuffer)) return;
+  uncloneableValues.add(value);
+}
+
+function isUncloneable(value) {
+  let current = value;
+  let depth = 0;
+  while (current && (typeof current === 'object' || typeof current === 'function') && depth < 32) {
+    if (uncloneableValues.has(current)) return true;
+    current = Object.getPrototypeOf(current);
+    depth += 1;
+  }
+  return false;
+}
+
 export const IPC_ERROR_CODES = Object.freeze({
   CLOSED: 'ERR_IPC_CLOSED',
   SERIALIZATION: 'ERR_IPC_SERIALIZATION',
@@ -18,23 +39,6 @@ function serializationError(cause) {
 
 function closedError() {
   return createIpcError(IPC_ERROR_CODES.CLOSED, 'IPC channel is closed');
-}
-
-function workerMessagingError(code, message) {
-  return createIpcError(code, message);
-}
-
-function missingArgumentError(name) {
-  const error = new TypeError(`The "${name}" argument must be specified`);
-  error.code = 'ERR_MISSING_ARGS';
-  return error;
-}
-
-function broadcastClosedError() {
-  if (typeof DOMException === 'function') return new DOMException('BroadcastChannel is closed.', 'InvalidStateError');
-  const error = new Error('BroadcastChannel is closed.');
-  error.name = 'InvalidStateError';
-  return error;
 }
 
 function canStructuredClone(value, scope) {
@@ -67,8 +71,203 @@ function workerError(event) {
   return error;
 }
 
+function replaceTransferredValues(value, replacements, seen = new WeakMap()) {
+  if (!value || typeof value !== 'object') return value;
+  if (replacements.has(value)) return replacements.get(value);
+  if (seen.has(value)) return seen.get(value);
+  if (Array.isArray(value)) {
+    const copy = [];
+    seen.set(value, copy);
+    for (const item of value) copy.push(replaceTransferredValues(item, replacements, seen));
+    return copy;
+  }
+  if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return value;
+  const copy = {};
+  seen.set(value, copy);
+  for (const [key, item] of Object.entries(value)) {
+    copy[key] = replaceTransferredValues(item, replacements, seen);
+  }
+  return copy;
+}
+
 function transferArguments(value, transferList) {
-  return transferList === undefined ? [value] : [value, transferList];
+  if (transferList === undefined) return [replaceTransferredValues(value, new Map())];
+  const list = Array.isArray(transferList) ? transferList : [transferList];
+  const identities = new Set();
+  for (const item of list) {
+    const identity = item?.raw || item;
+    if (identities.has(identity)) {
+      const type = item instanceof ArrayBuffer ? 'ArrayBuffer' : item?.__bnhReceiveMessage ? 'MessagePort' : null;
+      if (type) throw dataCloneError(`Transfer list contains duplicate ${type}`);
+    }
+    identities.add(identity);
+  }
+  if (list.some((item) => item?.__bnhIsClosed)) throw detachedPortError();
+  const replacements = new Map(list.map((item) => [item, item?.raw || item]));
+  const transfers = list.map((item) => item?.raw || item);
+  return [replaceTransferredValues(value, replacements), Array.isArray(transferList) ? transfers : transfers[0]];
+}
+
+function dataCloneError(message) {
+  if (typeof DOMException === 'function') return new DOMException(message, 'DataCloneError');
+  return Object.assign(new Error(message), { name: 'DataCloneError', code: 25 });
+}
+
+function detachArrayBuffers(items) {
+  const buffers = items.filter((item) => item instanceof ArrayBuffer);
+  if (buffers.length && typeof structuredClone === 'function') structuredClone({ buffers }, { transfer: buffers });
+}
+
+function detachedPortError() {
+  if (typeof DOMException === 'function') {
+    return new DOMException('MessagePort in transfer list is already detached', 'DataCloneError');
+  }
+  return Object.assign(new Error('MessagePort in transfer list is already detached'), {
+    name: 'DataCloneError',
+    code: 25,
+  });
+}
+
+function normalizePortTransferList(input) {
+  if (input === undefined || input === null) return undefined;
+  const isOptionsObject = input && typeof input === 'object' && !Array.isArray(input)
+    && typeof input[Symbol.iterator] !== 'function';
+  const optionTransfer = isOptionsObject && Object.hasOwn(input, 'transfer');
+  if (isOptionsObject && !optionTransfer) return undefined;
+  const value = optionTransfer ? input.transfer : input;
+  const label = optionTransfer ? 'Optional options.transfer argument' : 'Optional transferList argument';
+  if (value === undefined) return undefined;
+  if (value === null && optionTransfer) {
+    const error = new TypeError(`${label} must be an iterable`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (value === null) return undefined;
+  if (typeof value === 'string' || typeof value === 'symbol' || typeof value[Symbol.iterator] !== 'function') {
+    const error = new TypeError(`${label} must be an iterable`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  try { return Array.from(value); }
+  catch (cause) {
+    const error = new TypeError(`${label} must be an iterable`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    error.cause = cause;
+    throw error;
+  }
+}
+
+function messageEventValue(value) {
+  if (value === null) return 'null';
+  if (typeof value === 'object') {
+    try { return JSON.stringify(value); } catch { return String(value); }
+  }
+  return String(value);
+}
+
+let nodeMessagePortClass;
+
+function isMessagePort(value, MessagePort, NativeMessagePort = MessagePort) {
+  return (typeof MessagePort === 'function' && value instanceof MessagePort)
+    || (typeof NativeMessagePort === 'function' && value instanceof NativeMessagePort)
+    || (value?.raw && typeof MessagePort === 'function' && value.raw instanceof MessagePort);
+}
+
+function adaptReceivedMessage(value, nativePort, seen = new WeakMap()) {
+  const NativeMessagePort = nativePort?.constructor;
+  if (nodeMessagePortClass && value instanceof nodeMessagePortClass) return value;
+  if (typeof NativeMessagePort === 'function' && value instanceof NativeMessagePort) {
+    return adaptMessagePort(value);
+  }
+  if (!value || typeof value !== 'object' || ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return value;
+  if (seen.has(value)) return seen.get(value);
+  if (value[cloneablePrototypeMarker] === true) {
+    const copy = Object.create(Object.getPrototypeOf(value));
+    seen.set(value, copy);
+    for (const key of Reflect.ownKeys(value)) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor) continue;
+      Object.defineProperty(copy, key, descriptor);
+    }
+    return copy;
+  }
+  if (Array.isArray(value)) {
+    const copy = [];
+    seen.set(value, copy);
+    for (const item of value) copy.push(adaptReceivedMessage(item, nativePort, seen));
+    return copy;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return value;
+  const copy = {};
+  seen.set(value, copy);
+  for (const [key, item] of Object.entries(value)) copy[key] = adaptReceivedMessage(item, nativePort, seen);
+  return copy;
+}
+
+function receivedMessagePorts(value, nativePort, ports = [], seen = new WeakSet()) {
+  if (!value || typeof value !== 'object' || seen.has(value)) return ports;
+  if (nodeMessagePortClass && value instanceof nodeMessagePortClass) {
+    ports.push(value);
+    return ports;
+  }
+  const NativeMessagePort = nativePort?.constructor;
+  if (typeof NativeMessagePort === 'function' && value instanceof NativeMessagePort) {
+    ports.push(adaptMessagePort(value));
+    return ports;
+  }
+  seen.add(value);
+  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return ports;
+  if (Array.isArray(value)) {
+    for (const item of value) receivedMessagePorts(item, nativePort, ports, seen);
+    return ports;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return ports;
+  for (const item of Object.values(value)) receivedMessagePorts(item, nativePort, ports, seen);
+  return ports;
+}
+
+/** Provide Node's MessageEvent validation while retaining the browser Event base. */
+export function createMessageEvent(scope = globalThis, {
+  MessagePortClass = scope.MessagePort,
+  NativeMessagePort = scope.MessagePort,
+} = {}) {
+  const Event = scope.Event || class BrowserEvent {};
+  return class MessageEvent extends Event {
+    constructor(type, init = {}) {
+      super(type, init || {});
+      const options = init || {};
+      const source = options.source ?? null;
+      if (source !== null && !isMessagePort(source, MessagePortClass, NativeMessagePort)) {
+        throw new TypeError(
+          `MessageEvent constructor: Expected eventInitDict.source ("${messageEventValue(source)}") to be an instance of MessagePort.`,
+        );
+      }
+      let ports = [];
+      if (options.ports !== undefined) {
+        const iterable = options.ports;
+        if (iterable === null || typeof iterable[Symbol.iterator] !== 'function') {
+          throw new TypeError(`MessageEvent constructor: eventInitDict.ports (${messageEventValue(iterable)}) is not iterable.`);
+        }
+        ports = Array.from(iterable);
+        for (let index = 0; index < ports.length; index += 1) {
+          if (!isMessagePort(ports[index], MessagePortClass, NativeMessagePort)) {
+            throw new TypeError(
+              `MessageEvent constructor: Expected eventInitDict.ports[${index}] ("${messageEventValue(ports[index])}") to be an instance of MessagePort.`,
+            );
+          }
+        }
+      }
+      Object.defineProperties(this, {
+        data: { enumerable: true, value: options.data === undefined ? null : options.data },
+        origin: { enumerable: true, value: options.origin === undefined ? '' : String(options.origin) },
+        lastEventId: { enumerable: true, value: options.lastEventId === undefined ? '' : String(options.lastEventId) },
+        source: { enumerable: true, value: source },
+        ports: { enumerable: true, value: ports },
+      });
+    }
+  };
 }
 
 function isVirtualHandle(value) {
@@ -83,30 +282,63 @@ function unsupportedHandleError() {
 }
 
 /** Adapt a browser MessagePort to the event and transfer-list shape used by Node shims. */
-export function adaptMessagePort(nativePort, { broadcast = false } = {}) {
+export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePortClass } = {}) {
   if (!nativePort) throw new TypeError('a native MessagePort is required');
   const events = new BrowserEventEmitter();
   let assignedOnMessage = null;
   let assignedOnMessageError = null;
   let closed = false;
+  let closing = false;
   let closePeer = null;
   let notifyPeerMessage = null;
   let pendingMessages = 0;
+  let refed = true;
+  const closeCallbacks = [];
+  let peerPort = null;
   let peerCloseRequested = false;
+  const queuedMessages = [];
+  const deferredMessages = [];
+  const eventTargetListeners = new Map();
+  let port;
+  const messageEvent = (data, ports = []) => ({
+    type: 'message',
+    data,
+    target: port,
+    currentTarget: port,
+    origin: '',
+    lastEventId: '',
+    source: null,
+    ports,
+  });
+  const deliverMessage = (data) => {
+    events.emit('message', data);
+    assignedOnMessage?.(messageEvent(data, receivedMessagePorts(data, nativePort)));
+  };
+  const drainDeferredMessages = () => {
+    if (closed || (events.listenerCount('message') === 0 && !assignedOnMessage)) return;
+    while (deferredMessages.length && !closed) deliverMessage(deferredMessages.shift());
+  };
   const onMessage = (event) => {
     if (closed) return;
+    const queued = queuedMessages.shift();
+    const data = adaptReceivedMessage(
+      queued?.useNative ? event?.data : queued ? queued.value : event?.data,
+      nativePort,
+    );
     try {
-      events.emit('message', event?.data);
-      if (typeof assignedOnMessage === 'function') assignedOnMessage.call(port, event);
+      if (queued?.consumed) return;
+      if (events.listenerCount('message') === 0 && !assignedOnMessage) deferredMessages.push(data);
+      else deliverMessage(data);
     } finally {
       if (pendingMessages > 0) pendingMessages -= 1;
-      if (peerCloseRequested && pendingMessages === 0) closeLocally();
+      if (closing && pendingMessages === 0) closeLocally();
+      else if (peerCloseRequested && pendingMessages === 0) closeLocally();
     }
   };
   const onMessageError = (event) => {
     if (closed) return;
     events.emit('messageerror', event);
-    if (typeof assignedOnMessageError === 'function') assignedOnMessageError.call(port, event);
+    assignedOnMessageError?.(event);
   };
 
   if (typeof nativePort.addEventListener === 'function') {
@@ -118,11 +350,8 @@ export function adaptMessagePort(nativePort, { broadcast = false } = {}) {
   }
   if (typeof nativePort.start === 'function') nativePort.start();
 
-  const closeLocally = (callback) => {
-    if (closed) {
-      callback && queueMicrotask(callback);
-      return;
-    }
+  const finishClose = () => {
+    if (closed) return;
     closed = true;
     if (typeof nativePort.removeEventListener === 'function') {
       nativePort.removeEventListener('message', onMessage);
@@ -134,63 +363,164 @@ export function adaptMessagePort(nativePort, { broadcast = false } = {}) {
     callNative(nativePort, 'close');
     events.emit('close');
     events.removeAllListeners();
-    callback && queueMicrotask(callback);
+    deferredMessages.length = 0;
+    for (const closeCallback of closeCallbacks.splice(0)) queueMicrotask(closeCallback);
+  };
+  const closeLocally = (callback) => {
+    if (closed) {
+      callback && queueMicrotask(callback);
+      return;
+    }
+    if (callback) closeCallbacks.push(callback);
+    if (closing) {
+      if (pendingMessages === 0) finishClose();
+      return;
+    }
+    closing = true;
+    if (pendingMessages === 0) finishClose();
   };
 
-  const port = {
+  port = {
     raw: nativePort,
-    on(name, listener) { events.on(name, listener); return port; },
-    once(name, listener) { events.once(name, listener); return port; },
+    on(name, listener) { events.on(name, listener); if (name === 'message') drainDeferredMessages(); return port; },
+    once(name, listener) { events.once(name, listener); if (name === 'message') drainDeferredMessages(); return port; },
+    addListener(name, listener) { events.on(name, listener); if (name === 'message') drainDeferredMessages(); return port; },
     off(name, listener) { events.off(name, listener); return port; },
     removeListener(name, listener) { events.off(name, listener); return port; },
     removeAllListeners(name) { events.removeAllListeners(name); return port; },
     listenerCount(name) { return events.listenerCount(name); },
-    ...(broadcast ? {} : {
-      start() { nativePort.start?.(); },
-    }),
+    emit(name, ...args) { events.emit(name, ...args); return true; },
+    addEventListener(name, listener) {
+      if (typeof listener !== 'function') return;
+      const wrapped = name === 'message'
+        ? (data) => listener(messageEvent(data, receivedMessagePorts(data, nativePort)))
+        : (detail) => listener({ type: name, detail, target: port, currentTarget: port });
+      const listeners = eventTargetListeners.get(name) || new Map();
+      listeners.set(listener, wrapped);
+      eventTargetListeners.set(name, listeners);
+      events.on(name, wrapped);
+      if (name === 'message') drainDeferredMessages();
+    },
+    removeEventListener(name, listener) {
+      const wrapped = eventTargetListeners.get(name)?.get(listener);
+      if (!wrapped) return;
+      events.off(name, wrapped);
+      const listeners = eventTargetListeners.get(name);
+      listeners.delete(listener);
+      if (!listeners.size) eventTargetListeners.delete(name);
+    },
+    dispatchEvent(event) {
+      if (!event || typeof event.type !== 'string') throw new TypeError('event must have a type');
+      events.emit(event.type, event.detail === undefined ? event : event.detail);
+      return true;
+    },
+    start() { if (typeof nativePort.start === 'function') nativePort.start(); drainDeferredMessages(); return port; },
     postMessage(value, transferList) {
-      if (closed) {
-        if (broadcast) throw broadcastClosedError();
+      if (isUncloneable(value)) throw dataCloneError('object could not be cloned');
+      const normalizedTransfers = normalizePortTransferList(transferList);
+      const sourceRawPort = nativePort;
+      if (normalizedTransfers?.some((item) => (item?.raw || item) === sourceRawPort)) {
+        throw dataCloneError('Transfer list contains source port');
+      }
+      const transferIdentities = normalizedTransfers?.map((item) => item?.raw || item) || [];
+      if (peerPort && transferIdentities.includes(peerPort.raw || peerPort)) {
+        detachArrayBuffers(normalizedTransfers);
+        globalThis.process?.emitWarning?.(
+          'The target port was posted to itself, and the communication channel was lost',
+          'Warning',
+        );
+        closeLocally();
+        closePeer?.();
         return;
       }
-      callNative(nativePort, 'postMessage', ...(broadcast ? [value] : transferArguments(value, transferList)));
-      notifyPeerMessage?.();
+      if (closed) {
+        if (normalizedTransfers?.some((item) => item?.__bnhIsClosed)) throw detachedPortError();
+        return;
+      }
+      const [message, transfers] = transferArguments(value, normalizedTransfers);
+      const hasTransfer = Array.isArray(transfers) ? transfers.length > 0 : transfers !== undefined;
+      notifyPeerMessage?.(hasTransfer ? undefined : message, hasTransfer);
+      if (transfers === undefined) callNative(nativePort, 'postMessage', message);
+      else callNative(nativePort, 'postMessage', message, transfers);
     },
     close(callback) {
+      if (callback !== undefined && typeof callback !== 'function') {
+        throw new TypeError('callback must be a function');
+      }
       closeLocally(callback);
       closePeer?.();
-      return;
+      return port;
     },
-    ref() { nativePort.ref?.(); },
-    unref() { nativePort.unref?.(); },
+    hasRef() { return refed && !closed; },
+    ref() { refed = true; return port; },
+    unref() { refed = false; return port; },
   };
 
   Object.defineProperties(port, {
     __bnhCloseFromPeer: {
       value: () => {
         peerCloseRequested = true;
-        if (pendingMessages === 0) closeLocally();
+        closeLocally();
       },
     },
     __bnhSetPeerClose: {
       value: (callback) => { closePeer = callback; },
     },
     __bnhMessageQueued: {
-      value: () => { pendingMessages += 1; },
+      value: (value, useNative = false) => {
+        pendingMessages += 1;
+        queuedMessages.push({ value, useNative, consumed: false });
+      },
+    },
+    __bnhReceiveMessage: {
+      value: () => {
+        const queued = queuedMessages.find((entry) => !entry.consumed && !entry.useNative);
+        if (!queued) return undefined;
+        queued.consumed = true;
+        return queued.value;
+      },
+    },
+    __bnhIsClosed: {
+      get: () => closed,
     },
     __bnhSetPeerMessageQueued: {
       value: (callback) => { notifyPeerMessage = callback; },
     },
+    __bnhSetPeerPort: {
+      value: (value) => { peerPort = value; },
+    },
     onmessage: {
       get: () => assignedOnMessage,
-      set: (listener) => { assignedOnMessage = listener; },
+      set: (listener) => {
+        assignedOnMessage = typeof listener === 'function' ? listener : null;
+        drainDeferredMessages();
+      },
     },
     onmessageerror: {
       get: () => assignedOnMessageError,
-      set: (listener) => { assignedOnMessageError = listener; },
+      set: (listener) => {
+        assignedOnMessageError = typeof listener === 'function' ? listener : null;
+      },
+    },
+    [Symbol.for('nodejs.util.inspect.custom')]: {
+      value: () => `MessagePort { active: ${!closed}, refed: ${refed} }`,
     },
   });
+  // Keep the Node-facing adapter observable as a MessagePort while its own
+  // methods continue to translate browser events into Node-style callbacks.
+  try {
+    const prototypeClass = MessagePortClass || nativePort.constructor;
+    if (prototypeClass?.prototype) {
+      Object.setPrototypeOf(port, prototypeClass.prototype);
+    }
+  } catch {
+    // Some browser implementations expose a non-configurable prototype.
+  }
   return port;
+}
+
+export function prepareTransferPayload(value, transferList) {
+  return transferArguments(value, transferList);
 }
 
 /**
@@ -383,18 +713,67 @@ export function createScopedIpcEndpoint(nativePort, {
 export const createIpcEndpoint = createScopedIpcEndpoint;
 
 export function createMessageChannel(scope = globalThis) {
-  if (typeof scope.MessageChannel !== 'function') throw new TypeError('MessageChannel is unavailable');
-  const channel = new scope.MessageChannel();
+  const NativeMessageChannel = nativeMessageChannels.get(scope) || scope.MessageChannel;
+  if (typeof NativeMessageChannel !== 'function') throw new TypeError('MessageChannel is unavailable');
+  const channel = new NativeMessageChannel();
   const port1 = adaptMessagePort(channel.port1);
   const port2 = adaptMessagePort(channel.port2);
   port1.__bnhSetPeerClose?.(port2.__bnhCloseFromPeer);
   port2.__bnhSetPeerClose?.(port1.__bnhCloseFromPeer);
+  port1.__bnhSetPeerPort?.(port2);
+  port2.__bnhSetPeerPort?.(port1);
   port1.__bnhSetPeerMessageQueued?.(port2.__bnhMessageQueued);
   port2.__bnhSetPeerMessageQueued?.(port1.__bnhMessageQueued);
   return {
     raw: channel,
     port1,
     port2,
+  };
+}
+
+function createMessagePortClass() {
+  function MessagePort() {
+    const error = new TypeError('MessagePort constructor cannot be invoked without a valid native port');
+    error.code = 'ERR_CONSTRUCT_CALL_INVALID';
+    throw error;
+  }
+  Object.defineProperties(MessagePort.prototype, {
+    constructor: { configurable: true, writable: true, value: MessagePort },
+    close: { configurable: true, writable: true, value() {} },
+    hasRef: { configurable: true, writable: true, value() { return true; } },
+    postMessage: { configurable: true, writable: true, value() {} },
+    ref: { configurable: true, writable: true, value() { return this; } },
+    start: { configurable: true, writable: true, value() { return this; } },
+    unref: { configurable: true, writable: true, value() { return this; } },
+    onmessage: { configurable: true, get() { return null; }, set(_) {} },
+    onmessageerror: { configurable: true, get() { return null; }, set(_) {} },
+  });
+  return MessagePort;
+}
+
+function invalidMessagePort() {
+  const error = new TypeError('The "port" argument must be a MessagePort instance');
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+/** Implement the synchronous worker_threads channel helpers over queued ports. */
+function createMessagePortHelpers() {
+  return {
+    receiveMessageOnPort(port) {
+      if (!port?.__bnhReceiveMessage) throw invalidMessagePort();
+      const message = port.__bnhReceiveMessage();
+      return message === undefined ? undefined : { message };
+    },
+    moveMessagePortToContext(port) {
+      if (!port?.__bnhReceiveMessage) throw invalidMessagePort();
+      if (port.__bnhIsClosed) {
+        const error = new Error('Cannot send data on closed MessagePort');
+        error.code = 'ERR_CLOSED_MESSAGE_PORT';
+        throw error;
+      }
+      return port;
+    },
   };
 }
 
@@ -445,6 +824,9 @@ export function adaptWorker(nativeWorker, { revokeURL = null } = {}) {
       emitWorkerExit(1);
       return;
     }
+    // Chromium's ErrorEvent does not carry custom Error properties across the
+    // worker boundary. Give the bootstrap's structured error record a chance
+    // to arrive before falling back to the lossy browser event.
     deferredErrorTimer = setTimeout(() => {
       emitWorkerError(error);
       emitWorkerExit(1);
@@ -492,7 +874,15 @@ function workerSourceURL(scope, source) {
 export function createWorkerFactory(scope = globalThis, { bootstrap = '' } = {}) {
   if (typeof scope.Worker !== 'function') throw new TypeError('Worker is unavailable');
   return function Worker(source, options = {}) {
-    const generated = options.eval ? workerSourceURL(scope, `${bootstrap}\n${source}`) : null;
+    if (options.eval && typeof source !== 'string') {
+      throw new TypeError("The property 'options.eval' must be false when 'filename' is not a string.");
+    }
+    const inheritedNoAddons = scope.process?.execArgv?.some((argument) => String(argument) === '--no-addons')
+      || options.execArgv?.some((argument) => String(argument) === '--no-addons');
+    const workerBootstrap = inheritedNoAddons
+      ? bootstrap.replace('const __bnhNoAddons = false;', 'const __bnhNoAddons = true;')
+      : bootstrap;
+    const generated = options.eval ? workerSourceURL(scope, `${workerBootstrap}\n${source}`) : null;
     const workerOptions = {};
     if (options.name !== undefined) workerOptions.name = options.name;
     if (options.type !== undefined) workerOptions.type = options.type;
@@ -504,38 +894,45 @@ export function createWorkerFactory(scope = globalThis, { bootstrap = '' } = {})
 export function createBroadcastChannelFactory(scope = globalThis) {
   if (typeof scope.BroadcastChannel !== 'function') return undefined;
   return function BroadcastChannel(name) {
-    if (name === undefined) throw missingArgumentError('name');
     const channel = new scope.BroadcastChannel(name);
-    const adapted = adaptMessagePort(channel, { broadcast: true });
-    Object.defineProperty(adapted, 'name', { configurable: false, enumerable: true, value: channel.name });
+    const adapted = adaptMessagePort(channel);
+    adapted.name = channel.name;
     return adapted;
   };
 }
 
-function postMessageToThread(threadId) {
-  const code = threadId === 0
-    ? 'ERR_WORKER_MESSAGING_SAME_THREAD'
-    : 'ERR_WORKER_MESSAGING_FAILED';
-  const message = threadId === 0
-    ? 'Cannot sent a message to the same thread'
-    : 'Cannot find the destination thread or listener';
-  return Promise.reject(workerMessagingError(code, message));
-}
-
 export function createMessagingPrimitives(scope = globalThis) {
+  nodeMessagePortClass ||= createMessagePortClass();
+  const nativeMessageChannel = nativeMessageChannels.get(scope) || scope.MessageChannel;
+  if (nativeMessageChannel) nativeMessageChannels.set(scope, nativeMessageChannel);
+  const nativeStructuredClone = typeof scope.structuredClone === 'function'
+    ? scope.structuredClone.bind(scope)
+    : undefined;
   const Worker = typeof scope.Worker === 'function' ? createWorkerFactory(scope) : undefined;
-  const MessageChannel = typeof scope.MessageChannel === 'function'
-    ? function MessageChannel() { return createMessageChannel(scope); }
+  const MessageChannel = typeof nativeMessageChannel === 'function'
+    ? function MessageChannel() {
+        if (!new.target) {
+          const error = new TypeError('Class constructor MessageChannel cannot be invoked without \'new\'');
+          error.code = 'ERR_CONSTRUCT_CALL_REQUIRED';
+          throw error;
+        }
+        return createMessageChannel(scope);
+      }
     : undefined;
   return {
     Worker,
     MessageChannel,
     BroadcastChannel: createBroadcastChannelFactory(scope),
-    MessagePort: scope.MessagePort,
-    postMessageToThread,
-    threadId: 0,
+    MessagePort: nodeMessagePortClass,
     isMainThread: true,
     parentPort: null,
     workerData: undefined,
+    ...createMessagePortHelpers(),
+    markAsUncloneable,
+    structuredClone(value, options) {
+      if (isUncloneable(value)) throw dataCloneError('object could not be cloned');
+      if (!nativeStructuredClone) return value;
+      return nativeStructuredClone(value, options);
+    },
   };
 }

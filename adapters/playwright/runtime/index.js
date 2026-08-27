@@ -225,11 +225,12 @@ export function assembleBrowserCapabilities(runSpec, { globalObject = globalThis
  * No helper in this module reaches for Node, a filesystem, or a socket.
  */
 export function createBrowserIO(scope = globalThis) {
+  const messaging = createMessagingPrimitives(scope);
   return {
     ...createNetworkPrimitives(scope),
-    ...createMessagingPrimitives(scope),
+    ...messaging,
     ...createStreamPrimitives(scope),
-    structuredClone: scope.structuredClone?.bind(scope),
+    structuredClone: messaging.structuredClone,
     TextEncoder: scope.TextEncoder,
     TextDecoder: scope.TextDecoder,
     CompressionStream: scope.CompressionStream,
@@ -265,6 +266,9 @@ export {
   adaptMessagePort,
   adaptWorker,
   createMessageChannel,
+  createMessageEvent,
+  markAsUncloneable,
+  prepareTransferPayload,
   createWorkerFactory,
   createBroadcastChannelFactory,
   createMessagingPrimitives,
@@ -302,6 +306,8 @@ export {
   aesGcmDecrypt,
   sign,
   verify,
+  hasWebCrypto,
+  browserCryptoVersion,
   createCryptoContract,
 } from './crypto.js';
 export {

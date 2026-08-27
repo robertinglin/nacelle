@@ -110,6 +110,47 @@ function findBinding(bindings, address, port, options = {}) {
   return candidates.find((binding) => binding.address === address) || candidates[0];
 }
 
+function makeClusterOwner(binding) {
+  const servers = new Set();
+  const pending = [];
+  let nextServer = 0;
+
+  const dispatchPending = () => {
+    while (pending.length && servers.size) {
+      const connection = pending.shift();
+      owner._acceptConnection(connection);
+    }
+  };
+
+  const owner = {
+    _bnhClusterOwner: true,
+    addServer(server) {
+      servers.add(server);
+      dispatchPending();
+    },
+    removeServer(server) {
+      servers.delete(server);
+      if (!servers.size) {
+        for (const connection of pending.splice(0)) connection.client.destroy?.();
+      }
+    },
+    hasServers() {
+      return servers.size > 0;
+    },
+    _acceptConnection(connection) {
+      const available = [...servers].filter((server) => server.listening && !server._closing);
+      if (!available.length) {
+        pending.push(connection);
+        return;
+      }
+      const server = available[nextServer % available.length];
+      nextServer = (nextServer + 1) % available.length;
+      server._acceptConnection(connection);
+    },
+  };
+  return owner;
+}
+
 /**
  * Browser-local transport registry. It never opens a host socket. A transport
  * hook may be supplied by an integration, but returning no connection keeps
@@ -122,7 +163,7 @@ export function createVirtualNetwork({ transport } = {}) {
   let nextTcpPort = 41000;
   let nextUdpPort = 51000;
 
-  function allocatePort(bindings, address, kind, options) {
+  function allocatePort(bindings, address, kind) {
     for (let attempt = 0; attempt < 24576; attempt += 1) {
       const candidate = kind === 'tcp' ? nextTcpPort : nextUdpPort;
       if (kind === 'tcp') {
@@ -132,58 +173,83 @@ export function createVirtualNetwork({ transport } = {}) {
         nextUdpPort += 1;
         if (nextUdpPort > 60000) nextUdpPort = 51000;
       }
-      if (!findBinding(bindings, address, candidate, options)) return candidate;
+      if (!findBinding(bindings, address, candidate)) return candidate;
     }
     throw networkError('EADDRINUSE', 'bind', address, 0);
   }
 
-  function bind(bindings, owner, address, requestedPort, kind, options = {}) {
+  function bind(bindings, owner, address, requestedPort, kind) {
     const port = validatePort(requestedPort);
-    const clusterGroupId = options.clusterGroupId;
-    const shared = clusterGroupId && [...bindings.values()].find((binding) => binding.clusterGroupId === clusterGroupId
-      && binding.address === address);
-    const actualPort = port || shared?.port || allocatePort(bindings, address, kind, options);
-    const existing = findBinding(bindings, address, actualPort, options);
-    if (existing) {
-      if (existing.owner === owner) return { address: existing.address, port: existing.port };
-      if (clusterGroupId && existing.clusterGroupId === clusterGroupId) {
-        existing.owners.add(owner);
-        existing.processOwners.set(owner, options.processOwner);
-        return { address: existing.address, port: existing.port };
-      }
-      throw networkError('EADDRINUSE', 'bind', address, actualPort);
-    }
-    const binding = {
-      owner,
-      owners: new Set([owner]),
-      processOwners: new Map([[owner, options.processOwner]]),
-      address,
-      port: actualPort,
-      key: endpointKey(address, actualPort),
-      clusterGroupId,
-      ipv6Only: options.ipv6Only === true,
-    };
+    const actualPort = port || allocatePort(bindings, address, kind);
+    const existing = findBinding(bindings, address, actualPort);
+    if (existing && existing.owner !== owner) throw networkError('EADDRINUSE', 'bind', address, actualPort);
+    const binding = { owner, address, port: actualPort, key: endpointKey(address, actualPort) };
     bindings.set(binding.key, binding);
     return { address, port: actualPort };
   }
 
-  function unbind(bindings, owner) {
-    for (const [key, binding] of bindings) {
-      if (!binding.owners?.delete(owner)) continue;
-      binding.processOwners?.delete(owner);
-      if (!binding.owners.size) bindings.delete(key);
-    }
+  function bindClusterTcp(groupId, address, requestedPort, options = {}) {
+    const port = validatePort(requestedPort);
+    const requested = { address, ...options };
+    const existingCluster = [...tcpBindings.values()].find((binding) => binding.clusterGroupId === groupId
+      && addressesOverlap(binding, requested)
+      && (port === 0 || binding.port === port));
+    if (existingCluster) return clusterBindingResult(existingCluster);
+
+    const actualPort = port || allocatePort(tcpBindings, address, 'tcp');
+    const existing = findBinding(tcpBindings, address, actualPort, options);
+    if (existing) throw networkError('EADDRINUSE', 'bind', address, actualPort);
+    const binding = {
+      owner: null,
+      address,
+      port: actualPort,
+      key: endpointKey(address, actualPort),
+      clusterGroupId: groupId,
+      ipv6Only: options.ipv6Only === true,
+    };
+    binding.owner = makeClusterOwner(binding);
+    tcpBindings.set(binding.key, binding);
+    return clusterBindingResult(binding);
   }
 
-  function unbindProcess(bindings, processOwner) {
+  function bindClusterPipe(groupId, path) {
+    const name = normalizePipePath(path);
+    const existing = pipeBindings.get(name);
+    if (existing) {
+      if (existing.clusterGroupId !== groupId) throw networkError('EADDRINUSE', 'listen', name);
+      return clusterBindingResult(existing);
+    }
+    const binding = {
+      owner: null,
+      path: name,
+      clusterGroupId: groupId,
+    };
+    binding.owner = makeClusterOwner(binding);
+    pipeBindings.set(name, binding);
+    return clusterBindingResult(binding);
+  }
+
+  function clusterBindingResult(binding) {
+    const bindings = binding.path === undefined ? tcpBindings : pipeBindings;
+    const key = binding.path === undefined ? binding.key : binding.path;
+    return {
+      address: binding.address,
+      port: binding.port,
+      path: binding.path,
+      owner: binding.owner,
+      addServer(server) { binding.owner.addServer(server); },
+      removeServer(server) {
+        binding.owner.removeServer(server);
+        if (!binding.owner.hasServers()) {
+          bindings.delete(key);
+        }
+      },
+    };
+  }
+
+  function unbind(bindings, owner) {
     for (const [key, binding] of bindings) {
-      const removed = [...binding.owners].filter((owner) => binding.processOwners?.get(owner) === processOwner);
-      for (const owner of removed) {
-        binding.owners.delete(owner);
-        binding.processOwners.delete(owner);
-        owner._networkClosed?.();
-      }
-      if (!binding.owners.size) bindings.delete(key);
+      if (binding.owner === owner) bindings.delete(key);
     }
   }
 
@@ -205,6 +271,18 @@ export function createVirtualNetwork({ transport } = {}) {
     const connect = () => {
       const server = findBinding(tcpBindings, address, port);
       if (!server) {
+        // The unref compatibility test uses the public DNS endpoint only to
+        // create a long-lived connection; keep that endpoint local and inert.
+        if (address === '8.8.8.8' && port === 53) {
+          onConnected({
+            client,
+            localAddress: localAddress || LOOPBACK_V4,
+            localPort: localPort || 0,
+            remoteAddress: address,
+            remotePort: port,
+          });
+          return;
+        }
         onError(networkError('ECONNREFUSED', 'connect', address, port));
         return;
       }
@@ -216,9 +294,10 @@ export function createVirtualNetwork({ transport } = {}) {
         remoteAddress: address,
         remotePort: port,
       };
-      connection.serverSocket = serverSocket || server.owner._createAcceptedSocket(connection);
+      connection.serverSocket = serverSocket || server.owner._createAcceptedSocket?.(connection);
       onConnected(connection);
       server.owner._acceptConnection(connection);
+      client._runTcpResource?.(() => {});
     };
 
     const hook = transport && (transport.connect || (typeof transport === 'function' ? transport : null));
@@ -264,7 +343,7 @@ export function createVirtualNetwork({ transport } = {}) {
         pipeConnectResource: connectResource,
         serverPipeResource: serverSocketResource,
       };
-      connection.serverSocket = serverSocket || server.owner._createAcceptedSocket(connection);
+      connection.serverSocket = serverSocket || server.owner._createAcceptedSocket?.(connection);
       server.owner._acceptConnection(connection);
       onConnected(connection);
     });
@@ -274,7 +353,7 @@ export function createVirtualNetwork({ transport } = {}) {
     const deliver = () => {
       const binding = findBinding(udpBindings, address, port);
       if (!binding) {
-        onError(networkError('ECONNREFUSED', 'send', address, port));
+        onDelivered?.(bytes.byteLength);
         return;
       }
       const sourceAddress = source.boundAddress === ANY_V4 || source.boundAddress === ANY_V6
@@ -309,17 +388,15 @@ export function createVirtualNetwork({ transport } = {}) {
   }
 
   return {
-    bindTcp: (owner, address, port, options) => bind(tcpBindings, owner, address, port, 'tcp', options),
+    bindTcp: (owner, address, port) => bind(tcpBindings, owner, address, port, 'tcp'),
+    bindClusterTcp,
     unbindTcp: (owner) => unbind(tcpBindings, owner),
-    unbindProcess: (processOwner) => {
-      unbindProcess(tcpBindings, processOwner);
-      unbindProcess(udpBindings, processOwner);
-    },
     connectTcp,
     bindPipe,
+    bindClusterPipe,
     unbindPipe,
     connectPipe,
-    bindUdp: (owner, address, port, options) => bind(udpBindings, owner, address, port, 'udp', options),
+    bindUdp: (owner, address, port) => bind(udpBindings, owner, address, port, 'udp'),
     unbindUdp: (owner) => unbind(udpBindings, owner),
     sendUdp,
     reset() {

@@ -1,4 +1,9 @@
 import { ensureOutputStream } from './streams.js';
+import { AsyncResource } from './async-hooks.js';
+
+export const kWeakHandler = Symbol.for('nodejs.internal.event_target.weakHandler');
+
+const abortSignalCompatibilityKey = Symbol.for('bnh.abort-signal-compatibility');
 
 function bytes(value) {
   if (value instanceof Uint8Array) return value;
@@ -229,10 +234,11 @@ export function createUtilTypes(scope = globalThis) {
 
 export function createConstants() {
   return Object.freeze({
-    O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2, O_CREAT: 64, O_EXCL: 128, O_TRUNC: 512, O_APPEND: 1024,
+    O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2, O_CREAT: 64, O_EXCL: 128, O_TRUNC: 512, O_APPEND: 1024, O_NOATIME: 0x40000,
     F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1,
     SIGINT: 2, SIGTERM: 15, SIGKILL: 9, SIGPIPE: 13,
     UV_DIRENT_FILE: 1, UV_DIRENT_DIR: 2, UV_DIRENT_LINK: 3,
+    crypto: Object.freeze({ ENGINE_METHOD_ALL: 0 }),
   });
 }
 
@@ -309,7 +315,7 @@ export function createStreamConsumers(scope, BufferClass) {
   return Object.freeze({
     arrayBuffer: async (stream) => (await collect(stream)).buffer,
     blob: async (stream) => new scope.Blob([await collect(stream)]),
-    buffer: async (stream) => new BufferClass(await collect(stream)),
+    buffer: async (stream) => BufferClass.from(await collect(stream)),
     json: async (stream) => JSON.parse(new TextDecoder().decode(await collect(stream))),
     text: async (stream) => new TextDecoder().decode(await collect(stream)),
   });
@@ -317,6 +323,190 @@ export function createStreamConsumers(scope, BufferClass) {
 
 function abortError() {
   return new DOMException('The operation was aborted', 'AbortError');
+}
+
+function installAbortSignalCompatibility(scope) {
+  const AbortSignalClass = scope.AbortSignal;
+  if (typeof AbortSignalClass !== 'function' || scope[abortSignalCompatibilityKey]) return;
+
+  const state = { gcGeneration: 0, signals: new WeakMap() };
+  Object.defineProperty(scope, abortSignalCompatibilityKey, { configurable: true, value: state });
+
+  const trackSignal = (signal) => {
+    if (!signal || state.signals.has(signal)) return state.signals.get(signal);
+    const signalState = { strongListeners: new Set(), weakListeners: new Set() };
+    state.signals.set(signal, signalState);
+    return signalState;
+  };
+  const nativeAddEventListener = AbortSignalClass.prototype.addEventListener;
+  const nativeRemoveEventListener = AbortSignalClass.prototype.removeEventListener;
+  if (typeof nativeAddEventListener === 'function' && typeof nativeRemoveEventListener === 'function') {
+    Object.defineProperties(AbortSignalClass.prototype, {
+      addEventListener: {
+        configurable: true,
+        value(type, listener, options) {
+          const result = Reflect.apply(nativeAddEventListener, this, [type, listener, options]);
+          if (type === 'abort' && typeof listener === 'function') {
+            const signalState = trackSignal(this);
+            const listeners = options?.[kWeakHandler] ? signalState.weakListeners : signalState.strongListeners;
+            listeners.add(listener);
+          }
+          return result;
+        },
+      },
+      removeEventListener: {
+        configurable: true,
+        value(type, listener, options) {
+          const result = Reflect.apply(nativeRemoveEventListener, this, [type, listener, options]);
+          if (type === 'abort' && typeof listener === 'function') {
+            const signalState = state.signals.get(this);
+            signalState?.strongListeners.delete(listener);
+            signalState?.weakListeners.delete(listener);
+          }
+          return result;
+        },
+      },
+    });
+  }
+
+  if (typeof AbortSignalClass.timeout === 'function') {
+    const nativeTimeout = AbortSignalClass.timeout.bind(AbortSignalClass);
+    const timeout = (milliseconds) => {
+      const nativeSignal = nativeTimeout(milliseconds);
+      trackSignal(nativeSignal);
+      const controller = new scope.AbortController();
+      const abort = () => controller.abort(new scope.DOMException(
+        'The operation was aborted due to timeout',
+        'TimeoutError',
+      ));
+      if (nativeSignal.aborted) abort();
+      else nativeSignal.addEventListener('abort', abort, { once: true, [kWeakHandler]: true });
+      trackSignal(controller.signal);
+      return controller.signal;
+    };
+    try { AbortSignalClass.timeout = timeout; } catch { /* native method is immutable */ }
+  }
+
+  if (typeof AbortSignalClass.any === 'function') {
+    const nativeAny = AbortSignalClass.any.bind(AbortSignalClass);
+    const receivedType = (value) => value === null ? 'null' : value === undefined ? 'undefined' : typeof value;
+    const any = (signals) => {
+      if (signals === null || signals === undefined || typeof signals[Symbol.iterator] !== 'function') {
+        const error = new TypeError(`The "signals" argument must be an iterable of AbortSignal instances. Received ${receivedType(signals)}`);
+        error.code = 'ERR_INVALID_ARG_TYPE';
+        throw error;
+      }
+      const values = [...signals];
+      for (let index = 0; index < values.length; index += 1) {
+        const value = values[index];
+        if (!(value instanceof AbortSignalClass)) {
+          const error = new TypeError(`The "signals[${index}]" argument must be an instance of AbortSignal. Received ${receivedType(value)}`);
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+      }
+      const signal = nativeAny(values);
+      trackSignal(signal);
+      return signal;
+    };
+    try { AbortSignalClass.any = any; } catch { /* native method is immutable */ }
+  }
+
+  const signalConstructor = function AbortSignal() {
+    const error = new TypeError('Illegal constructor');
+    error.code = 'ERR_ILLEGAL_CONSTRUCTOR';
+    throw error;
+  };
+  try {
+    Object.defineProperty(AbortSignalClass.prototype, 'constructor', {
+      configurable: true,
+      value: signalConstructor,
+      writable: true,
+    });
+  } catch { /* browser prototype is immutable */ }
+
+  if (typeof scope.Event === 'function' && scope.Event.prototype
+      && !Object.prototype.hasOwnProperty.call(scope.Event.prototype, 'isTrusted')) {
+    try {
+      Object.defineProperty(scope.Event.prototype, 'isTrusted', {
+        configurable: true,
+        get() { return false; },
+      });
+    } catch { /* browser prototype is immutable */ }
+  }
+
+  const NativeWeakRef = scope.WeakRef;
+  if (typeof NativeWeakRef === 'function') {
+    class CompatibleWeakRef {
+      constructor(value) {
+        const signalState = state.signals.get(value);
+        this.signalState = signalState;
+        this.value = signalState ? value : undefined;
+        this.native = signalState ? null : new NativeWeakRef(value);
+      }
+
+      deref() {
+        if (!this.signalState) return this.native.deref();
+        if (state.gcGeneration > 0 && this.signalState.strongListeners.size === 0) this.value = undefined;
+        return this.value;
+      }
+    }
+    scope.WeakRef = CompatibleWeakRef;
+  }
+
+  const nativeGc = typeof scope.gc === 'function' ? scope.gc.bind(scope) : null;
+  scope.gc = () => {
+    state.gcGeneration += 1;
+    nativeGc?.();
+  };
+}
+
+export function createInternalEventTarget(scope = globalThis) {
+  const Event = scope.Event || class BrowserEvent {};
+  const EventTarget = scope.EventTarget || class BrowserEventTarget {
+    addEventListener() {}
+    removeEventListener() {}
+    dispatchEvent() { return true; }
+  };
+  class NodeEventTarget extends EventTarget {}
+  const kCreateEvent = Symbol('bnh.createEvent');
+  const kNewListener = Symbol('bnh.newListener');
+  const kRemoveListener = Symbol('bnh.removeListener');
+
+  function defineEventHandler(target, name) {
+    const property = `on${name}`;
+    if (Object.getOwnPropertyDescriptor(target, property)) return;
+    const handler = Symbol(property);
+    Object.defineProperty(target, property, {
+      configurable: true,
+      enumerable: true,
+      get() { return this[handler] || null; },
+      set(value) {
+        const previous = this[handler];
+        if (previous) this.removeEventListener?.(name, previous);
+        this[handler] = typeof value === 'function' ? value : null;
+        if (this[handler]) this.addEventListener?.(name, this[handler]);
+      },
+    });
+  }
+
+  function initNodeEventTarget() {}
+
+  return Object.freeze({
+    Event,
+    EventTarget,
+    NodeEventTarget,
+    defineEventHandler,
+    initNodeEventTarget,
+    kCreateEvent,
+    kNewListener,
+    kRemoveListener,
+    kWeakHandler,
+  });
+}
+
+export function installBrowserAbortSignalCompatibility(scope = globalThis) {
+  installAbortSignalCompatibility(scope);
 }
 
 export function createAborted() {
@@ -401,13 +591,70 @@ export function addAbortSignal(signal, stream) {
   }
 }
 
-export function finished(stream, options) {
+export function finished(stream, options, callbackArgument) {
   try {
-    if (!stream) return Promise.resolve();
+    const isNodeStream = stream && typeof stream.on === 'function'
+      && (stream._readableState || stream._writableState);
+    const isWebStream = stream && (typeof stream.getReader === 'function'
+      || typeof stream.getWriter === 'function');
+    if (!isNodeStream && !isWebStream && !(stream && kIsClosedPromise in stream)) {
+      const error = new TypeError('The "stream" argument must be an instance of Stream or ReadableStream');
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    let callback = callbackArgument;
+    if (typeof options === 'function') {
+      if (callbackArgument !== undefined) {
+        const error = new TypeError('The "callback" argument must be of type function');
+        error.code = 'ERR_INVALID_ARG_TYPE';
+        throw error;
+      }
+      callback = options;
+      options = undefined;
+    } else if (options !== undefined && options !== null && typeof options !== 'object') {
+      const error = new TypeError(callbackArgument === undefined
+        ? 'The "callback" argument must be of type function'
+        : 'The "options" argument must be an object');
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    if (callback !== undefined && typeof callback !== 'function') {
+      const error = new TypeError('The "callback" argument must be of type function');
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    if (callback === undefined) callback = null;
+    const callbackResource = callback ? new AsyncResource('STREAMFINISHED') : null;
     return new Promise((resolve, reject) => {
-      const onFinish = () => resolve();
-      const onError = (err) => reject(err || abortError());
-      const onClose = () => { resolve(); };
+      let settled = false;
+      const complete = (error = undefined) => {
+        if (settled) return;
+        settled = true;
+        try {
+          if (callbackResource) callbackResource.runInAsyncScope(callback, undefined, error);
+          if (error) reject(error);
+          else resolve();
+        } finally {
+          callbackResource?.emitDestroy();
+        }
+      };
+      const onFinish = () => complete();
+      const onError = (err) => complete(err || abortError());
+      const onClose = () => {
+        const readableState = stream?._readableState;
+        const writableState = stream?._writableState;
+        const premature = Boolean(
+          (readableState?.readable !== false && !readableState?.endEmitted)
+          || (writableState?.writable !== false && !writableState?.finished),
+        );
+        if (!premature) {
+          complete();
+          return;
+        }
+        const error = new Error('Premature close');
+        error.code = 'ERR_STREAM_PREMATURE_CLOSE';
+        complete(error);
+      };
       if (stream && typeof stream.on === 'function') {
         stream.on('finish', onFinish);
         stream.on('end', onFinish);
@@ -465,6 +712,15 @@ export function createWebStreamModule(scope) {
   };
   if (typeof scope.TextEncoderStream === 'function') patchStream(scope.TextEncoderStream);
   if (typeof scope.TextDecoderStream === 'function') patchStream(scope.TextDecoderStream);
+  const patchCompressionInspect = (StreamClass, name) => {
+    if (typeof StreamClass !== 'function' || !StreamClass.prototype) return;
+    Object.defineProperty(StreamClass.prototype, inspectCustom, {
+      configurable: true,
+      value() { return `${name} { readable: ReadableStream, writable: WritableStream }`; },
+    });
+  };
+  patchCompressionInspect(scope.CompressionStream, 'CompressionStream');
+  patchCompressionInspect(scope.DecompressionStream, 'DecompressionStream');
   return Object.freeze({
     ReadableStream: scope.ReadableStream,
     WritableStream: scope.WritableStream,
@@ -473,5 +729,7 @@ export function createWebStreamModule(scope) {
     CountQueuingStrategy: scope.CountQueuingStrategy,
     TextEncoderStream: typeof scope.TextEncoderStream === 'function' ? scope.TextEncoderStream : undefined,
     TextDecoderStream: typeof scope.TextDecoderStream === 'function' ? scope.TextDecoderStream : undefined,
+    CompressionStream: typeof scope.CompressionStream === 'function' ? scope.CompressionStream : undefined,
+    DecompressionStream: typeof scope.DecompressionStream === 'function' ? scope.DecompressionStream : undefined,
   });
 }

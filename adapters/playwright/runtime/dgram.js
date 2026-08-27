@@ -1,14 +1,34 @@
 import { EventEmitter } from './events.js';
-import { createVirtualNetwork, sharedVirtualNetwork, normalizeVirtualAddress, virtualNetworkConstants } from './virtual-network.js';
+import { AsyncResource } from './async-hooks.js';
+import { createBrowserDns } from './dns.js';
+import {
+  createVirtualNetwork,
+  sharedVirtualNetwork,
+  normalizeVirtualAddress,
+  virtualAddressFamily,
+  virtualNetworkConstants,
+} from './virtual-network.js';
 
 const UDP_CONSTANTS = Object.freeze({
   UV_UDP_REUSEADDR: 4,
   IPV6_ONLY: 27,
 });
 
+const VIRTUAL_DGRAM_STATE = Symbol.for('bnh.dgram.state');
+let nextVirtualDescriptor = 1000;
+
 function asBytes(value, offset = 0, length = undefined) {
   let bytes;
   if (typeof value === 'string') bytes = new TextEncoder().encode(value);
+  else if (Array.isArray(value)) {
+    const parts = value.map((part) => asBytes(part));
+    bytes = new Uint8Array(parts.reduce((total, part) => total + part.byteLength, 0));
+    let cursor = 0;
+    for (const part of parts) {
+      bytes.set(part, cursor);
+      cursor += part.byteLength;
+    }
+  }
   else if (value instanceof Uint8Array) bytes = new Uint8Array(value);
   else if (value instanceof ArrayBuffer) bytes = new Uint8Array(value.slice(0));
   else if (ArrayBuffer.isView(value)) bytes = new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
@@ -49,18 +69,38 @@ export class Socket extends EventEmitter {
     if (type !== 'udp4' && type !== 'udp6') throw new TypeError(`invalid dgram type: ${type}`);
     this.type = type;
     this._network = internal.network || sharedVirtualNetwork;
+    this._dns = internal.dns || createBrowserDns();
     this._bufferClass = internal.BufferClass;
     this._trackTask = internal.trackTask;
-    this._clusterGroupId = internal.clusterGroupId;
-    this._processOwner = internal.processOwner;
+    this._diagnostics = internal.diagnostics;
     this._reuseAddr = Boolean(internal.reuseAddr);
+    this._sendBlockList = internal.sendBlockList;
+    this._receiveBlockList = internal.receiveBlockList;
     this._bound = false;
     this._closed = false;
     this._connected = false;
     this._remoteAddress = null;
+    this._refed = true;
     this.boundPort = null;
     this.boundAddress = null;
     this._taskRelease = null;
+    this._sendResources = new Set();
+    // A UDP socket is an async resource whose callbacks inherit the context
+    // in which the socket was created, including an active AsyncLocalStorage.
+    this._receiveResource = new AsyncResource('UDPWRAP');
+    this[VIRTUAL_DGRAM_STATE] = {
+      handle: {
+        fd: nextVirtualDescriptor++,
+        lookup: (address, callback) => this._dns.lookup(
+          address,
+          { family: this.type === 'udp6' ? 6 : 4 },
+          callback,
+        ),
+      },
+    };
+    const diagnostics = typeof this._diagnostics === 'function' ? this._diagnostics() : this._diagnostics;
+    const channel = diagnostics?.channel?.('udp.socket');
+    if (channel?.hasSubscribers) channel.publish({ socket: this });
     if (typeof listener === 'function') this.on('message', listener);
   }
 
@@ -75,6 +115,14 @@ export class Socket extends EventEmitter {
       address = options.address;
       callback = address_;
       this._reuseAddr = Boolean(options.reuseAddr);
+      if (options.fd !== undefined) {
+        const descriptors = globalThis.__BNH_VIRTUAL_FD_TYPES__;
+        const descriptorType = descriptors?.get(Number(options.fd));
+        const error = new Error(descriptorType === 'tcp' ? 'Unsupported fd type: TCP' : 'open EEXIST');
+        error.code = descriptorType === 'tcp' ? 'ERR_INVALID_FD_TYPE' : 'EEXIST';
+        error.name = descriptorType === 'tcp' ? 'TypeError' : 'Error';
+        throw error;
+      }
     }
     if (typeof port === 'function') {
       callback = port;
@@ -86,7 +134,7 @@ export class Socket extends EventEmitter {
     }
     if (typeof callback !== 'function') callback = undefined;
     const family = this.type === 'udp6' ? 6 : 4;
-    const normalizedAddress = normalizeVirtualAddress(address || (family === 6 ? '::' : '0.0.0.0'), family);
+    let normalizedAddress = normalizeVirtualAddress(address || (family === 6 ? '::' : '0.0.0.0'), family);
     const requestedPort = validatePort(port ?? 0);
     queueMicrotask(() => {
       if (this._closed) return;
@@ -94,22 +142,29 @@ export class Socket extends EventEmitter {
         callback?.call(this);
         return;
       }
-      try {
-        const result = this._network.bindUdp(this, normalizedAddress, requestedPort, {
-          reuseAddr: this._reuseAddr,
-          clusterGroupId: this._clusterGroupId,
-          processOwner: this._processOwner,
-        });
-        this.boundPort = result.port;
-        this.boundAddress = result.address;
-        this._taskRelease = this._trackTask?.() || null;
-        this._bound = true;
-        this.emit('listening');
-        callback?.call(this);
-      } catch (error) {
-        this.emit('error', error);
-        callback?.call(this, error);
-      }
+      const handle = this[VIRTUAL_DGRAM_STATE].handle;
+      handle.lookup.call(handle, normalizedAddress, (lookupError, resolvedAddress, resolvedFamily) => {
+        if (this._closed) return;
+        if (lookupError) {
+          this.emit('error', lookupError);
+          return;
+        }
+        normalizedAddress = normalizeVirtualAddress(
+          resolvedAddress || normalizedAddress,
+          resolvedFamily || family,
+        );
+        try {
+          const result = this._network.bindUdp(this, normalizedAddress, requestedPort, { reuseAddr: this._reuseAddr });
+          this.boundPort = result.port;
+          this.boundAddress = result.address;
+          this._taskRelease = this._refed ? this._trackTask?.() || null : null;
+          this._bound = true;
+          this.emit('listening');
+          callback?.call(this);
+        } catch (error) {
+          this.emit('error', error);
+        }
+      });
     });
     return this;
   }
@@ -155,31 +210,86 @@ export class Socket extends EventEmitter {
       callback = address;
       address = undefined;
     }
+    address = address ?? this._remoteAddress?.address ?? (this.type === 'udp6' ? virtualNetworkConstants.LOOPBACK_V6 : virtualNetworkConstants.LOOPBACK_V4);
+    if (address === '') address = this.type === 'udp6' ? virtualNetworkConstants.LOOPBACK_V6 : virtualNetworkConstants.LOOPBACK_V4;
+    if (typeof address !== 'string') {
+      const received = address === null || address === undefined
+        ? String(address)
+        : typeof address === 'object'
+          ? `an instance of ${address.constructor?.name || 'Object'}`
+          : `type ${typeof address} (${String(address)})`;
+      const error = new TypeError(`The "address" argument must be of type string. Received ${received}`);
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    const callbackProvided = typeof callback === 'function';
     if (typeof callback !== 'function') callback = () => {};
     let bytes;
     try {
       bytes = asBytes(message, offset, length);
       port = port ?? this._remoteAddress?.port;
-      address = address ?? this._remoteAddress?.address ?? (this.type === 'udp6' ? virtualNetworkConstants.LOOPBACK_V6 : virtualNetworkConstants.LOOPBACK_V4);
       port = validatePort(port);
-      address = normalizeVirtualAddress(address, this.type === 'udp6' ? 6 : 4);
     } catch (error) {
       queueMicrotask(() => callback(error));
       return false;
     }
     const transmit = () => {
-      this._network.sendUdp({
-        source: this,
-        address,
-        port,
-        bytes,
-        onDelivered: (size) => callback(null, size),
-        onError: (error) => {
-          this.emit('error', error);
-          callback(error);
-        },
+      queueMicrotask(() => {
+        const family = this.type === 'udp6' ? 'ipv6' : 'ipv4';
+        if (this._sendBlockList?.check?.(address, family)) {
+          const error = networkError('ERR_IP_BLOCKED', 'send', address, port);
+          if (callbackProvided) callback(error);
+          else this.emit('error', error);
+          return;
+        }
+        const resource = new AsyncResource('UDPSENDWRAP');
+        this._sendResources.add(resource);
+        const runCallback = (...callbackArgs) => resource.runInAsyncScope(callback, this, ...callbackArgs);
+        const handleSend = this[VIRTUAL_DGRAM_STATE].handle.send;
+        if (typeof handleSend === 'function') {
+          let result;
+          try {
+            result = handleSend.call(this[VIRTUAL_DGRAM_STATE].handle, bytes, port, address);
+          } catch (error) {
+            this.emit('error', error);
+            runCallback(error);
+            return;
+          }
+          if (result !== undefined && result !== 0) {
+            const error = networkError('UNKNOWN', 'send', address, port);
+            error.errno = -4094;
+            this.emit('error', error);
+            runCallback(error);
+            return;
+          }
+        }
+        this._network.sendUdp({
+          source: this,
+          address,
+          port,
+          bytes,
+          onDelivered: (size) => runCallback(null, size),
+          onError: (error) => {
+            this.emit('error', error);
+            runCallback(error);
+          },
+        });
       });
     };
+    if (virtualAddressFamily(address) === 0) {
+      const lookup = this[VIRTUAL_DGRAM_STATE].handle.lookup;
+      lookup.call(this[VIRTUAL_DGRAM_STATE].handle, address, (error, resolvedAddress, resolvedFamily) => {
+        if (error) {
+          if (callbackProvided) callback(error);
+          else this.emit('error', error);
+          return;
+        }
+        address = normalizeVirtualAddress(resolvedAddress, resolvedFamily || (this.type === 'udp6' ? 6 : 4));
+        transmit();
+      });
+      return true;
+    }
+    address = normalizeVirtualAddress(address, this.type === 'udp6' ? 6 : 4);
     if (!this._bound) {
       this.bind(0, this.type === 'udp6' ? '::' : '0.0.0.0', (error) => {
         if (error) callback(error);
@@ -197,15 +307,44 @@ export class Socket extends EventEmitter {
       address = undefined;
     }
     const family = this.type === 'udp6' ? 6 : 4;
-    const remote = { port: validatePort(port), address: normalizeVirtualAddress(address || (family === 6 ? '::1' : '127.0.0.1'), family) };
-    const complete = () => {
-      this._remoteAddress = remote;
-      this._connected = true;
-      this.emit('connect');
-      callback?.call(this);
+    const requestedPort = validatePort(port);
+    const requestedAddress = address || (family === 6 ? '::1' : '127.0.0.1');
+    const finish = (error, resolvedAddress = requestedAddress, resolvedFamily = family) => {
+      if (error) {
+        if (callback) callback.call(this, error);
+        else queueMicrotask(() => this.emit('error', error));
+        return;
+      }
+      if (this._sendBlockList?.check?.(resolvedAddress, resolvedFamily === 6 ? 'ipv6' : 'ipv4')) {
+        const blocked = networkError('ERR_IP_BLOCKED', 'connect', resolvedAddress, requestedPort);
+        if (callback) callback.call(this, blocked);
+        else queueMicrotask(() => this.emit('error', blocked));
+        return;
+      }
+      const remote = {
+        port: requestedPort,
+        address: normalizeVirtualAddress(resolvedAddress, resolvedFamily),
+      };
+      const complete = (bindError) => {
+        if (bindError) {
+          finish(bindError);
+          return;
+        }
+        this._remoteAddress = remote;
+        this._connected = true;
+        this.emit('connect');
+        callback?.call(this);
+      };
+      if (this._bound) queueMicrotask(complete);
+      else this.bind(0, family === 6 ? '::' : '0.0.0.0', complete);
     };
-    if (this._bound) queueMicrotask(complete);
-    else this.bind(0, family === 6 ? '::' : '0.0.0.0', complete);
+    if (virtualNetworkConstants.LOOPBACK_V4 === requestedAddress
+      || virtualNetworkConstants.LOOPBACK_V6 === requestedAddress
+      || requestedAddress === '0.0.0.0' || requestedAddress === '::') {
+      finish(null);
+    } else {
+      this._dns.lookup(requestedAddress, { family, all: false }, finish);
+    }
     return this;
   }
 
@@ -225,13 +364,25 @@ export class Socket extends EventEmitter {
     this._bound = false;
     this.boundPort = null;
     this.boundAddress = null;
-    queueMicrotask(() => this.emit('close'));
+    queueMicrotask(() => {
+      this.emit('close');
+      queueMicrotask(() => {
+        for (const resource of this._sendResources) resource.emitDestroy();
+        this._sendResources.clear();
+        this._receiveResource.emitDestroy();
+      });
+    });
     return this;
   }
 
   _receiveDatagram(bytes, rinfo) {
     if (this._closed) return;
-    this.emit('message', makeNodeBytes(bytes, this._bufferClass), rinfo);
+    const family = rinfo?.family === 'IPv6' ? 'ipv6' : 'ipv4';
+    if (this._receiveBlockList?.check?.(rinfo?.address, family)) return;
+    this._receiveResource.runInAsyncScope(
+      () => this.emit('message', makeNodeBytes(bytes, this._bufferClass), rinfo),
+      this,
+    );
   }
 
   getRecvBufferSize() { return 0; }
@@ -244,28 +395,29 @@ export class Socket extends EventEmitter {
   setMulticastLoopback() { return this; }
   addMembership() { return this; }
   dropMembership() { return this; }
-  _networkClosed() {
-    if (!this._bound) return;
-    this._bound = false;
-    this.boundPort = null;
-    this.boundAddress = null;
+  ref() {
+    this._refed = true;
+    if (this._bound && !this._taskRelease) this._taskRelease = this._trackTask?.() || null;
+    return this;
+  }
+
+  unref() {
+    this._refed = false;
     this._taskRelease?.();
     this._taskRelease = null;
-    queueMicrotask(() => this.emit('close'));
+    return this;
   }
-  ref() { return this; }
-  unref() { return this; }
 }
 
-export function createBrowserDgram({ network = sharedVirtualNetwork, transport, BufferClass, trackTask, clusterGroupId, processOwner } = {}) {
+export function createBrowserDgram({ network = sharedVirtualNetwork, transport, dns = createBrowserDns(), BufferClass, trackTask, diagnostics } = {}) {
   const configuredNetwork = transport && network === sharedVirtualNetwork ? createVirtualNetwork({ transport }) : network;
   const SocketWithDefaults = class BrowserDgramSocket extends Socket {
     constructor(type, listener) {
-      super(type, listener, { network: configuredNetwork, BufferClass, trackTask, clusterGroupId, processOwner });
+      super(type, listener, { network: configuredNetwork, dns, BufferClass, trackTask, diagnostics });
     }
   };
   return {
-    createSocket(type, listener) { return new SocketWithDefaults(type, listener); },
+    createSocket: function createSocket(type, listener) { return new SocketWithDefaults(type, listener); },
     Socket: SocketWithDefaults,
     constants: UDP_CONSTANTS,
   };

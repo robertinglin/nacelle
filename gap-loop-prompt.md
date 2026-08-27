@@ -96,8 +96,15 @@ responsive while the job continues running.
 ## One round
 
 1. **Pick 3 cards.** Read `WORKLIST.md` (or `bnh gaps --list`). Take the top
-   ranked non-overlapping cards — different modules per round whenever
-   possible. Never assign two agents the same card. Note `test/es-module/
+   ranked cards that are non-overlapping by both module and runtime write
+   surface — different modules and different runtime files per round whenever
+   possible. Before dispatch, inspect each card's symbols and determine its
+   likely files under `adapters/playwright/runtime/`. Never assign two agents
+   cards that edit the same runtime file, shared export table, or tightly
+   coupled API family in parallel. If the next ranked card overlaps, skip it
+   for this round and select the next safe card; if overlap is unavoidable,
+   batch the cards into one agent or serialize them after the first merge.
+   Never assign two agents the same card. Note `test/es-module/
    test-esm-named-exports.mjs` is a known pre-existing loader-hook timeout:
    when it appears in a card's acceptance list, a "9 of 10 pass" result is
    acceptable — treat that test as a note, not a blocker.
@@ -164,8 +171,11 @@ responsive while the job continues running.
 
 6. **Merge serially** into `bnh/integration-v22` (in the integration worktree):
    `git merge --no-edit luna-gap-<id>`, one at a time, resolving conflicts as
-   you go. When two branches touched the same file (fs and fs/promises both
-   edit `runtime/vfs.js` — expect this):
+   you go. The selection rule above should prevent concurrent edits to the
+   same runtime file; do not create avoidable merge conflicts merely to keep
+   three agents busy. When two branches touched the same file (fs and
+   fs/promises both edit `runtime/vfs.js` — expect this only when no
+   disjoint card is available):
    - Union both sides' additions, then check for duplicate definitions:
      `grep -oE "^  (function|const) [A-Za-z_$]+" <file> | sort | uniq -d`
      (ignore pre-existing pairs like directories/files/symlinks — they are in

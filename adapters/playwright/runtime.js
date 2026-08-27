@@ -53,15 +53,21 @@ import {
   generateKeyPair,
   generateKeyPairSync,
   hashSync,
+  privateDecrypt,
+  privateEncrypt,
   pbkdf2,
   pbkdf2Sync,
   randomBytes as createRandomBytes,
   randomFill,
   randomFillSync,
+  randomInt as createRandomInt,
   randomUUID as createRandomUUID,
+  publicDecrypt,
+  publicEncrypt,
   sign,
   signSync,
   verify,
+  scrypt as createScrypt,
   verifySync,
 } from './runtime/crypto.js';
 import { createDiffieHellman, createDiffieHellmanGroup } from './runtime/diffie-hellman.js';
@@ -1566,6 +1572,20 @@ function createCryptoShim(scope, Buffer, processObject) {
   const nodeRandomFill = (buffer, offset, size, callback) => (
     randomFill(buffer, offset, size, callback, scope)
   );
+  const nodeRandomInt = (min, max, callback) => createRandomInt(min, max, callback, scope);
+  const nodeScrypt = (password, salt, keyLength, options, callback) => {
+    const actualOptions = typeof options === 'function' ? {} : options;
+    const actualCallback = typeof options === 'function' ? options : callback;
+    if (typeof actualCallback !== 'function') {
+      const error = new TypeError('The "callback" argument must be of type function');
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    return createScrypt(password, salt, keyLength, actualOptions, (error, value) => {
+      if (error) actualCallback(error);
+      else actualCallback(null, Buffer.from(value));
+    }, scope);
+  };
   const nodeSign = (...args) => {
     const value = signSync(args[0], args[1], args[2], args[3], scope);
     return value === undefined ? wrapBuffer(sign)(...args) : Buffer.from(value);
@@ -1635,7 +1655,7 @@ function createCryptoShim(scope, Buffer, processObject) {
       },
     };
   };
-  return {
+  const nodeCrypto = {
     webcrypto: crypto,
     subtle: crypto?.subtle,
     randomUUID: (options) => createRandomUUID(scope, options),
@@ -1643,9 +1663,13 @@ function createCryptoShim(scope, Buffer, processObject) {
     getHashes: () => ['md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512'],
     getCurves: () => [],
     randomBytes: nodeRandomBytes,
-    pseudoRandomBytes: nodeRandomBytes,
     randomFill: nodeRandomFill,
     randomFillSync: nodeRandomFillSync,
+    randomInt: nodeRandomInt,
+    privateDecrypt,
+    privateEncrypt,
+    publicDecrypt,
+    publicEncrypt,
     createHash: Hash,
     Hash,
     Hmac,
@@ -1657,6 +1681,7 @@ function createCryptoShim(scope, Buffer, processObject) {
     getCiphers: () => [],
     pbkdf2: nodePbkdf2,
     pbkdf2Sync: (...args) => Buffer.from(pbkdf2Sync(...args)),
+    scrypt: nodeScrypt,
     aesGcmEncrypt: wrapBuffer(aesGcmEncrypt),
     aesGcmDecrypt: wrapBuffer(aesGcmDecrypt),
     sign: nodeSign,
@@ -1681,6 +1706,12 @@ function createCryptoShim(scope, Buffer, processObject) {
     Certificate: createCertificateShim(scope, 'Certificate'),
     X509Certificate: createCertificateShim(scope, 'X509Certificate'),
   };
+  Object.defineProperties(nodeCrypto, {
+    pseudoRandomBytes: { configurable: true, enumerable: false, value: nodeRandomBytes, writable: true },
+    prng: { configurable: true, enumerable: false, value: nodeRandomBytes, writable: true },
+    rng: { configurable: true, enumerable: false, value: nodeRandomBytes, writable: true },
+  });
+  return nodeCrypto;
 }
 
 function createZlibShim(scope, BufferClass) {

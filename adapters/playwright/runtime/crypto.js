@@ -1163,6 +1163,265 @@ export function randomFill(buffer, offset, size, callback, globalObject = global
   );
 }
 
+const RANDOM_INT_MAX = 0xffffffffffff;
+
+function randomIntArguments(min, max, callback) {
+  const minNotSpecified = max === undefined || typeof max === 'function';
+  if (minNotSpecified) {
+    callback = max;
+    max = min;
+    min = 0;
+  }
+  if (!Number.isSafeInteger(min)) {
+    const error = new TypeError(`The "min" argument must be a safe integer. Received ${min}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (!Number.isSafeInteger(max)) {
+    const error = new TypeError(`The "max" argument must be a safe integer. Received ${max}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (max <= min) {
+    const error = new RangeError(`The value of "max" is out of range. It must be greater than the value of "min" (${min}). Received ${max}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  const range = max - min;
+  if (range > RANDOM_INT_MAX) {
+    const error = new RangeError(`The value of "${minNotSpecified ? 'max' : 'max - min'}" is out of range. It must be <= ${RANDOM_INT_MAX}. Received ${range}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  if (callback !== undefined && typeof callback !== 'function') {
+    const error = new TypeError('The "callback" argument must be of type function');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  return { min, max, range, callback };
+}
+
+function randomIntValue(min, range, globalObject) {
+  const limit = RANDOM_INT_MAX - (RANDOM_INT_MAX % range);
+  do {
+    const random = randomBytes(6, globalObject);
+    let value = 0;
+    for (const byte of random) value = value * 256 + byte;
+    if (value < limit) return (value % range) + min;
+  } while (true);
+}
+
+export function randomInt(min, max, callback, globalObject = globalThis) {
+  const normalized = randomIntArguments(min, max, callback);
+  if (normalized.callback === undefined) return randomIntValue(normalized.min, normalized.range, globalObject);
+  Promise.resolve().then(() => randomIntValue(normalized.min, normalized.range, globalObject)).then(
+    (value) => normalized.callback(undefined, value),
+    (error) => normalized.callback(error),
+  );
+  return undefined;
+}
+
+function scryptOptionError(message, code = 'ERR_CRYPTO_INVALID_SCRYPT_PARAMS') {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function validateScryptParameters(password, salt, keyLength, options, encoder = globalThis.TextEncoder) {
+  let passwordBytes;
+  let saltBytes;
+  try {
+    passwordBytes = toCryptoBytes(password, encoder);
+  } catch {
+    const error = new TypeError('The "password" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  try {
+    saltBytes = toCryptoBytes(salt, encoder);
+  } catch {
+    const error = new TypeError('The "salt" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (!Number.isSafeInteger(keyLength)) {
+    const error = new TypeError(`The "keylen" argument must be of type number. Received ${keyLength}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (keyLength < 0 || keyLength > 0x7fffffff) {
+    const error = new RangeError(`The value of "keylen" is out of range. It must be >= 0 && <= 2147483647. Received ${keyLength}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    const error = new TypeError('The "options" argument must be an object');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  const hasN = options.N !== undefined;
+  const hasCost = options.cost !== undefined;
+  const hasR = options.r !== undefined;
+  const hasBlockSize = options.blockSize !== undefined;
+  const hasP = options.p !== undefined;
+  const hasParallelization = options.parallelization !== undefined;
+  if ((hasN && hasCost) || (hasR && hasBlockSize) || (hasP && hasParallelization)) {
+    throw scryptOptionError('Invalid scrypt param');
+  }
+  const readUint32 = (value, name) => {
+    if (!Number.isSafeInteger(value) || value < 0 || value > 0xffffffff) {
+      const error = new TypeError(`The "${name}" argument must be an unsigned 32-bit integer`);
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    return value;
+  };
+  let N = hasN ? readUint32(options.N, 'N') : hasCost ? readUint32(options.cost, 'cost') : 16384;
+  let r = hasR ? readUint32(options.r, 'r') : hasBlockSize ? readUint32(options.blockSize, 'blockSize') : 8;
+  let p = hasP ? readUint32(options.p, 'p') : hasParallelization ? readUint32(options.parallelization, 'parallelization') : 1;
+  let maxmem = options.maxmem === undefined ? 32 << 20 : options.maxmem;
+  if (!Number.isSafeInteger(maxmem) || maxmem < 0) {
+    const error = new RangeError(`The value of "maxmem" is out of range. Received ${maxmem}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  if (N === 0) N = 16384;
+  if (r === 0) r = 8;
+  if (p === 0) p = 1;
+  if (maxmem === 0) maxmem = 32 << 20;
+  if (N < 2 || (N & (N - 1)) !== 0 || r === 0 || p === 0) throw scryptOptionError('Invalid scrypt param');
+  const memory = 128 * N * r;
+  if (!Number.isSafeInteger(memory) || memory > maxmem || N >= 2 ** (r * 16) || p > 0x7fffffff / r) {
+    throw scryptOptionError('Invalid scrypt params: memory limit exceeded');
+  }
+  return { password: passwordBytes, salt: saltBytes, keyLength, N, r, p };
+}
+
+function salsa208(input) {
+  const x = new Uint32Array(input);
+  const original = new Uint32Array(input);
+  const rotate = (value, bits) => (value << bits) | (value >>> (32 - bits));
+  for (let round = 0; round < 8; round += 2) {
+    x[4] ^= rotate((x[0] + x[12]) >>> 0, 7);
+    x[8] ^= rotate((x[4] + x[0]) >>> 0, 9);
+    x[12] ^= rotate((x[8] + x[4]) >>> 0, 13);
+    x[0] ^= rotate((x[12] + x[8]) >>> 0, 18);
+    x[9] ^= rotate((x[5] + x[1]) >>> 0, 7);
+    x[13] ^= rotate((x[9] + x[5]) >>> 0, 9);
+    x[1] ^= rotate((x[13] + x[9]) >>> 0, 13);
+    x[5] ^= rotate((x[1] + x[13]) >>> 0, 18);
+    x[14] ^= rotate((x[10] + x[6]) >>> 0, 7);
+    x[2] ^= rotate((x[14] + x[10]) >>> 0, 9);
+    x[6] ^= rotate((x[2] + x[14]) >>> 0, 13);
+    x[10] ^= rotate((x[6] + x[2]) >>> 0, 18);
+    x[3] ^= rotate((x[15] + x[11]) >>> 0, 7);
+    x[7] ^= rotate((x[3] + x[15]) >>> 0, 9);
+    x[11] ^= rotate((x[7] + x[3]) >>> 0, 13);
+    x[15] ^= rotate((x[11] + x[7]) >>> 0, 18);
+    x[1] ^= rotate((x[0] + x[3]) >>> 0, 7);
+    x[2] ^= rotate((x[1] + x[0]) >>> 0, 9);
+    x[3] ^= rotate((x[2] + x[1]) >>> 0, 13);
+    x[0] ^= rotate((x[3] + x[2]) >>> 0, 18);
+    x[6] ^= rotate((x[5] + x[4]) >>> 0, 7);
+    x[7] ^= rotate((x[6] + x[5]) >>> 0, 9);
+    x[4] ^= rotate((x[7] + x[6]) >>> 0, 13);
+    x[5] ^= rotate((x[4] + x[7]) >>> 0, 18);
+    x[11] ^= rotate((x[10] + x[9]) >>> 0, 7);
+    x[8] ^= rotate((x[11] + x[10]) >>> 0, 9);
+    x[9] ^= rotate((x[8] + x[11]) >>> 0, 13);
+    x[10] ^= rotate((x[9] + x[8]) >>> 0, 18);
+    x[12] ^= rotate((x[15] + x[14]) >>> 0, 7);
+    x[13] ^= rotate((x[12] + x[15]) >>> 0, 9);
+    x[14] ^= rotate((x[13] + x[12]) >>> 0, 13);
+    x[15] ^= rotate((x[14] + x[13]) >>> 0, 18);
+  }
+  for (let index = 0; index < 16; index += 1) x[index] = (x[index] + original[index]) >>> 0;
+  return x;
+}
+
+function blockMix(input, r) {
+  const output = new Uint32Array(input.length);
+  const x = new Uint32Array(16);
+  x.set(input.subarray(input.length - 16));
+  for (let index = 0; index < 2 * r; index += 1) {
+    const block = input.subarray(index * 16, index * 16 + 16);
+    for (let word = 0; word < 16; word += 1) x[word] ^= block[word];
+    const mixed = salsa208(x);
+    x.set(mixed);
+    output.set(mixed, (index % 2 === 0 ? index / 2 : r + (index - 1) / 2) * 16);
+  }
+  return output;
+}
+
+function scryptSyncForGlobal(password, salt, keyLength, options = {}, globalObject = globalThis) {
+  const parameters = validateScryptParameters(password, salt, keyLength, options, globalObject.TextEncoder);
+  if (parameters.keyLength === 0) return new Uint8Array();
+  const { N, r, p } = parameters;
+  const blockLength = 128 * r;
+  const initial = pbkdf2Sha256(parameters.password, parameters.salt, 1, blockLength * p, globalObject.TextEncoder);
+  const wordsPerBlock = blockLength / 4;
+  const blocks = new Uint32Array(initial.buffer, initial.byteOffset, initial.byteLength / 4);
+  const view = new DataView(initial.buffer, initial.byteOffset, initial.byteLength);
+  for (let index = 0; index < blocks.length; index += 1) blocks[index] = view.getUint32(index * 4, true);
+  for (let blockIndex = 0; blockIndex < p; blockIndex += 1) {
+    const start = blockIndex * wordsPerBlock;
+    let working = blocks.slice(start, start + wordsPerBlock);
+    const memory = new Uint32Array(N * wordsPerBlock);
+    for (let index = 0; index < N; index += 1) {
+      memory.set(working, index * wordsPerBlock);
+      working = blockMix(working, r);
+    }
+    for (let index = 0; index < N; index += 1) {
+      const j = working[working.length - 16] % N;
+      for (let word = 0; word < wordsPerBlock; word += 1) working[word] ^= memory[j * wordsPerBlock + word];
+      working = blockMix(working, r);
+    }
+    blocks.set(working, start);
+  }
+  const mixed = new Uint8Array(blocks.buffer, blocks.byteOffset, blocks.byteLength);
+  return pbkdf2Sha256(parameters.password, mixed, 1, parameters.keyLength, globalObject.TextEncoder);
+}
+
+export function scrypt(password, salt, keyLength, options, callback, globalObject = globalThis) {
+  if (typeof options === 'function') {
+    globalObject = callback || globalObject;
+    callback = options;
+    options = {};
+  }
+  if (typeof callback !== 'function') {
+    const error = new TypeError('The "callback" argument must be of type function');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  validateScryptParameters(password, salt, keyLength, options ?? {}, globalObject.TextEncoder);
+  const operation = Promise.resolve().then(() => scryptSyncForGlobal(password, salt, keyLength, options ?? {}, globalObject));
+  operation.then((value) => callback(null, value), (error) => callback(error));
+  return undefined;
+}
+
+function rsaCipherUnavailable(name) {
+  throw new UnsupportedWebCapabilityError(
+    `crypto.${name}`,
+    'Web Crypto exposes RSA encryption only through asynchronous SubtleCrypto operations; the Node API is synchronous',
+  );
+}
+
+export function privateDecrypt() {
+  return rsaCipherUnavailable('privateDecrypt');
+}
+
+export function privateEncrypt() {
+  return rsaCipherUnavailable('privateEncrypt');
+}
+
+export function publicDecrypt() {
+  return rsaCipherUnavailable('publicDecrypt');
+}
+
+export function publicEncrypt() {
+  return rsaCipherUnavailable('publicEncrypt');
+}
+
 function validateRandomUUIDOptions(options) {
   if (options === undefined) return;
   if (options === null || typeof options !== 'object' || Array.isArray(options)) {
@@ -1224,6 +1483,14 @@ export function createCryptoContract(globalObject = globalThis) {
     pbkdf2Sync: (password, salt, iterations, keyLength, digestAlgorithm = 'sha256') => (
       pbkdf2SyncForGlobal(password, salt, iterations, keyLength, digestAlgorithm, globalObject)
     ),
+    randomInt: (min, max, callback) => randomInt(min, max, callback, globalObject),
+    scrypt: (password, salt, keyLength, options, callback) => (
+      scrypt(password, salt, keyLength, options, callback, globalObject)
+    ),
+    privateDecrypt,
+    privateEncrypt,
+    publicDecrypt,
+    publicEncrypt,
     aesGcmEncrypt: (value, key, iv, options = {}) => (
       aesGcmOperation('encrypt', value, key, iv, options, globalObject)
     ),

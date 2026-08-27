@@ -997,6 +997,42 @@ class OutgoingMessage extends EventEmitter {
   }
 }
 Object.setPrototypeOf(OutgoingMessage.prototype, Writable.prototype);
+Object.defineProperties(OutgoingMessage.prototype, {
+  headersSent: {
+    configurable: true,
+    enumerable: true,
+    get() { return Boolean(this._header || this._headerSent); },
+    set(value) { this._headerSent = Boolean(value); },
+  },
+  writableEnded: {
+    configurable: true,
+    enumerable: false,
+    get() { return Boolean(this.finished || this._writableEnded); },
+    set(value) { this._writableEnded = Boolean(value); },
+  },
+  writableNeedDrain: {
+    configurable: true,
+    enumerable: false,
+    get() { return !this.destroyed && !this.finished && Boolean(this._needDrain); },
+  },
+});
+OutgoingMessage.prototype.addTrailers = function addTrailers(headers) {
+  this._trailer = '';
+  const entries = Array.isArray(headers) ? headers : Object.entries(headers);
+  for (const [field, value] of entries) {
+    validateHeaderName(field, 'Trailer name');
+    if (Array.isArray(value) && value.length > 1) {
+      for (const item of value) {
+        validateHeaderValue(field, item);
+        this._trailer += `${field}: ${item}\r\n`;
+      }
+    } else {
+      const normalized = Array.isArray(value) ? value.join('; ') : value;
+      validateHeaderValue(field, normalized);
+      this._trailer += `${field}: ${normalized}\r\n`;
+    }
+  }
+};
 
 class VirtualServerResponse extends Writable {
   constructor(request, scope, BufferClass, complete, flush) {
@@ -1089,6 +1125,55 @@ class VirtualServerResponse extends Writable {
     const socket = this.connection || this.socket;
     if (socket?.writable && typeof socket.write === 'function') {
       socket.write(head, 'ascii', callback);
+    }
+  }
+
+  assignSocket(socket) {
+    if (socket._httpMessage) {
+      const error = new Error('Socket already assigned');
+      error.code = 'ERR_HTTP_SOCKET_ASSIGNED';
+      throw error;
+    }
+    socket._httpMessage = this;
+    this.socket = socket;
+    this.connection = socket;
+    this.emit('socket', socket);
+    if (Array.isArray(this.outputData)) this._flush();
+  }
+
+  detachSocket(socket) {
+    if (socket._httpMessage !== this) {
+      const error = new Error('Socket is not assigned to this ServerResponse');
+      error.code = 'ERR_ASSERTION';
+      throw error;
+    }
+    socket._httpMessage = null;
+    if (this.socket === socket) this.socket = null;
+    if (this.connection === socket) this.connection = null;
+  }
+
+  writeContinue(callback) {
+    if (this.headersSent) {
+      const error = new Error('Cannot write headers after they are sent');
+      error.code = 'ERR_HTTP_HEADERS_SENT';
+      throw error;
+    }
+    const socket = this.connection || this.socket;
+    if (socket?.writable && typeof socket.write === 'function') {
+      socket.write('HTTP/1.1 100 Continue\r\n\r\n', 'ascii', callback);
+    }
+    this._sent100 = true;
+  }
+
+  writeProcessing(callback) {
+    if (this.headersSent) {
+      const error = new Error('Cannot write headers after they are sent');
+      error.code = 'ERR_HTTP_HEADERS_SENT';
+      throw error;
+    }
+    const socket = this.connection || this.socket;
+    if (socket?.writable && typeof socket.write === 'function') {
+      socket.write('HTTP/1.1 102 Processing\r\n\r\n', 'ascii', callback);
     }
   }
 

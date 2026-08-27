@@ -82,10 +82,11 @@ import { kConnectionsCheckingInterval } from './runtime/http.js';
 import { createVirtualNetwork, getSharedVirtualNetwork, replaceSharedVirtualNetwork } from './runtime/virtual-network.js';
 import { createCluster } from './runtime/cluster.js';
 import { createVirtualProcess } from './runtime/virtual-process.js';
-import { createBrowserProcess } from './runtime/process.js';
+import { createBrowserExecve, createBrowserProcess } from './runtime/process.js';
 import { createProxyCapability } from './runtime/proxy.js';
 import { createV8Module } from './runtime/v8.js';
 import { createProcessReport } from './runtime/report.js';
+import { installProcessFinalization } from './runtime/finalization.js';
 import { createModuleLoader } from './runtime/module-loader.js';
 import { createPrimordials } from './runtime/primordials.js';
 import { createBrowserInternalBindings } from './runtime/internal-bindings.js';
@@ -1265,6 +1266,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     moduleLoadList: [],
     pid: 1,
     ppid: 0,
+    debugPort: 9229,
     platform: 'linux',
     arch: 'x64',
     version: 'v22.0.0-browser',
@@ -1275,6 +1277,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     title: 'browser-node',
     execPath: '/browser/node',
     execArgv: [],
+    execve: createBrowserExecve(processObject),
     stdin: {
       isTTY: false,
       on(...args) { processObject.on(...args); return this; },
@@ -1328,6 +1331,11 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     geteuid: () => uid,
     getgid: () => gid,
     getegid: () => gid,
+    getgroups: () => [gid],
+    initgroups: (user, extraGroup) => {
+      normalizeCredential(user, 'User');
+      normalizeCredential(extraGroup, 'Group');
+    },
     setuid: (value) => { uid = normalizeCredential(value, 'User'); },
     seteuid: (value) => { uid = normalizeCredential(value, 'User'); },
     setgid: (value) => { gid = normalizeCredential(value, 'Group'); },
@@ -1365,6 +1373,12 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
         exitEventEmitted = true;
         processObject.emit('exit', exitCode);
       }
+      exited = true;
+    },
+    reallyExit: () => {
+      exitCode = Number(processObject.exitCode) || 0;
+      exitRequested = true;
+      exitEventEmitted = true;
       exited = true;
     },
     abort: () => terminateBySignal('SIGABRT'),
@@ -1474,6 +1488,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     get: () => exitCode,
     set: (value) => { exitCode = Number(value) || 0; },
   });
+  installProcessFinalization(processObject);
   return { processObject, setTimer, clearTimer };
 }
 
@@ -5606,6 +5621,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       (pathname) => vfs.read(pathname),
       entry,
     );
+    processObject.getBuiltinModule = function getBuiltinModule(id) {
+      if (typeof id !== 'string') throw moduleArgumentTypeError('id', 'of type string', id);
+      const name = builtinName(id);
+      return BUILTIN_NAMES.includes(name) ? builtins[name] : undefined;
+    };
     builtins.module._cache = new Map();
     builtins.module._main = null;
     builtins.module._resolve = (name, parent) => {
@@ -5995,7 +6015,10 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       const module = new builtins.module(resolved, parentModule || null);
       module.filename = resolved;
       module.paths = moduleSearchPaths(resolved);
-      if (!mainModule && resolved === entry) mainModule = module;
+      if (!mainModule && resolved === entry) {
+        mainModule = module;
+        processObject.mainModule = module;
+      }
       builtins.module._main = mainModule;
       cache.set(resolved, module);
       builtins.module._cache = cache;

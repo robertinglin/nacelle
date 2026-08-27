@@ -4,6 +4,8 @@ import { adaptMessagePort, adaptWorker, createIpcError, createMessageChannel, cr
 import { createProcessWorkerSource } from './process-worker.js';
 import { browserCryptoVersion } from './crypto.js';
 import { installWarningContract } from './warnings.js';
+import { installProcessFinalization } from './finalization.js';
+import { unsupportedBoundary } from './errors.js';
 
 export { PROCESS_WORKER_SOURCE } from './process-worker.js';
 
@@ -12,6 +14,56 @@ const STATES = Object.freeze(['created', 'starting', 'running', 'stopping', 'exi
 let nextProcessId = 1000;
 let nextRunId = 1;
 const sharedFileBuffers = new WeakMap();
+
+function execveTypeError(name, expected, value) {
+  const received = value === null
+    ? 'null'
+    : value === undefined
+      ? 'undefined'
+      : Array.isArray(value)
+        ? 'an instance of Array'
+        : typeof value === 'object'
+          ? `an instance of ${value.constructor?.name || 'Object'}`
+          : `type ${typeof value} (${String(value)})`;
+  const error = new TypeError(`The "${name}" argument must be ${expected}. Received ${received}`);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function execveValueError(name, value, reason) {
+  const error = new TypeError(`The argument '${name}' must be ${reason}. Received ${String(value)}`);
+  error.code = 'ERR_INVALID_ARG_VALUE';
+  return error;
+}
+
+export function createBrowserExecve(processObject) {
+  let warned = false;
+  return function execve(execPath, args = [], env = processObject.env) {
+    if (!warned) {
+      warned = true;
+      processObject.emitWarning?.(
+        'process.execve is an experimental feature and might change at any time',
+        { type: 'ExperimentalWarning' },
+      );
+    }
+    if (typeof execPath !== 'string') throw execveTypeError('execPath', 'of type string', execPath);
+    if (!Array.isArray(args)) throw execveTypeError('args', 'an instance of Array', args);
+    for (let index = 0; index < args.length; index += 1) {
+      if (typeof args[index] !== 'string' || args[index].includes('\u0000')) {
+        throw execveValueError(`args[${index}]`, args[index], 'a string without null bytes');
+      }
+    }
+    if (env === null || typeof env !== 'object' || Array.isArray(env)) {
+      throw execveTypeError('env', 'of type object', env);
+    }
+    for (const [key, value] of Object.entries(env)) {
+      if (key.includes('\u0000') || typeof value !== 'string' || value.includes('\u0000')) {
+        throw execveValueError('env', env, 'an object with string keys and values without null bytes');
+      }
+    }
+    unsupportedBoundary('real-subprocesses', 'process.execve requires a real subprocess boundary');
+  };
+}
 
 function shareFileBytes(bytes, scope) {
   if (!(bytes instanceof Uint8Array)) return bytes;
@@ -165,6 +217,15 @@ export function installProcessContract(process, { uid = 1000, gid = 1000, umask 
   installCredential('euid', 'User', () => currentUid);
   installCredential('gid', 'Group', () => currentGid);
   installCredential('egid', 'Group', () => currentGid);
+  process.getgroups ||= () => [currentGid];
+  process.initgroups ||= (user, extraGroup) => {
+    normalizeCredential(user, 'User');
+    normalizeCredential(extraGroup, 'Group');
+  };
+  process.getBuiltinModule ||= (id) => {
+    if (typeof id !== 'string') throw execveTypeError('id', 'of type string', id);
+    return undefined;
+  };
   if (process.stdout) process.stdout = ensureOutputStream(process.stdout);
   if (process.stderr) process.stderr = ensureOutputStream(process.stderr);
   if (process.stdout) process.stdout.isTTY = false;
@@ -269,9 +330,11 @@ export function createProcess({ argv, env, cwd, execArgv, output = {}, platform 
   process.arch = arch;
   process.pid = pid;
   process.ppid = ppid;
+  process.debugPort = 9229;
   process.argv = [...(argv || ['node'])].map(String);
   process.execArgv = [...(execArgv || [])].map(String);
   process.env = stringEnvironment(env);
+  process.execve = createBrowserExecve(process);
   process.exitCode = 0;
   process.title = 'node';
   process.connected = Boolean(ipc);
@@ -296,6 +359,12 @@ export function createProcess({ argv, env, cwd, execArgv, output = {}, platform 
     exited = true;
     process.state = 'exited';
     exit?.(exitCode);
+  };
+  process.reallyExit = () => {
+    exitCode = Number(process.exitCode) || 0;
+    process.exitCode = exitCode;
+    exitRequested = true;
+    exited = true;
   };
   process.kill = (_pid, signal = 'SIGTERM') => {
     const name = validateSignal(signal, grants);
@@ -338,6 +407,7 @@ export function createProcess({ argv, env, cwd, execArgv, output = {}, platform 
   process.stderr.isTTY = false;
   installProcessContract(process, { scope });
   installWarningContract(process);
+  installProcessFinalization(process);
   return process;
 }
 

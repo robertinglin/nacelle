@@ -139,6 +139,81 @@ function isRegExp(value) {
   return tag(value) === '[object RegExp]';
 }
 
+const NOT_HTTP_TOKEN_CODE_POINT = /[^!#$%&'*+\-.^_`|~A-Za-z0-9]/;
+const NOT_HTTP_QUOTED_STRING_CODE_POINT = /[^\t\u0020-~\u0080-\u00FF]/;
+
+function invalidMimeSyntax(production, value, invalidIndex) {
+  const suffix = invalidIndex === -1 ? '' : ` at ${invalidIndex}`;
+  const error = new TypeError(`The MIME syntax for a ${production} in "${value}" is invalid${suffix}`);
+  error.code = 'ERR_INVALID_MIME_SYNTAX';
+  return error;
+}
+
+class MIMEParams {
+  #data = new Map();
+
+  delete(name) {
+    this.#data.delete(name);
+  }
+
+  get(name) {
+    return this.#data.has(name) ? this.#data.get(name) : null;
+  }
+
+  has(name) {
+    return this.#data.has(name);
+  }
+
+  set(name, value) {
+    name = `${name}`;
+    value = `${value}`;
+    const invalidNameIndex = name.search(NOT_HTTP_TOKEN_CODE_POINT);
+    if (name.length === 0 || invalidNameIndex !== -1) {
+      throw invalidMimeSyntax('parameter name', name, invalidNameIndex);
+    }
+    const invalidValueIndex = value.search(NOT_HTTP_QUOTED_STRING_CODE_POINT);
+    if (invalidValueIndex !== -1) {
+      throw invalidMimeSyntax('parameter value', value, invalidValueIndex);
+    }
+    this.#data.set(name, value);
+  }
+
+  *entries() {
+    yield* this.#data.entries();
+  }
+
+  *keys() {
+    yield* this.#data.keys();
+  }
+
+  *values() {
+    yield* this.#data.values();
+  }
+
+  toString() {
+    let result = '';
+    for (const [key, value] of this.#data) {
+      if (result.length) result += ';';
+      const encoded = value.length === 0 || NOT_HTTP_TOKEN_CODE_POINT.test(value)
+        ? `"${value.replace(/[\\"]/g, (character) => `\\${character}`)}"`
+        : value;
+      result += `${key}=${encoded}`;
+    }
+    return result;
+  }
+}
+
+Object.defineProperty(MIMEParams.prototype, Symbol.iterator, {
+  configurable: true,
+  value: MIMEParams.prototype.entries,
+  writable: true,
+});
+Object.defineProperty(MIMEParams.prototype, 'toJSON', {
+  configurable: true,
+  value: MIMEParams.prototype.toString,
+  writable: true,
+});
+
 function typedArray(value) {
   return ArrayBuffer.isView(value) && !(value instanceof DataView);
 }
@@ -838,6 +913,7 @@ export function createPromisify() {
 export function createUtilModule(scope = globalThis) {
   const types = createUtilTypes(scope);
   return Object.freeze({
+    MIMEParams,
     isError,
     isFunction,
     isNull,

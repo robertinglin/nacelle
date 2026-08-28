@@ -211,6 +211,105 @@ function messageEventValue(value) {
 }
 
 let nodeMessagePortClass;
+const messagePortStates = new WeakMap();
+
+function messagePortState(receiver) {
+  const state = messagePortStates.get(receiver);
+  if (!state) {
+    const error = new TypeError('Value of "this" must be a MessagePort');
+    error.code = 'ERR_INVALID_THIS';
+    throw error;
+  }
+  return state;
+}
+
+function messagePortAddEventListener(name, listener) {
+  const state = messagePortState(this);
+  if (typeof listener !== 'function') return undefined;
+  const wrapped = name === 'message'
+    ? (data) => listener(state.messageEvent(data, receivedMessagePorts(data, state.nativePort)))
+    : (detail) => listener({ type: name, detail, target: this, currentTarget: this });
+  const listeners = state.eventTargetListeners.get(name) || new Map();
+  listeners.set(listener, wrapped);
+  state.eventTargetListeners.set(name, listeners);
+  state.events.on(name, wrapped);
+  if (name === 'message') state.drainDeferredMessages();
+  return undefined;
+}
+
+function messagePortRemoveEventListener(name, listener) {
+  const state = messagePortState(this);
+  const wrapped = state.eventTargetListeners.get(name)?.get(listener);
+  if (!wrapped) return undefined;
+  state.events.off(name, wrapped);
+  const listeners = state.eventTargetListeners.get(name);
+  listeners.delete(listener);
+  if (!listeners.size) state.eventTargetListeners.delete(name);
+  return undefined;
+}
+
+function messagePortDispatchEvent(event) {
+  const state = messagePortState(this);
+  if (!event || typeof event.type !== 'string') throw new TypeError('event must have a type');
+  state.events.emit(event.type, event.detail === undefined ? event : event.detail);
+  return true;
+}
+
+function messagePortOn(name, listener) {
+  messagePortState(this).events.on(name, listener);
+  return this;
+}
+
+function messagePortOnce(name, listener) {
+  messagePortState(this).events.once(name, listener);
+  return this;
+}
+
+function messagePortOff(name, listener) {
+  messagePortState(this).events.off(name, listener);
+  return this;
+}
+
+function messagePortRemoveAllListeners(name) {
+  messagePortState(this).events.removeAllListeners(name);
+  return this;
+}
+
+function messagePortEmit(name, ...args) {
+  return messagePortState(this).events.emit(name, ...args);
+}
+
+function messagePortListenerCount(name) {
+  return messagePortState(this).events.listenerCount(name);
+}
+
+function messagePortSetMaxListeners(value) {
+  messagePortState(this).events.setMaxListeners(value);
+  return this;
+}
+
+function messagePortGetMaxListeners() {
+  return messagePortState(this).events.getMaxListeners();
+}
+
+function messagePortEventNames() {
+  return messagePortState(this).events.eventNames();
+}
+
+const messagePortEventTargetPrototype = Object.create(Object.prototype);
+Object.defineProperties(messagePortEventTargetPrototype, {
+  setMaxListeners: { configurable: true, writable: true, value: messagePortSetMaxListeners },
+  getMaxListeners: { configurable: true, writable: true, value: messagePortGetMaxListeners },
+  eventNames: { configurable: true, writable: true, value: messagePortEventNames },
+  listenerCount: { configurable: true, writable: true, value: messagePortListenerCount },
+  off: { configurable: true, writable: true, value: messagePortOff },
+  removeListener: { configurable: true, writable: true, value: messagePortOff },
+  on: { configurable: true, writable: true, value: messagePortOn },
+  addListener: { configurable: true, writable: true, value: messagePortOn },
+  emit: { configurable: true, writable: true, value: messagePortEmit },
+  once: { configurable: true, writable: true, value: messagePortOnce },
+  removeAllListeners: { configurable: true, writable: true, value: messagePortRemoveAllListeners },
+});
 
 function isMessagePort(value, MessagePort, NativeMessagePort = MessagePort) {
   return (typeof MessagePort === 'function' && value instanceof MessagePort)
@@ -499,6 +598,9 @@ export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePor
     removeListener(name, listener) { events.off(name, listener); return port; },
     removeAllListeners(name) { events.removeAllListeners(name); return port; },
     listenerCount(name) { return events.listenerCount(name); },
+    setMaxListeners(value) { events.setMaxListeners(value); return port; },
+    getMaxListeners() { return events.getMaxListeners(); },
+    eventNames() { return events.eventNames(); },
     emit(name, ...args) { events.emit(name, ...args); return true; },
     addEventListener(name, listener) {
       if (typeof listener !== 'function') return;
@@ -565,6 +667,14 @@ export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePor
     ref() { refed = true; return port; },
     unref() { refed = false; return port; },
   };
+
+  messagePortStates.set(port, {
+    events,
+    nativePort,
+    eventTargetListeners,
+    messageEvent,
+    drainDeferredMessages,
+  });
 
   Object.defineProperties(port, {
     __bnhCloseFromPeer: {
@@ -858,7 +968,19 @@ function createMessagePortClass() {
     unref: { configurable: true, writable: true, value() { return this; } },
     onmessage: { configurable: true, get() { return null; }, set(_) {} },
     onmessageerror: { configurable: true, get() { return null; }, set(_) {} },
+    addEventListener: { configurable: true, writable: true, value: messagePortAddEventListener },
+    removeEventListener: { configurable: true, writable: true, value: messagePortRemoveEventListener },
+    dispatchEvent: { configurable: true, writable: true, value: messagePortDispatchEvent },
+    [Symbol.for('nodejs.util.inspect.custom')]: {
+      configurable: true,
+      value() { return 'MessagePort'; },
+    },
+    [Symbol.toStringTag]: {
+      configurable: true,
+      value: 'EventTarget',
+    },
   });
+  Object.setPrototypeOf(MessagePort.prototype, messagePortEventTargetPrototype);
   return MessagePort;
 }
 
@@ -1121,6 +1243,7 @@ export function createBroadcastChannelFactory(scope = globalThis) {
       },
     },
   });
+  if (scope.EventTarget?.prototype) Object.setPrototypeOf(BroadcastChannel.prototype, scope.EventTarget.prototype);
   Object.defineProperty(BroadcastChannel, 'prototype', { writable: false });
   return BroadcastChannel;
 }

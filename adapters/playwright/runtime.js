@@ -6514,6 +6514,60 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         error.code = 'ERR_WORKER_UNSERIALIZABLE_ERROR';
         worker.emit('error', error);
       });
+      const workerEvents = new EventEmitter();
+      const forwardedEvents = new Set();
+      const originalOn = worker.on?.bind(worker);
+      const originalEmit = worker.emit?.bind(worker);
+      const forwardEvent = (name) => {
+        if (forwardedEvents.has(name) || typeof originalOn !== 'function') return;
+        forwardedEvents.add(name);
+        originalOn(name, (...args) => workerEvents.emit(name, ...args));
+      };
+      worker.on = (name, listener) => { forwardEvent(name); workerEvents.on(name, listener); return worker; };
+      worker.addListener = worker.on;
+      worker.prependListener = (name, listener) => {
+        forwardEvent(name);
+        workerEvents.prependListener(name, listener);
+        return worker;
+      };
+      worker.once = (name, listener) => { forwardEvent(name); workerEvents.once(name, listener); return worker; };
+      worker.prependOnceListener = (name, listener) => {
+        forwardEvent(name);
+        workerEvents.prependOnceListener(name, listener);
+        return worker;
+      };
+      worker.emit = (name, ...args) => {
+        const result = originalEmit?.(name, ...args) ?? false;
+        if (!forwardedEvents.has(name)) workerEvents.emit(name, ...args);
+        return result;
+      };
+      worker.off = (name, listener) => { workerEvents.off(name, listener); return worker; };
+      worker.removeListener = worker.off;
+      worker.removeAllListeners = (name) => { workerEvents.removeAllListeners(name); return worker; };
+      worker.listeners = (name) => workerEvents.listeners(name);
+      worker.rawListeners = (name) => workerEvents.rawListeners(name);
+      worker.listenerCount = (name) => workerEvents.listenerCount(name);
+      worker.eventNames = () => workerEvents.eventNames();
+      worker.setMaxListeners = (value) => { workerEvents.setMaxListeners(value); return worker; };
+      worker.getMaxListeners = () => workerEvents.getMaxListeners();
+      Object.defineProperties(worker, {
+        _events: {
+          configurable: true,
+          enumerable: true,
+          get: () => workerEvents._events,
+        },
+        _eventsCount: {
+          configurable: true,
+          enumerable: true,
+          get: () => workerEvents._eventsCount,
+        },
+        _maxListeners: {
+          configurable: true,
+          enumerable: true,
+          get: () => workerEvents._maxListeners,
+          set: (value) => { workerEvents._maxListeners = value; },
+        },
+      });
       if (worker && Object.getPrototypeOf(worker) !== RuntimeWorker.prototype) {
         Object.setPrototypeOf(worker, RuntimeWorker.prototype);
       }
@@ -6628,7 +6682,15 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           return Promise.resolve({ stop: async () => ({}) });
         },
       },
+      [Symbol.for('nodejs.asyncDispose')]: {
+        configurable: true,
+        writable: true,
+        async value() {
+          await this.terminate();
+        },
+      },
     });
+    Object.setPrototypeOf(RuntimeWorker.prototype, EventEmitter.prototype);
     const workerThreads = {
       ...browserIO,
       Worker: createRuntimeWorker ? RuntimeWorker : undefined,

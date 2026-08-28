@@ -580,6 +580,7 @@ export class Readable extends EventEmitter {
 
   static from(source, options = {}) {
     const readable = new Readable({ objectMode: true, highWaterMark: options.highWaterMark ?? 1, ...options });
+    readable._read = () => {};
     (async () => {
       const iterator = source?.[Symbol.asyncIterator]?.() || source?.[Symbol.iterator]?.();
       readable._sourceIterator = iterator;
@@ -767,7 +768,10 @@ export class Readable extends EventEmitter {
       if (result?.then) {
         pending = true;
         result.then(
-          () => { this._reading = false; },
+          () => {
+            this._reading = false;
+            if (this._flowing) this._scheduleFlowRead();
+          },
           (error) => { this._reading = false; this.destroy(error); },
         );
         return;
@@ -1010,8 +1014,10 @@ export class Readable extends EventEmitter {
       this.emit('end');
       queueMicrotask(() => {
         if (this._destroyed) this._emitClose();
-        else if (this._readableState.autoDestroy) this.destroy();
-        else this._emitClose();
+        else if (!this._writable || this._writableState?.finished) {
+          if (this._readableState.autoDestroy) this.destroy();
+          else this._emitClose();
+        }
       });
     }
   }
@@ -1789,6 +1795,11 @@ class DuplexImpl extends Readable {
     this._writable.on('finish', () => {
       this.writable = false;
       this.emit('finish');
+      queueMicrotask(() => {
+        if (this._destroyed) this._emitClose();
+        else if (this._readableState.endEmitted && this._readableState.autoDestroy) this.destroy();
+        else if (!this.readable) this._emitClose();
+      });
     });
     this._writable.on('error', (error) => this.destroy(error));
     this._writable.on('close', () => queueMicrotask(() => {
@@ -1851,7 +1862,15 @@ for (const property of ['setDefaultEncoding', '_write', '_writev']) {
     ...Object.getOwnPropertyDescriptor(WritableImpl.prototype, property),
   });
 }
-for (const property of ['writable', 'writableBuffer']) {
+Object.defineProperty(DuplexImpl.prototype, 'writable', {
+  configurable: false,
+  get() { return this._writable?.writable ?? false; },
+  set(value) {
+    this._writableFlag = Boolean(value);
+    if (this._writableState) this._writableState.writable = this._writableFlag;
+  },
+});
+for (const property of ['writableBuffer']) {
   Object.defineProperty(DuplexImpl.prototype, property, {
     ...Object.getOwnPropertyDescriptor(WritableImpl.prototype, property),
   });
@@ -1864,6 +1883,381 @@ export function Duplex(options = {}) {
 
 Duplex.prototype = DuplexImpl.prototype;
 Object.setPrototypeOf(Duplex, DuplexImpl);
+
+function isReadableWebStream(value) {
+  return Boolean(value && typeof value.getReader === 'function');
+}
+
+function isWritableWebStream(value) {
+  return Boolean(value && typeof value.getWriter === 'function');
+}
+
+function isDuplexStream(value) {
+  return isNodeStream(value) && hasReadableSide(value) && hasWritableSide(value);
+}
+
+function isThenable(value) {
+  return Boolean(value && typeof value.then === 'function');
+}
+
+function readableFromIterable(value) {
+  const readable = Readable.from(value);
+  // Readable.from drives its iterator independently. It still needs a
+  // concrete pull hook when a consumer switches it into flowing mode.
+  if (readable._read === Readable.prototype._read) readable._read = () => {};
+  return readable;
+}
+
+function duplexFromInvalidReturn(value) {
+  const received = value === null
+    ? 'null'
+    : value === undefined
+      ? 'undefined'
+      : typeof value === 'number' || typeof value === 'boolean'
+        ? `type ${typeof value} (${value})`
+        : typeof value === 'string'
+          ? `type string ('${value}')`
+          : `an instance of ${value?.constructor?.name || typeof value}`;
+  return streamError(
+    'ERR_INVALID_RETURN_VALUE',
+    `Expected Iterable, AsyncIterable or AsyncFunction to be returned from the "body" function but got ${received}.`,
+  );
+}
+
+function readableSide(value) {
+  if (value === undefined || value === null) return undefined;
+  if (isNodeStream(value) || isReadableWebStream(value)) return value;
+  return duplexFrom(value);
+}
+
+function writableSide(value) {
+  if (value === undefined || value === null) return undefined;
+  if (isNodeStream(value) || isWritableWebStream(value)) return value;
+  return duplexFrom(value);
+}
+
+function createDuplexFromSides(readableSource, writableTarget, options = {}) {
+  const hasCustomWrite = typeof options.write === 'function';
+  const hasCustomFinal = typeof options.final === 'function';
+  const writable = writableTarget !== undefined || hasCustomWrite;
+  const readable = readableSource !== undefined;
+  let readableCleanup = () => {};
+  let writableCleanup = () => {};
+  let reader;
+  let writer;
+  let pendingWrite;
+  let pendingFinal;
+  let d;
+
+  const cleanup = () => {
+    readableCleanup();
+    writableCleanup();
+    readableCleanup = () => {};
+    writableCleanup = () => {};
+    try { reader?.releaseLock?.(); } catch { /* ignore */ }
+    try { writer?.releaseLock?.(); } catch { /* ignore */ }
+    reader = null;
+    writer = null;
+  };
+
+  const writeToTarget = (chunk, encoding, callback) => {
+    if (isWritableWebStream(writableTarget)) {
+      if (!writer) writer = writableTarget.getWriter();
+      Promise.resolve(writer.write(chunk)).then(() => callback(), callback);
+      return;
+    }
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      if (pendingWrite?.finish === finish) pendingWrite = null;
+      writableTarget.off?.('drain', onDrain);
+      callback(error);
+    };
+    const onDrain = () => finish();
+    try {
+      const accepted = writableTarget.write(chunk, encoding);
+      if (accepted) finish();
+      else pendingWrite = { finish };
+    } catch (error) {
+      finish(error);
+    }
+  };
+
+  const finishTarget = (callback) => {
+    if (isWritableWebStream(writableTarget)) {
+      if (!writer) writer = writableTarget.getWriter();
+      Promise.resolve(writer.close()).then(() => callback(), callback);
+      return;
+    }
+    if (writableTarget.writableFinished || writableTarget._writableState?.finished) {
+      callback();
+      return;
+    }
+    const onFinish = () => {
+      writableTarget.off?.('finish', onFinish);
+      writableTarget.off?.('error', onError);
+      pendingFinal = null;
+      callback();
+    };
+    const onError = (error) => {
+      writableTarget.off?.('finish', onFinish);
+      writableTarget.off?.('error', onError);
+      pendingFinal = null;
+      callback(error);
+    };
+    pendingFinal = { onFinish, onError };
+    writableTarget.once?.('finish', onFinish);
+    writableTarget.once?.('error', onError);
+    try {
+      writableTarget.end();
+    } catch (error) {
+      onError(error);
+    }
+  };
+
+  const destroyTarget = (error) => {
+    if (isWritableWebStream(writableTarget)) {
+      Promise.resolve(writer?.abort?.(error)).catch(() => {});
+    } else {
+      writableTarget?.destroy?.(error);
+    }
+  };
+
+  const destroySource = (error) => {
+    if (isReadableWebStream(readableSource)) {
+      Promise.resolve(reader?.cancel?.(error)).catch(() => {});
+    } else {
+      readableSource?.destroy?.(error);
+    }
+  };
+
+  const onDestroy = (error, callback) => {
+    destroyTarget(error);
+    destroySource(error);
+    cleanup();
+    if (typeof options.destroy !== 'function') {
+      callback(error);
+      return;
+    }
+    let called = false;
+    const done = (destroyError) => {
+      if (called) return;
+      called = true;
+      callback(destroyError || error);
+    };
+    try {
+      const result = options.destroy(error, done);
+      if (result?.then) result.then(() => done(), done);
+    } catch (destroyError) {
+      done(destroyError);
+    }
+  };
+
+  const write = hasCustomWrite
+    ? options.write
+    : (chunk, encoding, callback) => writeToTarget(chunk, encoding, callback);
+  const final = hasCustomFinal
+    ? options.final
+    : (callback) => finishTarget(callback);
+
+  d = new Duplex({
+    readable,
+    writable,
+    readableObjectMode: options.readableObjectMode ?? readableObjectMode(readableSource),
+    writableObjectMode: options.writableObjectMode ?? writableObjectMode(writableTarget),
+    read() {},
+    write,
+    final,
+    destroy: onDestroy,
+  });
+
+  if (readable) {
+    if (isReadableWebStream(readableSource)) {
+      reader = readableSource.getReader();
+      d._read = () => reader.read().then(({ done, value }) => {
+        if (done) d.push(null);
+        else {
+          d.push(value);
+          if (d._flowing) d._scheduleFlowRead();
+        }
+      }, (error) => d.destroy(error));
+    } else {
+      const onData = (chunk) => {
+        if (!d.push(chunk)) readableSource.pause?.();
+      };
+      const onEnd = () => d.push(null);
+      const onError = (error) => d.destroy(error);
+      const onClose = () => {
+        if (!d.readableEnded && !readableSource.readableEnded
+          && !readableSource._ended && !d.destroyed) d.destroy();
+      };
+      readableSource.on?.('data', onData);
+      readableSource.on?.('end', onEnd);
+      readableSource.on?.('error', onError);
+      readableSource.on?.('close', onClose);
+      d._read = () => readableSource.resume?.();
+      readableCleanup = () => {
+        readableSource.off?.('data', onData);
+        readableSource.off?.('end', onEnd);
+        readableSource.off?.('error', onError);
+        readableSource.off?.('close', onClose);
+      };
+    }
+  }
+
+  if (writable && writableTarget) {
+    if (isWritableWebStream(writableTarget)) {
+      // The writer promise is the backpressure signal for browser streams.
+    } else {
+      const onDrain = () => {
+        const current = pendingWrite;
+        if (current) current.finish();
+      };
+      const onError = (error) => {
+        const current = pendingWrite;
+        if (current) current.finish(error);
+        d.destroy(error);
+      };
+      writableTarget.on?.('drain', onDrain);
+      writableTarget.on?.('error', onError);
+      writableCleanup = () => {
+        writableTarget.off?.('drain', onDrain);
+        writableTarget.off?.('error', onError);
+        const current = pendingFinal;
+        if (current) {
+          writableTarget.off?.('finish', current.onFinish);
+          writableTarget.off?.('error', current.onError);
+        }
+      };
+    }
+  }
+
+  return d;
+}
+
+function duplexFromFunction(body) {
+  let resolveInput;
+  let inputPromise = new Promise((resolve) => { resolveInput = resolve; });
+  const controller = new AbortController();
+  const input = (async function* inputGenerator() {
+    while (true) {
+      const current = await inputPromise;
+      inputPromise = new Promise((resolve) => { resolveInput = resolve; });
+      queueMicrotask(() => current.callback?.());
+      if (current.done) return;
+      if (controller.signal.aborted) throw abortError(controller.signal);
+      yield current.chunk;
+    }
+  }());
+
+  let result;
+  try {
+    result = body(input, { signal: controller.signal });
+  } catch (error) {
+    throw error;
+  }
+
+  if (isDuplexStream(result)) return result;
+  if (isIterable(result)) {
+    const output = readableFromIterable(result);
+    return createDuplexFromSides(output, undefined, {
+      writableObjectMode: true,
+      write(chunk, _encoding, callback) {
+        const resolve = resolveInput;
+        resolveInput = null;
+        resolve?.({ chunk, done: false, callback });
+      },
+      final(callback) {
+        const resolve = resolveInput;
+        resolveInput = null;
+        resolve?.({ done: true, callback });
+      },
+      destroy(error, callback) {
+        controller.abort(error);
+        const resolve = resolveInput;
+        resolveInput = null;
+        resolve?.({ done: true });
+        callback(error);
+      },
+    });
+  }
+
+  if (isThenable(result)) {
+    let d;
+    let settled = false;
+    let resolveFinal;
+    const resultPromise = Promise.resolve(result).then((value) => {
+      if (value != null) throw duplexFromInvalidReturn(value);
+      settled = true;
+      resolveFinal?.();
+    }, (error) => {
+      d?.destroy(error);
+      resolveFinal?.(error);
+    });
+    return d = createDuplexFromSides(undefined, undefined, {
+      writableObjectMode: true,
+      write(chunk, _encoding, callback) {
+        const resolve = resolveInput;
+        resolveInput = null;
+        resolve?.({ chunk, done: false, callback });
+      },
+      final(callback) {
+        const resolve = resolveInput;
+        resolveInput = null;
+        resolve?.({ done: true });
+        if (settled) callback();
+        else {
+          resolveFinal = (error) => callback(error);
+          resultPromise.catch(() => {});
+        }
+      },
+      destroy(error, callback) {
+        controller.abort(error);
+        const resolve = resolveInput;
+        resolveInput = null;
+        resolve?.({ done: true });
+        callback(error);
+      },
+    });
+  }
+
+  throw duplexFromInvalidReturn(result);
+}
+
+function duplexFrom(body) {
+  if (isDuplexStream(body)) return body;
+  if (isNodeStream(body)) {
+    if (hasReadableSide(body)) return createDuplexFromSides(body, undefined);
+    if (hasWritableSide(body)) return createDuplexFromSides(undefined, body);
+    return createDuplexFromSides(undefined, undefined);
+  }
+  if (isReadableWebStream(body)) return createDuplexFromSides(body, undefined);
+  if (isWritableWebStream(body)) return createDuplexFromSides(undefined, body);
+  if (typeof body === 'function') return duplexFromFunction(body);
+  if (typeof Blob === 'function' && body instanceof Blob) return duplexFrom(body.arrayBuffer());
+  if (isIterable(body)) {
+    return createDuplexFromSides(readableFromIterable(body), undefined, { writableObjectMode: true });
+  }
+  if (body && (typeof body.readable === 'object' || typeof body.writable === 'object')) {
+    const readable = body.readable ? readableSide(body.readable) : undefined;
+    const writable = body.writable ? writableSide(body.writable) : undefined;
+    return createDuplexFromSides(readable, writable);
+  }
+  if (isThenable(body)) {
+    const output = readableFromIterable((async function* promiseOutput() {
+      const value = await body;
+      if (value != null) yield value;
+    }()));
+    return createDuplexFromSides(output, undefined, { writableObjectMode: true });
+  }
+  throw streamError(
+    'ERR_INVALID_ARG_TYPE',
+    `The "body" argument must be of type function or an instance of Blob, ReadableStream, WritableStream, Stream, Iterable, AsyncIterable, or Promise or { readable, writable } pair. Received ${streamReceivedValue(body)}`,
+  );
+}
+
+Duplex.from = duplexFrom;
 
 export function duplexPair(options = {}) {
   let first;
@@ -2233,9 +2627,11 @@ export const promises = {
 
 export function pipeline(...streams) {
   const callback = typeof streams.at(-1) === 'function' ? streams.pop() : () => {};
-  streams = streams.map((stream) => isNodeStream(stream) || typeof stream?.pipe === 'function'
-    ? stream
-    : Readable.from(stream));
+  streams = streams.map((stream) => {
+    if (isNodeStream(stream) || typeof stream?.pipe === 'function') return stream;
+    if (typeof stream === 'function') return Duplex.from(stream);
+    return Readable.from(stream);
+  });
   let completed = false;
   let failed = false;
   const finish = (error) => {

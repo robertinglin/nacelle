@@ -76,8 +76,8 @@ def module_list_source() -> str:
 def surface_probe_source(modules: Sequence[str]) -> str:
     """Probe that reports every exported symbol of each given module.
 
-    For each export the probe records own property names, plus one level of
-    prototype members for exported constructors so class methods
+    For each export the probe records own property names, plus the complete
+    prototype chain for exported constructors so subclassed implementations
     (`fs.ReadStream.prototype.read`) count as part of the surface.
     """
 
@@ -95,8 +95,16 @@ def surface_probe_source(modules: Sequence[str]) -> str:
         "      let value;\n"
         "      try { value = mod[key]; } catch { continue; }\n"
         "      if (typeof value === \"function\" && value.prototype) {\n"
-        "        for (const member of Object.getOwnPropertyNames(value.prototype)) {\n"
-        "          if (member !== \"constructor\") entry.symbols.push(key + \".\" + member);\n"
+        "        const seenMembers = new Set();\n"
+        "        let prototype = value.prototype;\n"
+        "        while (prototype && prototype !== Object.prototype) {\n"
+        "          for (const member of Object.getOwnPropertyNames(prototype)) {\n"
+        "            if (member !== \"constructor\" && !seenMembers.has(member)) {\n"
+        "              seenMembers.add(member);\n"
+        "              entry.symbols.push(key + \".\" + member);\n"
+        "            }\n"
+        "          }\n"
+        "          prototype = Object.getPrototypeOf(prototype);\n"
         "        }\n"
         "      }\n"
         "    }\n"

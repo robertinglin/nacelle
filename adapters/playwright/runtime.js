@@ -5869,7 +5869,17 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           // Preserve injected process identity and capabilities (stdout, stderr, exit control, IPC)
           processObject.stdout = injectedProcess.stdout || processObject.stdout;
           processObject.stderr = injectedProcess.stderr || processObject.stderr;
-          processObject.stdin = injectedProcess.stdin || processObject.stdin;
+          const injectedStdin = injectedProcess.stdin;
+          if (injectedStdin && [
+            'readableLength', 'readableObjectMode', 'readableEncoding', 'errored',
+            'closed', 'destroyed', 'readableEnded', 'drop',
+          ].some((property) => !(property in injectedStdin))) {
+            const wrappedStdin = Readable.wrap(injectedStdin, { objectMode: false });
+            wrappedStdin.isTTY = injectedStdin.isTTY;
+            processObject.stdin = wrappedStdin;
+          } else {
+            processObject.stdin = injectedStdin || processObject.stdin;
+          }
           processObject.exit = (code) => {
             processObject.exitCode = Number(code) || 0;
             processObject.emit('exit', processObject.exitCode);

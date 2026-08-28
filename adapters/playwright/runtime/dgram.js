@@ -363,6 +363,9 @@ function createSocketHandle(address, port, addressType, fd, flags, options) {
 export class Socket extends EventEmitter {
   constructor(type = 'udp4', listener, internal = {}) {
     super();
+    this._events = Object.create(null);
+    this._eventsCount = 0;
+    this._maxListeners = undefined;
     if (typeof type === 'object') {
       const options = type;
       internal = { ...options, ...internal };

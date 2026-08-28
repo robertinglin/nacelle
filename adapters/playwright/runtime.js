@@ -500,6 +500,38 @@ function installProcessStdoutIterableSurface(stream, processObject) {
     writable: true,
     value() { return readable[Symbol.asyncIterator](); },
   });
+  Object.defineProperties(stream, {
+    _readableState: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: readable._readableState,
+    },
+    _server: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    _sockname: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    _type: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: 'pipe',
+    },
+    allowHalfOpen: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: false,
+    },
+  });
   Object.defineProperties(iterablePrototype, {
     unpipe: {
       configurable: true,
@@ -530,6 +562,27 @@ function installProcessStdoutIterableSurface(stream, processObject) {
       enumerable: true,
       writable: true,
       value() { return {}; },
+    },
+    _writeGeneric: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(writev, data, encoding, callback) {
+        const chunks = writev ? data || [] : [data];
+        for (const item of chunks) this.write(writev ? item?.chunk : item, encoding);
+        if (typeof callback === 'function') callback();
+      },
+    },
+    _reset: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    bufferSize: {
+      configurable: false,
+      enumerable: false,
+      get: () => stream.writableLength || 0,
     },
     readable: {
       configurable: false,

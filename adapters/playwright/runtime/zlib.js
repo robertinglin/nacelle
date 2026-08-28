@@ -187,29 +187,167 @@ class ZlibStream extends Transform {
     super({
       transform(chunk, _encoding, callback) {
         chunks.push(chunk);
+        this.bytesWritten += chunk.byteLength ?? chunk.length ?? 0;
         callback();
       },
-      flush(callback) {
-        let transformed;
-        try {
-          const streamFormat = typeof format === 'function' ? format(chunks) : format;
-          const input = new scope.Blob(chunks).stream();
-          transformed = input.pipeThrough(createWebTransform(scope, streamFormat, mode));
-        } catch (error) {
-          callback(mode === 'decompress' ? zlibDataError(error) : error);
-          return;
-        }
-        new scope.Response(transformed).arrayBuffer().then(
-          (output) => {
-            this.push(bufferClass ? new bufferClass(output) : new Uint8Array(output));
-            callback();
-          },
-          (error) => callback(mode === 'decompress' ? zlibDataError(error) : error),
-        );
-      },
     });
+    this._zlibChunks = chunks;
+    this._zlibFormat = format;
+    this._zlibMode = mode;
+    this._zlibBufferClass = bufferClass;
+    this._zlibScope = scope;
+    this._zlibMaxFlushFlag = format === 'zstd' ? 2 : 5;
+    this.bytesWritten = 0;
     this._handle = new ZlibHandle();
   }
+
+  _flush(callback) {
+    let transformed;
+    try {
+      const streamFormat = typeof this._zlibFormat === 'function'
+        ? this._zlibFormat(this._zlibChunks)
+        : this._zlibFormat;
+      const input = new this._zlibScope.Blob(this._zlibChunks).stream();
+      transformed = input.pipeThrough(
+        createWebTransform(this._zlibScope, streamFormat, this._zlibMode),
+      );
+    } catch (error) {
+      callback(this._zlibMode === 'decompress' ? zlibDataError(error) : error);
+      return;
+    }
+    new this._zlibScope.Response(transformed).arrayBuffer().then(
+      (output) => {
+        const BufferClass = this._zlibBufferClass;
+        this.push(BufferClass ? new BufferClass(output) : new Uint8Array(output));
+        callback();
+      },
+      (error) => callback(this._zlibMode === 'decompress' ? zlibDataError(error) : error),
+    );
+  }
+
+  reset() {
+    if (!this._handle) {
+      const error = new Error(
+        'zlib binding closed\n' +
+        'This is caused by either a bug in Node.js or incorrect usage of Node.js internals.',
+      );
+      error.code = 'ERR_INTERNAL_ASSERTION';
+      throw error;
+    }
+    this._zlibChunks.length = 0;
+    this.bytesWritten = 0;
+  }
+
+  flush(kind, callback) {
+    if (typeof kind === 'function' || (kind === undefined && !callback)) {
+      callback = kind;
+      kind = this._zlibMode === 'compress' && this._zlibFormat === 'zstd' ? 1 : 3;
+    }
+    if (kind !== undefined && typeof kind !== 'number') {
+      const error = new TypeError(
+        `The "kind" argument must be of type number. Received ${kind === null ? 'null' : typeof kind}`,
+      );
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    if (kind !== undefined && (!Number.isInteger(kind) || kind < 0 || kind > this._zlibMaxFlushFlag)) {
+      const error = new RangeError(
+        `The value of "kind" is out of range. It must be >= 0 and <= ${this._zlibMaxFlushFlag}. Received ${kind}`,
+      );
+      error.code = 'ERR_OUT_OF_RANGE';
+      throw error;
+    }
+    if (this.writableFinished) {
+      if (callback) queueMicrotask(callback);
+    } else if (this.writableEnded) {
+      if (callback) this.once('end', callback);
+    } else {
+      this.write(new Uint8Array(0), callback);
+    }
+  }
+
+  close(callback) {
+    if (callback !== undefined && typeof callback !== 'function') {
+      const error = new TypeError(
+        `The "callback" argument must be of type function. Received ${typeof callback}`,
+      );
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    if (callback) {
+      if (this._closed) queueMicrotask(callback);
+      else this.once('close', callback);
+    }
+    this.destroy();
+  }
+
+  _destroy(error, callback) {
+    this._handle?.close();
+    this._handle = null;
+    callback(error);
+  }
+
+  _processChunk(chunk, _flushFlag, callback) {
+    if (typeof callback === 'function') {
+      queueMicrotask(() => {
+        if (!this._handle) {
+          callback();
+          return;
+        }
+        try {
+          this._transform.call(this, chunk, 'buffer', callback);
+        } catch (error) {
+          callback(error);
+        }
+      });
+      return;
+    }
+    syncUnavailable('zlib processing', '_processChunk');
+  }
+}
+
+let bytesReadGetterWarned = false;
+let bytesReadSetterWarned = false;
+
+function warnBytesRead(scope, message) {
+  const processObject = scope?.process || globalThis.process;
+  processObject?.emitWarning?.(message, { code: 'DEP0108' });
+}
+
+Object.defineProperty(ZlibStream.prototype, '_closed', {
+  configurable: true,
+  enumerable: true,
+  get() { return !this._handle; },
+});
+
+Object.defineProperty(ZlibStream.prototype, 'bytesRead', {
+  configurable: true,
+  enumerable: true,
+  get() {
+    if (!bytesReadGetterWarned) {
+      bytesReadGetterWarned = true;
+      warnBytesRead(
+        this._zlibScope,
+        'zlib.bytesRead is deprecated and will change its meaning in the future. Use zlib.bytesWritten instead.',
+      );
+    }
+    return this.bytesWritten;
+  },
+  set(value) {
+    if (!bytesReadSetterWarned) {
+      bytesReadSetterWarned = true;
+      warnBytesRead(
+        this._zlibScope,
+        'Setting zlib.bytesRead is deprecated. This feature will be removed in the future.',
+      );
+    }
+    this.bytesWritten = value;
+  },
+});
+
+for (const name of ['reset', '_flush', 'flush', 'close', '_processChunk', '_destroy']) {
+  const descriptor = Object.getOwnPropertyDescriptor(ZlibStream.prototype, name);
+  Object.defineProperty(ZlibStream.prototype, name, { ...descriptor, enumerable: true });
 }
 
 class Inflate extends ZlibStream {

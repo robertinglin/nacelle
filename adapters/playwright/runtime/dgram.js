@@ -16,6 +16,8 @@ const UDP_CONSTANTS = Object.freeze({
 
 const VIRTUAL_DGRAM_STATE = Symbol.for('bnh.dgram.state');
 const DGRAM_OWNER = Symbol.for('bnh.dgram.owner');
+const SymbolNodeAsyncDispose = Symbol.for('nodejs.asyncDispose');
+const SymbolAsyncDispose = Symbol.asyncDispose || SymbolNodeAsyncDispose;
 const BIND_STATE_UNBOUND = 0;
 const BIND_STATE_BINDING = 1;
 const BIND_STATE_BOUND = 2;
@@ -933,6 +935,13 @@ export class Socket extends EventEmitter {
     return this;
   }
 
+  async [SymbolNodeAsyncDispose]() {
+    if (!this[VIRTUAL_DGRAM_STATE].handle) return;
+    await new Promise((resolve, reject) => {
+      this.close((error) => error ? reject(error) : resolve());
+    });
+  }
+
   remoteAddress() {
     healthCheck(this);
     if (!this._connected) throw socketError('ERR_SOCKET_DGRAM_NOT_CONNECTED', 'Not connected');
@@ -1067,6 +1076,15 @@ export class Socket extends EventEmitter {
     this[VIRTUAL_DGRAM_STATE].handle?.unref?.();
     return this;
   }
+}
+
+if (SymbolAsyncDispose !== SymbolNodeAsyncDispose) {
+  Object.defineProperty(Socket.prototype, SymbolAsyncDispose, {
+    configurable: true,
+    enumerable: false,
+    value: Socket.prototype[SymbolNodeAsyncDispose],
+    writable: true,
+  });
 }
 
 // Deprecated private APIs retained for compatibility with Node's dgram

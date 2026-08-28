@@ -529,6 +529,12 @@ function installProcessStdoutIterableSurface(stream, processObject) {
       writable: true,
       value: null,
     },
+    server: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
     _sockname: {
       configurable: true,
       enumerable: true,
@@ -601,6 +607,21 @@ function installProcessStdoutIterableSurface(stream, processObject) {
       writable: true,
       value() { return {}; },
     },
+    remoteAddress: {
+      configurable: false,
+      enumerable: true,
+      get: () => stream._getpeername().address,
+    },
+    remoteFamily: {
+      configurable: false,
+      enumerable: true,
+      get: () => stream._getpeername().family,
+    },
+    remotePort: {
+      configurable: false,
+      enumerable: true,
+      get: () => stream._getpeername().port,
+    },
     _getsockname: {
       configurable: true,
       enumerable: true,
@@ -617,6 +638,30 @@ function installProcessStdoutIterableSurface(stream, processObject) {
       enumerable: true,
       writable: true,
       value() { return this; },
+    },
+    resetAndDestroy: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    resume: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { readable.resume(); return this; },
+    },
+    setEncoding: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) { readable.setEncoding(...args); return this; },
+    },
+    take: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.take(...args); },
     },
     bufferSize: {
       configurable: false,

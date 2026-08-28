@@ -73,7 +73,9 @@ _RUNTIME_SURFACES = {
     "util/types": "runtime/compat.js",
     "v8": "runtime/v8.js",
     "vm": "runtime/vm.js",
-    "worker_threads": "runtime/process-worker.js",
+    # Worker instances are assembled across the browser-event adapter and the
+    # RuntimeWorker wrapper; keep them as one ownership unit for scheduling.
+    "worker_threads": "runtime/messaging.js + runtime.js",
     "zlib": "runtime/zlib.js",
 }
 

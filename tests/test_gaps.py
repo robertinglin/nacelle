@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from browser_node_harness.gap_cards import emit_gap_cards, emit_worklist_index
+from browser_node_harness.gap_cards import _runtime_surface, emit_gap_cards, emit_worklist_index
 from browser_node_harness.gaps import (
     HOST_NETWORK,
     MISSING_API,
@@ -346,6 +346,16 @@ class FormGapIntegrationTests(unittest.TestCase):
 
 
 class GapCardEmissionTests(unittest.TestCase):
+    def test_worker_surface_owns_both_worker_layers(self) -> None:
+        gap = Gap(
+            gap_id="worker",
+            kind=MISSING_API,
+            module="worker_threads",
+            symbols=("Worker.on",),
+            affected_count=1,
+        )
+        self.assertEqual(_runtime_surface(gap), "runtime/messaging.js + runtime.js")
+
     def test_cards_carry_prompt_task_reference_and_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

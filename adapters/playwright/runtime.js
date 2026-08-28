@@ -479,6 +479,7 @@ function installProcessStdoutIterableSurface(stream, processObject) {
     value: true,
   });
   let bytesDispatched = 0;
+  let stdioHandle = null;
   const outputWrite = stream.write;
   const byteLength = (value) => {
     if (typeof value === 'string') return new TextEncoder().encode(value).byteLength;
@@ -517,6 +518,42 @@ function installProcessStdoutIterableSurface(stream, processObject) {
     value() { return readable[Symbol.asyncIterator](); },
   });
   Object.defineProperties(stream, {
+    _hadError: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: false,
+    },
+    _host: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    _isStdio: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: true,
+    },
+    _parent: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    _pendingData: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    _pendingEncoding: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: '',
+    },
     _readableState: {
       configurable: true,
       enumerable: true,
@@ -579,6 +616,12 @@ function installProcessStdoutIterableSurface(stream, processObject) {
     },
   });
   Object.defineProperties(iterablePrototype, {
+    _handle: {
+      configurable: false,
+      enumerable: false,
+      get: () => stdioHandle,
+      set: (value) => { stdioHandle = value; },
+    },
     unpipe: {
       configurable: true,
       enumerable: true,
@@ -769,6 +812,12 @@ function installProcessStdoutIterableSurface(stream, processObject) {
       configurable: false,
       enumerable: false,
       get: () => false,
+    },
+    _read: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() {},
     },
     _final: {
       configurable: true,

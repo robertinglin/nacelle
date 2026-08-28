@@ -1509,6 +1509,8 @@ function writableConsoleStream(stream, name) {
   throw error;
 }
 
+const kIsConsole = Symbol('kIsConsole');
+
 function noop() {}
 
 function createWriteErrorHandler(instance, streamName) {
@@ -1681,6 +1683,10 @@ export function createConsoleModule(processObject) {
       range.code = 'ERR_OUT_OF_RANGE';
       throw range;
     }
+    Object.defineProperties(this, {
+      [kIsConsole]: { configurable: true, enumerable: false, value: true, writable: true },
+      [Symbol.toStringTag]: { configurable: true, enumerable: false, value: 'console', writable: false },
+    });
     this._groupIndent = 0;
     this._times = new Map();
     this._counts = new Map();
@@ -1734,6 +1740,18 @@ export function createConsoleModule(processObject) {
     },
     dirxml(...values) { this.log(...values); },
     groupCollapsed(...values) { this.group(...values); },
+  });
+  Object.defineProperty(Console, Symbol.hasInstance, {
+    value(instance) {
+      return instance?.[kIsConsole] === true
+        || (instance?.Console === Console && instance?._stdout !== undefined && instance?._stderr !== undefined);
+    },
+  });
+  Object.defineProperty(Console.prototype, Symbol.toStringTag, {
+    configurable: true,
+    enumerable: false,
+    value: 'console',
+    writable: false,
   });
   const consoleObject = new Console(processObject.stdout, processObject.stderr);
   consoleObject.Console = Console;

@@ -1,5 +1,5 @@
 import { EventEmitter } from './events.js';
-import { AsyncResource } from './async-hooks.js';
+import { ASYNC_WRAP_PROVIDERS, AsyncResource } from './async-hooks.js';
 import { inspect as nodeInspect } from './assert.js';
 import { createBrowserNet } from './net.js';
 import { Duplex, Readable, Writable } from './streams.js';
@@ -22,7 +22,30 @@ const objectToString = Object.prototype.toString;
 const HTTP_TOKEN_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const HTTP_TOKEN_CHARACTERS = new Set("!#$%&'*+-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ^_`abcdefghijklmnopqrstuvwxyz|~".split(''));
 const INVALID_HEADER_CHAR_PATTERN = /[^\t\x20-\x7e\x80-\xff]/;
-const httpParsers = { max: 1000 };
+class FreeList {
+  constructor(name, max, ctor) {
+    this.name = name;
+    this.ctor = ctor;
+    this.max = max;
+    this.list = [];
+  }
+
+  alloc() {
+    return this.list.length > 0
+      ? this.list.pop()
+      : Reflect.apply(this.ctor, this, arguments);
+  }
+
+  free(obj) {
+    if (this.list.length < this.max) {
+      this.list.push(obj);
+      return true;
+    }
+    return false;
+  }
+}
+
+const httpParsers = new FreeList('parsers', 1000, null);
 const continueExpression = /(?:^|\W)100-continue(?:$|\W)/i;
 const CRLF = '\r\n';
 const kIncomingMessage = Symbol('IncomingMessage');
@@ -66,12 +89,16 @@ function createHTTPParserClass(scope, BufferClass, ownerProcess) {
       this._paused = false;
       this._stream = null;
       this._resource = null;
+      this._providerType = ASYNC_WRAP_PROVIDERS.NONE;
       this._ownerProcess = ownerProcess;
     }
 
     initialize(type, callbacks) {
       this.close();
       this.type = type;
+      this._providerType = type === HTTP_PARSER_RESPONSE
+        ? ASYNC_WRAP_PROVIDERS.HTTPCLIENTREQUEST
+        : ASYNC_WRAP_PROVIDERS.HTTPINCOMINGMESSAGE;
       this.callbacks = callbacks || {};
       this._buffer = new Uint8Array();
       this._currentBuffer = new Uint8Array();
@@ -90,6 +117,10 @@ function createHTTPParserClass(scope, BufferClass, ownerProcess) {
     // rebinding is private native/async-hooks state, so expose the safe
     // browser surface without fabricating lifecycle events here.
     asyncReset() {}
+
+    getProviderType() {
+      return this._providerType;
+    }
 
     execute(input, offset = 0, length = input?.byteLength || 0) {
       if (this._paused) return 0;
@@ -169,6 +200,7 @@ function createHTTPParserClass(scope, BufferClass, ownerProcess) {
     close() {
       this._resource?.emitDestroy();
       this._resource = null;
+      this._providerType = ASYNC_WRAP_PROVIDERS.NONE;
     }
 
     getAsyncId() { return this._resource?.asyncId() ?? -1; }
@@ -245,18 +277,27 @@ function createHTTPParserClass(scope, BufferClass, ownerProcess) {
   return HTTPParser;
 }
 
+function cleanParser(parser) {
+  parser._headers = [];
+  parser._url = '';
+  parser.socket = null;
+  parser.incoming = null;
+  parser.outgoing = null;
+  parser.maxHeaderPairs = 2000;
+  parser[HTTP_PARSER_ON_HEADERS] = null;
+  parser[HTTP_PARSER_ON_EXECUTE] = null;
+  parser[HTTP_PARSER_ON_TIMEOUT] = null;
+  parser._consumed = false;
+  parser.onIncoming = null;
+  parser.joinDuplicateHeaders = null;
+}
+
 function freeParser(parser, req, socket) {
   if (parser) {
     if (parser._consumed) parser.unconsume();
-    parser._headers = [];
-    parser._url = '';
-    parser.socket = null;
-    parser.incoming = null;
-    parser.outgoing = null;
-    parser._consumed = false;
-    parser.onIncoming = null;
-    parser.joinDuplicateHeaders = null;
+    cleanParser(parser);
     parser.remove();
+    httpParsers.free(parser);
     parser.free();
   }
   if (req) req.parser = null;
@@ -3958,6 +3999,12 @@ export function createHttpCompatibility(scope = globalThis, {
     allowCrossProtocol,
   );
   const HTTPParser = createHTTPParserClass(scope, BufferClass, ownerProcess);
+  function parsersCb() {
+    const parser = new HTTPParser();
+    cleanParser(parser);
+    return parser;
+  }
+  httpParsers.ctor = parsersCb;
   return Object.freeze({
     http,
     https,

@@ -1,5 +1,5 @@
 import { EventEmitter } from './events.js';
-import { Duplex, Stream } from './streams.js';
+import { Duplex, Readable, Stream } from './streams.js';
 import { createProxyCapability } from './proxy.js';
 
 const SERVER_REGISTRY = new Map();
@@ -203,6 +203,90 @@ function normalizeProxy(proxy, capability) {
   });
 }
 
+function noSocketManipulationError() {
+  return http2Error(
+    'ERR_HTTP2_NO_SOCKET_MANIPULATION',
+    'HTTP/2 sockets should not be directly manipulated (e.g. read and written)',
+  );
+}
+
+const compatibilitySocketHandler = {
+  has(stream, property) {
+    const sessionSocket = stream.session?.socket;
+    return property in stream || Boolean(sessionSocket && property in sessionSocket);
+  },
+
+  get(stream, property) {
+    switch (property) {
+      case 'on':
+      case 'once':
+      case 'end':
+      case 'emit':
+      case 'destroy':
+        return stream[property].bind(stream);
+      case 'writable':
+      case 'destroyed':
+        return stream[property];
+      case 'readable':
+        return stream._compatRequest ? stream._compatRequest.readable : stream.readable;
+      case 'setTimeout': {
+        const session = stream.session;
+        return (session || stream).setTimeout.bind(session || stream);
+      }
+      case 'write':
+      case 'read':
+      case 'pause':
+      case 'resume':
+        throw noSocketManipulationError();
+      default: {
+        const sessionSocket = stream.session?.socket;
+        const value = sessionSocket?.[property];
+        return typeof value === 'function' ? value.bind(sessionSocket) : value;
+      }
+    }
+  },
+
+  getPrototypeOf(stream) {
+    return Object.getPrototypeOf(stream.session?.socket || stream);
+  },
+
+  set(stream, property, value) {
+    switch (property) {
+      case 'writable':
+      case 'readable':
+      case 'destroyed':
+      case 'on':
+      case 'once':
+      case 'end':
+      case 'emit':
+      case 'destroy':
+        stream[property] = value;
+        return true;
+      case 'setTimeout': {
+        const session = stream.session;
+        (session || stream).setTimeout = value;
+        return true;
+      }
+      case 'write':
+      case 'read':
+      case 'pause':
+      case 'resume':
+        throw noSocketManipulationError();
+      default: {
+        const sessionSocket = stream.session?.socket;
+        if (sessionSocket) sessionSocket[property] = value;
+        else stream[property] = value;
+        return true;
+      }
+    }
+  },
+};
+
+function compatibilitySocket(stream) {
+  if (!stream._compatSocket) stream._compatSocket = new Proxy(stream, compatibilitySocketHandler);
+  return stream._compatSocket;
+}
+
 class VirtualHttp2Stream extends Duplex {
   constructor(session, options = {}) {
     super({ highWaterMark: options.highWaterMark });
@@ -236,6 +320,8 @@ class VirtualHttp2Stream extends Duplex {
     this._responseComplete = false;
     this._responseFile = null;
     this._peer = null;
+    this._compatRequest = null;
+    this._compatSocket = null;
     this._writable._write = (chunk, encoding, callback) => {
       try {
         this._body.push(bytesFor(chunk, this._scope));
@@ -253,6 +339,14 @@ class VirtualHttp2Stream extends Duplex {
       });
       callback();
     };
+  }
+
+  get closed() {
+    return Boolean(this._http2Closed);
+  }
+
+  set closed(value) {
+    this._http2Closed = Boolean(value);
   }
 
   on(name, listener) {
@@ -610,6 +704,135 @@ class VirtualHttp2Stream extends Duplex {
   }
 }
 
+// Compatibility request surface used by the request-oriented HTTP/2 API.
+// The raw ServerHttp2Stream remains the source of body data and lifecycle;
+// this wrapper only adapts it to Node's IncomingMessage-like interface.
+export class Http2ServerRequest extends Readable {
+  constructor(stream, headers, options, rawHeaders) {
+    super({ autoDestroy: false, ...options });
+    this._compatState = { closed: false, didRead: false };
+    this._headers = headers;
+    this._rawHeaders = rawHeaders;
+    this._trailers = {};
+    this._rawTrailers = [];
+    this._stream = stream;
+    this._aborted = false;
+    stream._compatRequest = this;
+
+    stream.on('end', () => this.push(null));
+    stream.on('error', () => {});
+    stream.on('aborted', () => {
+      if (!this._compatState.closed) {
+        this._aborted = true;
+        this.emit('aborted');
+      }
+    });
+    stream.on('close', () => {
+      this._compatState.closed = true;
+      this.push(null);
+      if (!this._compatState.didRead && !this._resumeScheduled) this.resume();
+      stream._compatSocket = null;
+      stream._compatRequest = null;
+      this.emit('close');
+    });
+    stream.on('timeout', () => this.emit('timeout'));
+    this.on('pause', () => stream.pause());
+    this.on('resume', () => stream.resume());
+  }
+
+  get aborted() {
+    return this._aborted;
+  }
+
+  get complete() {
+    return this._aborted || this.readableEnded || this._compatState.closed || this._stream.destroyed;
+  }
+
+  get stream() {
+    return this._stream;
+  }
+
+  get headers() {
+    return this._headers;
+  }
+
+  get rawHeaders() {
+    return this._rawHeaders;
+  }
+
+  get trailers() {
+    return this._trailers;
+  }
+
+  get rawTrailers() {
+    return this._rawTrailers;
+  }
+
+  get httpVersionMajor() {
+    return 2;
+  }
+
+  get httpVersionMinor() {
+    return 0;
+  }
+
+  get httpVersion() {
+    return '2.0';
+  }
+
+  get socket() {
+    return compatibilitySocket(this._stream);
+  }
+
+  get connection() {
+    return this.socket;
+  }
+
+  _read() {
+    if (!this._compatState.didRead) {
+      this._compatState.didRead = true;
+      this._stream.on('data', (chunk) => {
+        if (!this.push(chunk)) this._stream.pause();
+      });
+    } else {
+      queueMicrotask(() => this._stream.resume());
+    }
+  }
+
+  get method() {
+    return this._headers[':method'];
+  }
+
+  set method(method) {
+    if (typeof method !== 'string') {
+      throw http2Error('ERR_INVALID_ARG_TYPE', 'method must be a string');
+    }
+    if (method.trim() === '') throw http2Error('ERR_INVALID_ARG_VALUE', 'method must not be empty');
+    this._headers[':method'] = method;
+  }
+
+  get authority() {
+    return this._headers[':authority'] ?? this._headers.host;
+  }
+
+  get scheme() {
+    return this._headers[':scheme'];
+  }
+
+  get url() {
+    return this._headers[':path'];
+  }
+
+  set url(url) {
+    this._headers[':path'] = url;
+  }
+
+  setTimeout(milliseconds, callback) {
+    if (!this._compatState.closed) this._stream.setTimeout(milliseconds, callback);
+    return this;
+  }
+}
+
 // Compatibility response surface used by the request-oriented HTTP/2 API.
 // Keep these accessors backed by the virtual stream so the response observes
 // the same lifecycle and writable state as the raw stream API.
@@ -625,7 +848,7 @@ export class Http2ServerResponse extends Stream {
 
   get socket() {
     if (this._stream?.closed || this._stream?.destroyed) return undefined;
-    return this._stream;
+    return compatibilitySocket(this._stream);
   }
 
   get connection() {
@@ -739,7 +962,7 @@ export class ClientHttp2Session extends EventEmitter {
     const normalized = normalizeHeaders(headers);
     if (!normalized[':method']) normalized[':method'] = 'GET';
     if (!normalized[':scheme'] && normalized[':method'] !== 'CONNECT') normalized[':scheme'] = this._authority.protocol.slice(0, -1);
-    if (!normalized[':authority']) {
+    if (!normalized[':authority'] && !normalized.host) {
       const defaultPort = this._authority.protocol === 'http:' ? 80 : 443;
       normalized[':authority'] = `${this._authority.host}${this._authority.port === defaultPort ? '' : `:${this._authority.port}`}`;
     }
@@ -780,10 +1003,13 @@ export class ClientHttp2Session extends EventEmitter {
       serverStream._publishCreatedDiagnostics(stream._headers);
       serverStream._publishStartDiagnostics(stream._headers);
       this._server.emit('stream', serverStream, { ...stream._headers }, 0);
+      if (this._server.listenerCount('request') > 0) {
+        this._server._emitRequest(serverStream, stream._headers);
+      }
       const body = stream._bodyBytes();
       if (body.byteLength) serverStream.push(body);
       serverStream.push(null);
-      if (this._server.listenerCount('stream') === 0) {
+      if (this._server.listenerCount('stream') === 0 && this._server.listenerCount('request') === 0) {
         schedule(() => {
           if (!serverStream.headersSent) serverStream.respond({ ':status': 200, 'x-bnh-virtual': '1' });
           if (!serverStream.closed) serverStream.end();
@@ -868,13 +1094,15 @@ export class Http2Server extends EventEmitter {
     this._trackTask = internal.trackTask;
     this._taskRelease = null;
     this._secure = Boolean(internal.secure);
+    this._requestClass = this._options.Http2ServerRequest || Http2ServerRequest;
+    this._responseClass = this._options.Http2ServerResponse || Http2ServerResponse;
     this._host = 'localhost';
     this._port = null;
     this.listening = false;
     this._sessions = new Set();
     this.timeout = 0;
     this.maxConnections = undefined;
-    if (typeof listener === 'function') this.on('stream', listener);
+    if (typeof listener === 'function') this.on('request', listener);
   }
 
   listen(...args) {
@@ -902,6 +1130,20 @@ export class Http2Server extends EventEmitter {
     this._sessions.add(session);
     session.once('close', () => this._sessions.delete(session));
     this.emit('session', session);
+  }
+
+  _emitRequest(stream, headers) {
+    const rawHeaders = Object.entries(headers).flatMap(([name, value]) => [name, value]);
+    const request = new this._requestClass(stream, headers, undefined, rawHeaders);
+    const response = new this._responseClass(stream);
+    if (headers[':method'] === 'CONNECT') {
+      if (!this.emit('connect', request, response)) {
+        response.statusCode = 405;
+        response.end?.();
+      }
+      return;
+    }
+    this.emit('request', request, response);
   }
 
   address() { return this.listening ? { address: this._host, family: 'IPv4', port: this._port } : null; }
@@ -992,6 +1234,7 @@ export function createHttp2Module(scope = globalThis, options = {}) {
     Http2Stream: VirtualHttp2Stream,
     Http2Server,
     Http2SecureServer: Http2Server,
+    Http2ServerRequest,
     Http2ServerResponse,
   });
 }

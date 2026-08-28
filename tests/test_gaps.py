@@ -69,6 +69,7 @@ class SurfaceTests(unittest.TestCase):
         self.assertIn("Object.getOwnPropertySymbols", source)
         self.assertIn("symbolLabel", source)
         self.assertIn("isPublicSymbol", source)
+        self.assertIn("nodejs.asyncDispose", source)
 
     def test_module_list_source_uses_the_same_marker(self) -> None:
         self.assertIn("__BNH_SURFACE_JSON__", module_list_source())

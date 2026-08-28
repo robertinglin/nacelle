@@ -2662,6 +2662,10 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         }
       }
 
+      [Symbol.for('nodejs.dispose')]() {
+        if (!this.killed) this.kill();
+      }
+
       ref() {
         this._referenced = true;
         this._handle?.ref?.();
@@ -2671,6 +2675,13 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         this._referenced = false;
         this._handle?.unref?.();
       }
+    }
+    if (Symbol.dispose && Symbol.dispose !== Symbol.for('nodejs.dispose')) {
+      Object.defineProperty(BrowserChildProcess.prototype, Symbol.dispose, {
+        configurable: true,
+        value: BrowserChildProcess.prototype[Symbol.for('nodejs.dispose')],
+        writable: true,
+      });
     }
     const statWatchers = new Map();
     fs.watchFile = (pathValue, optionsValue, listener) => {

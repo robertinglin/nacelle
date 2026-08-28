@@ -18,6 +18,10 @@ const kReadableStateEncoding = Symbol('readableStateEncoding');
 const kReadableStateFlowing = Symbol('readableStateFlowing');
 const kReadableStateHasFlowing = Symbol('readableStateHasFlowing');
 const kReadableStatePaused = Symbol('readableStatePaused');
+const kReadableStateMultiAwaitDrain = Symbol('readableStateMultiAwaitDrain');
+const kReadableStateNeedReadable = Symbol('readableStateNeedReadable');
+const kReadableStateReadableListening = Symbol('readableStateReadableListening');
+const kReadableStateReading = Symbol('readableStateReading');
 
 export function setDefaultHighWaterMark(objectMode, value) {
   if (typeof objectMode !== 'boolean') throw streamError('ERR_INVALID_ARG_TYPE', 'The "objectMode" argument must be of type boolean');
@@ -1543,6 +1547,30 @@ Object.defineProperties(ReadableState.prototype, {
     enumerable: false,
     get() { return this[kReadableStateEncoding] || null; },
     set(value) { this[kReadableStateEncoding] = value || null; },
+  },
+  reading: {
+    configurable: false,
+    enumerable: false,
+    get() { return Boolean(this[kReadableStateReading]); },
+    set(value) { this[kReadableStateReading] = Boolean(value); },
+  },
+  needReadable: {
+    configurable: false,
+    enumerable: false,
+    get() { return Boolean(this[kReadableStateNeedReadable]); },
+    set(value) { this[kReadableStateNeedReadable] = Boolean(value); },
+  },
+  readableListening: {
+    configurable: false,
+    enumerable: false,
+    get() { return Boolean(this[kReadableStateReadableListening]); },
+    set(value) { this[kReadableStateReadableListening] = Boolean(value); },
+  },
+  multiAwaitDrain: {
+    configurable: false,
+    enumerable: false,
+    get() { return Boolean(this[kReadableStateMultiAwaitDrain]); },
+    set(value) { this[kReadableStateMultiAwaitDrain] = Boolean(value); },
   },
   flowing: {
     configurable: false,

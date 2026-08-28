@@ -537,6 +537,22 @@ export class Socket extends EventEmitter {
     if (typeof listener === 'function') this.on('message', listener);
   }
 
+  on(name, listener) {
+    return super.on(name, listener);
+  }
+
+  off(name, listener) {
+    return super.off(name, listener);
+  }
+
+  listenerCount(name) {
+    return super.listenerCount(name);
+  }
+
+  listeners(name) {
+    return super.listeners(name);
+  }
+
   bind(port_, address_, callback_) {
     healthCheck(this);
     const state = this[VIRTUAL_DGRAM_STATE];

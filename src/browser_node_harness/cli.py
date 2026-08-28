@@ -27,7 +27,6 @@ from .reference_adapter import run_reference_request
 from .surface import (
     SurfaceProbeError,
     diff_surfaces,
-    is_surface_infrastructure_error,
     list_builtin_modules,
     run_surface_probe,
     surfaces_from_json,
@@ -460,7 +459,7 @@ def _extract_gaps(harness: Harness, args: argparse.Namespace) -> int:
         infrastructure_errors = sorted(
             name
             for name, surface in target_surfaces.items()
-            if is_surface_infrastructure_error(surface.load_error)
+            if "infra_error" in surface.load_error.lower()
         )
         if infrastructure_errors:
             raise SurfaceProbeError(

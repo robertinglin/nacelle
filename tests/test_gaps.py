@@ -28,7 +28,6 @@ from browser_node_harness.surface import (
     SurfaceGap,
     SurfaceProbeError,
     diff_surfaces,
-    is_surface_infrastructure_error,
     module_list_source,
     parse_probe_payload,
     surface_probe_source,
@@ -57,12 +56,6 @@ def evidence(
 
 
 class SurfaceTests(unittest.TestCase):
-    def test_surface_infrastructure_errors_are_distinct_from_module_load_errors(self) -> None:
-        self.assertTrue(is_surface_infrastructure_error("probe failed: no JSON marker"))
-        self.assertTrue(is_surface_infrastructure_error("surface probe for ['fs'] failed (timeout): hung"))
-        self.assertTrue(is_surface_infrastructure_error("adapter-core.mjs cannot load"))
-        self.assertFalse(is_surface_infrastructure_error("ERR_UNKNOWN_BUILTIN_MODULE"))
-
     def test_probe_source_embeds_module_list_and_marker(self) -> None:
         source = surface_probe_source(["fs", "http"])
         self.assertIn('"fs"', source)

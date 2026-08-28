@@ -1336,6 +1336,8 @@ export function createBufferClass(scope = globalThis) {
   Buffer.kMaxLength = maxLength;
   Buffer.kStringMaxLength = maxStringLength;
   Buffer.SlowBuffer = function SlowBuffer(size) { return Buffer.alloc(size); };
+  Object.setPrototypeOf(Buffer.SlowBuffer.prototype, Uint8Array.prototype);
+  Object.setPrototypeOf(Buffer.SlowBuffer, Uint8Array);
   let inspectMaxBytes = 50;
   Object.defineProperty(Buffer, '__bnhInspectMaxBytes', { configurable: true, value: inspectMaxBytes });
   Object.defineProperty(NodeBuffer.prototype, 'inspect', {

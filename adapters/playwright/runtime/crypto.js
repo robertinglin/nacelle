@@ -6,6 +6,15 @@ const objectToString = Object.prototype.toString;
 const virtualKeyPairs = new Map();
 const VERIFY_SYNC_BLOCKER = 'Web Crypto exposes only asynchronous SubtleCrypto.verify; no browser-native synchronous verifier is available for this key';
 const X509_PARSER_BLOCKER = 'Web Crypto exposes key operations but no browser-native X.509 parser or certificate-chain field extraction';
+const LEGACY_CIPHER_BLOCKER = 'Web Crypto exposes cipher operations asynchronously; the Node legacy Cipheriv API is synchronous and stream-based';
+const PRIME_BLOCKER = 'Web Crypto does not expose browser-native prime testing';
+const KEY_OBJECT_BLOCKER = 'Web Crypto returns CryptoKey objects, but this browser runtime has no synchronous Node KeyObject adapter for generated symmetric keys';
+
+const CRYPTO_CONSTANTS = Object.freeze({
+  // This is the only crypto constant exposed by the browser compatibility
+  // layer. OpenSSL cipher and engine registries are not browser capabilities.
+  ENGINE_METHOD_ALL: 0,
+});
 
 function isArrayBuffer(value) {
   return value !== null && typeof value === 'object'
@@ -1297,6 +1306,7 @@ export function createCertificateShim(globalObject = globalThis, name = 'X509Cer
     checkIssued(otherCertificate) { throw unsupportedCertificateOperation(name, 'checkIssued'); }
     checkPrivateKey(privateKey) { throw unsupportedCertificateOperation(name, 'checkPrivateKey'); }
     verify(publicKey) { throw unsupportedCertificateOperation(name, 'verify'); }
+    toLegacyObject() { throw unsupportedCertificateOperation(name, 'toLegacyObject'); }
   };
 }
 
@@ -1685,6 +1695,153 @@ export function generatePrimeSync(size, options = {}) {
   return unsupportedPrimeGeneration('generatePrimeSync');
 }
 
+function bigintToBytes(value) {
+  if (value < 0n) {
+    const error = new RangeError('The value of "candidate" is out of range. It must be >= 0');
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  const encoded = value.toString(16).padStart(2, '0');
+  const result = new Uint8Array(encoded.length / 2);
+  for (let index = 0; index < result.length; index += 1) {
+    result[index] = Number.parseInt(encoded.slice(index * 2, index * 2 + 2), 16);
+  }
+  return result;
+}
+
+function primeCandidate(candidate) {
+  if (typeof candidate === 'bigint') return bigintToBytes(candidate);
+  if (!isArrayBuffer(candidate) && !isArrayBufferView(candidate)) {
+    const error = new TypeError(
+      'The "candidate" argument must be an instance of ArrayBuffer, TypedArray, Buffer, DataView, or bigint',
+    );
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  return toCryptoBytes(candidate);
+}
+
+function validatePrimeOptions(options) {
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    const error = new TypeError('The "options" argument must be an object');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  const checks = options.checks ?? 0;
+  if (!Number.isSafeInteger(checks) || checks < 0 || checks > 0x7fffffff) {
+    const detail = Number.isInteger(checks)
+      ? `It must be >= 0 && <= 2147483647. Received ${checks}`
+      : `It must be an integer. Received ${checks}`;
+    const error = new RangeError(`The value of "options.checks" is out of range. ${detail}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+}
+
+function unsupportedPrimeCheck(name) {
+  throw new UnsupportedWebCapabilityError(`crypto.${name}`, PRIME_BLOCKER);
+}
+
+export function checkPrime(candidate, options, callback) {
+  primeCandidate(candidate);
+  let actualOptions = options;
+  let actualCallback = callback;
+  if (typeof actualOptions === 'function') {
+    actualCallback = actualOptions;
+    actualOptions = {};
+  }
+  if (typeof actualCallback !== 'function') {
+    const error = new TypeError('The "callback" argument must be of type function');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  validatePrimeOptions(actualOptions ?? {});
+  Promise.resolve().then(() => unsupportedPrimeCheck('checkPrime')).then(
+    (value) => actualCallback(null, value),
+    (error) => actualCallback(error),
+  );
+  return undefined;
+}
+
+export function checkPrimeSync(candidate, options = {}) {
+  primeCandidate(candidate);
+  validatePrimeOptions(options);
+  return unsupportedPrimeCheck('checkPrimeSync');
+}
+
+function legacyCipherUnavailable(name) {
+  throw new UnsupportedWebCapabilityError(`crypto.${name}`, LEGACY_CIPHER_BLOCKER);
+}
+
+export function createCipheriv() {
+  return legacyCipherUnavailable('createCipheriv');
+}
+
+export function createDecipheriv() {
+  return legacyCipherUnavailable('createDecipheriv');
+}
+
+function validateGenerateKey(type, options) {
+  if (typeof type !== 'string') {
+    const error = new TypeError(`The "type" argument must be of type string. Received ${type}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    const error = new TypeError('The "options" argument must be an object');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  const length = options.length;
+  if (type === 'hmac') {
+    if (typeof length !== 'number' || Number.isNaN(length)) {
+      const error = new TypeError(`The "options.length" property must be of type number. Received ${length}`);
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    if (!Number.isSafeInteger(length) || length < 8 || length > 0x7fffffff) {
+      const error = new RangeError(`The value of "options.length" is out of range. It must be >= 8 && <= 2147483647. Received ${length}`);
+      error.code = 'ERR_OUT_OF_RANGE';
+      throw error;
+    }
+  } else if (type === 'aes') {
+    if (![128, 192, 256].includes(length)) {
+      const received = typeof length === 'string' ? `'${length}'` : length;
+      const error = new TypeError(`The property 'options.length' must be one of: 128, 192, 256. Received ${received}`);
+      error.code = 'ERR_INVALID_ARG_VALUE';
+      throw error;
+    }
+  } else {
+    const error = new TypeError(`The argument 'type' must be a supported key type. Received '${type}'`);
+    error.code = 'ERR_INVALID_ARG_VALUE';
+    throw error;
+  }
+}
+
+export function generateKey(type, options, callback) {
+  let actualOptions = options;
+  let actualCallback = callback;
+  if (typeof actualOptions === 'function') {
+    actualCallback = actualOptions;
+    actualOptions = undefined;
+  }
+  if (typeof actualCallback !== 'function') {
+    const error = new TypeError('The "callback" argument must be of type function');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  validateGenerateKey(type, actualOptions);
+  Promise.resolve().then(() => {
+    throw new UnsupportedWebCapabilityError('crypto.generateKey', KEY_OBJECT_BLOCKER);
+  }).then(
+    (value) => actualCallback(null, value),
+    (error) => actualCallback(error),
+  );
+  return undefined;
+}
+
+export const fips = 0;
+
 export function getCipherInfo(nameOrNid, options) {
   if (typeof nameOrNid !== 'string' && typeof nameOrNid !== 'number') {
     const error = new TypeError('The "nameOrNid" argument must be of type string or number');
@@ -1762,7 +1919,7 @@ export async function hmac(value, key, { hash = 'SHA-256', globalObject = global
 
 export function createCryptoContract(globalObject = globalThis) {
   const crypto = requireCrypto(globalObject);
-  return Object.freeze({
+  const contract = {
     randomBytes: (length) => randomBytes(length, globalObject),
     getRandomValues: (array) => getRandomValues(array, globalObject),
     randomUUID: (options) => randomUUID(globalObject, options),
@@ -1781,6 +1938,8 @@ export function createCryptoContract(globalObject = globalThis) {
       hkdfSync(hash, key, salt, info, keyLength, globalObject)
     ),
     randomInt: (min, max, callback) => randomInt(min, max, callback, globalObject),
+    checkPrime: (candidate, options, callback) => checkPrime(candidate, options, callback),
+    checkPrimeSync: (candidate, options = {}) => checkPrimeSync(candidate, options),
     scrypt: (password, salt, keyLength, options, callback) => (
       scrypt(password, salt, keyLength, options, callback, globalObject)
     ),
@@ -1789,6 +1948,10 @@ export function createCryptoContract(globalObject = globalThis) {
     ),
     generatePrime: (size, options, callback) => generatePrime(size, options, callback, globalObject),
     generatePrimeSync: (size, options = {}) => generatePrimeSync(size, options, globalObject),
+    generateKey: (type, options, callback) => generateKey(type, options, callback),
+    createCipheriv,
+    createDecipheriv,
+    constants: CRYPTO_CONSTANTS,
     getCipherInfo: (nameOrNid, options) => getCipherInfo(nameOrNid, options, globalObject),
     secureHeapUsed: () => secureHeapUsed(globalObject),
     privateDecrypt,
@@ -1824,5 +1987,14 @@ export function createCryptoContract(globalObject = globalThis) {
     webcrypto: crypto,
     getCurves: () => [],
     copyBytes: (value) => new Uint8Array(toCryptoBytes(value, globalObject.TextEncoder)),
+  };
+  Object.defineProperty(contract, 'fips', {
+    configurable: false,
+    enumerable: true,
+    get: () => 0,
+    set: () => {
+      throw new UnsupportedWebCapabilityError('crypto.fips', 'FIPS mode is not available in the browser runtime');
+    },
   });
+  return Object.freeze(contract);
 }

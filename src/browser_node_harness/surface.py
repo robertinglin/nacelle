@@ -37,6 +37,20 @@ class SurfaceProbeError(RuntimeError):
     pass
 
 
+def is_surface_infrastructure_error(load_error: str) -> bool:
+    """Distinguish probe/adapter failures from real module load gaps."""
+
+    normalized = str(load_error or "").lower()
+    if normalized.startswith("probe failed:") or "adapter-core.mjs" in normalized:
+        return True
+    return bool(
+        re.search(
+            r"surface probe .* failed \((?:infra_error|timeout|crash|error)\)",
+            normalized,
+        )
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ModuleSurface:
     symbols: tuple[str, ...] = ()

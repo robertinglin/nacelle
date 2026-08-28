@@ -317,6 +317,21 @@ function missingSearchParamsArguments(message) {
   return error;
 }
 
+function missingUrlArgument() {
+  return missingSearchParamsArguments('The "url" argument must be specified');
+}
+
+function invalidObjectUrlArgument(value) {
+  let received;
+  if (value === undefined) received = 'undefined';
+  else if (value === null) received = 'null';
+  else if (typeof value === 'object') received = `an instance of ${value?.constructor?.name || 'Object'}`;
+  else received = `type ${typeof value} (${String(value)})`;
+  const error = new TypeError(`The "obj" argument must be an instance of Blob. Received ${received}`);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
 function createSearchParamsIterator(source, type) {
   const state = new WeakMap();
   const iterator = {
@@ -335,6 +350,7 @@ function createSearchParamsIterator(source, type) {
 }
 
 function createNodeUrlSearchParams(scope) {
+  const NativeURL = scope.URL;
   const NativeSearchParams = scope.URLSearchParams;
   const nativeSearchParamsGetter = Object.getOwnPropertyDescriptor(
     scope.URL.prototype,
@@ -478,7 +494,49 @@ function createNodeUrlSearchParams(scope) {
     return wrapper;
   }
 
-  class NodeURL extends scope.URL {
+  class NodeURL extends NativeURL {
+    static parse(input, base = undefined) {
+      if (arguments.length === 0) throw missingUrlArgument();
+      const url = stringValue(input);
+      const baseUrl = base === undefined ? undefined : stringValue(base);
+      try {
+        return new NodeURL(url, baseUrl);
+      } catch {
+        return null;
+      }
+    }
+
+    static canParse(input, base = undefined) {
+      if (arguments.length === 0) throw missingUrlArgument();
+      const url = stringValue(input);
+      const baseUrl = base === undefined ? undefined : stringValue(base);
+      try {
+        new NodeURL(url, baseUrl);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    static createObjectURL(blob) {
+      if (typeof scope.Blob !== 'function' || !(blob instanceof scope.Blob)) {
+        throw invalidObjectUrlArgument(blob);
+      }
+      const nativeCreateObjectURL = NativeURL?.createObjectURL;
+      if (typeof nativeCreateObjectURL !== 'function') {
+        throw new TypeError('URL.createObjectURL is not available in this browser');
+      }
+      return nativeCreateObjectURL.call(NativeURL, blob);
+    }
+
+    static revokeObjectURL(url) {
+      if (arguments.length === 0) throw missingUrlArgument();
+      const nativeRevokeObjectURL = NativeURL?.revokeObjectURL;
+      if (typeof nativeRevokeObjectURL === 'function') {
+        nativeRevokeObjectURL.call(NativeURL, stringValue(url));
+      }
+    }
+
     [inspectCustomSymbol](depth, options) {
       if (typeof depth === 'number' && depth < 0) return this;
 
@@ -548,10 +606,20 @@ function createNodeUrlSearchParams(scope) {
     enumerable: true,
     writable: true,
     value() {
-      const nativeToJSON = scope.URL.prototype.toJSON;
+      const nativeToJSON = NativeURL.prototype.toJSON;
       return typeof nativeToJSON === 'function' ? nativeToJSON.call(this) : this.href;
     },
   });
+
+  for (const name of ['parse', 'canParse', 'createObjectURL', 'revokeObjectURL']) {
+    const descriptor = Object.getOwnPropertyDescriptor(NodeURL, name);
+    Object.defineProperty(NodeURL, name, {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: descriptor.value,
+    });
+  }
 
   return { URL: NodeURL, URLSearchParams: NodeURLSearchParams };
 }

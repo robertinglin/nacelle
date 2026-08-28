@@ -64,7 +64,7 @@ class SurfaceTests(unittest.TestCase):
         # The probe must run as plain CJS through both adapters.
         self.assertIn("require(", source)
         self.assertIn("Object.getPrototypeOf", source)
-        self.assertIn('typeof value === "object"', source)
+        self.assertIn('typeof value !== "function" && typeof value !== "object"', source)
         self.assertIn('valueType === "function" ? value.prototype : prototypeOfValue', source)
         self.assertIn("Object.getOwnPropertySymbols", source)
         self.assertIn("ownNamesForCheck.filter", source)

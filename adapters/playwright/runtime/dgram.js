@@ -30,6 +30,16 @@ function invalidArgumentType(name, expected, value) {
   return error;
 }
 
+function validateNumber(value, name) {
+  if (typeof value !== 'number') throw invalidArgumentType(name, 'number', value);
+}
+
+function missingArgument(name) {
+  const error = new TypeError(`The "${name}" argument must be specified`);
+  error.code = 'ERR_MISSING_ARGS';
+  return error;
+}
+
 function bufferOutOfBounds(name) {
   const error = new RangeError(`The ${name} is outside the bounds of the buffer`);
   error.code = 'ERR_BUFFER_OUT_OF_BOUNDS';
@@ -78,6 +88,15 @@ function socketError(code, message) {
   const error = new Error(message);
   error.code = code;
   return error;
+}
+
+function handleError(error, syscall) {
+  const code = error === UV_EINVAL ? 'EINVAL' : 'UNKNOWN';
+  const exception = new Error(`${syscall} ${code}`);
+  exception.code = code;
+  exception.errno = error;
+  exception.syscall = syscall;
+  return exception;
 }
 
 function validateBufferSize(size) {
@@ -171,6 +190,13 @@ function createDgramHandle(type, { dns, network, lookup } = {}) {
     sendBufferSize: 0,
     sendQueueCount: 0,
     sendQueueSize: 0,
+    broadcast: 0,
+    ttl: 64,
+    multicastTTL: 1,
+    multicastLoopback: 1,
+    multicastInterface: undefined,
+    memberships: new Map(),
+    sourceMemberships: new Map(),
     refed: true,
   };
   const handle = {
@@ -218,6 +244,34 @@ function createDgramHandle(type, { dns, network, lookup } = {}) {
     recvStop() { return 0; },
     getSendQueueCount() { return state.sendQueueCount; },
     getSendQueueSize() { return state.sendQueueSize; },
+    setBroadcast(value) { state.broadcast = value ? 1 : 0; return 0; },
+    setTTL(value) { state.ttl = value; return 0; },
+    setMulticastTTL(value) { state.multicastTTL = value; return 0; },
+    setMulticastLoopback(value) { state.multicastLoopback = value ? 1 : 0; return 0; },
+    setMulticastInterface(value) { state.multicastInterface = value; return 0; },
+    addMembership(multicastAddress, interfaceAddress) {
+      state.memberships.set(`${multicastAddress}\u0000${interfaceAddress ?? ''}`, {
+        multicastAddress,
+        interfaceAddress,
+      });
+      return 0;
+    },
+    dropMembership(multicastAddress, interfaceAddress) {
+      state.memberships.delete(`${multicastAddress}\u0000${interfaceAddress ?? ''}`);
+      return 0;
+    },
+    addSourceSpecificMembership(sourceAddress, groupAddress, interfaceAddress) {
+      state.sourceMemberships.set(`${sourceAddress}\u0000${groupAddress}\u0000${interfaceAddress ?? ''}`, {
+        sourceAddress,
+        groupAddress,
+        interfaceAddress,
+      });
+      return 0;
+    },
+    dropSourceSpecificMembership(sourceAddress, groupAddress, interfaceAddress) {
+      state.sourceMemberships.delete(`${sourceAddress}\u0000${groupAddress}\u0000${interfaceAddress ?? ''}`);
+      return 0;
+    },
     bufferSize(size, receive) {
       const key = receive ? 'recvBufferSize' : 'sendBufferSize';
       if (size === 0) return state[key];
@@ -227,7 +281,6 @@ function createDgramHandle(type, { dns, network, lookup } = {}) {
     ref() { state.refed = true; return handle; },
     unref() { state.refed = false; return handle; },
     hasRef() { return state.refed; },
-    dropSourceSpecificMembership() { return 0; },
     connect(address, port) {
       if (state.closed || !state.bound) return UV_EINVAL;
       state.remoteAddress = {
@@ -367,6 +420,13 @@ export class Socket extends EventEmitter {
       sendBufferSize: internal.sendBufferSize === undefined
         ? 0
         : validateBufferSize(internal.sendBufferSize),
+      broadcast: 0,
+      ttl: 64,
+      multicastTTL: 1,
+      multicastLoopback: 1,
+      multicastInterface: undefined,
+      memberships: new Map(),
+      sourceMemberships: new Map(),
       refed: true,
     };
     state.handle[DGRAM_OWNER] = this;
@@ -406,6 +466,49 @@ export class Socket extends EventEmitter {
     };
     state.handle.getSendQueueCount = () => this._sendQueueCount;
     state.handle.getSendQueueSize = () => this._sendQueueSize;
+    state.handle.setBroadcast = (value) => {
+      state.broadcast = value ? 1 : 0;
+      return 0;
+    };
+    state.handle.setTTL = (value) => {
+      state.ttl = value;
+      return 0;
+    };
+    state.handle.setMulticastTTL = (value) => {
+      state.multicastTTL = value;
+      return 0;
+    };
+    state.handle.setMulticastLoopback = (value) => {
+      state.multicastLoopback = value ? 1 : 0;
+      return 0;
+    };
+    state.handle.setMulticastInterface = (value) => {
+      state.multicastInterface = value;
+      return 0;
+    };
+    state.handle.addMembership = (multicastAddress, interfaceAddress) => {
+      state.memberships.set(`${multicastAddress}\u0000${interfaceAddress ?? ''}`, {
+        multicastAddress,
+        interfaceAddress,
+      });
+      return 0;
+    };
+    state.handle.dropMembership = (multicastAddress, interfaceAddress) => {
+      state.memberships.delete(`${multicastAddress}\u0000${interfaceAddress ?? ''}`);
+      return 0;
+    };
+    state.handle.addSourceSpecificMembership = (sourceAddress, groupAddress, interfaceAddress) => {
+      state.sourceMemberships.set(`${sourceAddress}\u0000${groupAddress}\u0000${interfaceAddress ?? ''}`, {
+        sourceAddress,
+        groupAddress,
+        interfaceAddress,
+      });
+      return 0;
+    };
+    state.handle.dropSourceSpecificMembership = (sourceAddress, groupAddress, interfaceAddress) => {
+      state.sourceMemberships.delete(`${sourceAddress}\u0000${groupAddress}\u0000${interfaceAddress ?? ''}`);
+      return 0;
+    };
     state.handle.bufferSize = (size, receive) => {
       const key = receive ? 'recvBufferSize' : 'sendBufferSize';
       if (size === 0) return state[key];
@@ -426,7 +529,6 @@ export class Socket extends EventEmitter {
       return state.handle;
     };
     state.handle.hasRef = () => state.refed;
-    state.handle.dropSourceSpecificMembership = () => 0;
     const diagnostics = typeof this._diagnostics === 'function' ? this._diagnostics() : this._diagnostics;
     const channel = diagnostics?.channel?.('udp.socket');
     if (channel?.hasSubscribers) channel.publish({ socket: this });
@@ -862,7 +964,7 @@ export class Socket extends EventEmitter {
       groupAddress,
       interfaceAddress,
     );
-    if (error) throw networkError('UNKNOWN', 'dropSourceSpecificMembership', groupAddress, 0);
+    if (error) throw handleError(error, 'dropSourceSpecificMembership');
   }
 
   getRecvBufferSize() {
@@ -887,12 +989,75 @@ export class Socket extends EventEmitter {
     validateBufferSize(size);
     this[VIRTUAL_DGRAM_STATE].handle.bufferSize(size, false);
   }
-  setBroadcast() { return this; }
-  setTTL() { return this; }
-  setMulticastTTL() { return this; }
-  setMulticastLoopback() { return this; }
-  addMembership() { return this; }
-  dropMembership() { return this; }
+  setBroadcast(arg) {
+    const error = this[VIRTUAL_DGRAM_STATE].handle.setBroadcast(arg ? 1 : 0);
+    if (error) throw handleError(error, 'setBroadcast');
+  }
+
+  setTTL(ttl) {
+    validateNumber(ttl, 'ttl');
+    const error = this[VIRTUAL_DGRAM_STATE].handle.setTTL(ttl);
+    if (error) throw handleError(error, 'setTTL');
+    return ttl;
+  }
+
+  setMulticastTTL(ttl) {
+    validateNumber(ttl, 'ttl');
+    const error = this[VIRTUAL_DGRAM_STATE].handle.setMulticastTTL(ttl);
+    if (error) throw handleError(error, 'setMulticastTTL');
+    return ttl;
+  }
+
+  setMulticastLoopback(arg) {
+    const error = this[VIRTUAL_DGRAM_STATE].handle.setMulticastLoopback(arg ? 1 : 0);
+    if (error) throw handleError(error, 'setMulticastLoopback');
+    return arg;
+  }
+
+  setMulticastInterface(interfaceAddress) {
+    healthCheck(this);
+    if (typeof interfaceAddress !== 'string') {
+      throw invalidArgumentType('interfaceAddress', 'string', interfaceAddress);
+    }
+    const error = this[VIRTUAL_DGRAM_STATE].handle.setMulticastInterface(interfaceAddress);
+    if (error) throw handleError(error, 'setMulticastInterface');
+  }
+
+  addMembership(multicastAddress, interfaceAddress) {
+    healthCheck(this);
+    if (!multicastAddress) throw missingArgument('multicastAddress');
+    const error = this[VIRTUAL_DGRAM_STATE].handle.addMembership(
+      multicastAddress,
+      interfaceAddress,
+    );
+    if (error) throw handleError(error, 'addMembership');
+  }
+
+  dropMembership(multicastAddress, interfaceAddress) {
+    healthCheck(this);
+    if (!multicastAddress) throw missingArgument('multicastAddress');
+    const error = this[VIRTUAL_DGRAM_STATE].handle.dropMembership(
+      multicastAddress,
+      interfaceAddress,
+    );
+    if (error) throw handleError(error, 'dropMembership');
+  }
+
+  addSourceSpecificMembership(sourceAddress, groupAddress, interfaceAddress) {
+    healthCheck(this);
+    if (typeof sourceAddress !== 'string') {
+      throw invalidArgumentType('sourceAddress', 'string', sourceAddress);
+    }
+    if (typeof groupAddress !== 'string') {
+      throw invalidArgumentType('groupAddress', 'string', groupAddress);
+    }
+    const error = this[VIRTUAL_DGRAM_STATE].handle.addSourceSpecificMembership(
+      sourceAddress,
+      groupAddress,
+      interfaceAddress,
+    );
+    if (error) throw handleError(error, 'addSourceSpecificMembership');
+  }
   ref() {
     this[VIRTUAL_DGRAM_STATE].handle?.ref?.();
     return this;

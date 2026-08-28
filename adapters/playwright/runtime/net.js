@@ -6,6 +6,8 @@ import { createVirtualNetwork, sharedVirtualNetwork, normalizeVirtualAddress, vi
 
 let nextClientPort = 62000;
 const socketHandle = Symbol('socketHandle');
+const SymbolAsyncDispose = Symbol.asyncDispose || Symbol.for('nodejs.asyncDispose');
+const inspectCustomSymbol = Symbol.for('nodejs.util.inspect.custom');
 
 function schedule(callback) {
   queueMicrotask(callback);
@@ -62,6 +64,50 @@ function socketError(code, syscall, address, port) {
   error.address = address;
   error.port = port;
   return error;
+}
+
+function socketAbortError() {
+  const error = new Error('The operation was aborted');
+  error.name = 'AbortError';
+  error.code = 'ABORT_ERR';
+  return error;
+}
+
+function waitForSocketClose(socket, expectedError) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      socket.off?.('close', onClose);
+      socket.off?.('error', onError);
+    };
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error && error !== expectedError) reject(error);
+      else resolve(null);
+    };
+    const onError = (error) => {
+      if (error !== expectedError) finish(error);
+    };
+    const onClose = () => {
+      const streamError = socket.errored;
+      if (streamError && streamError !== expectedError) {
+        finish(streamError);
+        return;
+      }
+      if (!expectedError && !socket.readableEnded) {
+        const error = new Error('Premature close');
+        error.code = 'ERR_STREAM_PREMATURE_CLOSE';
+        finish(error);
+        return;
+      }
+      finish();
+    };
+    socket.once('close', onClose);
+    socket.once('error', onError);
+    if (socket.closed) queueMicrotask(onClose);
+  });
 }
 
 function socketErrorFromHandle(status, address, port) {
@@ -726,6 +772,15 @@ export class Socket extends Duplex {
     if (!forceClose && this.readyState === 'open') this._readyState = 'writeOnly';
     if (forceClose || !this.allowHalfOpen) this.destroy();
   }
+
+  async [SymbolAsyncDispose]() {
+    let error;
+    if (!this.destroyed) {
+      error = this.readableEnded ? null : socketAbortError();
+      this.destroy(error);
+    }
+    await waitForSocketClose(this, error);
+  }
 }
 
 Object.defineProperty(Socket.prototype, '_handle', {
@@ -1105,6 +1160,13 @@ export class Server extends EventEmitter {
     if (this._handle) this._handle.unref();
     return this;
   }
+
+  async [SymbolAsyncDispose]() {
+    if (!this._handle) return;
+    await new Promise((resolve, reject) => {
+      this.close((error) => error ? reject(error) : resolve());
+    });
+  }
 }
 
 function createDetachedServerHandle(network, config, address, port, addressType, fd) {
@@ -1186,6 +1248,31 @@ class BrowserSocketAddress {
     const family = isIPv6Literal(address) ? 'ipv6' : isIPv4Literal(address) ? 'ipv4' : null;
     if (!family || !Number.isInteger(port) || port < 0 || port > 65535) return undefined;
     return new BrowserSocketAddress({ address, family, port });
+  }
+
+  [inspectCustomSymbol](depth, options = {}) {
+    if (depth < 0) return this;
+    const stylize = typeof options.stylize === 'function' ? options.stylize : (value) => value;
+    const quote = (value) => `'${String(value)
+      .replaceAll('\\', '\\\\')
+      .replaceAll('\n', '\\n')
+      .replaceAll('\r', '\\r')
+      .replaceAll('\t', '\\t')
+      .replaceAll("'", "\\'")}'`;
+    const number = (value) => {
+      const text = String(value);
+      return options.numericSeparator ? text.replace(/\B(?=(\d{3})+(?!\d))/g, '_') : text;
+    };
+    const fields = [
+      `address: ${stylize(quote(this.address), 'string')}`,
+      `port: ${stylize(number(this.port), 'number')}`,
+      `family: ${stylize(quote(this.family), 'string')}`,
+      `flowlabel: ${stylize(number(this.flowlabel), 'number')}`,
+    ];
+    const oneLine = `SocketAddress { ${fields.join(', ')} }`;
+    const breakLength = options.breakLength ?? 80;
+    if (oneLine.length <= breakLength) return oneLine;
+    return `SocketAddress {\n${fields.map((field) => `  ${field}`).join(',\n')}\n}`;
   }
 }
 

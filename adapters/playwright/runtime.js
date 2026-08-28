@@ -501,6 +501,30 @@ function installProcessStdoutIterableSurface(stream, processObject) {
     value() { return readable[Symbol.asyncIterator](); },
   });
   Object.defineProperties(iterablePrototype, {
+    unpipe: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(destination) { readable.unpipe(destination); return this; },
+    },
+    unref: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    unshift: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) { return readable.unshift(...args); },
+    },
+    wrap: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(source) { readable.wrap(source); return this; },
+    },
     address: {
       configurable: true,
       enumerable: true,
@@ -1459,6 +1483,7 @@ const BROWSER_PROCESS_VERSIONS = Object.freeze({
   node: '22.0.0',
   acorn: '8.16.0',
   ada: '2.7.8',
+  amaro: '1.1.8',
   ares: '1.33.1',
   brotli: '1.1.0',
   cjs_module_lexer: '2.2.0',
@@ -1473,7 +1498,9 @@ const BROWSER_PROCESS_VERSIONS = Object.freeze({
   openssl: '3.0.0',
   simdjson: '3.9.3',
   simdutf: '5.2.4',
+  sqlite: '3.51.3',
   tz: '2024a',
+  undici: '6.28.0',
   unicode: '15.1',
   uv: '1.48.0',
   uvwasi: '0.0.20',

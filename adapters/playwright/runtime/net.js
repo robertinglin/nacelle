@@ -335,7 +335,9 @@ export class Socket extends Duplex {
     // Documentation-only networks are intentionally unroutable. Keep their
     // connection pending so Socket#setTimeout can deliver the observable
     // timeout event instead of converting the black hole into ECONNREFUSED.
-    if (!options.autoSelectFamily && isVirtualBlackholeAddress(address)) return;
+    const hasEgressTransport = typeof this._transport === 'function'
+      || typeof this._transport?.connect === 'function';
+    if (!hasEgressTransport && !options.autoSelectFamily && isVirtualBlackholeAddress(address)) return;
     if (options.blockList?.check?.(address, family === 6 ? 'ipv6' : 'ipv4')) {
       schedule(() => onError(socketError('ERR_IP_BLOCKED', 'connect', address, port)));
       return;
@@ -858,6 +860,7 @@ export class Server extends EventEmitter {
     this._workers = [];
     this._closeEmitted = false;
     this._ownerProcess = internal.currentProcess?.() || null;
+    this._ownerDisconnectListener = null;
     this._listening = false;
     this.maxConnections = undefined;
     if (typeof connectionListener === 'function') this.on('connection', connectionListener);
@@ -997,6 +1000,11 @@ export class Server extends EventEmitter {
           this._boundPort = handle.port;
           this._taskRelease = this._config.trackTask?.() || null;
           this._listening = true;
+          this._ownerDisconnectListener = () => {
+            this._ownerDisconnectListener = null;
+            if (this.listening) this.close();
+          };
+          this._ownerProcess?.once?.('disconnect', this._ownerDisconnectListener);
           this._runWithOwner(() => {
             this.emit('listening');
             try { this._config.onListening?.(this.address()); } catch { /* parent may already be terminal */ }
@@ -1026,6 +1034,11 @@ export class Server extends EventEmitter {
           this._pipeResource = new AsyncResource('PIPESERVERWRAP');
           this._taskRelease = this._config.trackTask?.() || null;
           this._listening = true;
+          this._ownerDisconnectListener = () => {
+            this._ownerDisconnectListener = null;
+            if (this.listening) this.close();
+          };
+          this._ownerProcess?.once?.('disconnect', this._ownerDisconnectListener);
           this._runWithOwner(() => {
             this.emit('listening');
             try { this._config.onListening?.(this.address()); } catch { /* parent may already be terminal */ }
@@ -1059,6 +1072,10 @@ export class Server extends EventEmitter {
       this.once('close', () => callback(wasListening ? undefined : serverNotRunningError()));
     }
     this._closeRequested = true;
+    if (this._ownerDisconnectListener) {
+      this._ownerProcess?.off?.('disconnect', this._ownerDisconnectListener);
+      this._ownerDisconnectListener = null;
+    }
     if (!wasListening) {
       this._emitCloseIfDrained();
       return this;
@@ -1155,6 +1172,8 @@ export class Server extends EventEmitter {
       return;
     }
     const accepted = connection.serverSocket || this._createAcceptedSocket(connection);
+    accepted.server = this;
+    accepted._server = this;
     accepted._peer = connection.client;
     accepted.path = connection.path;
     accepted._pipeResource = connection.serverPipeResource;

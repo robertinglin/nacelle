@@ -234,7 +234,7 @@ function outOfRangeError(name, range, value) {
 
 function validateBufferSize(size) {
   if (typeof size !== 'number') throw invalidArgumentTypeError('size', ['number'], size);
-  if (!Number.isFinite(size) || size < 0 || size > MAX_BUFFER_LENGTH) {
+  if (size < 0 || size > MAX_BUFFER_LENGTH || Number.isNaN(size)) {
     throw outOfRangeError('size', `>= 0 && <= ${MAX_BUFFER_LENGTH}`, size);
   }
   return Math.trunc(size);

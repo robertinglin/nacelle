@@ -9,6 +9,8 @@ let defaultWritableHighWaterMark = DEFAULT_WRITABLE_HIGH_WATER_MARK;
 let defaultObjectHighWaterMark = 16;
 
 const kReadableStateDataEmitted = Symbol('readableStateDataEmitted');
+const kReadableStateObjectMode = Symbol('readableStateObjectMode');
+const kReadableStateEnded = Symbol('readableStateEnded');
 const kReadableStateErrored = Symbol('readableStateErrored');
 const kReadableStateDefaultEncoding = Symbol('readableStateDefaultEncoding');
 const kReadableStateDecoder = Symbol('readableStateDecoder');
@@ -230,6 +232,7 @@ function streamError(code, message) {
     || code === 'ERR_INVALID_ARG_VALUE'
     || code === 'ERR_INVALID_RETURN_VALUE'
     || code === 'ERR_MISSING_ARGS'
+    || code === 'ERR_STREAM_NULL_VALUES'
     || code === 'ERR_UNKNOWN_ENCODING'
     ? TypeError
     : code === 'ERR_OUT_OF_RANGE' ? RangeError : Error;
@@ -704,27 +707,96 @@ export class Readable extends EventEmitter {
   }
 
   static from(source, options = {}) {
-    const readable = new Readable({ objectMode: true, highWaterMark: options.highWaterMark ?? 1, ...options });
-    readable._read = () => {};
-    (async () => {
-      const iterator = source?.[Symbol.asyncIterator]?.() || source?.[Symbol.iterator]?.();
-      readable._sourceIterator = iterator;
-      try {
-        while (true) {
-          const step = await iterator.next();
-          if (step.done) break;
-          readable.push(step.value);
-          if (!readable._flowing && readable._bufferedBytes >= readable.readableHighWaterMark) {
-            await new Promise((resolve) => { readable._sourceWaiter = resolve; });
-          }
-        }
-        readable.push(null);
-      } catch (error) {
-        readable.destroy(error);
-      } finally {
-        if (readable._sourceIterator === iterator) readable._sourceIterator = null;
+    const fromOptions = options ?? {};
+
+    // Strings and Buffers are iterable, but Readable.from() treats each as a
+    // single value. This is important for both object mode and callers that
+    // explicitly opt out of it.
+    const isBuffer = typeof globalThis.Buffer?.isBuffer === 'function'
+      && globalThis.Buffer.isBuffer(source);
+    if (typeof source === 'string' || isBuffer) {
+      return new Readable({
+        objectMode: true,
+        ...fromOptions,
+        read() {
+          this.push(source);
+          this.push(null);
+        },
+      });
+    }
+
+    const asyncIteratorMethod = source?.[Symbol.asyncIterator];
+    const iteratorMethod = typeof asyncIteratorMethod === 'function'
+      ? asyncIteratorMethod
+      : source?.[Symbol.iterator];
+    if (typeof iteratorMethod !== 'function') {
+      throw streamError(
+        'ERR_INVALID_ARG_TYPE',
+        `The "iterable" argument must be an instance of Iterable. Received ${streamReceivedValue(source)}`,
+      );
+    }
+
+    // Acquire the iterator before constructing the stream so errors from a
+    // user-supplied iterator method remain synchronous, as in Node.
+    const iterator = iteratorMethod.call(source);
+    if (!iterator || typeof iterator.next !== 'function') {
+      throw streamError(
+        'ERR_INVALID_ARG_TYPE',
+        `The "iterable" argument must be an instance of Iterable. Received ${streamReceivedValue(source)}`,
+      );
+    }
+
+    let reading = false;
+    let finished = false;
+    let closed = false;
+
+    const close = async (error) => {
+      if (closed) return;
+      closed = true;
+      if (error != null && typeof iterator.throw === 'function') {
+        const thrown = await iterator.throw(error);
+        if (thrown?.done) return;
       }
-    })();
+      if (typeof iterator.return === 'function') await iterator.return();
+    };
+
+    const readable = new Readable({
+      objectMode: true,
+      highWaterMark: 1,
+      ...fromOptions,
+      read() {
+        if (reading || finished) return;
+        reading = true;
+        return (async () => {
+          try {
+            while (!finished) {
+              const step = await iterator.next();
+              if (step.done) {
+                finished = true;
+                this.push(null);
+                return;
+              }
+              let value = step.value;
+              if (value && typeof value.then === 'function') value = await value;
+              if (value === null) throw streamError('ERR_STREAM_NULL_VALUES', 'May not write null values to stream');
+              if (!this.push(value)) return;
+            }
+          } finally {
+            reading = false;
+          }
+        })();
+      },
+    });
+
+    // destroy() invokes this hook asynchronously. Keep iterator cleanup here
+    // so the browser-side stream owns the same cancellation boundary as the
+    // native async iterator, without relying on a host-Node stream.
+    readable._destroyHook = (error, callback) => {
+      Promise.resolve(close(error)).then(
+        () => callback(error),
+        (closeError) => callback(closeError || error),
+      );
+    };
     return readable;
   }
 
@@ -1428,6 +1500,18 @@ function ReadableState(options = {}, stream) {
 }
 
 Object.defineProperties(ReadableState.prototype, {
+  objectMode: {
+    configurable: false,
+    enumerable: false,
+    get() { return Boolean(this[kReadableStateObjectMode]); },
+    set(value) { this[kReadableStateObjectMode] = Boolean(value); },
+  },
+  ended: {
+    configurable: false,
+    enumerable: false,
+    get() { return Boolean(this[kReadableStateEnded]); },
+    set(value) { this[kReadableStateEnded] = Boolean(value); },
+  },
   dataEmitted: {
     configurable: false,
     enumerable: false,
@@ -1491,19 +1575,109 @@ Object.defineProperties(ReadableState.prototype, {
 
 function readableFromList(n, state) {
   const buffer = state?.buffer;
-  if (!Array.isArray(buffer) || buffer.length === 0) return null;
-  if (state.objectMode) return buffer.shift();
-  if (!n || n >= buffer.reduce((total, chunk) => total + (chunk?.byteLength ?? chunk?.length ?? 0), 0)) {
-    const values = buffer.splice(0);
-    return values.every((value) => typeof value === 'string')
-      ? values.join('')
-      : bufferChunk(values.reduce((joined, value) => appendBytes(joined, toBytes(value)), new Uint8Array(0)));
+  if (!Array.isArray(buffer)) return null;
+
+  let index = Number.isInteger(state.bufferIndex) ? state.bufferIndex : 0;
+  const availableChunks = () => buffer.slice(index).filter((value) => value != null);
+  const values = availableChunks();
+  const bufferedLength = Number.isFinite(state.length)
+    ? state.length
+    : values.reduce((total, value) => total + (value?.byteLength ?? value?.length ?? 0), 0);
+  if (bufferedLength === 0 || values.length === 0) return null;
+
+  const consume = (count) => {
+    if (Number.isInteger(state.bufferIndex)) {
+      let remaining = count;
+      while (index < buffer.length && remaining > 0) {
+        const value = buffer[index];
+        if (value == null) {
+          index += 1;
+          continue;
+        }
+        const size = state.objectMode ? 1 : value.byteLength ?? value.length ?? 0;
+        if (remaining >= size) {
+          remaining -= size;
+          buffer[index] = null;
+          index += 1;
+        } else {
+          buffer[index] = typeof value === 'string'
+            ? value.slice(remaining)
+            : value.slice(remaining);
+          remaining = 0;
+          break;
+        }
+      }
+      state.bufferIndex = index;
+    } else {
+      let remaining = count;
+      while (buffer.length && remaining > 0) {
+        const value = buffer[0];
+        const size = state.objectMode ? 1 : value.byteLength ?? value.length ?? 0;
+        if (remaining < size) {
+          buffer[0] = typeof value === 'string'
+            ? value.slice(remaining)
+            : value.slice(remaining);
+          break;
+        }
+        remaining -= size;
+        buffer.shift();
+      }
+    }
+    if (Number.isFinite(state.length)) state.length = Math.max(0, state.length - count);
+  };
+
+  if (state.objectMode) {
+    const result = values[0];
+    consume(1);
+    return result;
   }
-  return buffer.shift();
+
+  const decoder = state.decoder;
+  const all = !n || n >= bufferedLength;
+  const target = all ? bufferedLength : n;
+  if (decoder) {
+    let result = '';
+    let remaining = target;
+    for (const value of values) {
+      const text = String(value);
+      if (all || text.length <= remaining) {
+        result += text;
+        remaining -= text.length;
+        if (remaining === 0) break;
+      } else {
+        result += text.slice(0, remaining);
+        remaining = 0;
+        break;
+      }
+    }
+    consume(target - remaining);
+    return result;
+  }
+
+  if (all && values.length === 1) {
+    const result = values[0];
+    consume(target);
+    return result;
+  }
+
+  let result = new Uint8Array(0);
+  let remaining = target;
+  for (const value of values) {
+    const bytes = toBytes(value);
+    const take = Math.min(bytes.byteLength, remaining);
+    result = appendBytes(result, bytes.slice(0, take));
+    remaining -= take;
+    if (remaining === 0) break;
+  }
+  consume(target - remaining);
+  return bufferChunk(result);
 }
 
 Readable.ReadableState = ReadableState;
 Readable._fromList = readableFromList;
+// Keep the legacy constructor graph intact for consumers that import Stream
+// directly instead of going through runtime.js's callable wrapper.
+Stream.Readable = Readable;
 defineAsyncDispose(Readable.prototype);
 
 class WritableImpl extends EventEmitter {

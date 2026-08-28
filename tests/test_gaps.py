@@ -66,6 +66,8 @@ class SurfaceTests(unittest.TestCase):
         self.assertIn("Object.getPrototypeOf", source)
         self.assertIn('typeof value === "object"', source)
         self.assertIn('typeof value === "function" ? value.prototype : Object.getPrototypeOf(value)', source)
+        self.assertIn("Object.getOwnPropertySymbols", source)
+        self.assertIn("symbolLabel", source)
 
     def test_module_list_source_uses_the_same_marker(self) -> None:
         self.assertIn("__BNH_SURFACE_JSON__", module_list_source())

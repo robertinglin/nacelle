@@ -159,6 +159,18 @@ function normalizeHeaders(headers) {
   return result;
 }
 
+function rawHeaderPairs(headers) {
+  const entries = Object.entries(headers || {});
+  const ordered = [
+    ...entries.filter(([name]) => String(name).startsWith(':')),
+    ...entries.filter(([name]) => !String(name).startsWith(':')),
+  ];
+  return ordered.flatMap(([name, value]) => {
+    const values = Array.isArray(value) ? value : [value];
+    return values.flatMap((item) => [name, item]);
+  });
+}
+
 function serverFor(host, port) {
   const exact = SERVER_REGISTRY.get(registryKey(host, port));
   if (exact) return exact;
@@ -711,8 +723,8 @@ export class Http2ServerRequest extends Readable {
   constructor(stream, headers, options, rawHeaders) {
     super({ autoDestroy: false, ...options });
     this._compatState = { closed: false, didRead: false };
-    this._headers = headers;
-    this._rawHeaders = rawHeaders;
+    this._headers = headers || Object.create(null);
+    this._rawHeaders = rawHeaders || rawHeaderPairs(this._headers);
     this._trailers = {};
     this._rawTrailers = [];
     this._stream = stream;
@@ -741,11 +753,11 @@ export class Http2ServerRequest extends Readable {
   }
 
   get aborted() {
-    return this._aborted;
+    return this._aborted || Boolean(this._stream.aborted);
   }
 
   get complete() {
-    return this._aborted || this.readableEnded || this._compatState.closed || this._stream.destroyed;
+    return this.aborted || this.readableEnded || this._compatState.closed || this._stream.destroyed;
   }
 
   get stream() {
@@ -1133,7 +1145,7 @@ export class Http2Server extends EventEmitter {
   }
 
   _emitRequest(stream, headers) {
-    const rawHeaders = Object.entries(headers).flatMap(([name, value]) => [name, value]);
+    const rawHeaders = rawHeaderPairs(headers);
     const request = new this._requestClass(stream, headers, undefined, rawHeaders);
     const response = new this._responseClass(stream);
     if (headers[':method'] === 'CONNECT') {

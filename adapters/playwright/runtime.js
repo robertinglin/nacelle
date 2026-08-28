@@ -471,6 +471,74 @@ function normalizeOutputChunk(value) {
   return String(value);
 }
 
+function installProcessStderrSocketSurface(stream) {
+  let bytesDispatched = 0;
+  const outputWrite = stream.write;
+  const byteLength = (value) => {
+    if (typeof value === 'string') return new TextEncoder().encode(value).byteLength;
+    if (value instanceof ArrayBuffer) return value.byteLength;
+    if (ArrayBuffer.isView(value)) return value.byteLength;
+    return new TextEncoder().encode(normalizeOutputChunk(value)).byteLength;
+  };
+
+  stream.write = function writeStderr(value, encoding, callback) {
+    bytesDispatched += byteLength(value);
+    const result = outputWrite.call(this, value, encoding);
+    if (typeof callback === 'function') callback();
+    return result;
+  };
+
+  Object.defineProperties(stream, {
+    localAddress: {
+      configurable: false,
+      enumerable: true,
+      get: () => undefined,
+    },
+    localPort: {
+      configurable: false,
+      enumerable: true,
+      get: () => undefined,
+    },
+    localFamily: {
+      configurable: false,
+      enumerable: true,
+      get: () => undefined,
+    },
+    _writeGeneric: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(writev, data, encoding, callback) {
+        const chunks = writev ? data || [] : [data];
+        for (const item of chunks) this.write(writev ? item?.chunk : item, encoding);
+        if (typeof callback === 'function') callback();
+      },
+    },
+    _bytesDispatched: {
+      configurable: false,
+      enumerable: true,
+      get: () => bytesDispatched,
+    },
+    bytesWritten: {
+      configurable: false,
+      enumerable: true,
+      get: () => bytesDispatched,
+    },
+    connect: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    ref: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+  });
+}
+
 function browserHeapSnapshot(scope) {
   const dnsState = Number(scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ || 0);
   const hasDnsChannel = dnsState > 0;
@@ -1708,6 +1776,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       for (const handle of timers) clearTimer(handle);
     },
   });
+  installProcessStderrSocketSurface(processObject.stderr);
   const preloads = [];
   const execArgv = options.execArgv || [];
   for (let index = 0; index < execArgv.length; index += 1) {

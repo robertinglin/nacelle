@@ -61,6 +61,22 @@ function createPrimitiveMethod(readValue) {
   return method;
 }
 
+function createCheckedPrimitiveMethod(readValue) {
+  const method = function (...args) {
+    try {
+      return Reflect.apply(readValue, this, args);
+    } catch (error) {
+      if (Error.stackTraceLimit && typeof Error.captureStackTrace === 'function') {
+        Error.captureStackTrace(error, method);
+      }
+      throw error;
+    }
+  };
+  Object.defineProperty(method, Symbol.toPrimitive, { value: () => String(method()) });
+  method.withoutStackTrace = readValue;
+  return method;
+}
+
 export function createPlatformContract({
   variant = 'browser',
   platform = 'linux',
@@ -102,9 +118,9 @@ export function createPlatformContract({
     freemem: createPrimitiveMethod(() => BROWSER_FREE_MEMORY),
     availableParallelism: createPrimitiveMethod(() => 1),
     cpus: () => [{ ...BROWSER_CPU, times: { ...BROWSER_CPU.times } }],
-    homedir: createPrimitiveMethod(() => homedir),
-    hostname: createPrimitiveMethod(() => 'browser'),
-    uptime: createPrimitiveMethod(() => 1),
+    homedir: createCheckedPrimitiveMethod(() => homedir),
+    hostname: createCheckedPrimitiveMethod(() => 'browser'),
+    uptime: createCheckedPrimitiveMethod(() => 1),
     loadavg: () => [0, 0, 0],
     userInfo: (options = {}) => {
       const encoding = options?.encoding;

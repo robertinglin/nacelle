@@ -115,6 +115,18 @@ function isNumber(value) {
   return typeof value === 'number';
 }
 
+function isString(value) {
+  return typeof value === 'string';
+}
+
+function isSymbol(value) {
+  return typeof value === 'symbol';
+}
+
+function isUndefined(value) {
+  return value === undefined;
+}
+
 function isObject(value) {
   return value !== null && typeof value === 'object';
 }
@@ -129,6 +141,330 @@ function isRegExp(value) {
 
 function typedArray(value) {
   return ArrayBuffer.isView(value) && !(value instanceof DataView);
+}
+
+function invalidArgumentType(name, expected, value) {
+  const received = value === null ? 'null' : Array.isArray(value) ? 'an instance of Array'
+    : value === undefined ? 'undefined' : `type ${typeof value}`;
+  const error = new TypeError(`The "${name}" argument must be of type ${expected}. Received ${received}`);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function invalidArgumentValue(name, value, reason) {
+  const error = new TypeError(`The property '${name}' must be ${reason}. Received ${String(value)}`);
+  error.code = 'ERR_INVALID_ARG_VALUE';
+  return error;
+}
+
+function validateParseArgsConfig(config) {
+  if (config === null || typeof config !== 'object' || Array.isArray(config)) {
+    throw invalidArgumentType('config', 'object', config);
+  }
+  const args = config.args ?? undefined;
+  if (args !== undefined && !Array.isArray(args)) throw invalidArgumentType('args', 'an Array', args);
+  const strict = config.strict ?? true;
+  if (typeof strict !== 'boolean') throw invalidArgumentType('strict', 'boolean', strict);
+  const allowPositionals = config.allowPositionals ?? !strict;
+  if (typeof allowPositionals !== 'boolean') throw invalidArgumentType('allowPositionals', 'boolean', allowPositionals);
+  const tokens = config.tokens ?? false;
+  if (typeof tokens !== 'boolean') throw invalidArgumentType('tokens', 'boolean', tokens);
+  const allowNegative = config.allowNegative ?? false;
+  if (typeof allowNegative !== 'boolean') throw invalidArgumentType('allowNegative', 'boolean', allowNegative);
+  const options = config.options ?? Object.create(null);
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    throw invalidArgumentType('options', 'object', options);
+  }
+  for (const [longOption, option] of Object.entries(options)) {
+    if (option === null || typeof option !== 'object' || Array.isArray(option)) {
+      throw invalidArgumentType(`options.${longOption}`, 'object', option);
+    }
+    if (option.type !== 'string' && option.type !== 'boolean') {
+      throw invalidArgumentValue(`options.${longOption}.type`, option.type, "'string' or 'boolean'");
+    }
+    if (Object.hasOwn(option, 'short')) {
+      if (typeof option.short !== 'string') throw invalidArgumentType(`options.${longOption}.short`, 'string', option.short);
+      if ([...option.short].length !== 1) {
+        throw invalidArgumentValue(`options.${longOption}.short`, option.short, 'a single character');
+      }
+    }
+    if (Object.hasOwn(option, 'multiple') && typeof option.multiple !== 'boolean') {
+      throw invalidArgumentType(`options.${longOption}.multiple`, 'boolean', option.multiple);
+    }
+    if (Object.hasOwn(option, 'default') && option.default !== undefined) {
+      const multiple = option.multiple === true;
+      if (option.type === 'string' && (multiple ? !Array.isArray(option.default) || option.default.some((value) => typeof value !== 'string') : typeof option.default !== 'string')) {
+        throw invalidArgumentType(`options.${longOption}.default`, multiple ? 'an array of strings' : 'string', option.default);
+      }
+      if (option.type === 'boolean' && (multiple ? !Array.isArray(option.default) || option.default.some((value) => typeof value !== 'boolean') : typeof option.default !== 'boolean')) {
+        throw invalidArgumentType(`options.${longOption}.default`, multiple ? 'an array of booleans' : 'boolean', option.default);
+      }
+    }
+  }
+  return { args, strict, allowPositionals, tokens, allowNegative, options };
+}
+
+function optionHas(options, name) {
+  return Object.prototype.hasOwnProperty.call(options, name);
+}
+
+function optionValue(options, name, property) {
+  return options[name]?.[property];
+}
+
+function isOptionLikeValue(value) {
+  return value != null && value.length > 1 && value[0] === '-';
+}
+
+function isOptionValue(value) {
+  return value != null;
+}
+
+function findLongOptionForShort(short, options) {
+  for (const [name, option] of Object.entries(options)) if (option.short === short) return name;
+  return short;
+}
+
+function argsToTokens(args, options) {
+  const tokens = [];
+  const remaining = [...args];
+  let index = -1;
+  let groupCount = 0;
+  while (remaining.length > 0) {
+    const arg = remaining.shift();
+    const next = remaining[0];
+    if (groupCount > 0) groupCount -= 1;
+    else index += 1;
+    if (arg === '--') {
+      tokens.push({ kind: 'option-terminator', index });
+      for (const value of remaining) tokens.push({ kind: 'positional', index: ++index, value });
+      break;
+    }
+    if (/^-[^-]$/.test(arg)) {
+      const short = arg[1];
+      const name = findLongOptionForShort(short, options);
+      let value;
+      let inlineValue;
+      if (optionValue(options, name, 'type') === 'string' && isOptionValue(next)) {
+        value = remaining.shift();
+        inlineValue = false;
+      }
+      tokens.push({ kind: 'option', name, rawName: arg, index, value, inlineValue });
+      if (value !== undefined) index += 1;
+      continue;
+    }
+    if (/^-[^-]{2,}$/.test(arg) && optionValue(options, findLongOptionForShort(arg[1], options), 'type') !== 'string') {
+      const expanded = [];
+      for (let shortIndex = 1; shortIndex < arg.length; shortIndex += 1) {
+        const name = findLongOptionForShort(arg[shortIndex], options);
+        if (optionValue(options, name, 'type') !== 'string' || shortIndex === arg.length - 1) {
+          expanded.push(`-${arg[shortIndex]}`);
+        } else {
+          expanded.push(`-${arg.slice(shortIndex)}`);
+          break;
+        }
+      }
+      remaining.unshift(...expanded);
+      groupCount = expanded.length;
+      continue;
+    }
+    if (/^-[^-].+$/.test(arg)) {
+      const short = arg[1];
+      const name = findLongOptionForShort(short, options);
+      if (name !== undefined && optionValue(options, name, 'type') === 'string') {
+        tokens.push({ kind: 'option', name, rawName: `-${short}`, index, value: arg.slice(2), inlineValue: true });
+        continue;
+      }
+    }
+    if (arg.startsWith('--') && !arg.includes('=', 2)) {
+      const name = arg.slice(2);
+      let value;
+      let inlineValue;
+      if (optionValue(options, name, 'type') === 'string' && isOptionValue(next)) {
+        value = remaining.shift();
+        inlineValue = false;
+      }
+      tokens.push({ kind: 'option', name, rawName: arg, index, value, inlineValue });
+      if (value !== undefined) index += 1;
+      continue;
+    }
+    if (arg.startsWith('--') && arg.includes('=', 2)) {
+      const equal = arg.indexOf('=');
+      const name = arg.slice(2, equal);
+      tokens.push({ kind: 'option', name, rawName: `--${name}`, index, value: arg.slice(equal + 1), inlineValue: true });
+      continue;
+    }
+    tokens.push({ kind: 'positional', index, value: arg });
+  }
+  return tokens;
+}
+
+function parseArgs(config = {}, scope = globalThis) {
+  const normalized = validateParseArgsConfig(config);
+  const args = normalized.args ?? (() => {
+    const argv = scope?.process?.argv;
+    const values = Array.isArray(argv) ? argv.slice(2) : [];
+    return values;
+  })();
+  if (!args.every((value) => typeof value === 'string')) throw invalidArgumentType('args', 'an Array of strings', args);
+  const result = { values: Object.create(null), positionals: [] };
+  const tokens = argsToTokens(args, normalized.options);
+  if (normalized.tokens) result.tokens = tokens;
+  for (const token of tokens) {
+    if (token.kind === 'positional') {
+      if (!normalized.allowPositionals) {
+        const error = new TypeError(`Unexpected positional argument '${token.value}'. This command does not take positional arguments`);
+        error.code = 'ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL';
+        throw error;
+      }
+      result.positionals.push(token.value);
+      continue;
+    }
+    if (token.kind !== 'option') continue;
+    let name = token.name;
+    if (normalized.strict) {
+      if (!optionHas(normalized.options, name)) {
+        if (!(normalized.allowNegative && name.startsWith('no-') && optionHas(normalized.options, name.slice(3)) && optionValue(normalized.options, name.slice(3), 'type') === 'boolean')) {
+          const error = new TypeError(`Unknown option '${token.rawName}'`);
+          error.code = 'ERR_PARSE_ARGS_UNKNOWN_OPTION';
+          throw error;
+        }
+      }
+      const type = normalized.allowNegative && name.startsWith('no-') && token.value === undefined
+        ? optionValue(normalized.options, name.slice(3), 'type') : optionValue(normalized.options, name, 'type');
+      if (type === 'string' && typeof token.value !== 'string') {
+        const error = new TypeError(`Option '--${name} <value>' argument missing`);
+        error.code = 'ERR_PARSE_ARGS_INVALID_OPTION_VALUE';
+        throw error;
+      }
+      if (type === 'boolean' && token.value != null) {
+        const error = new TypeError(`Option '--${name}' does not take an argument`);
+        error.code = 'ERR_PARSE_ARGS_INVALID_OPTION_VALUE';
+        throw error;
+      }
+      if (!token.inlineValue && isOptionLikeValue(token.value)) {
+        const error = new TypeError(`Option '${token.rawName}' argument is ambiguous.`);
+        error.code = 'ERR_PARSE_ARGS_INVALID_OPTION_VALUE';
+        throw error;
+      }
+    }
+    if (normalized.allowNegative && name.startsWith('no-') && token.value === undefined
+      && optionValue(normalized.options, name.slice(3), 'type') === 'boolean') {
+      name = name.slice(3);
+      token.name = name;
+      token.value = false;
+    }
+    if (name === '__proto__') continue;
+    const value = token.value ?? true;
+    if (optionValue(normalized.options, name, 'multiple')) {
+      (result.values[name] ||= []).push(value);
+    } else {
+      result.values[name] = value;
+    }
+  }
+  for (const [name, option] of Object.entries(normalized.options)) {
+    if (!Object.hasOwn(result.values, name) && Object.hasOwn(option, 'default')) result.values[name] = option.default;
+  }
+  return result;
+}
+
+function parseEnv(content) {
+  if (typeof content !== 'string') throw invalidArgumentType('content', 'string', content);
+  const result = {};
+  const trim = (value) => value.replace(/^[ \t\n]+|[ \t\n]+$/g, '');
+  let remaining = trim(content.replaceAll('\r', ''));
+  while (remaining) {
+    if (remaining[0] === '\n' || remaining[0] === '#') {
+      const newline = remaining.indexOf('\n');
+      remaining = newline === -1 ? '' : remaining.slice(newline + 1);
+      continue;
+    }
+    const separator = remaining.search(/[=\n]/);
+    if (separator === -1 || remaining[separator] === '\n') {
+      remaining = separator === -1 ? '' : trim(remaining.slice(separator + 1));
+      continue;
+    }
+    let key = trim(remaining.slice(0, separator));
+    remaining = remaining.slice(separator + 1);
+    if (!remaining || remaining[0] === '\n') {
+      result[key] = '';
+      continue;
+    }
+    remaining = trim(remaining);
+    if (!key) continue;
+    if (key.startsWith('export ')) key = trim(key.slice(7));
+    if (!remaining) {
+      result[key] = '';
+      break;
+    }
+    if (remaining[0] === '"') {
+      const closing = remaining.indexOf('"', 1);
+      if (closing !== -1) {
+        result[key] = remaining.slice(1, closing).replaceAll('\\n', '\n');
+        const newline = remaining.indexOf('\n', closing + 1);
+        remaining = newline === -1 ? '' : remaining.slice(newline + 1);
+        continue;
+      }
+    }
+    if (['\'', '"', '`'].includes(remaining[0])) {
+      const quote = remaining[0];
+      const closing = remaining.indexOf(quote, 1);
+      if (closing === -1) {
+        const newline = remaining.indexOf('\n');
+        if (newline === -1) {
+          result[key] = remaining;
+          break;
+        }
+        result[key] = remaining.slice(0, newline);
+        remaining = remaining.slice(newline + 1);
+      } else {
+        result[key] = remaining.slice(1, closing);
+        const newline = remaining.indexOf('\n', closing + 1);
+        remaining = newline === -1 ? '' : remaining.slice(newline + 1);
+      }
+      continue;
+    }
+    const newline = remaining.indexOf('\n');
+    let value = newline === -1 ? remaining : remaining.slice(0, newline);
+    const hash = value.indexOf('#');
+    if (hash !== -1) value = value.slice(0, hash);
+    result[key] = trim(value);
+    remaining = newline === -1 ? '' : remaining.slice(newline + 1);
+    remaining = trim(remaining);
+  }
+  return result;
+}
+
+const ansiControlCharacters = new RegExp(
+  '[\\u001B\\u009B][[\\]()#;?]*' +
+  '(?:(?:(?:(?:;[-a-zA-Z\\d\\/\\#&.:=?%@~_]+)*' +
+  '|[a-zA-Z\\d]+(?:;[-a-zA-Z\\d\\/\\#&.:=?%@~_]*)*)?' +
+  '(?:\\u0007|\\u001B\\u005C|\\u009C))' +
+  '|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?' +
+  '[\\dA-PR-TZcf-nq-uy=><~]))', 'g',
+);
+
+function stripVTControlCharacters(value) {
+  if (typeof value !== 'string') throw invalidArgumentType('str', 'string', value);
+  return value.replace(ansiControlCharacters, '');
+}
+
+function timestamp() {
+  const now = new Date();
+  const pad = (value) => String(value).padStart(2, '0');
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${now.getDate()} ${months[now.getMonth()]} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+}
+
+function log(scope, ...args) {
+  const output = `${timestamp()} - ${formatConsole(args)}\n`;
+  if (typeof scope?.process?.stdout?.write === 'function') scope.process.stdout.write(output);
+  else (scope?.console || console).log(output.trimEnd());
+}
+
+function setTraceSigInt() {
+  // Browser contexts do not expose a process-level SIGINT watchdog. Keeping
+  // this operation a no-op is the browser-safe equivalent of disabling it.
 }
 
 const promisifyCustom = Symbol.for('nodejs.util.promisify.custom');
@@ -219,10 +555,18 @@ export function createUtilModule(scope = globalThis) {
     isNull,
     isNullOrUndefined,
     isNumber,
+    isString,
+    isSymbol,
+    isUndefined,
     isObject,
     isPrimitive,
     isRegExp,
+    log: (...args) => log(scope, ...args),
+    parseArgs: (config) => parseArgs(config, scope),
+    parseEnv,
     promisify: createPromisify(),
+    setTraceSigInt,
+    stripVTControlCharacters,
     customPromisifyArgs: promisifyArgs,
     types,
   });

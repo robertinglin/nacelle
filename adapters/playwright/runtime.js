@@ -90,6 +90,7 @@ import {
   createQuerystring,
   createStreamConsumers,
   createStringDecoder,
+  createUtilModule,
   createUtilTypes,
   createInternalEventTarget,
   installBrowserAbortSignalCompatibility,
@@ -3713,7 +3714,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       url: nodeUrl, util: (() => {
         const inspectFn = (value, options) => nodeInspect(value, options ?? {});
         inspectFn.custom = Symbol.for('nodejs.util.inspect.custom');
-        return { format: (format, ...args) => String(format).replace(/%[sdifoO%]/g, (token) => token === '%%' ? '%' : String(args.shift())), inspect: inspectFn, types: utilTypes, promisify: createPromisify(), deprecate: createDeprecate(processObject), _extend: (target, source) => Object.assign(target, source), customPromisifyArgs: Symbol.for('nodejs.util.promisify.customArgs'), getSystemErrorName: (code) => ({ [-1]: 'EPERM', [-4094]: 'UNKNOWN' }[code] || `Unknown system error ${code}`), getCallSites: createGetCallSites(), debuglog: (section) => { const sections = (String(processObject?.env?.NODE_DEBUG || '')).split(',').map((s) => s.trim()).filter(Boolean); const enabled = sections.includes(section) || sections.includes('DEBUG') || sections.some((s) => s.includes(section)); return (...args) => { if (enabled) console?.error ? console.error(...args) : console?.log ? console.log(...args) : null; }; }, TextEncoder: scope.TextEncoder, TextDecoder: scope.TextDecoder, aborted: createAborted() };
+        const utilCompat = createUtilModule(Object.assign(Object.create(scope), {
+          process: processObject,
+          console: processObject._bnhConsole || scope.console,
+        }));
+        return { ...utilCompat, format: (format, ...args) => String(format).replace(/%[sdifoO%]/g, (token) => token === '%%' ? '%' : String(args.shift())), inspect: inspectFn, types: utilTypes, promisify: createPromisify(), deprecate: createDeprecate(processObject), _extend: (target, source) => Object.assign(target, source), customPromisifyArgs: Symbol.for('nodejs.util.promisify.customArgs'), getSystemErrorName: (code) => ({ [-1]: 'EPERM', [-4094]: 'UNKNOWN' }[code] || `Unknown system error ${code}`), getCallSites: createGetCallSites(), debuglog: (section) => { const sections = (String(processObject?.env?.NODE_DEBUG || '')).split(',').map((s) => s.trim()).filter(Boolean); const enabled = sections.includes(section) || sections.includes('DEBUG') || sections.some((s) => s.includes(section)); return (...args) => { if (enabled) console?.error ? console.error(...args) : console?.log ? console.log(...args) : null; }; }, TextEncoder: scope.TextEncoder, TextDecoder: scope.TextDecoder, aborted: createAborted() };
       })(),
       'util/types': createUtilTypes(scope),
       worker_threads: { ...createBrowserIO(scope), isMainThread: true, parentPort: null, workerData: undefined },

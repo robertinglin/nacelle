@@ -912,7 +912,15 @@ function installProcessStderrSocketSurface(stream, processObject) {
     return result;
   };
 
+  const readable = new Readable({ read() {}, readable: false });
+
   Object.defineProperties(stream, {
+    _readableState: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: readable._readableState,
+    },
     _closeAfterHandlingError: {
       configurable: true,
       enumerable: true,
@@ -959,6 +967,18 @@ function installProcessStderrSocketSurface(stream, processObject) {
     value() { return new Readable({ read() {}, readable: false })[Symbol.asyncIterator](); },
   });
   Object.defineProperties(socketPrototype, {
+    push: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(chunk, encoding) { return readable.push(chunk, encoding); },
+    },
+    read: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(size) { return readable.read(size); },
+    },
     localAddress: {
       configurable: false,
       enumerable: true,
@@ -1056,6 +1076,37 @@ function installProcessStderrSocketSurface(stream, processObject) {
       configurable: false,
       enumerable: false,
       get: () => stream.writableLength || 0,
+    },
+    readable: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readable,
+      set: (value) => { readable.readable = value; },
+    },
+    readableAborted: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableAborted,
+    },
+    readableBuffer: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableBuffer,
+    },
+    readableDidRead: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableDidRead,
+    },
+    readableEncoding: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableEncoding,
+    },
+    readableEnded: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableEnded,
     },
   });
   Object.setPrototypeOf(stream, socketPrototype);

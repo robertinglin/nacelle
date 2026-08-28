@@ -280,25 +280,52 @@ Stream.prototype.once = function once(name, listener) {
     this.removeListener(name, wrapped);
     listener.apply(this, args);
   };
+  wrapped.listener = listener;
   return this.on(name, wrapped);
 };
 Stream.prototype.removeListener = function removeListener(name, listener) {
+  if (typeof listener !== 'function') {
+    throw streamError(
+      'ERR_INVALID_ARG_TYPE',
+      `The "listener" argument must be of type function. Received ${streamReceivedValue(listener)}`,
+    );
+  }
   const state = legacyState(this);
   const listeners = state.listeners.get(name);
-  listeners?.delete(listener);
+  if (listeners) {
+    const snapshot = [...listeners];
+    for (let index = snapshot.length - 1; index >= 0; index -= 1) {
+      const candidate = snapshot[index];
+      if (candidate === listener || candidate.listener === listener) {
+        listeners.delete(candidate);
+        break;
+      }
+    }
+  }
   if (listeners?.size === 0) state.listeners.delete(name);
   return this;
 };
 Stream.prototype.off = Stream.prototype.removeListener;
-Stream.prototype.listenerCount = function listenerCount(name) {
-  return legacyState(this).listeners.get(name)?.size || 0;
+Stream.prototype.listenerCount = function listenerCount(name, listener) {
+  const listeners = legacyState(this).listeners.get(name);
+  if (!listeners) return 0;
+  if (listener == null) return listeners.size;
+  let count = 0;
+  for (const candidate of listeners) {
+    if (candidate === listener || candidate.listener === listener) count += 1;
+  }
+  return count;
 };
 Stream.prototype.listeners = function listeners(name) {
+  return [...(legacyState(this).listeners.get(name) || [])]
+    .map((listener) => listener.listener || listener);
+};
+Stream.prototype.rawListeners = function rawListeners(name) {
   return [...(legacyState(this).listeners.get(name) || [])];
 };
-Stream.prototype.removeAllListeners = function removeAllListeners(name = undefined) {
+Stream.prototype.removeAllListeners = function removeAllListeners(name) {
   const state = legacyState(this);
-  if (name === undefined) state.listeners.clear();
+  if (arguments.length === 0) state.listeners.clear();
   else state.listeners.delete(name);
   return this;
 };
@@ -310,9 +337,11 @@ Stream.prototype.emit = function emit(name, ...args) {
   return listeners.size > 0;
 };
 Stream.prototype.eventNames = function eventNames() {
-  return [...legacyState(this).listeners]
-    .filter(([, listeners]) => listeners.size > 0)
-    .map(([name]) => name);
+  const events = Object.create(null);
+  for (const [name, listeners] of legacyState(this).listeners) {
+    if (listeners.size > 0) events[name] = true;
+  }
+  return Reflect.ownKeys(events);
 };
 Stream.prototype.pipe = function pipe(destination) {
   this.on('data', (chunk) => {

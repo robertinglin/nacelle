@@ -51,9 +51,7 @@ function createContextEvaluator(scope) {
 }
 
 function contextObject(value) {
-  if (value === null || (typeof value !== 'object' && typeof value !== 'function')) {
-    throw new TypeError('contextifiedObject must be an object');
-  }
+  if (value === null || typeof value !== 'object') throw vmInvalidArgType('object', 'object', value);
   return value;
 }
 
@@ -222,6 +220,173 @@ function vmError(code, message, Type = Error) {
   const error = new Type(message);
   error.code = code;
   return error;
+}
+
+function vmTypeDescription(value) {
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  switch (typeof value) {
+    case 'bigint': return `type bigint (${value}n)`;
+    case 'number':
+      if (Object.is(value, -0)) return 'type number (-0)';
+      if (Number.isNaN(value)) return 'type number (NaN)';
+      if (value === Infinity) return 'type number (Infinity)';
+      if (value === -Infinity) return 'type number (-Infinity)';
+      return `type number (${value})`;
+    case 'boolean': return `type boolean (${value})`;
+    case 'symbol': return `type symbol (${String(value)})`;
+    case 'function': return `function ${value.name}`;
+    case 'string': {
+      const shortened = value.length > 28 ? `${value.slice(0, 25)}...` : value;
+      return shortened.includes("'")
+        ? `type string (${JSON.stringify(shortened)})`
+        : `type string ('${shortened}')`;
+    }
+    case 'object': {
+      let constructorName;
+      try { constructorName = value.constructor?.name; } catch { /* use inspect fallback */ }
+      if (constructorName) return `an instance of ${constructorName}`;
+      return String(value);
+    }
+    default: return `type ${typeof value} (${String(value)})`;
+  }
+}
+
+function vmFormatExpected(expected) {
+  const values = Array.isArray(expected) ? expected : [expected];
+  const types = [];
+  const instances = [];
+  const other = [];
+  const typeNames = new Set(['bigint', 'boolean', 'function', 'number', 'object', 'string', 'symbol', 'undefined']);
+  for (const value of values) {
+    if (typeNames.has(String(value).toLowerCase())) types.push(String(value).toLowerCase());
+    else if (value === 'Array' || value === 'Buffer' || value === 'TypedArray' || value === 'DataView') instances.push(value);
+    else other.push(value);
+  }
+  const list = (items) => items.length === 1
+    ? items[0]
+    : items.length === 2
+      ? `${items[0]} or ${items[1]}`
+      : `${items.slice(0, -1).join(', ')}, or ${items.at(-1)}`;
+  let result = '';
+  if (types.length) result += `${types.length > 1 ? 'one of type' : 'of type'} ${list(types)}`;
+  if (instances.length) result += `${result ? ' or ' : ''}an instance of ${list(instances)}`;
+  if (other.length) {
+    result += `${result ? ' or ' : ''}${other.length > 1 ? `one of ${list(other)}` : (String(other[0]).toLowerCase() !== String(other[0]) ? 'an ' : 'a ') + other[0]}`;
+  }
+  return result;
+}
+
+function vmInvalidArgType(name, expected, value) {
+  const kind = name.includes('.') ? 'property' : 'argument';
+  return vmError(
+    'ERR_INVALID_ARG_TYPE',
+    `The "${name}" ${kind} must be ${vmFormatExpected(expected)}. Received ${vmTypeDescription(value)}`,
+    TypeError,
+  );
+}
+
+function vmInvalidArgValue(name, value, reason) {
+  const kind = name.includes('.') ? 'property' : 'argument';
+  return vmError(
+    'ERR_INVALID_ARG_VALUE',
+    `The ${kind} '${name}' ${reason}. Received ${receivedValue(value)}`,
+    TypeError,
+  );
+}
+
+function vmOutOfRange(name, reason, value) {
+  return vmError(
+    'ERR_OUT_OF_RANGE',
+    `The value of "${name}" is out of range. It must be ${reason}. Received ${receivedValue(value)}`,
+    RangeError,
+  );
+}
+
+function validateObject(value, name, allowArray = false) {
+  if (value === null || typeof value !== 'object' || (!allowArray && Array.isArray(value))) {
+    throw vmInvalidArgType(name, 'Object', value);
+  }
+}
+
+function validateString(value, name) {
+  if (typeof value !== 'string') throw vmInvalidArgType(name, 'string', value);
+}
+
+function validateBoolean(value, name) {
+  if (typeof value !== 'boolean') throw vmInvalidArgType(name, 'boolean', value);
+}
+
+function validateInt32(value, name) {
+  if (typeof value !== 'number') throw vmInvalidArgType(name, 'number', value);
+  if (!Number.isInteger(value)) throw vmOutOfRange(name, 'an integer', value);
+  if (value < -2147483648 || value > 2147483647) {
+    throw vmOutOfRange(name, '>= -2147483648 && <= 2147483647', value);
+  }
+}
+
+function validateUint32(value, name, positive = false) {
+  if (typeof value !== 'number') throw vmInvalidArgType(name, 'number', value);
+  if (!Number.isInteger(value)) throw vmOutOfRange(name, 'an integer', value);
+  const minimum = positive ? 1 : 0;
+  if (value < minimum || value > 4294967295) {
+    throw vmOutOfRange(name, `>= ${minimum} && <= 4294967295`, value);
+  }
+}
+
+function validateOneOf(value, name, choices) {
+  if (!choices.includes(value)) {
+    const allowed = choices.map((choice) => typeof choice === 'string' ? `'${choice}'` : String(choice)).join(', ');
+    throw vmInvalidArgValue(name, value, `must be one of: ${allowed}`);
+  }
+}
+
+function validateBuffer(value, name) {
+  const isBuffer = typeof globalThis.Buffer?.isBuffer === 'function' && globalThis.Buffer.isBuffer(value);
+  if (!isBuffer && !ArrayBuffer.isView(value)) throw vmInvalidArgType(name, ['Buffer', 'TypedArray', 'DataView'], value);
+}
+
+function validateStringArray(value, name) {
+  if (!Array.isArray(value)) throw vmInvalidArgType(name, 'Array', value);
+  for (let index = 0; index < value.length; index += 1) {
+    if (typeof value[index] !== 'string') throw vmInvalidArgType(`${name}[${index}]`, 'string', value[index]);
+  }
+}
+
+function validateContext(value, isContextFunction) {
+  if (!isContextFunction(value)) throw vmInvalidArgType('contextifiedObject', 'vm.Context', value);
+}
+
+function getContextOptions(options) {
+  if (!options) return {};
+  const contextOptions = {
+    name: options.contextName,
+    origin: options.contextOrigin,
+    codeGeneration: options.contextCodeGeneration,
+    microtaskMode: options.microtaskMode,
+  };
+  if (contextOptions.name !== undefined) validateString(contextOptions.name, 'options.contextName');
+  if (contextOptions.origin !== undefined) validateString(contextOptions.origin, 'options.contextOrigin');
+  if (contextOptions.codeGeneration !== undefined) {
+    validateObject(contextOptions.codeGeneration, 'options.contextCodeGeneration');
+    const { strings, wasm } = contextOptions.codeGeneration;
+    if (strings !== undefined) validateBoolean(strings, 'options.contextCodeGeneration.strings');
+    if (wasm !== undefined) validateBoolean(wasm, 'options.contextCodeGeneration.wasm');
+  }
+  if (contextOptions.microtaskMode !== undefined) validateString(contextOptions.microtaskMode, 'options.microtaskMode');
+  return contextOptions;
+}
+
+function getRunInContextArgs(options = {}) {
+  validateObject(options, 'options');
+  let timeout = options.timeout;
+  if (timeout === undefined) timeout = -1;
+  else validateUint32(timeout, 'options.timeout', true);
+  const displayErrors = options.displayErrors === undefined ? true : options.displayErrors;
+  const breakOnSigint = options.breakOnSigint === undefined ? false : options.breakOnSigint;
+  validateBoolean(displayErrors, 'options.displayErrors');
+  validateBoolean(breakOnSigint, 'options.breakOnSigint');
+  return { timeout, displayErrors, breakOnSigint };
 }
 
 function receivedValue(value) {
@@ -405,6 +570,7 @@ export function createVmModule(scope = globalThis) {
   const evaluate = createContextEvaluator(scope);
   const FunctionConstructor = scope.Function || Function;
   const moduleIds = new WeakMap();
+  let defaultContextNameIndex = 1;
   let measureMemoryWarned = false;
 
   const moduleIdentifier = (context) => {
@@ -415,7 +581,24 @@ export function createVmModule(scope = globalThis) {
   };
 
   function createContext(sandbox = {}, options = {}) {
+    if (isContext(sandbox)) return sandbox;
     const context = contextObject(sandbox);
+    validateObject(options, 'options');
+    const {
+      name = `VM Context ${defaultContextNameIndex++}`,
+      origin,
+      codeGeneration,
+      microtaskMode,
+    } = options;
+    validateString(name, 'options.name');
+    if (origin !== undefined) validateString(origin, 'options.origin');
+    if (codeGeneration !== undefined) {
+      validateObject(codeGeneration, 'options.codeGeneration');
+      const { strings, wasm } = codeGeneration;
+      if (strings !== undefined) validateBoolean(strings, 'options.codeGeneration.strings');
+      if (wasm !== undefined) validateBoolean(wasm, 'options.codeGeneration.wasm');
+    }
+    if (microtaskMode !== undefined) validateOneOf(microtaskMode, 'options.microtaskMode', ['afterEvaluate', undefined]);
     if (!context[CONTEXT_MARKER]) {
       markContext(context);
       const realm = createBrowserRealm(scope);
@@ -433,47 +616,66 @@ export function createVmModule(scope = globalThis) {
     }
     shadowBrowserGlobals(context);
     if (realm) copyContextToRealm(context, realm.global, realm.managedKeys);
-    if (options.name !== undefined) context.__bnhContextName = String(options.name);
+    if (Object.prototype.hasOwnProperty.call(options, 'name')) context.__bnhContextName = name;
     return context;
   }
 
   function isContext(value) {
+    if (value === null || typeof value !== 'object') throw vmInvalidArgType('object', 'object', value);
     return Boolean(value && value[CONTEXT_MARKER]);
   }
 
   function runInContext(code, contextifiedObject, options = {}) {
-    const context = contextObject(contextifiedObject);
-    if (!isContext(context)) throw new TypeError('contextifiedObject is not a vm.Context');
-    const source = String(code);
-    const timeout = Number(options.timeout || 0);
-    if (timeout > 0 && isObviouslyUnbounded(source)) throw timedOutScriptError(timeout);
-    const realm = CONTEXT_REALMS.get(context);
-    const previousFilename = scope.__bnhVmFilename;
-    scope.__bnhVmFilename = options.filename;
-    try {
-      if (!realm) return evaluate(context, source);
-      copyContextToRealm(context, realm.global, realm.managedKeys);
-      return realm.evaluate(source);
-    } finally {
-      if (previousFilename === undefined) delete scope.__bnhVmFilename;
-      else scope.__bnhVmFilename = previousFilename;
-      if (realm) copyRealmToContext(context, realm.global, realm.nativeKeys, realm.managedKeys);
-    }
+    validateContext(contextifiedObject, isContext);
+    const scriptOptions = typeof options === 'string' ? { filename: options } : { ...options };
+    return new Script(code, scriptOptions).runInContext(contextifiedObject, scriptOptions);
   }
 
   function runInNewContext(code, sandbox = {}, options = {}) {
-    return runInContext(code, createContext(sandbox, options), options);
+    const contextOptions = getContextOptions(options);
+    const context = createContext(sandbox, contextOptions);
+    const scriptOptions = typeof options === 'string' ? { filename: options } : { ...options };
+    return new Script(code, scriptOptions).runInContext(context, scriptOptions);
   }
 
-  function runInThisContext(code) {
-    return (scope.eval || eval)(String(code));
+  function runInThisContext(code, options) {
+    const scriptOptions = typeof options === 'string' ? { filename: options } : options;
+    return new Script(code, scriptOptions).runInThisContext(scriptOptions);
   }
 
-  function compileFunction(code, params = [], options = {}) {
-    if (!Array.isArray(params)) throw new TypeError('params must be an array');
-    if (options === null || typeof options !== 'object' || Array.isArray(options)) throw new TypeError('options must be an object');
+  function compileFunction(code, params, options = {}) {
+    validateString(code, 'code');
+    validateObject(options, 'options');
+    if (params !== undefined) validateStringArray(params, 'params');
+    const effectiveParams = params === undefined ? [] : params;
+    const {
+      filename = '',
+      columnOffset = 0,
+      lineOffset = 0,
+      cachedData,
+      produceCachedData = false,
+      parsingContext,
+      contextExtensions = [],
+    } = options;
+    validateString(filename, 'options.filename');
+    validateInt32(columnOffset, 'options.columnOffset');
+    validateInt32(lineOffset, 'options.lineOffset');
+    if (cachedData !== undefined) validateBuffer(cachedData, 'options.cachedData');
+    validateBoolean(produceCachedData, 'options.produceCachedData');
+    if (parsingContext !== undefined) {
+      if (parsingContext === null || typeof parsingContext !== 'object' || !isContext(parsingContext)) {
+        throw vmInvalidArgType('options.parsingContext', 'Context', parsingContext);
+      }
+    }
+    if (!Array.isArray(contextExtensions)) throw vmInvalidArgType('options.contextExtensions', 'Array', contextExtensions);
+    for (let index = 0; index < contextExtensions.length; index += 1) {
+      const extension = contextExtensions[index];
+      if (extension !== null && (typeof extension !== 'object' || Array.isArray(extension))) {
+        throw vmInvalidArgType(`options.contextExtensions[${index}]`, 'object', extension);
+      }
+    }
     const source = String(code).replace(/\bimport\s*\(/g, '__bnhDynamicImport(');
-    const compiled = FunctionConstructor('__bnhDynamicImport', ...params.map(String), source);
+    const compiled = FunctionConstructor('__bnhDynamicImport', ...effectiveParams, source);
     let functionObject;
     functionObject = (...args) => {
       const dynamicImport = (specifier) => {
@@ -493,13 +695,7 @@ export function createVmModule(scope = globalThis) {
         { type: 'ExperimentalWarning' },
       );
     }
-    if (options === null || typeof options !== 'object' || Array.isArray(options)) {
-      throw vmError(
-        'ERR_INVALID_ARG_TYPE',
-        `The "options" argument must be of type object. Received ${measureMemoryReceivedValue(options)}`,
-        TypeError,
-      );
-    }
+    validateObject(options, 'options');
     const mode = options.mode === undefined ? 'summary' : options.mode;
     const execution = options.execution === undefined ? 'default' : options.execution;
     if (mode !== 'summary' && mode !== 'detailed') {
@@ -522,33 +718,63 @@ export function createVmModule(scope = globalThis) {
   class Script {
     constructor(code, options = {}) {
       this.code = String(code);
-      this.options = { ...options };
+      if (typeof options === 'string') options = { filename: options };
+      else validateObject(options, 'options');
+      const {
+        filename = 'evalmachine.<anonymous>',
+        lineOffset = 0,
+        columnOffset = 0,
+        cachedData,
+        produceCachedData = false,
+      } = options;
+      validateString(filename, 'options.filename');
+      validateInt32(lineOffset, 'options.lineOffset');
+      validateInt32(columnOffset, 'options.columnOffset');
+      if (cachedData !== undefined) validateBuffer(cachedData, 'options.cachedData');
+      validateBoolean(produceCachedData, 'options.produceCachedData');
+      this.options = { ...options, filename, lineOffset, columnOffset, produceCachedData };
       FunctionConstructor(this.code);
     }
 
     runInContext(contextifiedObject, options = {}) {
-      return runInContext(this.code, contextifiedObject, { ...this.options, ...options });
+      validateContext(contextifiedObject, isContext);
+      const runOptions = getRunInContextArgs(options);
+      const source = this.code;
+      if (runOptions.timeout > 0 && isObviouslyUnbounded(source)) throw timedOutScriptError(runOptions.timeout);
+      const context = contextifiedObject;
+      const realm = CONTEXT_REALMS.get(context);
+      const previousFilename = scope.__bnhVmFilename;
+      scope.__bnhVmFilename = this.options.filename;
+      try {
+        if (!realm) return evaluate(context, source);
+        copyContextToRealm(context, realm.global, realm.managedKeys);
+        return realm.evaluate(source);
+      } finally {
+        if (previousFilename === undefined) delete scope.__bnhVmFilename;
+        else scope.__bnhVmFilename = previousFilename;
+        if (realm) copyRealmToContext(context, realm.global, realm.nativeKeys, realm.managedKeys);
+      }
     }
 
     runInNewContext(sandbox = {}, options = {}) {
-      return runInNewContext(this.code, sandbox, { ...this.options, ...options });
+      const context = createContext(sandbox, getContextOptions(options));
+      return this.runInContext(context, options);
     }
 
     runInThisContext(options = {}) {
-      return runInThisContext(this.code, options);
+      getRunInContextArgs(options);
+      return (scope.eval || eval)(this.code);
     }
   }
 
   class SourceTextModule {
     constructor(sourceText, options = {}) {
-      if (typeof sourceText !== 'string') throw vmError('ERR_INVALID_ARG_TYPE', 'The "code" argument must be of type string', TypeError);
-      if (options === null || typeof options !== 'object' || Array.isArray(options)) {
-        throw vmError('ERR_INVALID_ARG_TYPE', 'The "options" argument must be of type object', TypeError);
-      }
-      if (options.identifier !== undefined && typeof options.identifier !== 'string') throw vmError('ERR_INVALID_ARG_TYPE', 'The "options.identifier" property must be of type string', TypeError);
-      if (options.context !== undefined && !isContext(options.context)) throw vmError('ERR_INVALID_ARG_TYPE', 'The "options.context" property must be a vm.Context', TypeError);
+      validateString(sourceText, 'code');
+      validateObject(options, 'options');
+      if (options.identifier !== undefined) validateString(options.identifier, 'options.identifier');
+      if (options.context !== undefined) validateContext(options.context, isContext);
       for (const name of ['initializeImportMeta', 'importModuleDynamically']) {
-        if (options[name] !== undefined && typeof options[name] !== 'function') throw vmError('ERR_INVALID_ARG_TYPE', `The "options.${name}" property must be of type function`, TypeError);
+        if (options[name] !== undefined && typeof options[name] !== 'function') throw vmInvalidArgType(`options.${name}`, 'function', options[name]);
       }
       this.sourceText = sourceText;
       this.options = { ...options };
@@ -599,7 +825,7 @@ export function createVmModule(scope = globalThis) {
     [INSPECT_CUSTOM](depth) { return inspectModule(this, 'SourceTextModule', depth); }
 
     link(linker) {
-      if (typeof linker !== 'function') return Promise.reject(vmError('ERR_INVALID_ARG_TYPE', 'The "linker" argument must be of type function', TypeError));
+      if (typeof linker !== 'function') return Promise.reject(vmInvalidArgType('linker', 'function', linker));
       if (this._status === 'linked' || this._status === 'evaluated') return Promise.reject(vmError('ERR_VM_MODULE_ALREADY_LINKED', 'Module has already been linked'));
       if (this._status !== 'unlinked') return Promise.reject(vmError('ERR_VM_MODULE_STATUS', 'Module status must be unlinked'));
       this._status = 'linking';
@@ -630,7 +856,7 @@ export function createVmModule(scope = globalThis) {
     }
 
     evaluate(options = {}) {
-      if (options === null || typeof options !== 'object' || Array.isArray(options)) return Promise.reject(vmError('ERR_INVALID_ARG_TYPE', 'The "options" argument must be of type object', TypeError));
+      if (options === null || typeof options !== 'object' || Array.isArray(options)) return Promise.reject(vmInvalidArgType('options', 'Object', options));
       if (this._status !== 'linked' && this._status !== 'evaluated' && this._status !== 'errored') return Promise.reject(vmError('ERR_VM_MODULE_STATUS', 'Module status must be one of linked, evaluated, or errored'));
       if (this._status === 'errored') return markVmPromise(Promise.reject(this._error), '<rejected>');
       if (this._evaluation) return this._evaluation;
@@ -712,13 +938,13 @@ export function createVmModule(scope = globalThis) {
   class SyntheticModule {
     constructor(exportNames, evaluateCallback, options = {}) {
       if (!Array.isArray(exportNames) || !exportNames.every((name) => typeof name === 'string')) {
-        throw vmError('ERR_INVALID_ARG_TYPE', `The "exportNames" argument must be an Array of unique strings. Received ${receivedValue(exportNames)}`, TypeError);
+        throw vmInvalidArgType('exportNames', 'Array', exportNames);
       }
       const duplicate = exportNames.find((name, index) => exportNames.indexOf(name) !== index);
       if (duplicate !== undefined) throw vmError('ERR_INVALID_ARG_VALUE', `The property 'exportNames.${duplicate}' is duplicated. Received '${duplicate}'`, TypeError);
-      if (typeof evaluateCallback !== 'function') throw vmError('ERR_INVALID_ARG_TYPE', `The "evaluateCallback" argument must be of type function. Received ${receivedValue(evaluateCallback)}`, TypeError);
-      if (options === null || typeof options !== 'object' || Array.isArray(options)) throw vmError('ERR_INVALID_ARG_TYPE', `The "options" argument must be of type object. Received ${receivedValue(options)}`, TypeError);
-      if (options.context !== undefined && !isContext(options.context)) throw vmError('ERR_INVALID_ARG_TYPE', 'The "options.context" property must be a vm.Context', TypeError);
+      if (typeof evaluateCallback !== 'function') throw vmInvalidArgType('evaluateCallback', 'function', evaluateCallback);
+      validateObject(options, 'options');
+      if (options.context !== undefined) validateContext(options.context, isContext);
       this._status = 'linked';
       this._exportNames = new Set(exportNames);
       this._namespace = Object.create(null);
@@ -742,7 +968,7 @@ export function createVmModule(scope = globalThis) {
     instantiate() {}
     setExport(name, value) {
       if (!(this instanceof SyntheticModule) || !(this._exportNames instanceof Set)) throw vmError('ERR_INVALID_THIS', 'Invalid this');
-      if (typeof name !== 'string') throw vmError('ERR_INVALID_ARG_TYPE', 'The "name" argument must be of type string', TypeError);
+      validateString(name, 'name');
       if (!this._exportNames.has(name)) throw vmError('ERR_INVALID_ARG_VALUE', `Export '${name}' is not defined`, ReferenceError);
       this._namespace[name] = value;
     }

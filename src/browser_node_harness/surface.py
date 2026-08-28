@@ -96,7 +96,7 @@ def surface_probe_source(modules: Sequence[str]) -> str:
         "      try { value = mod[key]; } catch { continue; }\n"
         "      if (value && (typeof value === \"function\" || typeof value === \"object\")) {\n"
         "        const seenMembers = new Set();\n"
-        "        let prototype = typeof value === \"function\" ? value.prototype : value;\n"
+        "        let prototype = typeof value === \"function\" ? value.prototype : Object.getPrototypeOf(value);\n"
         "        while (prototype && prototype !== Object.prototype) {\n"
         "          for (const member of Object.getOwnPropertyNames(prototype)) {\n"
         "            if (member !== \"constructor\" && !seenMembers.has(member)) {\n"

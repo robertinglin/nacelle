@@ -1,5 +1,6 @@
 import { EventEmitter } from './events.js';
 import { AsyncResource } from './async-hooks.js';
+import { inspect as nodeInspect } from './assert.js';
 import { createBrowserNet } from './net.js';
 import { Duplex, Readable, Writable } from './streams.js';
 import { virtualNetworkError } from './virtual-network.js';
@@ -14,6 +15,8 @@ const DEFAULT_HTTP_PROTOCOL = 'http:';
 const DEFAULT_HTTPS_PROTOCOL = 'https:';
 export const kConnectionsCheckingInterval = Symbol('http.server.connectionsCheckingInterval');
 const SymbolAsyncDispose = Symbol.asyncDispose || Symbol.for('nodejs.asyncDispose');
+const SymbolNodeAsyncDispose = Symbol.for('nodejs.asyncDispose');
+const SymbolInspectCustom = Symbol.for('nodejs.util.inspect.custom');
 const BODYLESS_METHODS = new Set(['GET', 'HEAD']);
 const objectToString = Object.prototype.toString;
 const HTTP_TOKEN_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
@@ -317,6 +320,43 @@ function inspectValue(value) {
   if (Array.isArray(value)) return 'an instance of Array';
   if (typeof value === 'object') return `an instance of ${value.constructor?.name || 'Object'}`;
   return `type ${typeof value} (${String(value)})`;
+}
+
+function installEventInspectHook(scope) {
+  const Event = scope.Event;
+  const prototype = Event?.prototype;
+  if (!prototype || prototype[SymbolInspectCustom]) return;
+  Object.defineProperty(prototype, SymbolInspectCustom, {
+    configurable: true,
+    value(depth, options, inspect) {
+      if (!this || typeof this !== 'object' || typeof this.type !== 'string') {
+        const error = new TypeError('Invalid this');
+        error.code = 'ERR_INVALID_THIS';
+        throw error;
+      }
+      const name = this.constructor?.name || 'Event';
+      if (depth < 0) return name;
+      const inspectFn = typeof inspect === 'function' ? inspect : nodeInspect;
+      const nextOptions = {
+        ...(options || {}),
+        depth: Number.isInteger(options?.depth) ? options.depth - 1 : options?.depth,
+      };
+      return `${name} ${inspectFn({
+        type: this.type,
+        defaultPrevented: Boolean(this.defaultPrevented),
+        cancelable: Boolean(this.cancelable),
+        timeStamp: this.timeStamp,
+      }, nextOptions)}`;
+    },
+  });
+}
+
+function defineAsyncDisposeAlias(prototype, method) {
+  if (typeof prototype?.[SymbolNodeAsyncDispose] === 'function') return;
+  Object.defineProperty(prototype, SymbolNodeAsyncDispose, {
+    configurable: true,
+    value: method,
+  });
 }
 
 function invalidArgumentType(name, expected, value, property = false) {
@@ -2225,7 +2265,7 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask) {
       }
       if (options === undefined || options === null) options = {};
       this.options = { ...options };
-      this.listening = false;
+      this._listening = false;
       this.maxConnections = undefined;
       this.timeout = 0;
       this.requestTimeout = 300000;
@@ -2234,12 +2274,26 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask) {
       this.maxHeadersCount = null;
       this._bound = null;
       this._taskRelease = null;
+      this._closeRequested = false;
+      this._closeEmitted = false;
+      this._connections = 0;
+      this._usingWorkers = false;
+      this._workers = [];
       this[kConnectionsCheckingInterval] = { _destroyed: false };
       // Node's internal HTTP connection listener annotates every accepted
       // socket before user connection listeners run, including manually
       // emitted connection events used by cluster handoff tests.
       this.on('connection', connectionListener);
       if (typeof listener === 'function') this.on('request', listener);
+    }
+
+    _listen2(address, port, addressType) {
+      const host = address || (addressType === 6 ? '::' : '0.0.0.0');
+      return this.listen({ host, port: port ?? 0 });
+    }
+
+    get listening() {
+      return this._listening;
     }
 
     listen(...args) {
@@ -2251,8 +2305,10 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask) {
           const bound = registry.bind(this, protocol, options);
           this._bound = bound;
           this._taskRelease = trackTask?.() || null;
+          this._closeRequested = false;
+          this._closeEmitted = false;
           this[kConnectionsCheckingInterval]._destroyed = false;
-          this.listening = true;
+          this._listening = true;
           schedule(scope, () => {
             if (this.listening && this._bound === bound) this.emit('listening');
           });
@@ -2274,18 +2330,34 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask) {
 
     close(callback) {
       if (callback) this.once('close', callback);
+      this._closeRequested = true;
       if (this._bound) registry.unbind(this);
       this._taskRelease?.();
       this._taskRelease = null;
       this._bound = null;
-      this.listening = false;
+      this._listening = false;
       this[kConnectionsCheckingInterval]._destroyed = true;
-      schedule(scope, () => this.emit('close'));
+      this._emitCloseIfDrained();
       return this;
     }
 
-    [SymbolAsyncDispose]() {
-      return new Promise((resolve) => this.close(resolve));
+    async [SymbolAsyncDispose]() {
+      await new Promise((resolve) => this.close(resolve));
+    }
+
+    _emitCloseIfDrained() {
+      if (!this._closeRequested || this._bound || this._connections || this._closeEmitted) return;
+      this._closeEmitted = true;
+      schedule(scope, () => this.emit('close'));
+    }
+
+    _setupWorker(socketList) {
+      this._usingWorkers = true;
+      this._workers.push(socketList);
+      socketList?.once?.('exit', () => {
+        const index = this._workers.indexOf(socketList);
+        if (index !== -1) this._workers.splice(index, 1);
+      });
     }
 
     setTimeout(milliseconds, callback) {
@@ -2313,6 +2385,7 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask) {
     writable: true,
   });
   Object.defineProperty(CallableServer, 'name', { value: 'Server' });
+  defineAsyncDisposeAlias(Server.prototype, Server.prototype[SymbolAsyncDispose]);
   return CallableServer;
 }
 
@@ -2562,7 +2635,6 @@ class IncomingMessage extends Readable {
     this.url = response.url || '';
     this.complete = false;
     this.aborted = false;
-    this.readableEnded = false;
     this.readableComplete = false;
     this._owner = owner;
     this._scope = scope;
@@ -2698,7 +2770,6 @@ class IncomingMessage extends Readable {
       }
       if (this.destroyed) return;
       this.complete = true;
-      this.readableEnded = true;
       this.readableComplete = true;
       this.clearTimeout();
       this._runInAsyncScope(() => this._owner?._responseComplete());
@@ -2714,6 +2785,39 @@ class IncomingMessage extends Readable {
     }
   }
 }
+
+const incomingMessageAsyncDispose = async function() {
+  let error;
+  if (!this.destroyed) {
+    error = this.readableEnded ? null : abortError(this._scope);
+    this.destroy(error);
+  }
+  if (this._closeEmitted || this.closed) return;
+  await new Promise((resolve, reject) => {
+    const onClose = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (cause) => {
+      if (cause !== error) {
+        cleanup();
+        reject(cause);
+      }
+    };
+    const cleanup = () => {
+      this.off?.('close', onClose);
+      this.off?.('error', onError);
+    };
+    this.once('close', onClose);
+    this.on('error', onError);
+  });
+};
+
+Object.defineProperty(IncomingMessage.prototype, SymbolAsyncDispose, {
+  configurable: true,
+  value: incomingMessageAsyncDispose,
+});
+defineAsyncDisposeAlias(IncomingMessage.prototype, incomingMessageAsyncDispose);
 
 IncomingMessage.prototype._read = function _read(n) {
   if (!this._consuming) {
@@ -3668,6 +3772,7 @@ export function createHttpCompatibility(scope = globalThis, {
   diagnostics,
 } = {}) {
   BufferClass ||= typeof Buffer === 'function' ? Buffer : undefined;
+  installEventInspectHook(scope);
   const net = configuredNet || createBrowserNet({ BufferClass, trackTask });
   const virtualNetwork = configuredHttpNetwork
     || createVirtualHttpNetwork(scope, BufferClass, net, trackTask, diagnostics);

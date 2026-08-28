@@ -1236,8 +1236,10 @@ export function createVfs(options = {}) {
   }
 
   function realpathPath(path) {
-    const resolved = resolvePath(resolve(path));
-    statPath(resolved);
+    const normalized = resolve(path);
+    const resolved = resolvePath(normalized, true, 'realpath');
+    access(resolved, 'realpath');
+    if (!nodeExists(resolved)) throw missing(normalized, 'realpath');
     return resolved;
   }
 
@@ -3173,6 +3175,17 @@ export function createVfs(options = {}) {
     resolve(pathValue);
     asyncFsOperation(done, () => realpathPath(resolve(pathValue)));
   }
+
+  function realpathNative(pathValue, optionsValue, callback) {
+    return realpath(pathValue, optionsValue, callback);
+  }
+
+  function realpathSyncNative(pathValue, optionsValue) {
+    return realpathPath(pathValue, optionsValue);
+  }
+
+  realpath.native = realpathNative;
+  realpathPath.native = realpathSyncNative;
 
   function copyFileAsync(sourceValue, destinationValue, flags, callback) {
     const done = typeof flags === 'function' ? flags : callback;

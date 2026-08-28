@@ -427,11 +427,39 @@ function validateHttpToken(value, label) {
   }
 }
 
-export function validateHeaderName(name, label = 'Header name') {
-  validateHttpToken(name, label || 'Header name');
+function hideStackFrames(name, fn) {
+  function wrappedFn(...args) {
+    try {
+      return Reflect.apply(fn, this, args);
+    } catch (error) {
+      if (Error.stackTraceLimit && typeof Error.captureStackTrace === 'function') {
+        Error.captureStackTrace(error, wrappedFn);
+      }
+      throw error;
+    }
+  }
+  Object.defineProperty(wrappedFn, 'name', {
+    configurable: true,
+    value: name,
+  });
+  wrappedFn.withoutStackTrace = fn;
+  return wrappedFn;
 }
 
-export function validateHeaderValue(name, value) {
+const validateHeaderNameImplementation = (name, label) => {
+  validateHttpToken(name, label || 'Header name');
+};
+Object.defineProperty(validateHeaderNameImplementation, 'name', {
+  configurable: true,
+  value: '',
+});
+
+export const validateHeaderName = hideStackFrames(
+  'validateHeaderName',
+  validateHeaderNameImplementation,
+);
+
+const validateHeaderValueImplementation = (name, value) => {
   if (value === undefined) {
     const error = new TypeError(`Invalid value "undefined" for header "${String(name)}"`);
     error.code = 'ERR_HTTP_INVALID_HEADER_VALUE';
@@ -442,7 +470,16 @@ export function validateHeaderValue(name, value) {
     error.code = 'ERR_INVALID_CHAR';
     throw error;
   }
-}
+};
+Object.defineProperty(validateHeaderValueImplementation, 'name', {
+  configurable: true,
+  value: '',
+});
+
+export const validateHeaderValue = hideStackFrames(
+  'validateHeaderValue',
+  validateHeaderValueImplementation,
+);
 
 export function setMaxIdleHTTPParsers(max) {
   if (typeof max !== 'number') throw invalidArgumentType('max', 'number', max);
@@ -2420,7 +2457,7 @@ class BrowserAgent extends EventEmitter {
     this.protocol = options.protocol || protocol;
     this.defaultPort = Number(options.defaultPort || (this.protocol === DEFAULT_HTTPS_PROTOCOL ? 443 : 80));
     this.keepAlive = Boolean(options.keepAlive);
-    this.maxSockets = options.maxSockets ?? Infinity;
+    this.maxSockets = options.maxSockets || this.constructor.defaultMaxSockets;
     this.maxFreeSockets = options.maxFreeSockets ?? 256;
     this.maxTotalSockets = options.maxTotalSockets ?? Infinity;
     this.scheduling = options.scheduling || 'lifo';
@@ -3821,6 +3858,8 @@ export function createHttpCompatibility(scope = globalThis, {
   const HttpsAgent = class Agent extends BrowserAgent {
     constructor(options = {}) { super(options, DEFAULT_HTTPS_PROTOCOL, net.createConnection); }
   };
+  HttpAgent.defaultMaxSockets = Infinity;
+  Object.setPrototypeOf(HttpsAgent, HttpAgent);
   const agentMethods = [
     'createConnection',
     'getName',

@@ -50,17 +50,21 @@ function typeDescription(value) {
     case 'bigint': return `type bigint (${value}n)`;
     case 'number':
       if (Number.isNaN(value)) return 'type number (NaN)';
-      if (value === Infinity || value === -Infinity) return 'type number (null)';
+      if (value === Infinity) return 'type number (Infinity)';
+      if (value === -Infinity) return 'type number (-Infinity)';
       if (Object.is(value, -0)) return 'type number (-0)';
       return `type number (${value})`;
     case 'boolean': return `type boolean (${value})`;
     case 'symbol': return `type symbol (${String(value)})`;
     case 'string': {
       const short = value.length > 28 ? `${value.slice(0, 25)}...` : value;
-      return `type string ('${short.replaceAll("'", "\\'")}')`;
+      return short.includes("'")
+        ? `type string (${JSON.stringify(short)})`
+        : `type string ('${short}')`;
     }
     case 'function': return `function ${value.name || ''}`;
     case 'object': {
+      if (Object.getPrototypeOf(value) === null) return '[Object: null prototype] {}';
       const constructorName = value.constructor?.name;
       return constructorName ? `an instance of ${constructorName}` : 'an instance of Object';
     }
@@ -619,9 +623,6 @@ function createInternalAsyncHooks() {
 export class AsyncResource {
   constructor(type, options = {}) {
     if (typeof type !== 'string') throw invalidArgumentType('type', 'string', type);
-    if (initHooksExist() && enabledHooksExist() && type.length === 0) {
-      throw invalidAsyncType(type);
-    }
     const triggerAsyncId = typeof options === 'number'
       ? options
       : options?.triggerAsyncId !== undefined ? options.triggerAsyncId : executionId;
@@ -629,6 +630,9 @@ export class AsyncResource {
       const error = new RangeError(`invalid async id: ${triggerAsyncId}`);
       error.code = 'ERR_INVALID_ASYNC_ID';
       throw error;
+    }
+    if (initHooksExist() && enabledHooksExist() && type.length === 0) {
+      throw invalidAsyncType(type);
     }
     this._asyncId = newAsyncId(type, triggerAsyncId, this, true, true);
     // Browser DNS uses one GETADDRINFOREQWRAP for both lookup and c-ares-like

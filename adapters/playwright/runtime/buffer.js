@@ -1,3 +1,5 @@
+import { inspect as nodeInspect } from './assert.js';
+
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 const MAX_BUFFER_LENGTH = 0x7fffffff;
@@ -117,6 +119,70 @@ function encodeBase64(bytes, urlSafe) {
   for (const item of bytes) binary += String.fromCharCode(item);
   const encodedText = btoa(binary);
   return urlSafe ? encodedText.replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '') : encodedText;
+}
+
+const inspectCustomSymbol = Symbol.for('nodejs.util.inspect.custom');
+
+function inspectBlobProperties(properties, options) {
+  if (options.depth !== null && options.depth < 0) return '[Object]';
+
+  const entries = Object.entries(properties).map(([key, value]) => `${key}: ${nodeInspect(value, options)}`);
+  const body = entries.join(', ');
+  const breakLength = options.breakLength ?? 80;
+  if (options.compact === false || body.length > breakLength) {
+    return ['{', `  ${entries.join(',\n  ')}`, '}'].join('\n');
+  }
+  return `{ ${body} }`;
+}
+
+function blobInspect(depth, options) {
+  if (depth < 0) return this;
+
+  const opts = {
+    ...options,
+    depth: options.depth == null ? null : options.depth - 1,
+  };
+
+  return `Blob ${inspectBlobProperties({
+    size: this.size,
+    type: this.type,
+  }, opts)}`;
+}
+
+function fileInspect(depth, options) {
+  if (depth < 0) return this;
+
+  const opts = {
+    ...options,
+    depth: options.depth == null ? null : options.depth - 1,
+  };
+
+  return `File ${inspectBlobProperties({
+    size: this.size,
+    type: this.type,
+    name: this.name,
+    lastModified: this.lastModified,
+  }, opts)}`;
+}
+
+function installBlobInspection(BlobClass) {
+  if (typeof BlobClass !== 'function' || !BlobClass.prototype) return BlobClass;
+  Object.defineProperty(BlobClass.prototype, inspectCustomSymbol, {
+    configurable: true,
+    writable: true,
+    value: blobInspect,
+  });
+  return BlobClass;
+}
+
+function installFileInspection(FileClass) {
+  if (typeof FileClass !== 'function' || !FileClass.prototype) return FileClass;
+  Object.defineProperty(FileClass.prototype, inspectCustomSymbol, {
+    configurable: true,
+    writable: true,
+    value: fileInspect,
+  });
+  return FileClass;
 }
 
 function sliceBytes(buffer, start, end) {
@@ -407,7 +473,9 @@ export function createTranscode(BufferClass) {
 }
 
 export function installBlobCompatibility(BlobClass) {
-  if (typeof BlobClass !== 'function' || typeof BlobClass.prototype?.bytes === 'function') return BlobClass;
+  if (typeof BlobClass !== 'function') return BlobClass;
+  installBlobInspection(BlobClass);
+  if (typeof BlobClass.prototype?.bytes === 'function') return BlobClass;
   Object.defineProperty(BlobClass.prototype, 'bytes', {
     configurable: true,
     writable: true,
@@ -470,9 +538,9 @@ function bufferInspect(_recurseTimes, context = {}, inspectValue = null) {
 }
 
 export function createFileClass(scope = globalThis) {
-  if (typeof scope.File === 'function') return scope.File;
+  if (typeof scope.File === 'function') return installFileInspection(scope.File);
   if (typeof scope.Blob !== 'function') return undefined;
-  return class File extends scope.Blob {
+  const FileClass = class File extends scope.Blob {
     constructor(bits, name, options = {}) {
       super(bits, options);
       const lastModified = options?.lastModified === undefined ? Date.now() : Number(options.lastModified);
@@ -482,6 +550,7 @@ export function createFileClass(scope = globalThis) {
       });
     }
   };
+  return installFileInspection(FileClass);
 }
 
 // ---------------------------------------------------------------------------

@@ -435,8 +435,10 @@ def _extract_gaps(harness: Harness, args: argparse.Namespace) -> int:
                 harness.runner, spec=config.target, worktree=worktree, run_id=run_id
             )
         except SurfaceProbeError as exc:
-            print(f"warning: target cannot list builtins yet ({exc}); probing oracle list only")
-            target_modules = ()
+            raise SurfaceProbeError(
+                "target builtin-module probe is unavailable; refusing to replace gap state: "
+                f"{exc}"
+            ) from exc
         # Subpath builtins (fs/promises, stream/web, …) are probed as their
         # own surfaces; collapsing them here would manufacture phantom
         # modules like bare `internal` that neither side can load.
@@ -454,6 +456,16 @@ def _extract_gaps(harness: Harness, args: argparse.Namespace) -> int:
         target_surfaces = run_surface_probe(
             harness.runner, spec=config.target, worktree=worktree, modules=modules, run_id=run_id
         )
+        infrastructure_errors = sorted(
+            name
+            for name, surface in target_surfaces.items()
+            if "infra_error" in surface.load_error.lower()
+        )
+        if infrastructure_errors:
+            raise SurfaceProbeError(
+                "target surface probe encountered infrastructure errors for "
+                f"{', '.join(infrastructure_errors)}; refusing to replace gap state"
+            )
         harness.db.set_meta("surface:oracle", surfaces_to_json(oracle_surfaces))
         harness.db.set_meta("surface:target", surfaces_to_json(target_surfaces))
 

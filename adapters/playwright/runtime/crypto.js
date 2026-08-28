@@ -1842,6 +1842,41 @@ export function generateKey(type, options, callback) {
 
 export const fips = 0;
 
+export function setFips(_value) {
+  throw new UnsupportedWebCapabilityError(
+    'crypto.fips',
+    'FIPS mode is not available in the browser runtime',
+  );
+}
+
+function timingSafeEqualInput(value, name) {
+  if (!isArrayBuffer(value) && !isArrayBufferView(value)) {
+    const error = new TypeError(
+      `The "${name}" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView.`,
+    );
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  return isArrayBuffer(value)
+    ? new Uint8Array(value)
+    : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+}
+
+export function timingSafeEqual(buf1, buf2) {
+  const left = timingSafeEqualInput(buf1, 'buf1');
+  const right = timingSafeEqualInput(buf2, 'buf2');
+  if (left.byteLength !== right.byteLength) {
+    const error = new RangeError('Input buffers must have the same byte length');
+    error.code = 'ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH';
+    throw error;
+  }
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    difference |= left[index] ^ right[index];
+  }
+  return difference === 0;
+}
+
 export function getCipherInfo(nameOrNid, options) {
   if (typeof nameOrNid !== 'string' && typeof nameOrNid !== 'number') {
     const error = new TypeError('The "nameOrNid" argument must be of type string or number');
@@ -1949,6 +1984,8 @@ export function createCryptoContract(globalObject = globalThis) {
     generatePrime: (size, options, callback) => generatePrime(size, options, callback, globalObject),
     generatePrimeSync: (size, options = {}) => generatePrimeSync(size, options, globalObject),
     generateKey: (type, options, callback) => generateKey(type, options, callback),
+    setFips,
+    timingSafeEqual,
     createCipheriv,
     createDecipheriv,
     constants: CRYPTO_CONSTANTS,
@@ -1992,9 +2029,7 @@ export function createCryptoContract(globalObject = globalThis) {
     configurable: false,
     enumerable: true,
     get: () => 0,
-    set: () => {
-      throw new UnsupportedWebCapabilityError('crypto.fips', 'FIPS mode is not available in the browser runtime');
-    },
+    set: setFips,
   });
   return Object.freeze(contract);
 }

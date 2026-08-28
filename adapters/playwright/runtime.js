@@ -73,9 +73,11 @@ import {
   publicDecrypt,
   publicEncrypt,
   secureHeapUsed,
+  setFips,
   sign,
   signSync,
   scryptSync as createScryptSync,
+  timingSafeEqual,
   verify,
   scrypt as createScrypt,
   verifySync,
@@ -1722,6 +1724,8 @@ function createCryptoShim(scope, Buffer, processObject) {
     createHmac: (...args) => new Hmac(...args),
     createSecretKey: createSecretKeyShim(Buffer),
     getFips: () => 0,
+    setFips,
+    timingSafeEqual,
     // Web Crypto does not expose OpenSSL's cipher registry. Returning an
     // empty list preserves Node's capability-gated skip behavior.
     getCiphers: () => [],

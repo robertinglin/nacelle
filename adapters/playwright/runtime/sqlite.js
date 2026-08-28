@@ -121,6 +121,81 @@ class DatabaseSync {
     unavailable();
   }
 
+  open() {
+    validateDatabaseReceiver(this);
+    unavailable();
+  }
+
+  close() {
+    validateDatabaseReceiver(this);
+    unavailable();
+  }
+
+  prepare(sql) {
+    validateDatabaseReceiver(this);
+    if (typeof sql !== 'string') throw invalidArgType('sql', 'a string', sql);
+    unavailable();
+  }
+
+  exec(sql) {
+    validateDatabaseReceiver(this);
+    if (typeof sql !== 'string') throw invalidArgType('sql', 'a string', sql);
+    unavailable();
+  }
+
+  function(name, optionsOrFunction, maybeFunction) {
+    validateDatabaseReceiver(this);
+    if (typeof name !== 'string') throw invalidArgType('name', 'a string', name);
+
+    const functionIndex = arguments.length < 3 ? 1 : 2;
+    if (functionIndex > 1) {
+      const options = optionsOrFunction;
+      if (options === null || (typeof options !== 'object' && typeof options !== 'function')) {
+        throw invalidArgType('options', 'an object', options);
+      }
+      for (const option of ['useBigIntArguments', 'varargs', 'deterministic', 'directOnly']) {
+        if (options[option] !== undefined && typeof options[option] !== 'boolean') {
+          throw invalidArgType(`options.${option}`, 'a boolean', options[option]);
+        }
+      }
+    }
+    if (typeof arguments[functionIndex] !== 'function') {
+      throw invalidArgType('function', 'a function', arguments[functionIndex]);
+    }
+    unavailable();
+  }
+
+  location(dbName) {
+    validateDatabaseReceiver(this);
+    if (dbName !== undefined && typeof dbName !== 'string') {
+      throw invalidArgType('dbName', 'a string', dbName);
+    }
+    unavailable();
+  }
+
+  aggregate(name, options = undefined) {
+    validateDatabaseReceiver(this);
+    if (typeof name !== 'string') throw invalidArgType('name', 'a string', name);
+    if (options === null || (typeof options !== 'object' && typeof options !== 'function')) {
+      throw invalidArgType('options', 'an object', options);
+    }
+    if (options.start === undefined) {
+      throw invalidArgType('options.start', 'a function or a primitive value', options.start);
+    }
+    if (typeof options.step !== 'function') {
+      throw invalidArgType('options.step', 'a function', options.step);
+    }
+    for (const option of ['useBigIntArguments', 'varargs', 'directOnly']) {
+      if (options[option] !== undefined && typeof options[option] !== 'boolean') {
+        throw invalidArgType(`options.${option}`, 'a boolean', options[option]);
+      }
+    }
+    if (options.inverse !== undefined && typeof options.inverse !== 'function') {
+      throw invalidArgType('options.inverse', 'a function', options.inverse);
+    }
+    unavailable();
+  }
+
   applyChangeset(changeset, options = {}) {
     validateDatabaseReceiver(this);
     if (!isByteArray(changeset)) throw invalidArgType('changeset', 'a Uint8Array', changeset);
@@ -152,6 +227,11 @@ class DatabaseSync {
 class StatementSync {
   constructor() {
     throw illegalConstructor('StatementSync');
+  }
+
+  run() {
+    validateStatementReceiver(this);
+    unavailable();
   }
 
   iterate() {

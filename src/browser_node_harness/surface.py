@@ -174,6 +174,119 @@ def surface_probe_source(modules: Sequence[str]) -> str:
     )
 
 
+def exhaustive_surface_probe_source(modules: Sequence[str]) -> str:
+    """Build a cycle-safe probe for the complete observable export graph.
+
+    This is intentionally separate from the historical heuristic probe while
+    it is being validated. The graph walk has no depth limit: aliases are
+    expanded at each public path, cycles are stopped by the current ancestor
+    path, and only array indices are treated as data rather than API names.
+    """
+
+    module_list = json.dumps(list(modules))
+    return (
+        "const modules = " + module_list + ";\n"
+        "const out = [];\n"
+        "const symbolLabel = (symbol) => {\n"
+        "  const globalKey = Symbol.keyFor(symbol);\n"
+        "  if (globalKey !== undefined) return '[Symbol.for(' + JSON.stringify(globalKey) + ')]';\n"
+        "  return '[Symbol(' + String(symbol.description || '') + ')]';\n"
+        "};\n"
+        "const publicSymbols = new Set(Object.getOwnPropertyNames(Symbol)\n"
+        "  .filter((name) => !['length', 'name', 'prototype', 'for', 'keyFor'].includes(name))\n"
+        "  .map((name) => Symbol[name]).filter((value) => typeof value === 'symbol'));\n"
+        "const isPublicSymbol = (symbol) => publicSymbols.has(symbol)\n"
+        "  || new Set(['nodejs.dispose', 'nodejs.asyncDispose', 'nodejs.util.inspect.custom'])\n"
+        "    .has(Symbol.keyFor(symbol));\n"
+        "const structuralNames = new Set(['length', 'name', 'prototype', 'arguments', 'caller']);\n"
+        "const stableNamespaces = new Set(['constants', 'versions', 'features', 'STATUS_CODES']);\n"
+        "const isIndex = (key) => /^\\d+$/.test(key);\n"
+        "const ownKeys = (value) => {\n"
+        "  if (!value) return [];\n"
+        "  try { return [...Object.getOwnPropertyNames(value), ...Object.getOwnPropertySymbols(value).filter(isPublicSymbol)]; }\n"
+        "  catch { return []; }\n"
+        "};\n"
+        "const read = (value, key) => {\n"
+        "  try { return value[key]; } catch { return null; }\n"
+        "};\n"
+        "const safePrototype = (value) => {\n"
+        "  try { return Object.getPrototypeOf(value); } catch { return null; }\n"
+        "};\n"
+        "const isObjectValue = (value) => Boolean(value && (typeof value === 'function' || typeof value === 'object'));\n"
+        "const shouldDescend = (value, propertyName = '') => {\n"
+        "  if (!isObjectValue(value)) return false;\n"
+        "  if (Array.isArray(value)) return false;\n"
+        "  if (stableNamespaces.has(propertyName)) return true;\n"
+        "  const own = ownKeys(value).some((key) => { const name = typeof key === 'symbol' ? symbolLabel(key) : key; return !structuralNames.has(name) && typeof read(value, key) === 'function'; });\n"
+        "  const prototype = typeof value === 'function' ? read(value, 'prototype') : safePrototype(value);\n"
+        "  const inherited = prototype && prototype !== Object.prototype\n"
+        "    && ownKeys(prototype).some((key) => String(key) !== 'constructor');\n"
+        "  return own || inherited;\n"
+        "};\n"
+        "const collect = (value, allowNumeric = false, ancestors = new Set()) => {\n"
+        "  if (!isObjectValue(value) || ancestors.has(value)) return [];\n"
+        "  if (Array.isArray(value)) return [];\n"
+        "  const nextAncestors = new Set(ancestors);\n"
+        "  nextAncestors.add(value);\n"
+        "  const result = [];\n"
+        "  const seen = new Set();\n"
+        "  for (const member of ownKeys(value)) {\n"
+        "    const memberName = typeof member === 'symbol' ? symbolLabel(member) : member;\n"
+        "    if ((typeof value === 'function' && structuralNames.has(memberName)) || (!allowNumeric && isIndex(memberName))\n"
+        "      || (Array.isArray(value) && isIndex(memberName)) || seen.has(memberName)) continue;\n"
+        "    seen.add(memberName);\n"
+        "    result.push(memberName);\n"
+        "    const child = read(value, member);\n"
+        "    if (!memberName.startsWith('_') && shouldDescend(child, memberName) && !nextAncestors.has(child)) {\n"
+        "      for (const nested of collect(child, memberName === 'STATUS_CODES', nextAncestors)) result.push(memberName + '.' + nested);\n"
+        "    }\n"
+        "  }\n"
+        "  let prototype = typeof value === 'function' ? read(value, 'prototype') : safePrototype(value);\n"
+        "  const prototypeSeen = new Set();\n"
+        "  while (prototype && prototype !== Object.prototype && !prototypeSeen.has(prototype)) {\n"
+        "    prototypeSeen.add(prototype);\n"
+        "    for (const member of ownKeys(prototype)) {\n"
+        "      const memberName = typeof member === 'symbol' ? symbolLabel(member) : member;\n"
+        "      if (memberName === 'constructor' || seen.has(memberName)) continue;\n"
+        "      seen.add(memberName);\n"
+        "      result.push(memberName);\n"
+        "      const child = read(prototype, member);\n"
+        "      if (!memberName.startsWith('_') && shouldDescend(child, memberName) && !nextAncestors.has(child)) {\n"
+        "        for (const nested of collect(child, false, nextAncestors)) result.push(memberName + '.' + nested);\n"
+        "      }\n"
+        "    }\n"
+        "    prototype = safePrototype(prototype);\n"
+        "  }\n"
+        "  return [...new Set(result)];\n"
+        "};\n"
+        "for (const name of modules) {\n"
+        "  const entry = { module: name, symbols: [], load_error: '' };\n"
+        "  try {\n"
+        "    const mod = require(name.startsWith('node:') ? name : 'node:' + name);\n"
+        "    for (const member of ownKeys(mod)) {\n"
+        "      const memberName = typeof member === 'symbol' ? symbolLabel(member) : member;\n"
+        "      if (typeof mod === 'function' && structuralNames.has(memberName)) continue;\n"
+        "      entry.symbols.push(memberName);\n"
+        "      const value = read(mod, member);\n"
+        "      if (!memberName.startsWith('_') && shouldDescend(value, memberName)) {\n"
+        "        for (const nested of collect(value, memberName === 'STATUS_CODES')) entry.symbols.push(memberName + '.' + nested);\n"
+        "      }\n"
+        "    }\n"
+        "    entry.symbols = [...new Set(entry.symbols)].sort();\n"
+        "  } catch (error) {\n"
+        "    entry.load_error = String((error && error.code) || (error && error.message) || error);\n"
+        "  }\n"
+        "  out.push(entry);\n"
+        "}\n"
+        + _probe_body("JSON.stringify(out)")
+    )
+
+
+# The exhaustive walk is the authoritative surface definition. Keep the
+# historical name used by the rest of the harness as a compatibility alias.
+surface_probe_source = exhaustive_surface_probe_source
+
+
 def parse_probe_payload(stdout: str) -> list:
     match = _MARKER_RE.search(stdout)
     if match is None:

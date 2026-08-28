@@ -1081,7 +1081,9 @@ export function createAssert({ strict = false, readSource, sourcePath, process: 
   Object.setPrototypeOf(deprecatedCallTracker, CallTracker);
   deprecatedCallTracker.prototype = CallTracker.prototype;
   assert.CallTracker = deprecatedCallTracker;
-  assert.strict = strict ? assert : createAssert({ strict: true, readSource, sourcePath, process: processObject });
+  const strictAssert = strict ? assert : createAssert({ strict: true, readSource, sourcePath, process: processObject });
+  if (!strict) strictAssert.ok = assert;
+  assert.strict = strictAssert;
   assert.ifError = (value) => {
     if (value !== null && value !== undefined) {
       let message = 'ifError got unwanted exception: ';

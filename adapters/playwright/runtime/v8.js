@@ -277,6 +277,116 @@ function browserCppHeapStatistics(type, globalObject) {
   };
 }
 
+const V8_HEAP_SPACE_NAMES = Object.freeze([
+  'read_only_space',
+  'old_space',
+  'code_space',
+  'large_object_space',
+  'code_large_object_space',
+  'new_large_object_space',
+  'new_space',
+  'shared_space',
+  'shared_large_object_space',
+  'trusted_space',
+  'trusted_large_object_space',
+]);
+
+function browserNumber(value, fallback = 0) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function browserHeapMemory(globalObject) {
+  const memory = globalObject.performance?.memory;
+  const used = browserNumber(memory?.usedJSHeapSize);
+  const total = browserNumber(memory?.totalJSHeapSize);
+  const limit = browserNumber(memory?.jsHeapSizeLimit, Number.MAX_SAFE_INTEGER);
+  return {
+    total,
+    used,
+    limit: Math.max(limit, used),
+  };
+}
+
+function browserHeapStatistics(globalObject) {
+  const { total, used, limit } = browserHeapMemory(globalObject);
+  return {
+    total_heap_size: total,
+    total_heap_size_executable: 0,
+    total_physical_size: total,
+    total_available_size: limit - used,
+    used_heap_size: used,
+    heap_size_limit: limit,
+    malloced_memory: 0,
+    peak_malloced_memory: 0,
+    does_zap_garbage: 0,
+    number_of_native_contexts: 1,
+    number_of_detached_contexts: 0,
+    total_global_handles_size: 0,
+    used_global_handles_size: 0,
+    external_memory: 0,
+  };
+}
+
+function browserHeapSpaceStatistics(globalObject) {
+  const result = new globalObject.Array();
+  for (const space_name of V8_HEAP_SPACE_NAMES) {
+    result.push({
+      space_name,
+      space_size: 0,
+      space_used_size: 0,
+      space_available_size: 0,
+      physical_space_size: 0,
+    });
+  }
+  return result;
+}
+
+function browserHeapCodeStatistics() {
+  return {
+    code_and_metadata_size: 0,
+    bytecode_and_metadata_size: 0,
+    external_script_source_size: 0,
+    cpu_profiler_metadata_size: 0,
+  };
+}
+
+function browserCachedDataVersionTag(processObject) {
+  const input = `${processObject?.versions?.v8 || ''}\0${(processObject?.argv || []).join('\0')}`;
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+function browserNow(globalObject) {
+  if (typeof globalObject.Date?.now === 'function') return globalObject.Date.now();
+  return typeof globalObject.performance?.now === 'function' ? globalObject.performance.now() : 0;
+}
+
+function createGCProfiler(globalObject) {
+  return class GCProfiler {
+    #startTime = null;
+
+    start() {
+      if (this.#startTime === null) this.#startTime = browserNow(globalObject);
+    }
+
+    stop() {
+      if (this.#startTime === null) return undefined;
+      const startTime = this.#startTime;
+      this.#startTime = null;
+      return {
+        version: 1,
+        startTime,
+        statistics: [],
+        endTime: browserNow(globalObject),
+      };
+    }
+  };
+}
+
 function makeDataCloneError(serializer, value, globalObject) {
   const message = describeCloneFailure(value, globalObject);
   const ErrorConstructor = serializer._getDataCloneError;
@@ -921,6 +1031,8 @@ export function createV8Module(processObject, globalObject = globalThis) {
   const serializeCallbacks = [];
   const deserializeCallbacks = [];
   let deserializeMainFunction = null;
+  const cachedDataVersionTagValue = browserCachedDataVersionTag(processObject);
+  const GCProfiler = createGCProfiler(globalObject);
   const promiseHooks = createUnsupportedPromiseHooks();
   const DefaultSerializer = createDefaultSerializerClass(globalObject);
   const DefaultDeserializer = createDefaultDeserializerClass(globalObject);
@@ -940,6 +1052,22 @@ export function createV8Module(processObject, globalObject = globalThis) {
     const deserializer = new DefaultDeserializer(buffer);
     deserializer.readHeader();
     return deserializer.readValue();
+  }
+
+  function cachedDataVersionTag() {
+    return cachedDataVersionTagValue;
+  }
+
+  function getHeapStatistics() {
+    return browserHeapStatistics(globalObject);
+  }
+
+  function getHeapSpaceStatistics() {
+    return browserHeapSpaceStatistics(globalObject);
+  }
+
+  function getHeapCodeStatistics() {
+    return browserHeapCodeStatistics();
   }
 
   function isStringOneByteRepresentation(content) {
@@ -1033,6 +1161,10 @@ export function createV8Module(processObject, globalObject = globalThis) {
     DefaultDeserializer,
     serialize,
     deserialize,
+    cachedDataVersionTag,
+    getHeapStatistics,
+    getHeapSpaceStatistics,
+    getHeapCodeStatistics,
     getCppHeapStatistics,
     isStringOneByteRepresentation,
     promiseHooks,
@@ -1042,5 +1174,6 @@ export function createV8Module(processObject, globalObject = globalThis) {
     stopCoverage,
     takeCoverage,
     writeHeapSnapshot,
+    GCProfiler,
   };
 }

@@ -16,6 +16,8 @@ const CRYPTO_CONSTANTS = Object.freeze({
   ENGINE_METHOD_ALL: 0,
 });
 
+export const cryptoConstants = CRYPTO_CONSTANTS;
+
 function isArrayBuffer(value) {
   return value !== null && typeof value === 'object'
     && ['[object ArrayBuffer]', '[object SharedArrayBuffer]'].includes(objectToString.call(value));
@@ -1781,6 +1783,30 @@ export function createDecipheriv() {
   return legacyCipherUnavailable('createDecipheriv');
 }
 
+export function setEngine(id, flags) {
+  if (typeof id !== 'string') {
+    const error = new TypeError(`The "id" argument must be of type string. Received ${id}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (flags) {
+    if (typeof flags !== 'number') {
+      const error = new TypeError(`The "flags" argument must be of type number. Received ${flags}`);
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    if (!Number.isFinite(flags)) {
+      const error = new RangeError(`The value of "flags" is out of range. Received ${flags}`);
+      error.code = 'ERR_OUT_OF_RANGE';
+      throw error;
+    }
+  }
+  throw new UnsupportedWebCapabilityError(
+    'crypto.setEngine',
+    'OpenSSL engines are not available in the browser runtime',
+  );
+}
+
 function validateGenerateKey(type, options) {
   if (typeof type !== 'string') {
     const error = new TypeError(`The "type" argument must be of type string. Received ${type}`);
@@ -1988,7 +2014,8 @@ export function createCryptoContract(globalObject = globalThis) {
     timingSafeEqual,
     createCipheriv,
     createDecipheriv,
-    constants: CRYPTO_CONSTANTS,
+    constants: cryptoConstants,
+    setEngine,
     getCipherInfo: (nameOrNid, options) => getCipherInfo(nameOrNid, options, globalObject),
     secureHeapUsed: () => secureHeapUsed(globalObject),
     privateDecrypt,

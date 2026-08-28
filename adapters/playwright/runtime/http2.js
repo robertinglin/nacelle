@@ -90,6 +90,35 @@ function http2Error(code, message) {
   return error;
 }
 
+function http2CompatError(type, code, message) {
+  const error = new type(message);
+  error.code = code;
+  return error;
+}
+
+function validateCompatHeader(name, value) {
+  if (typeof name !== 'string') {
+    throw http2CompatError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The "name" argument must be of type string');
+  }
+  if (name === '' || name.includes(' ')) {
+    throw http2CompatError(TypeError, 'ERR_INVALID_HTTP_TOKEN', `Header name must be a valid HTTP token ["${name}"]`);
+  }
+  if ([':status', ':method', ':path', ':authority', ':scheme'].includes(name)) {
+    throw http2CompatError(
+      TypeError,
+      'ERR_HTTP2_PSEUDOHEADER_NOT_ALLOWED',
+      'Cannot set HTTP/2 pseudo-headers',
+    );
+  }
+  if (value === undefined || value === null) {
+    throw http2CompatError(
+      TypeError,
+      'ERR_HTTP2_INVALID_HEADER_VALUE',
+      `Invalid value "${value}" for header "${name}"`,
+    );
+  }
+}
+
 function abortError() {
   const error = new Error('The operation was aborted');
   error.name = 'AbortError';
@@ -852,6 +881,8 @@ export class Http2ServerResponse extends Stream {
   constructor(stream, options) {
     super(options);
     this._stream = stream;
+    this._headers = Object.create(null);
+    this._trailers = Object.create(null);
     this._state = {
       closed: false,
       ending: false,
@@ -866,6 +897,18 @@ export class Http2ServerResponse extends Stream {
       this.emit('finish');
       this.emit('close');
     });
+  }
+
+  get _header() {
+    return this.headersSent;
+  }
+
+  get writableEnded() {
+    return this._state.ending;
+  }
+
+  get finished() {
+    return this._state.ending;
   }
 
   get socket() {
@@ -922,6 +965,10 @@ export class Http2ServerResponse extends Stream {
 
   get writableFinished() {
     return this._stream?.writableFinished ?? false;
+  }
+
+  get writableLength() {
+    return this._stream?.writableLength;
   }
 
   cork() {
@@ -1023,6 +1070,28 @@ export class Http2ServerResponse extends Stream {
     if (this._stream.headersSent || this._state.closed) return false;
     this._stream.additionalHeaders({ ':status': 100 });
     return true;
+  }
+
+  setTrailer(name, value) {
+    if (typeof name !== 'string') validateCompatHeader(name, value);
+    name = name.trim().toLowerCase();
+    validateCompatHeader(name, value);
+    this._trailers[name] = value;
+  }
+
+  addTrailers(headers) {
+    for (const name of Object.keys(headers)) this.setTrailer(name, headers[name]);
+  }
+
+  getHeader(name) {
+    if (typeof name !== 'string') {
+      throw http2CompatError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The "name" argument must be of type string');
+    }
+    return this._headers[name.trim().toLowerCase()];
+  }
+
+  getHeaderNames() {
+    return Object.keys(this._headers);
   }
 }
 

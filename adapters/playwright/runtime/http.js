@@ -351,6 +351,25 @@ function installEventInspectHook(scope) {
   });
 }
 
+function installEventTargetInspectHook(scope) {
+  const EventTarget = scope.EventTarget;
+  const prototype = EventTarget?.prototype;
+  if (!prototype || prototype[SymbolInspectCustom]) return;
+  Object.defineProperty(prototype, SymbolInspectCustom, {
+    configurable: true,
+    writable: true,
+    value(depth, options) {
+      const name = this.constructor.name;
+      if (depth < 0) return name;
+      const inspectOptions = {
+        ...(options || {}),
+        depth: Number.isInteger(options?.depth) ? options.depth - 1 : options?.depth,
+      };
+      return `${name} ${nodeInspect({}, inspectOptions)}`;
+    },
+  });
+}
+
 function defineAsyncDisposeAlias(prototype, method) {
   if (typeof prototype?.[SymbolNodeAsyncDispose] === 'function') return;
   Object.defineProperty(prototype, SymbolNodeAsyncDispose, {
@@ -3773,6 +3792,7 @@ export function createHttpCompatibility(scope = globalThis, {
 } = {}) {
   BufferClass ||= typeof Buffer === 'function' ? Buffer : undefined;
   installEventInspectHook(scope);
+  installEventTargetInspectHook(scope);
   const net = configuredNet || createBrowserNet({ BufferClass, trackTask });
   const virtualNetwork = configuredHttpNetwork
     || createVirtualHttpNetwork(scope, BufferClass, net, trackTask, diagnostics);

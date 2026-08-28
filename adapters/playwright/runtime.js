@@ -478,6 +478,22 @@ function installProcessStdoutIterableSurface(stream, processObject) {
     enumerable: false,
     value: true,
   });
+  let bytesDispatched = 0;
+  const outputWrite = stream.write;
+  const byteLength = (value) => {
+    if (typeof value === 'string') return new TextEncoder().encode(value).byteLength;
+    if (value instanceof ArrayBuffer) return value.byteLength;
+    if (ArrayBuffer.isView(value)) return value.byteLength;
+    return new TextEncoder().encode(normalizeOutputChunk(value)).byteLength;
+  };
+
+  stream.write = function writeStdout(value, encoding, callback) {
+    bytesDispatched += byteLength(value);
+    const result = outputWrite.call(this, value, encoding);
+    if (typeof callback === 'function') callback();
+    return result;
+  };
+
   const readable = new Readable({ read() {}, readable: false });
   const iterablePrototype = Object.create(Object.getPrototypeOf(stream));
   for (const name of ['every', 'forEach', 'reduce', 'toArray', 'some', 'find']) {
@@ -531,6 +547,12 @@ function installProcessStdoutIterableSurface(stream, processObject) {
       writable: true,
       value: false,
     },
+    _closeAfterHandlingError: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: false,
+    },
   });
   Object.defineProperties(iterablePrototype, {
     unpipe: {
@@ -572,6 +594,23 @@ function installProcessStdoutIterableSurface(stream, processObject) {
         for (const item of chunks) this.write(writev ? item?.chunk : item, encoding);
         if (typeof callback === 'function') callback();
       },
+    },
+    _getpeername: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return {}; },
+    },
+    _getsockname: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return {}; },
+    },
+    _bytesDispatched: {
+      configurable: false,
+      enumerable: true,
+      get: () => bytesDispatched,
     },
     _reset: {
       configurable: true,
@@ -634,6 +673,11 @@ function installProcessStdoutIterableSurface(stream, processObject) {
       enumerable: true,
       writable: true,
       value() { this._timeout?.refresh?.(); },
+    },
+    _connecting: {
+      configurable: false,
+      enumerable: false,
+      get: () => false,
     },
     _final: {
       configurable: true,
@@ -918,6 +962,28 @@ function installProcessStdinSurface(stream) {
       configurable: true,
       enumerable: false,
       get: () => stream.fd === null,
+    },
+    end: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(_chunk, _encoding, callback) {
+        if (typeof _encoding === 'function') callback = _encoding;
+        callback?.();
+        return this;
+      },
+    },
+    start: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: undefined,
+    },
+    pos: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: undefined,
     },
   });
   Object.defineProperty(stream, Symbol.for('nodejs.asyncDispose'), {

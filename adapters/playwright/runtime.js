@@ -134,6 +134,7 @@ import { createBrowserInternalBindings } from './runtime/internal-bindings.js';
 import { createUrlModule } from './runtime/url.js';
 import { installWarningContract } from './runtime/warnings.js';
 import { nativeAddonDisabledError, unsupportedNativeAddon } from './runtime/errors.js';
+import { createSqliteModule } from './runtime/sqlite.js';
 
 const BUILTIN_NAMES = Object.freeze([
   'assert', 'assert/strict', 'buffer', 'console', 'constants', 'crypto', 'domain', 'events', 'fs', 'fs/promises', 'http', 'https', 'module', 'os',
@@ -3227,6 +3228,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       value: streamPromiseFinished,
     });
     const unsupportedBuiltins = createUnsupportedBuiltins();
+    const sqlite = createSqliteModule();
     const notifyDnsLookup = () => {
       scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ = Math.max(1, Number(scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ || 0));
     };
@@ -3761,7 +3763,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       test: nodeTest,
       ...unsupportedBuiltins,
       sea: Object.freeze({}),
-      sqlite: Object.freeze({}),
+      sqlite,
       'test/reporters': Object.freeze({}),
       net, dgram, cluster, tls,
       child_process: (() => {

@@ -853,9 +853,19 @@ export class Http2ServerResponse extends Stream {
     super(options);
     this._stream = stream;
     this._state = {
+      closed: false,
+      ending: false,
+      destroyed: false,
       sendDate: true,
       statusCode: 200,
     };
+    this.req = stream?._compatRequest;
+    stream?.once('close', () => {
+      if (this._state.closed) return;
+      this._state.closed = true;
+      this.emit('finish');
+      this.emit('close');
+    });
   }
 
   get socket() {
@@ -912,6 +922,107 @@ export class Http2ServerResponse extends Stream {
 
   get writableFinished() {
     return this._stream?.writableFinished ?? false;
+  }
+
+  cork() {
+    this._stream.cork();
+  }
+
+  uncork() {
+    this._stream.uncork();
+  }
+
+  write(chunk, encoding, callback) {
+    if (typeof encoding === 'function') {
+      callback = encoding;
+      encoding = 'utf8';
+    }
+
+    let error;
+    if (this._state.ending) {
+      error = http2Error('ERR_STREAM_WRITE_AFTER_END', 'write after end');
+    } else if (this._state.closed || this._stream.closed) {
+      error = http2Error('ERR_HTTP2_INVALID_STREAM', 'The stream has been destroyed');
+    } else if (this._state.destroyed || this._stream.destroyed) {
+      return false;
+    }
+
+    if (error) {
+      if (typeof callback === 'function') queueMicrotask(() => callback(error));
+      this.destroy(error);
+      return false;
+    }
+
+    if (!this._stream.headersSent) {
+      this._stream.respond({ ':status': this._state.statusCode });
+    }
+    return this._stream.write(chunk, encoding, callback);
+  }
+
+  end(chunk, encoding, callback) {
+    if (typeof chunk === 'function') {
+      callback = chunk;
+      chunk = undefined;
+    } else if (typeof encoding === 'function') {
+      callback = encoding;
+      encoding = 'utf8';
+    }
+
+    if (this._state.closed || this._state.ending) {
+      if (typeof callback === 'function') queueMicrotask(callback);
+      return this;
+    }
+
+    if (chunk !== undefined && chunk !== null) this.write(chunk, encoding);
+    this._state.ending = true;
+
+    if (typeof callback === 'function') {
+      if (this._stream.writableFinished) queueMicrotask(callback);
+      else this._stream.once('finish', callback);
+    }
+
+    if (!this._stream.headersSent) this._stream.respond({ ':status': this._state.statusCode });
+    if (!this._state.closed && !this._stream.destroyed) this._stream.end();
+    return this;
+  }
+
+  destroy(error) {
+    if (this._state.destroyed) return;
+    this._state.destroyed = true;
+    this._stream.destroy(error);
+  }
+
+  setTimeout(milliseconds, callback) {
+    if (this._state.closed) return;
+    this._stream.setTimeout(milliseconds, callback);
+  }
+
+  createPushResponse(headers, callback) {
+    if (typeof callback !== 'function') {
+      const error = new TypeError('callback must be a function');
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    if (this._state.closed || this._stream.closed) {
+      queueMicrotask(() => callback(http2Error(
+        'ERR_HTTP2_INVALID_STREAM',
+        'The stream has been destroyed',
+      )));
+      return;
+    }
+    this._stream.pushStream(headers, {}, (error, stream) => {
+      if (error) {
+        callback(error);
+        return;
+      }
+      callback(null, new Http2ServerResponse(stream));
+    });
+  }
+
+  writeContinue() {
+    if (this._stream.headersSent || this._state.closed) return false;
+    this._stream.additionalHeaders({ ':status': 100 });
+    return true;
   }
 }
 

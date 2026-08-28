@@ -1,7 +1,7 @@
 import { assertByteLength, hex } from './binary.js';
 import { UnsupportedWebCapabilityError } from './errors.js';
 import { createDiffieHellman, createDiffieHellmanGroup } from './diffie-hellman.js';
-import { Transform } from './streams.js';
+import { Transform, Writable } from './streams.js';
 
 const objectToString = Object.prototype.toString;
 const virtualKeyPairs = new Map();
@@ -12,7 +12,17 @@ const PRIME_BLOCKER = 'Web Crypto does not expose browser-native prime testing';
 const KEY_OBJECT_BLOCKER = 'Web Crypto returns CryptoKey objects, but this browser runtime has no synchronous Node KeyObject adapter for generated symmetric keys';
 
 const CRYPTO_CONSTANTS = Object.freeze({
-  ENGINE_METHOD_ALL: 0,
+  ENGINE_METHOD_ALL: 65535,
+  ENGINE_METHOD_NONE: 0,
+  ENGINE_METHOD_RSA: 1,
+  ENGINE_METHOD_DSA: 2,
+  ENGINE_METHOD_DH: 4,
+  ENGINE_METHOD_RAND: 8,
+  ENGINE_METHOD_EC: 2048,
+  ENGINE_METHOD_CIPHERS: 64,
+  ENGINE_METHOD_DIGESTS: 128,
+  ENGINE_METHOD_PKEY_METHS: 512,
+  ENGINE_METHOD_PKEY_ASN1_METHS: 1024,
   DH_CHECK_P_NOT_PRIME: 1,
   DH_CHECK_P_NOT_SAFE_PRIME: 2,
   DH_NOT_SUITABLE_GENERATOR: 8,
@@ -31,6 +41,33 @@ const CRYPTO_CONSTANTS = Object.freeze({
   SSL_OP_NO_QUERY_MTU: 4096,
   SSL_OP_NO_RENEGOTIATION: 1073741824,
   SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION: 65536,
+  RSA_PKCS1_PADDING: 1,
+  RSA_NO_PADDING: 3,
+  RSA_PKCS1_OAEP_PADDING: 4,
+  RSA_X931_PADDING: 5,
+  RSA_PKCS1_PSS_PADDING: 6,
+  RSA_PSS_SALTLEN_DIGEST: -1,
+  RSA_PSS_SALTLEN_AUTO: -2,
+  RSA_PSS_SALTLEN_MAX_SIGN: -2,
+  POINT_CONVERSION_COMPRESSED: 2,
+  POINT_CONVERSION_UNCOMPRESSED: 4,
+  POINT_CONVERSION_HYBRID: 6,
+  TLS1_VERSION: 769,
+  TLS1_1_VERSION: 770,
+  TLS1_2_VERSION: 771,
+  TLS1_3_VERSION: 772,
+  OPENSSL_VERSION_NUMBER: 810549360,
+  SSL_OP_NO_SSLv2: 0,
+  SSL_OP_NO_SSLv3: 33554432,
+  SSL_OP_NO_TICKET: 16384,
+  SSL_OP_NO_TLSv1: 67108864,
+  SSL_OP_NO_TLSv1_1: 268435456,
+  SSL_OP_NO_TLSv1_2: 134217728,
+  SSL_OP_NO_TLSv1_3: 536870912,
+  SSL_OP_PRIORITIZE_CHACHA: 2097152,
+  SSL_OP_TLS_ROLLBACK_BUG: 8388608,
+  defaultCoreCipherList: 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384:DHE-RSA-AES256-SHA384:ECDHE-RSA-AES256-SHA256:DHE-RSA-AES256-SHA256:HIGH:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!SRP:!CAMELLIA',
+  defaultCipherList: 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384:DHE-RSA-AES256-SHA384:ECDHE-RSA-AES256-SHA256:DHE-RSA-AES256-SHA256:HIGH:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!SRP:!CAMELLIA',
 });
 
 export const cryptoConstants = CRYPTO_CONSTANTS;
@@ -401,7 +438,7 @@ export function createHashShim(BufferClass) {
       streamResult: undefined,
     };
 
-    const hash = {};
+    const hash = new Transform();
     Object.setPrototypeOf(hash, Hash.prototype);
     states.set(hash, state);
     return hash;
@@ -493,6 +530,7 @@ export function createHashShim(BufferClass) {
     return result.toString(String(encoding));
   };
 
+  Object.setPrototypeOf(Hash.prototype, Transform.prototype);
   return Hash;
 }
 
@@ -560,17 +598,21 @@ export function createHmacShim(BufferClass, processObject, scope = globalThis) {
   function Hmac(algorithm, key) {
     emitWarning();
     if (!(this instanceof Hmac)) return new Hmac(algorithm, key);
-    this._algorithm = hmacAlgorithm(algorithm);
+    const normalizedAlgorithm = hmacAlgorithm(algorithm);
     const secret = key?.type === 'secret' ? key.key : key;
+    const stream = new Transform();
+    Object.setPrototypeOf(stream, Hmac.prototype);
     try {
-      this._key = bytes(secret);
+      stream._key = bytes(secret);
     } catch (error) {
       error.code ||= 'ERR_INVALID_ARG_TYPE';
       throw error;
     }
-    this._chunks = [];
-    this._finalized = false;
-    this._output = null;
+    stream._algorithm = normalizedAlgorithm;
+    stream._chunks = [];
+    stream._finalized = false;
+    stream._output = null;
+    return stream;
   }
 
   Hmac.prototype.update = function update(value, encoding) {
@@ -622,6 +664,7 @@ export function createHmacShim(BufferClass, processObject, scope = globalThis) {
     return result;
   };
 
+  Object.setPrototypeOf(Hmac.prototype, Transform.prototype);
   return Hmac;
 }
 
@@ -1104,24 +1147,26 @@ export function createSignShim(algorithm, BufferClass, globalObject = globalThis
 }
 
 export function createSignClass(BufferClass, globalObject = globalThis) {
-  function Sign(algorithm, options) {
-    void options;
-    const Implementation = createSignShim(algorithm, BufferClass, globalObject);
-    this._implementation = new Implementation();
+  class Sign extends Writable {
+    constructor(algorithm, options) {
+      super(options ?? {});
+      const Implementation = createSignShim(algorithm, BufferClass, globalObject);
+      this._implementation = new Implementation();
+    }
+
+    _write(chunk, encoding, callback) {
+      this._implementation._write(chunk, encoding, callback);
+    }
+
+    update(value, encoding) {
+      this._implementation.update(value, encoding);
+      return this;
+    }
+
+    sign(key, outputEncoding) {
+      return this._implementation.sign(key, outputEncoding);
+    }
   }
-
-  Sign.prototype._write = function _write(chunk, encoding, callback) {
-    this._implementation._write(chunk, encoding, callback);
-  };
-
-  Sign.prototype.update = function update(value, encoding) {
-    this._implementation.update(value, encoding);
-    return this;
-  };
-
-  Sign.prototype.sign = function signValue(key, outputEncoding) {
-    return this._implementation.sign(key, outputEncoding);
-  };
 
   return Sign;
 }
@@ -1173,23 +1218,26 @@ export function createVerifyShim(algorithm, BufferClass, globalObject = globalTh
 }
 
 export function createVerifyClass(BufferClass, globalObject = globalThis) {
-  function Verify(algorithm) {
-    const Implementation = createVerifyShim(algorithm, BufferClass, globalObject);
-    this._implementation = new Implementation();
+  class Verify extends Writable {
+    constructor(algorithm, options) {
+      super(options ?? {});
+      const Implementation = createVerifyShim(algorithm, BufferClass, globalObject);
+      this._implementation = new Implementation();
+    }
+
+    update(value, encoding) {
+      this._implementation.update(value, encoding);
+      return this;
+    }
+
+    _write(chunk, encoding, callback) {
+      this._implementation._write(chunk, encoding, callback);
+    }
+
+    verify(key, signature, signatureEncoding) {
+      return this._implementation.verify(key, signature, signatureEncoding);
+    }
   }
-
-  Verify.prototype.update = function update(value, encoding) {
-    this._implementation.update(value, encoding);
-    return this;
-  };
-
-  Verify.prototype._write = function _write(chunk, encoding, callback) {
-    this._implementation._write(chunk, encoding, callback);
-  };
-
-  Verify.prototype.verify = function verifyValue(key, signature, signatureEncoding) {
-    return this._implementation.verify(key, signature, signatureEncoding);
-  };
 
   return Verify;
 }
@@ -1406,6 +1454,13 @@ export function generateKeyPairSync(type, options = {}) {
 }
 
 export class BrowserECDH {
+  static convertKey() {
+    throw new UnsupportedWebCapabilityError(
+      'ECDH.convertKey',
+      'Web Crypto does not expose synchronous elliptic-curve point format conversion',
+    );
+  }
+
   constructor(curve, globalObject = globalThis) {
     this.globalObject = globalObject;
     this.curve = curveInfo(curve);
@@ -1585,6 +1640,9 @@ export function createCertificateShim(globalObject = globalThis, name = 'X509Cer
     checkPrivateKey(privateKey) { throw unsupportedCertificateOperation(name, 'checkPrivateKey'); }
     verify(publicKey) { throw unsupportedCertificateOperation(name, 'verify'); }
     toLegacyObject() { throw unsupportedCertificateOperation(name, 'toLegacyObject'); }
+    [Symbol.for('nodejs.util.inspect.custom')]() {
+      return this.toString();
+    }
   };
 }
 

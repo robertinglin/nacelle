@@ -170,6 +170,7 @@ function createConstants() {
     ...baseConstants,
     ...BROWSER_SIGNAL_CONSTANTS,
     ...crypto,
+    E2BIG: 7,
     EISDIR: 21,
     EOPNOTSUPP: 95,
     EOVERFLOW: 75,
@@ -183,7 +184,7 @@ function createConstants() {
 }
 
 const ERRNO_CONSTANT_NAMES = Object.freeze([
-  'EISDIR', 'EOPNOTSUPP', 'EOVERFLOW', 'EPERM', 'EPIPE',
+  'E2BIG', 'EISDIR', 'EOPNOTSUPP', 'EOVERFLOW', 'EPERM', 'EPIPE',
   'EPROTO', 'EPROTONOSUPPORT', 'EPROTOTYPE', 'ERANGE',
 ]);
 

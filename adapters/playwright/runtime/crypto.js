@@ -2124,6 +2124,26 @@ export class Cipher {
     void outputEncoding;
     unsupportedCipherOperation('Cipher', 'update');
   }
+
+  final(outputEncoding) {
+    void outputEncoding;
+    unsupportedCipherOperation(this.constructor?.name || 'Cipher', 'final');
+  }
+
+  setAutoPadding(autoPadding = true) {
+    void autoPadding;
+    unsupportedCipherOperation(this.constructor?.name || 'Cipher', 'setAutoPadding');
+  }
+
+  getAuthTag() {
+    unsupportedCipherOperation(this.constructor?.name || 'Cipher', 'getAuthTag');
+  }
+
+  setAAD(aad, options) {
+    void aad;
+    void options;
+    unsupportedCipherOperation(this.constructor?.name || 'Cipher', 'setAAD');
+  }
 }
 
 export class Cipheriv extends Cipher {
@@ -2152,6 +2172,75 @@ export class Cipheriv extends Cipher {
     void outputEncoding;
     unsupportedCipherOperation('Cipheriv', 'update');
   }
+
+  final(outputEncoding) {
+    void outputEncoding;
+    unsupportedCipherOperation('Cipheriv', 'final');
+  }
+
+  setAutoPadding(autoPadding = true) {
+    void autoPadding;
+    unsupportedCipherOperation('Cipheriv', 'setAutoPadding');
+  }
+
+  getAuthTag() {
+    unsupportedCipherOperation('Cipheriv', 'getAuthTag');
+  }
+
+  setAAD(aad, options) {
+    void aad;
+    void options;
+    unsupportedCipherOperation('Cipheriv', 'setAAD');
+  }
+}
+
+export class Decipher extends Cipher {
+  constructor(cipher, password, options) {
+    void cipher;
+    void password;
+    void options;
+    unsupportedCipherOperation('Decipher');
+  }
+
+  _transform(chunk, encoding, callback) {
+    void chunk;
+    void encoding;
+    void callback;
+    unsupportedCipherOperation('Decipher', '_transform');
+  }
+
+  _flush(callback) {
+    void callback;
+    unsupportedCipherOperation('Decipher', '_flush');
+  }
+
+  update(data, inputEncoding, outputEncoding) {
+    void data;
+    void inputEncoding;
+    void outputEncoding;
+    unsupportedCipherOperation('Decipher', 'update');
+  }
+
+  final(outputEncoding) {
+    void outputEncoding;
+    unsupportedCipherOperation('Decipher', 'final');
+  }
+
+  setAutoPadding(autoPadding = true) {
+    void autoPadding;
+    unsupportedCipherOperation('Decipher', 'setAutoPadding');
+  }
+
+  setAuthTag(tag) {
+    void tag;
+    unsupportedCipherOperation('Decipher', 'setAuthTag');
+  }
+
+  setAAD(aad, options) {
+    void aad;
+    void options;
+    unsupportedCipherOperation('Decipher', 'setAAD');
+  }
 }
 
 export class Decipheriv extends Cipheriv {
@@ -2164,6 +2253,18 @@ export class Decipheriv extends Cipheriv {
     void inputEncoding;
     void outputEncoding;
     unsupportedCipherOperation('Decipheriv', 'update');
+  }
+
+  _transform(chunk, encoding, callback) {
+    void chunk;
+    void encoding;
+    void callback;
+    unsupportedCipherOperation('Decipheriv', '_transform');
+  }
+
+  _flush(callback) {
+    void callback;
+    unsupportedCipherOperation('Decipheriv', '_flush');
   }
 
   final(outputEncoding) {
@@ -2429,6 +2530,7 @@ export function createCryptoContract(globalObject = globalThis) {
     createDecipheriv,
     Cipher,
     Cipheriv,
+    Decipher,
     Decipheriv,
     constants: cryptoConstants,
     setEngine,

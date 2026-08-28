@@ -345,7 +345,57 @@ function xorBytes(value, byte) {
 }
 
 export function createHashShim(BufferClass) {
+  const states = new WeakMap();
+
+  function invalidHashData(value) {
+    const received = value === undefined
+      ? 'undefined'
+      : value === null
+        ? 'null'
+        : typeof value === 'object'
+          ? `an instance of ${value.constructor?.name || 'Object'}`
+          : `type ${typeof value} (${String(value)})`;
+    const error = new TypeError(
+      'The "data" argument must be of type string or an instance of Buffer, '
+      + `TypedArray, or DataView. Received ${received}`,
+    );
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    return error;
+  }
+
+  function hashInput(value, encoding) {
+    if (typeof value === 'string') {
+      return encoding === undefined
+        ? bytes(value)
+        : new Uint8Array(BufferClass.from(value, encoding));
+    }
+    if (!isArrayBufferView(value)) throw invalidHashData(value);
+    return bytes(value);
+  }
+
+  function createHash(algorithm, options, sourceState) {
+    const chunks = sourceState
+      ? sourceState.chunks.map((chunk) => new Uint8Array(chunk))
+      : [];
+    const state = {
+      algorithm,
+      chunks,
+      finalized: false,
+      streamResult: undefined,
+    };
+
+    const hash = {};
+    Object.setPrototypeOf(hash, Hash.prototype);
+    states.set(hash, state);
+    return hash;
+  }
+
   function Hash(algorithm) {
+    if (algorithm && states.has(algorithm)) {
+      const sourceState = states.get(algorithm);
+      if (sourceState.finalized) throw finalizedHashError();
+      return createHash(sourceState.algorithm, undefined, sourceState);
+    }
     if (typeof algorithm !== 'string') {
       const received = algorithm === undefined ? 'undefined' : typeof algorithm;
       const error = new TypeError(
@@ -359,64 +409,73 @@ export function createHashShim(BufferClass) {
     } catch {
       throw new TypeError('Digest method not supported');
     }
-    const chunks = [];
-    let finalized = false;
-    let streamResult;
-    const finalizedError = () => {
-      const error = new Error('Digest already called');
-      error.code = 'ERR_CRYPTO_HASH_FINALIZED';
-      return error;
-    };
-    const hashValue = () => {
-      const input = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, 0));
-      let offset = 0;
-      for (const chunk of chunks) { input.set(chunk, offset); offset += chunk.length; }
-      return BufferClass.from(hashSync(algorithm, input));
-    };
-    const hash = {
-      update(value, encoding) {
-        if (finalized) throw finalizedError();
-        if (value === undefined) {
-          const error = new TypeError('The "data" argument must be of type string or an instance of Buffer');
-          error.code = 'ERR_INVALID_ARG_TYPE';
-          throw error;
-        }
-        const input = typeof value === 'string' && encoding !== undefined
-          ? BufferClass.from(value, encoding)
-          : value;
-        chunks.push(bytes(input));
-        return this;
-      },
-      write(value, encoding) {
-        this.update(value, encoding);
-        return true;
-      },
-      end(value, encoding, callback) {
-        if (value !== undefined && value !== null) this.update(value, encoding);
-        if (!finalized) {
-          streamResult = this.digest();
-        }
-        if (typeof callback === 'function') callback();
-        return this;
-      },
-      read() {
-        if (!finalized) this.end();
-        return streamResult;
-      },
-      digest(encoding) {
-        if (finalized) throw finalizedError();
-        finalized = true;
-        const result = hashValue();
-        streamResult = result;
-        if (!encoding || encoding === 'buffer') return result;
-        const encodingName = typeof encoding === 'string' ? encoding : encoding.toString();
-        return result.toString(encodingName);
-      },
-    };
-    // Node exposes Hash as both a factory and a callable constructor.
-    Object.setPrototypeOf(hash, Hash.prototype);
-    return hash;
+    return createHash(algorithm);
   }
+
+  function finalizedHashError() {
+    const error = new Error('Digest already called');
+    error.code = 'ERR_CRYPTO_HASH_FINALIZED';
+    return error;
+  }
+
+  Hash.prototype.copy = function copy(options) {
+    const state = states.get(this);
+    if (state?.finalized) throw finalizedHashError();
+    return createHash(state.algorithm, options, state);
+  };
+
+  Hash.prototype._transform = function _transform(chunk, encoding, callback) {
+    this.update(chunk, encoding);
+    callback();
+  };
+
+  Hash.prototype._flush = function _flush(callback) {
+    const result = this.digest();
+    const state = states.get(this);
+    state.streamResult = result;
+    if (typeof this.push === 'function') this.push(result);
+    callback();
+  };
+
+  Hash.prototype.update = function update(value, encoding) {
+    const state = states.get(this);
+    if (state.finalized) throw finalizedHashError();
+    state.chunks.push(hashInput(value, encoding));
+    return this;
+  };
+
+  Hash.prototype.write = function write(value, encoding) {
+    this.update(value, encoding);
+    return true;
+  };
+
+  Hash.prototype.end = function end(value, encoding, callback) {
+    if (value !== undefined && value !== null) this.update(value, encoding);
+    const state = states.get(this);
+    if (!state.finalized) this._flush(() => {});
+    if (typeof callback === 'function') callback();
+    return this;
+  };
+
+  Hash.prototype.read = function read() {
+    const state = states.get(this);
+    if (!state.finalized) this.end();
+    return state.streamResult;
+  };
+
+  Hash.prototype.digest = function digest(encoding) {
+    const state = states.get(this);
+    if (state.finalized) throw finalizedHashError();
+    state.finalized = true;
+    const input = new Uint8Array(state.chunks.reduce((total, chunk) => total + chunk.length, 0));
+    let offset = 0;
+    for (const chunk of state.chunks) { input.set(chunk, offset); offset += chunk.length; }
+    const result = BufferClass.from(hashSync(state.algorithm, input));
+    state.streamResult = result;
+    if (!encoding || encoding === 'buffer') return result;
+    return result.toString(String(encoding));
+  };
+
   return Hash;
 }
 
@@ -526,6 +585,18 @@ export function createHmacShim(BufferClass, processObject, scope = globalThis) {
     if (value !== undefined) this.update(value, encoding);
     this._output = this.digest();
     return this;
+  };
+
+  Hmac.prototype._transform = function _transform(chunk, encoding, callback) {
+    this.update(chunk, encoding);
+    callback();
+  };
+
+  Hmac.prototype._flush = function _flush(callback) {
+    const result = this.digest();
+    this._output = result;
+    if (typeof this.push === 'function') this.push(result);
+    callback();
   };
 
   Hmac.prototype.read = function read() {
@@ -1207,6 +1278,8 @@ export class BrowserECDH {
     this.curve = curveInfo(curve);
     this.privateKey = null;
     this.publicKey = null;
+    this.privateKeyBytes = null;
+    this.publicKeyBytes = null;
   }
 
   async generateKeys(encoding) {
@@ -1218,16 +1291,34 @@ export class BrowserECDH {
     );
     this.privateKey = pair.privateKey;
     this.publicKey = pair.publicKey;
+    this.privateKeyBytes = null;
+    this.publicKeyBytes = null;
     return this.getPublicKey(encoding);
   }
 
+  setPrivateKey(value, encoding) {
+    const key = ecdhKeyBytes(value, encoding, this.globalObject);
+    this.privateKeyBytes = new Uint8Array(key);
+    this.privateKey = null;
+    return this;
+  }
+
+  setPublicKey(value, encoding) {
+    const key = ecdhKeyBytes(value, encoding, this.globalObject);
+    this.publicKeyBytes = new Uint8Array(key);
+    this.publicKey = null;
+    return this;
+  }
+
   async getPublicKey(encoding) {
+    if (this.publicKeyBytes) return encodeKeyBytes(this.publicKeyBytes, encoding);
     if (!this.publicKey) throw new TypeError('ECDH keys have not been generated');
     const subtle = requireSubtle(this.globalObject, 'ECDH');
     return encodeKeyBytes(await subtle.exportKey('raw', this.publicKey), encoding);
   }
 
   async getPrivateKey(encoding) {
+    if (this.privateKeyBytes) return encodeKeyBytes(this.privateKeyBytes, encoding);
     if (!this.privateKey) throw new TypeError('ECDH keys have not been generated');
     const subtle = requireSubtle(this.globalObject, 'ECDH');
     return encodeKeyBytes(await subtle.exportKey('pkcs8', this.privateKey), encoding);
@@ -1246,6 +1337,29 @@ export class BrowserECDH {
     const secret = await subtle.deriveBits({ name: 'ECDH', public: imported }, this.privateKey, this.curve.bits);
     return new Uint8Array(secret);
   }
+}
+
+function ecdhKeyBytes(value, encoding, globalObject) {
+  if (typeof value === 'string') {
+    if (encoding !== undefined && typeof globalObject?.Buffer?.from === 'function') {
+      return new Uint8Array(globalObject.Buffer.from(value, encoding));
+    }
+    return new globalObject.TextEncoder().encode(value);
+  }
+  if (isArrayBufferView(value) || isArrayBuffer(value)) return toCryptoBytes(value, globalObject.TextEncoder);
+  const received = value === undefined
+    ? 'undefined'
+    : value === null
+      ? 'null'
+      : typeof value === 'object'
+        ? `an instance of ${value.constructor?.name || 'Object'}`
+        : `type ${typeof value} (${String(value)})`;
+  const error = new TypeError(
+    'The "key" argument must be of type string or an instance of ArrayBuffer, '
+    + `Buffer, TypedArray, or DataView. Received ${received}`,
+  );
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  throw error;
 }
 
 export function createECDH(curve, globalObject = globalThis) {

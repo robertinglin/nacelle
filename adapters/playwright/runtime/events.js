@@ -49,6 +49,36 @@ function receivedValue(value) {
   return `an instance of ${value?.constructor?.name || typeof value}`;
 }
 
+function invalidArgumentType(name, expected, value) {
+  const error = new TypeError(
+    `The "${name}" ${name.includes('.') ? 'property' : 'argument'} must be ${expected}. Received ${receivedValue(value)}`,
+  );
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function validateFunction(value, name) {
+  if (typeof value !== 'function') throw invalidArgumentType(name, 'of type function', value);
+}
+
+function validateObject(value, name) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw invalidArgumentType(name, 'of type object', value);
+  }
+}
+
+function validateAbortSignal(value, name) {
+  if (value === undefined) return;
+  const AbortSignal = globalThis.AbortSignal;
+  const isNativeSignal = typeof AbortSignal === 'function' && value instanceof AbortSignal;
+  const isSignalLike = typeof value?.addEventListener === 'function'
+    && typeof value?.removeEventListener === 'function'
+    && typeof value.aborted === 'boolean';
+  if (!isNativeSignal && !isSignalLike) {
+    throw invalidArgumentType(name, 'an instance of AbortSignal', value);
+  }
+}
+
 function validateMaxListeners(value, name = 'n') {
   if (typeof value !== 'number') {
     const error = new TypeError(`The "${name}" argument must be of type number. Received ${receivedValue(value)}`);
@@ -152,7 +182,7 @@ export class BrowserEventEmitter {
   }
 
   on(name, listener) {
-    if (typeof listener !== 'function') throw new TypeError('listener must be a function');
+    validateFunction(listener, 'listener');
     if (name !== 'newListener') this.emit('newListener', name, listener.listener || listener);
     const listeners = this._listeners.get(name) || new ListenerList();
     listeners.add(listener);
@@ -167,7 +197,7 @@ export class BrowserEventEmitter {
   }
 
   prependListener(name, listener) {
-    if (typeof listener !== 'function') throw new TypeError('listener must be a function');
+    validateFunction(listener, 'listener');
     if (name !== 'newListener') this.emit('newListener', name, listener.listener || listener);
     const listeners = this._listeners.get(name) || new ListenerList();
     this._listeners.set(name, new ListenerList(listener, ...listeners));
@@ -193,7 +223,7 @@ export class BrowserEventEmitter {
   }
 
   once(name, listener) {
-    if (typeof listener !== 'function') throw new TypeError('listener must be a function');
+    validateFunction(listener, 'listener');
     const onceListener = function onceListener(...args) {
       this.off(name, onceListener);
       listener.apply(this, args);
@@ -206,7 +236,7 @@ export class BrowserEventEmitter {
   }
 
   prependOnceListener(name, listener) {
-    if (typeof listener !== 'function') throw new TypeError('listener must be a function');
+    validateFunction(listener, 'listener');
     const onceListener = (...args) => {
       this.off(name, onceListener);
       listener.apply(this, args);
@@ -379,7 +409,8 @@ export function getEventListeners(emitter, name) {
   if (emitter && typeof emitter.listeners === 'function') {
     return emitter.listeners(name);
   }
-  return [];
+  if (isEventTarget(emitter)) return [];
+  throw invalidEmitter(emitter);
 }
 
 export function getMaxListeners(emitterOrTarget) {
@@ -402,6 +433,15 @@ BrowserEventEmitter.prototype.addListener = BrowserEventEmitter.prototype.on;
 BrowserEventEmitter.prototype.removeListener = BrowserEventEmitter.prototype.off;
 
 export function once(emitter, name, options = {}) {
+  try {
+    validateObject(options, 'options');
+    validateAbortSignal(options.signal, 'options.signal');
+    if (typeof emitter?.on !== 'function' && typeof emitter?.addEventListener !== 'function') {
+      throw invalidEmitter(emitter);
+    }
+  } catch (error) {
+    return Promise.reject(error);
+  }
   return new Promise((resolve, reject) => {
     let settled = false;
     const isEventTarget = typeof emitter?.addEventListener === 'function'
@@ -440,15 +480,9 @@ export function once(emitter, name, options = {}) {
 export function addAbortListener(signal, listener) {
   if (!signal || typeof signal.addEventListener !== 'function'
     || typeof signal.removeEventListener !== 'function') {
-    const error = new TypeError('The "signal" argument must be an instance of AbortSignal');
-    error.code = 'ERR_INVALID_ARG_TYPE';
-    throw error;
+    throw invalidArgumentType('signal', 'an instance of AbortSignal', signal);
   }
-  if (typeof listener !== 'function') {
-    const error = new TypeError('The "listener" argument must be of type function');
-    error.code = 'ERR_INVALID_ARG_TYPE';
-    throw error;
-  }
+  validateFunction(listener, 'listener');
   let disposed = false;
   const onAbort = (event) => {
     if (disposed) return;
@@ -654,10 +688,28 @@ Object.defineProperties(EventEmitter, {
 });
 
 EventEmitter.on = function on(emitter, name, options = {}) {
+  validateObject(options, 'options');
+  validateAbortSignal(options.signal, 'options.signal');
+  if (typeof emitter?.on !== 'function' && typeof emitter?.addEventListener !== 'function') {
+    throw invalidEmitter(emitter);
+  }
+  const highWaterMark = options.highWaterMark ?? options.highWatermark ?? Number.MAX_SAFE_INTEGER;
+  const lowWaterMark = options.lowWaterMark ?? options.lowWatermark ?? 1;
+  if (typeof highWaterMark !== 'number') throw invalidArgumentType('options.highWaterMark', 'of type number', highWaterMark);
+  if (typeof lowWaterMark !== 'number') throw invalidArgumentType('options.lowWaterMark', 'of type number', lowWaterMark);
+  if (!Number.isInteger(highWaterMark) || highWaterMark < 1 || highWaterMark > Number.MAX_SAFE_INTEGER) {
+    const error = new RangeError(`The value of "options.highWaterMark" is out of range. It must be >= 1 && <= ${Number.MAX_SAFE_INTEGER}. Received ${receivedValue(highWaterMark)}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  if (!Number.isInteger(lowWaterMark) || lowWaterMark < 1 || lowWaterMark > Number.MAX_SAFE_INTEGER) {
+    const error = new RangeError(`The value of "options.lowWaterMark" is out of range. It must be >= 1 && <= ${Number.MAX_SAFE_INTEGER}. Received ${receivedValue(lowWaterMark)}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
   const queue = [];
   const waiters = [];
   let finished = false;
-  const highWaterMark = Number(options.highWaterMark) || 1;
   const watermarkData = { high: highWaterMark, get size() { return queue.length; } };
   const cleanup = () => {
     emitter.off?.(name, onEvent);

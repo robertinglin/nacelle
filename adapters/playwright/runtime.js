@@ -39,6 +39,7 @@ import { createHttpCompatibility } from './runtime/http.js';
 import { createTlsModule } from './runtime/tls.js';
 import { createHttp2Module } from './runtime/http2.js';
 import { createPerformancePrimitives } from './runtime/perf.js';
+import { createWasmContract } from './runtime/wasm.js';
 import {
   aesGcmDecrypt,
   aesGcmEncrypt,
@@ -6702,6 +6703,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       TextDecoderStream: scope.TextDecoderStream,
       CompressionStream: scope.CompressionStream,
       DecompressionStream: scope.DecompressionStream,
+      WebAssembly: scope.WebAssembly,
       URL: scope.URL,
       URLSearchParams: scope.URLSearchParams,
       setTimeout: scope.setTimeout,
@@ -6825,6 +6827,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       TextDecoderStream: streamWebApi.TextDecoderStream,
       CompressionStream: streamWebApi.CompressionStream,
       DecompressionStream: streamWebApi.DecompressionStream,
+      WebAssembly: createWasmContract(scope),
     });
     vfs.mkdir('/node/deps/corepack', { recursive: true });
     vfs.writeFile('/node/deps/corepack/package.json', JSON.stringify({ version: '0.34.6' }));

@@ -67,6 +67,8 @@ class SurfaceTests(unittest.TestCase):
         self.assertIn('typeof value === "object"', source)
         self.assertIn('typeof value === "function" ? value.prototype : Object.getPrototypeOf(value)', source)
         self.assertIn("Object.getOwnPropertySymbols", source)
+        self.assertIn("Object.getOwnPropertyNames(value).filter", source)
+        self.assertIn("key + \".\" + memberName", source)
         self.assertIn("symbolLabel", source)
         self.assertIn("isPublicSymbol", source)
         self.assertIn("nodejs.asyncDispose", source)

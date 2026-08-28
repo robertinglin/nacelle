@@ -22,6 +22,19 @@ const UV_EINVAL = -22;
 const UV_EADDRINUSE = -98;
 let nextVirtualDescriptor = 1000;
 
+function invalidArgumentType(name, expected, value) {
+  const received = value === null ? 'null' : value === undefined ? 'undefined' : `type ${typeof value}`;
+  const error = new TypeError(`The "${name}" argument must be of type ${expected}. Received ${received}`);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function bufferOutOfBounds(name) {
+  const error = new RangeError(`The ${name} is outside the bounds of the buffer`);
+  error.code = 'ERR_BUFFER_OUT_OF_BOUNDS';
+  return error;
+}
+
 function asBytes(value, offset = 0, length = undefined) {
   let bytes;
   if (typeof value === 'string') bytes = new TextEncoder().encode(value);
@@ -34,11 +47,14 @@ function asBytes(value, offset = 0, length = undefined) {
       cursor += part.byteLength;
     }
   }
-  else if (value instanceof Uint8Array) bytes = new Uint8Array(value);
-  else if (value instanceof ArrayBuffer) bytes = new Uint8Array(value.slice(0));
-  else if (ArrayBuffer.isView(value)) bytes = new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
-  else throw new TypeError('message must be a string, Buffer, or Uint8Array');
-  return bytes.slice(offset, length === undefined ? bytes.byteLength : offset + length);
+  else if (ArrayBuffer.isView(value)) bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  else throw invalidArgumentType('buffer', 'Buffer, TypedArray, DataView, or string', value);
+  if (!Number.isInteger(offset) || offset < 0) throw bufferOutOfBounds('offset');
+  if (offset > bytes.byteLength) throw bufferOutOfBounds('offset');
+  if (length === undefined) length = bytes.byteLength - offset;
+  if (!Number.isInteger(length) || length < 0) throw bufferOutOfBounds('length');
+  if (offset + length > bytes.byteLength) throw bufferOutOfBounds('length');
+  return bytes.slice(offset, offset + length);
 }
 
 function validatePort(port) {
@@ -186,6 +202,26 @@ function createDgramHandle(type, { dns, network, lookup } = {}) {
     recvStart() { return state.closed ? UV_EINVAL : 0; },
     recvStop() { return 0; },
     getSendQueueCount() { return 0; },
+    connect(address, port) {
+      if (state.closed || !state.bound) return UV_EINVAL;
+      state.remoteAddress = {
+        address: normalizeVirtualAddress(address, family),
+        port: validatePort(port),
+      };
+      return 0;
+    },
+    disconnect() {
+      state.remoteAddress = null;
+      return 0;
+    },
+    getpeername(address) {
+      if (!state.remoteAddress) return UV_EINVAL;
+      if (address) Object.assign(address, {
+        ...state.remoteAddress,
+        family: family === 6 ? 'IPv6' : 'IPv4',
+      });
+      return 0;
+    },
     send(request) {
       request?._bnhInitialize?.();
       queueMicrotask(() => request?.oncomplete?.(0));
@@ -280,6 +316,7 @@ export class Socket extends EventEmitter {
       receiving: false,
       bindState: BIND_STATE_UNBOUND,
       queue: undefined,
+      closeQueued: false,
       reuseAddr: Boolean(internal.reuseAddr),
     };
     state.handle.recvStart = () => {
@@ -288,6 +325,26 @@ export class Socket extends EventEmitter {
     };
     state.handle.recvStop = () => {
       state.receiving = false;
+      return 0;
+    };
+    state.handle.connect = (address, port) => {
+      if (this._closed || !this._bound) return UV_EINVAL;
+      state.remoteAddress = {
+        address: normalizeVirtualAddress(address, this.type === 'udp6' ? 6 : 4),
+        port: validatePort(port),
+      };
+      return 0;
+    };
+    state.handle.disconnect = () => {
+      state.remoteAddress = null;
+      return 0;
+    };
+    state.handle.getpeername = (address) => {
+      if (!state.remoteAddress) return UV_EINVAL;
+      if (address) Object.assign(address, {
+        ...state.remoteAddress,
+        family: this.type === 'udp6' ? 'IPv6' : 'IPv4',
+      });
       return 0;
     };
     state.handle.getSendQueueCount = () => this._sendQueueCount;
@@ -362,7 +419,9 @@ export class Socket extends EventEmitter {
         try {
           const cluster = typeof this._cluster === 'function' ? this._cluster() : this._cluster;
           const groupId = this._clusterGroupId || cluster?.worker?.process?.ppid;
-          const result = cluster?.isWorker && typeof this._network.bindClusterUdp === 'function'
+          const useClusterBinding = (cluster?.isWorker || this._clusterGroupId !== undefined)
+            && typeof this._network.bindClusterUdp === 'function';
+          const result = useClusterBinding
             ? this._network.bindClusterUdp(groupId, normalizedAddress, requestedPort, {
                 reuseAddr: state.reuseAddr,
                 reusePort: this._reusePort,
@@ -477,8 +536,9 @@ export class Socket extends EventEmitter {
       throw socketError('ERR_SOCKET_BAD_PORT', 'Port should be specified');
     }
     port = validatePort(port);
-    const transmit = () => {
-      queueMicrotask(() => {
+    const transmit = (defer = true) => {
+      const run = () => {
+        if (this._closed || !this[VIRTUAL_DGRAM_STATE].handle) return;
         const family = this.type === 'udp6' ? 'ipv6' : 'ipv4';
         if (this._sendBlockList?.check?.(address, family)) {
           const error = networkError('ERR_IP_BLOCKED', 'send', address, port);
@@ -526,52 +586,64 @@ export class Socket extends EventEmitter {
             runCallback(error);
           },
         });
-      });
+      };
+      if (defer) queueMicrotask(run);
+      else run();
+    };
+    const sendAfterBinding = () => {
+      if (!this._bound) {
+        if (!this._binding) this.bind(0, this.type === 'udp6' ? '::' : '0.0.0.0');
+        if (this._bound) transmit();
+        else enqueue(this, () => transmit(false));
+      } else {
+        transmit();
+      }
     };
     if (virtualAddressFamily(address) === 0) {
       const lookup = this[VIRTUAL_DGRAM_STATE].handle.lookup;
       lookup.call(this[VIRTUAL_DGRAM_STATE].handle, address, (error, resolvedAddress, resolvedFamily) => {
+        if (this._closed || !this[VIRTUAL_DGRAM_STATE].handle) return;
         if (error) {
           if (callbackProvided) callback(error);
           else this.emit('error', error);
           return;
         }
         address = normalizeVirtualAddress(resolvedAddress, resolvedFamily || (this.type === 'udp6' ? 6 : 4));
-        transmit();
+        sendAfterBinding();
       });
-      return true;
+      return undefined;
     }
     address = normalizeVirtualAddress(address, this.type === 'udp6' ? 6 : 4);
-    if (!this._bound) {
-      if (!this._binding) this.bind(0, this.type === 'udp6' ? '::' : '0.0.0.0');
-      if (this._bound) transmit();
-      else enqueue(this, transmit);
-    } else {
-      transmit();
-    }
-    return true;
+    sendAfterBinding();
+    return undefined;
   }
 
   sendto(buffer, offset, length, port, address, callback) {
-    if (typeof offset !== 'number') throw socketError('ERR_INVALID_ARG_TYPE', 'The "offset" argument must be of type number');
-    if (typeof length !== 'number') throw socketError('ERR_INVALID_ARG_TYPE', 'The "length" argument must be of type number');
-    if (typeof port !== 'number') throw socketError('ERR_INVALID_ARG_TYPE', 'The "port" argument must be of type number');
-    if (typeof address !== 'string') throw socketError('ERR_INVALID_ARG_TYPE', 'The "address" argument must be of type string');
-    this.send(buffer, offset, length, port, address, callback);
+    if (typeof offset !== 'number') throw invalidArgumentType('offset', 'number', offset);
+    if (typeof length !== 'number') throw invalidArgumentType('length', 'number', length);
+    if (typeof port !== 'number') throw invalidArgumentType('port', 'number', port);
+    if (typeof address !== 'string') throw invalidArgumentType('address', 'string', address);
+    return this.send(buffer, offset, length, port, address, callback);
   }
 
   connect(port, address, callback) {
     healthCheck(this);
     if (this._connected || this._connecting) throw socketError('ERR_SOCKET_DGRAM_IS_CONNECTED', 'Already connected');
-    this._connecting = true;
     if (typeof address === 'function') {
       callback = address;
       address = undefined;
     }
     const family = this.type === 'udp6' ? 6 : 4;
     const requestedPort = validatePort(port);
-    const requestedAddress = address || (family === 6 ? '::1' : '127.0.0.1');
+    const requestedAddress = address === undefined || address === ''
+      ? (family === 6 ? '::1' : '127.0.0.1')
+      : address;
+    if (typeof requestedAddress !== 'string') {
+      throw invalidArgumentType('address', 'string', requestedAddress);
+    }
+    this._connecting = true;
     const finish = (error, resolvedAddress = requestedAddress, resolvedFamily = family) => {
+      if (this._closed || !this[VIRTUAL_DGRAM_STATE].handle) return;
       if (error) {
         this._connecting = false;
         if (callback) callback.call(this, error);
@@ -590,8 +662,14 @@ export class Socket extends EventEmitter {
         address: normalizeVirtualAddress(resolvedAddress, resolvedFamily),
       };
       const complete = (bindError) => {
+        if (this._closed || !this[VIRTUAL_DGRAM_STATE].handle) return;
         if (bindError) {
           finish(bindError);
+          return;
+        }
+        const connectError = this[VIRTUAL_DGRAM_STATE].handle.connect(remote.address, remote.port);
+        if (connectError) {
+          finish(networkError('UNKNOWN', 'connect', requestedAddress, requestedPort));
           return;
         }
         this._remoteAddress = remote;
@@ -616,13 +694,25 @@ export class Socket extends EventEmitter {
   disconnect() {
     healthCheck(this);
     if (!this._connected) throw socketError('ERR_SOCKET_DGRAM_NOT_CONNECTED', 'Not connected');
+    const error = this[VIRTUAL_DGRAM_STATE].handle.disconnect?.() || 0;
+    if (error) throw networkError('UNKNOWN', 'connect', this._remoteAddress.address, this._remoteAddress.port);
     this._remoteAddress = null;
     this._connected = false;
   }
 
   close(callback) {
-    healthCheck(this);
     if (typeof callback === 'function') this.once('close', callback);
+    const state = this[VIRTUAL_DGRAM_STATE];
+    if (state.queue !== undefined && !state.closeQueued) {
+      state.closeQueued = true;
+      state.queue.push(() => {
+        state.closeQueued = false;
+        this.close();
+      });
+      return this;
+    }
+    if (state.closeQueued) return this;
+    healthCheck(this);
     if (this._closed) return this;
     this._closed = true;
     this._binding = false;
@@ -632,6 +722,7 @@ export class Socket extends EventEmitter {
     this._taskRelease = null;
     this._bound = false;
     this[VIRTUAL_DGRAM_STATE].bindState = BIND_STATE_UNBOUND;
+    this[VIRTUAL_DGRAM_STATE].closeQueued = false;
     this[VIRTUAL_DGRAM_STATE].queue = undefined;
     this._sendQueueCount = 0;
     this[VIRTUAL_DGRAM_STATE].handle = null;

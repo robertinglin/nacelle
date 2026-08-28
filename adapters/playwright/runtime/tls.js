@@ -4,6 +4,7 @@ import { createBrowserNet } from './net.js';
 import { AsyncResource } from './async-hooks.js';
 import { createProxyCapability } from './proxy.js';
 import { createHmacShim, hashSync } from './crypto.js';
+import { UnsupportedWebCapabilityError } from './errors.js';
 
 const DEFAULT_CIPHERS = 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256';
 const DEFAULT_ROOT_CERTIFICATES = Object.freeze([
@@ -711,6 +712,33 @@ export class TLSSocket extends Duplex {
   setMaxSendFragment() { return true; }
   setServername(servername) { this.servername = String(servername); return this; }
   renegotiate(_options, callback) { schedule(() => callback?.(null)); return true; }
+
+  // Browser WebSocket/TLS does not expose the peer certificate as an X509
+  // object. The legacy getPeerCertificate() metadata above is intentionally
+  // not promoted to this API because it is not a parsed certificate.
+  getX509Certificate() { return undefined; }
+
+  // Browser TLS credentials are selected by the user agent before the
+  // WebSocket handshake. There is no browser API to replace them on an open
+  // connection, so do not pretend that changing the virtual options works.
+  setKeyCert() {
+    throw new UnsupportedWebCapabilityError(
+      'tls.TLSSocket.setKeyCert',
+      'WebSocket TLS credentials cannot be changed through a browser API',
+    );
+  }
+
+  // These values come from the native TLS handle in Node. Browser WebSocket
+  // and Web Crypto expose neither negotiated signature groups nor ephemeral
+  // key details, TLS Finished messages, session tickets, or trace hooks.
+  // Returning null matches Node's socket-method proxy when no native handle is
+  // available and avoids fabricating protocol state.
+  getSharedSigalgs() { return null; }
+  getEphemeralKeyInfo() { return null; }
+  getFinished() { return null; }
+  getPeerFinished() { return null; }
+  getTLSTicket() { return null; }
+  enableTrace() { return null; }
 
   exportKeyingMaterial(length, label = '', context = undefined) {
     if (!Number.isInteger(length) || length < 0) throw new RangeError('length must be a non-negative integer');

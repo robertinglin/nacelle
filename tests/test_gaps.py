@@ -373,6 +373,16 @@ class GapCardEmissionTests(unittest.TestCase):
             )
             self.assertEqual(_runtime_surface(gap), "runtime.js")
 
+    def test_console_stream_surfaces_own_process_runtime_layer(self) -> None:
+        gap = Gap(
+            gap_id="console-stream",
+            kind=MISSING_API,
+            module="console",
+            symbols=("_stdout.setTimeout", "_stderr.rawListeners"),
+            affected_count=1,
+        )
+        self.assertEqual(_runtime_surface(gap), "runtime.js")
+
     def test_cards_carry_prompt_task_reference_and_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

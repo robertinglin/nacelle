@@ -86,6 +86,15 @@ def _runtime_surface(gap: Gap) -> str:
         return f"native-addon:{gap.module}"
     if gap.kind == HOST_NETWORK:
         return f"network:{gap.module}"
+    # The console export is a facade over process stdout/stderr.  These
+    # nested socket members are installed at the process-stream boundary in
+    # runtime.js, not in the console formatter module; keep them out of the
+    # compat family so scheduling does not place a runtime.js edit in parallel
+    # with process cards.
+    if gap.module == "console" and any(
+        symbol.startswith(("_stdout.", "_stderr.")) for symbol in gap.symbols
+    ):
+        return "runtime.js"
     return _RUNTIME_SURFACES.get(gap.module, f"module:{gap.module}")
 
 

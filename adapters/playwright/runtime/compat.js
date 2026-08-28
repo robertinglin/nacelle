@@ -95,6 +95,38 @@ function tag(value) {
   return Object.prototype.toString.call(value);
 }
 
+function isError(value) {
+  return tag(value) === '[object Error]' || value instanceof Error;
+}
+
+function isFunction(value) {
+  return typeof value === 'function';
+}
+
+function isNull(value) {
+  return value === null;
+}
+
+function isNullOrUndefined(value) {
+  return value === null || value === undefined;
+}
+
+function isNumber(value) {
+  return typeof value === 'number';
+}
+
+function isObject(value) {
+  return value !== null && typeof value === 'object';
+}
+
+function isPrimitive(value) {
+  return value === null || (typeof value !== 'object' && typeof value !== 'function');
+}
+
+function isRegExp(value) {
+  return tag(value) === '[object RegExp]';
+}
+
 function typedArray(value) {
   return ArrayBuffer.isView(value) && !(value instanceof DataView);
 }
@@ -180,10 +212,19 @@ export function createPromisify() {
 }
 
 export function createUtilModule(scope = globalThis) {
+  const types = createUtilTypes(scope);
   return Object.freeze({
+    isError,
+    isFunction,
+    isNull,
+    isNullOrUndefined,
+    isNumber,
+    isObject,
+    isPrimitive,
+    isRegExp,
     promisify: createPromisify(),
     customPromisifyArgs: promisifyArgs,
-    types: createUtilTypes(scope),
+    types,
   });
 }
 
@@ -213,7 +254,7 @@ export function createUtilTypes(scope = globalThis) {
     isNativeError: (value) => value instanceof Error,
     isNumberObject: isTag('Number'),
     isPromise: (value) => value instanceof Promise,
-    isRegExp: (value) => value instanceof RegExp,
+    isRegExp,
     isSet: (value) => value instanceof Set,
     isSharedArrayBuffer: (value) => typeof scope.SharedArrayBuffer === 'function' && value instanceof scope.SharedArrayBuffer,
     isStringObject: isTag('String'),

@@ -165,7 +165,7 @@ export function createPrimordials(globalObject = globalThis) {
     uncurryThis: uncurry,
     SymbolToPrimitive: Symbol.toPrimitive,
   };
-  prototypeMethods(primordials, Array, 'Array', ['at', 'concat', 'every', 'fill', 'filter', 'find', 'findIndex', 'findLast', 'findLastIndex', 'flatMap', 'forEach', 'includes', 'indexOf', 'join', 'map', 'pop', 'push', 'reduce', 'reduceRight', 'reverse', 'shift', 'slice', 'some', 'sort', 'splice', 'toReversed', 'toSorted', 'unshift', 'with']);
+  prototypeMethods(primordials, Array, 'Array', ['at', 'concat', 'copyWithin', 'every', 'fill', 'filter', 'find', 'findIndex', 'findLast', 'findLastIndex', 'flatMap', 'forEach', 'includes', 'indexOf', 'join', 'lastIndexOf', 'map', 'pop', 'push', 'reduce', 'reduceRight', 'reverse', 'shift', 'slice', 'some', 'sort', 'splice', 'toReversed', 'toSorted', 'unshift', 'with']);
   prototypeMethods(primordials, String, 'String', ['at', 'charAt', 'charCodeAt', 'codePointAt', 'endsWith', 'includes', 'indexOf', 'lastIndexOf', 'localeCompare', 'normalize', 'padEnd', 'padStart', 'repeat', 'replace', 'replaceAll', 'search', 'slice', 'split', 'startsWith', 'substring', 'toLocaleLowerCase', 'toLowerCase', 'toUpperCase', 'trim', 'trimStart', 'trimEnd', 'valueOf']);
   prototypeMethods(primordials, RegExp, 'RegExp', ['exec', 'test', 'toString']);
   prototypeMethods(primordials, Function, 'Function', ['bind', 'call', 'apply', 'toString']);

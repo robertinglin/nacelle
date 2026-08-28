@@ -132,7 +132,7 @@ responsive while the job continues running.
    must contain: the worktree path and branch, the card dir path, the exact
    acceptance command (below), the constraints (no test modification, no
    hard-coded expectations, browser-native only, extend `runtime.js`/`runtime/`
-   not a parallel layer), and "leave changes uncommitted".
+   rather than adding a parallel layer), and "leave changes uncommitted".
 
    Acceptance command shape:
 
@@ -162,6 +162,9 @@ responsive while the job continues running.
 
 5. **As each agent finishes:**
    - Read its final report (root cause, subsystem, tests run).
+   - Agents must not run `gaps --verify` or `gaps --emit`: those commands
+     mutate the shared DB/worklist and are reserved for the orchestrator after
+     all merges in the round. Agents may run focused acceptance commands.
    - Independently rerun the card's acceptance command yourself. Require all
      pass, or all-but-one where the one is pre-existing (confirm pre-existing
      by running it against the integration worktree before merging).

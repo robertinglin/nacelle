@@ -2127,13 +2127,13 @@ export class Cipher {
 }
 
 export class Cipheriv extends Cipher {
-  constructor(cipher, key, iv, options) {
+  constructor(cipher, key, iv, options, operationName = 'Cipheriv') {
     void cipher;
     void key;
     void iv;
     void options;
     validateCipherivArguments(cipher, key, iv);
-    unsupportedCipherOperation('Cipheriv');
+    unsupportedCipherOperation(operationName);
   }
 
   _transform(chunk, encoding, callback) {
@@ -2154,12 +2154,46 @@ export class Cipheriv extends Cipher {
   }
 }
 
+export class Decipheriv extends Cipheriv {
+  constructor(cipher, key, iv, options) {
+    super(cipher, key, iv, options, 'Decipheriv');
+  }
+
+  update(data, inputEncoding, outputEncoding) {
+    void data;
+    void inputEncoding;
+    void outputEncoding;
+    unsupportedCipherOperation('Decipheriv', 'update');
+  }
+
+  final(outputEncoding) {
+    void outputEncoding;
+    unsupportedCipherOperation('Decipheriv', 'final');
+  }
+
+  setAutoPadding(autoPadding = true) {
+    void autoPadding;
+    unsupportedCipherOperation('Decipheriv', 'setAutoPadding');
+  }
+
+  setAuthTag(tag) {
+    void tag;
+    unsupportedCipherOperation('Decipheriv', 'setAuthTag');
+  }
+
+  setAAD(aad, options) {
+    void aad;
+    void options;
+    unsupportedCipherOperation('Decipheriv', 'setAAD');
+  }
+}
+
 export function createCipheriv() {
   return legacyCipherUnavailable('createCipheriv');
 }
 
-export function createDecipheriv() {
-  return legacyCipherUnavailable('createDecipheriv');
+export function createDecipheriv(cipher, key, iv, options) {
+  return new Decipheriv(cipher, key, iv, options);
 }
 
 export function setEngine(id, flags) {
@@ -2395,6 +2429,7 @@ export function createCryptoContract(globalObject = globalThis) {
     createDecipheriv,
     Cipher,
     Cipheriv,
+    Decipheriv,
     constants: cryptoConstants,
     setEngine,
     getCipherInfo: (nameOrNid, options) => getCipherInfo(nameOrNid, options, globalObject),

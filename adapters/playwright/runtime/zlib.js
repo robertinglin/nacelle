@@ -2,6 +2,9 @@ import { AsyncResource } from './async-hooks.js';
 import { Transform } from './streams.js';
 import { UnsupportedWebCapabilityError } from './errors.js';
 
+const SymbolNodeAsyncDispose = Symbol.for('nodejs.asyncDispose');
+const SymbolAsyncDispose = Symbol.asyncDispose || SymbolNodeAsyncDispose;
+
 // The browser Compression Streams API currently standardizes gzip, deflate,
 // and (in newer engines) deflate-raw. Brotli and zstd remain capability
 // dependent, so their constructors are exposed with the same stream shape and
@@ -171,6 +174,99 @@ function zlibDataError(error) {
   result.errno = -3;
   result.cause = error;
   return result;
+}
+
+function receivedType(value) {
+  if (value === null) return 'null';
+  if (typeof value === 'string') return `type string ('${value}')`;
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return `type ${typeof value} (${value})`;
+  }
+  return `an instance of ${value?.constructor?.name || typeof value}`;
+}
+
+function checkZlibParam(value, name, lower, upper, defaultValue) {
+  if (value === undefined || Number.isNaN(value)) return defaultValue;
+  if (typeof value !== 'number') {
+    const error = new TypeError(
+      `The "${name}" argument must be of type number. Received ${receivedType(value)}`,
+    );
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (!Number.isFinite(value)) {
+    const error = new RangeError(
+      `The value of "${name}" must be a finite number. Received ${value}`,
+    );
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  if (value < lower || value > upper) {
+    const error = new RangeError(
+      `The value of "${name}" is out of range. It must be >= ${lower} and <= ${upper}. Received ${value}`,
+    );
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  return value;
+}
+
+function zlibParams(level, strategy, callback) {
+  checkZlibParam(level, 'level', constants.Z_MIN_LEVEL, constants.Z_MAX_LEVEL);
+  checkZlibParam(strategy, 'strategy', constants.Z_DEFAULT_STRATEGY, constants.Z_FIXED);
+
+  const apply = () => queueMicrotask(() => {
+    if (!this._handle) {
+      const error = new Error(
+        'zlib binding closed\n' +
+        'This is caused by either a bug in Node.js or incorrect usage of Node.js internals.',
+      );
+      error.code = 'ERR_INTERNAL_ASSERTION';
+      throw error;
+    }
+    this._level = level;
+    this._strategy = strategy;
+    if (callback) callback();
+  });
+
+  if (this._level !== level || this._strategy !== strategy) {
+    this.flush(constants.Z_SYNC_FLUSH, apply);
+  } else if (typeof callback === 'function') {
+    queueMicrotask(callback);
+  }
+}
+
+function zlibAbortError() {
+  const error = new Error('The operation was aborted');
+  error.name = 'AbortError';
+  error.code = 'ABORT_ERR';
+  return error;
+}
+
+async function zlibAsyncDispose() {
+  let error;
+  const completion = this.closed
+    ? Promise.resolve()
+    : new Promise((resolve, reject) => {
+      const onClose = () => {
+        this.off?.('error', onError);
+        resolve();
+      };
+      const onError = (cause) => {
+        if (cause !== error) {
+          this.off?.('close', onClose);
+          reject(cause);
+        }
+      };
+      this.once('close', onClose);
+      this.once('error', onError);
+    });
+
+  if (!this.destroyed) {
+    error = this.readableEnded ? null : zlibAbortError();
+    this.destroy(error);
+  }
+  await completion;
 }
 
 class ZlibHandle {
@@ -407,11 +503,19 @@ class Gzip extends ZlibStream {
 }
 
 class Deflate extends ZlibStream {
-  constructor(_options, bufferClass, scope) { super('deflate', 'compress', bufferClass, scope); }
+  constructor(options, bufferClass, scope) {
+    super('deflate', 'compress', bufferClass, scope);
+    this._level = options?.level ?? constants.Z_DEFAULT_COMPRESSION;
+    this._strategy = options?.strategy ?? constants.Z_DEFAULT_STRATEGY;
+  }
 }
 
 class DeflateRaw extends ZlibStream {
-  constructor(_options, bufferClass, scope) { super('deflate-raw', 'compress', bufferClass, scope); }
+  constructor(options, bufferClass, scope) {
+    super('deflate-raw', 'compress', bufferClass, scope);
+    this._level = options?.level ?? constants.Z_DEFAULT_COMPRESSION;
+    this._strategy = options?.strategy ?? constants.Z_DEFAULT_STRATEGY;
+  }
 }
 
 class BrotliCompress extends ZlibStream {
@@ -420,6 +524,14 @@ class BrotliCompress extends ZlibStream {
 
 class BrotliDecompress extends ZlibStream {
   constructor(_options, bufferClass, scope) { super('br', 'decompress', bufferClass, scope); }
+}
+
+for (const Constructor of [BrotliCompress, BrotliDecompress, Deflate, DeflateRaw]) {
+  Constructor.prototype.params = zlibParams;
+  Constructor.prototype[SymbolNodeAsyncDispose] = zlibAsyncDispose;
+  if (SymbolAsyncDispose !== SymbolNodeAsyncDispose) {
+    Constructor.prototype[SymbolAsyncDispose] = zlibAsyncDispose;
+  }
 }
 
 class ZstdCompress extends ZlibStream {

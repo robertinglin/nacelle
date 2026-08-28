@@ -41,7 +41,9 @@ function cloneSettings(settings = {}, defaults = DEFAULT_SETTINGS) {
 
 function normalizeEnvironment(environment) {
   if (environment === undefined) return {};
-  if (environment === null || typeof environment !== 'object' || Array.isArray(environment)) {
+  if (environment === null
+    || (typeof environment !== 'object' && typeof environment !== 'string')
+    || Array.isArray(environment)) {
     throw errorWithCode('ERR_INVALID_ARG_TYPE', 'fork environment must be an object');
   }
   return Object.fromEntries(Object.entries(environment).map(([key, value]) => [String(key), String(value)]));

@@ -1446,6 +1446,7 @@ export function createBrowserInternalBindings({ globalObject = globalThis, const
         constructor() {
           super('UDP');
           this._bnhInitialize();
+          this._closed = false;
           this.fd = nextUdpDescriptor++;
           this._bnhUdpState = { address: '0.0.0.0', family: 'IPv4', port: 0, bound: false };
           descriptors.set(this.fd, 'udp');
@@ -1455,7 +1456,14 @@ export function createBrowserInternalBindings({ globalObject = globalThis, const
           const state = this._bnhUdpState;
           state.address = String(address || '0.0.0.0');
           state.family = state.address.includes(':') ? 'IPv6' : 'IPv4';
-          state.port = Number(port) || network?.allocateUdpPort?.(state.address) || 51000;
+          const requestedPort = Number(port) || 0;
+          state.port = requestedPort || network?.allocateUdpPort?.(state.address) || 51000;
+          const groupId = `browser-udp-fd-${this.fd}`;
+          const binding = network?.bindClusterUdp?.(groupId, state.address, state.port, { socket: this });
+          if (!binding) return -22;
+          state.address = binding.address;
+          state.port = binding.port;
+          state.clusterGroupId = groupId;
           state.bound = true;
           udpHandles.set(this.fd, { handle: this, ...state });
           return 0;
@@ -1466,7 +1474,16 @@ export function createBrowserInternalBindings({ globalObject = globalThis, const
           return 0;
         }
         send(request) { request?._bnhInitialize(); queueMicrotask(() => request?.oncomplete?.(0)); return 0; }
-        close(callback) { descriptors.delete(this.fd); udpHandles.delete(this.fd); callback?.(); }
+        _receiveDatagram() {}
+        close(callback) {
+          if (this._closed) return 0;
+          this._closed = true;
+          network?.unbindUdp?.(this);
+          descriptors.delete(this.fd);
+          udpHandles.delete(this.fd);
+          callback?.();
+          return 0;
+        }
       },
       SendWrap,
     },

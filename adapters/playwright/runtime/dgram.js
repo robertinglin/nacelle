@@ -287,6 +287,8 @@ export class Socket extends EventEmitter {
     this._cluster = internal.cluster;
     this._clusterGroupId = internal.clusterGroupId;
     this._onListening = internal.onListening;
+    this._processOwner = internal.processOwner || globalThis.process;
+    this._runInProcessContext = internal.runInProcessContext;
     this._sendBlockList = internal.sendBlockList;
     this._receiveBlockList = internal.receiveBlockList;
     this._bound = false;
@@ -318,6 +320,7 @@ export class Socket extends EventEmitter {
       queue: undefined,
       closeQueued: false,
       reuseAddr: Boolean(internal.reuseAddr),
+      fdClusterGroupId: undefined,
     };
     state.handle.recvStart = () => {
       state.receiving = true;
@@ -373,18 +376,22 @@ export class Socket extends EventEmitter {
       this._reusePort = Boolean(options.reusePort);
       this._ipv6Only = Boolean(options.ipv6Only);
       if (options.fd !== undefined) {
+        const fd = Number(options.fd);
         const descriptors = globalThis.__BNH_VIRTUAL_FD_TYPES__;
-        const descriptorType = descriptors?.get(Number(options.fd));
+        const descriptorType = descriptors?.get(fd);
         if (descriptorType !== 'udp') {
           const error = new Error(descriptorType === 'tcp' ? 'Unsupported fd type: TCP' : 'open EEXIST');
           error.code = descriptorType === 'tcp' ? 'ERR_INVALID_FD_TYPE' : 'EEXIST';
           error.name = descriptorType === 'tcp' ? 'TypeError' : 'Error';
           throw error;
         }
-        const descriptor = globalThis.__BNH_VIRTUAL_UDP_HANDLES__?.get(Number(options.fd));
-        if (!descriptor?.bound) throw socketError('EEXIST', 'open EEXIST');
-        address = descriptor.address;
-        port = descriptor.port;
+        const descriptor = globalThis.__BNH_VIRTUAL_UDP_HANDLES__?.get(fd);
+        const fdGroupId = `browser-udp-fd-${fd}`;
+        const sharedBinding = this._network.getClusterUdpBinding?.(fdGroupId);
+        if (!descriptor?.bound && !sharedBinding) throw socketError('EEXIST', 'open EEXIST');
+        address = descriptor?.address ?? sharedBinding.address;
+        port = descriptor?.port ?? sharedBinding.port;
+        state.fdClusterGroupId = fdGroupId;
       }
     }
     if (typeof port === 'function') {
@@ -419,10 +426,11 @@ export class Socket extends EventEmitter {
         try {
           const cluster = typeof this._cluster === 'function' ? this._cluster() : this._cluster;
           const groupId = this._clusterGroupId || cluster?.worker?.process?.ppid;
-          const useClusterBinding = (cluster?.isWorker || this._clusterGroupId !== undefined)
-            && typeof this._network.bindClusterUdp === 'function';
+          const useClusterBinding = state.fdClusterGroupId !== undefined
+            || ((cluster?.isWorker || this._clusterGroupId !== undefined)
+              && typeof this._network.bindClusterUdp === 'function');
           const result = useClusterBinding
-            ? this._network.bindClusterUdp(groupId, normalizedAddress, requestedPort, {
+            ? this._network.bindClusterUdp(state.fdClusterGroupId ?? groupId, normalizedAddress, requestedPort, {
                 reuseAddr: state.reuseAddr,
                 reusePort: this._reusePort,
                 ipv6Only: this._ipv6Only,
@@ -628,13 +636,18 @@ export class Socket extends EventEmitter {
 
   connect(port, address, callback) {
     healthCheck(this);
+    const family = this.type === 'udp6' ? 6 : 4;
+    const requestedPort = validatePort(port);
+    if (requestedPort === 0) {
+      const error = new RangeError('Port should be > 0 and < 65536');
+      error.code = 'ERR_SOCKET_BAD_PORT';
+      throw error;
+    }
     if (this._connected || this._connecting) throw socketError('ERR_SOCKET_DGRAM_IS_CONNECTED', 'Already connected');
     if (typeof address === 'function') {
       callback = address;
       address = undefined;
     }
-    const family = this.type === 'udp6' ? 6 : 4;
-    const requestedPort = validatePort(port);
     const requestedAddress = address === undefined || address === ''
       ? (family === 6 ? '::1' : '127.0.0.1')
       : address;
@@ -753,10 +766,12 @@ export class Socket extends EventEmitter {
     if (this._closed || !this[VIRTUAL_DGRAM_STATE].receiving) return;
     const family = rinfo?.family === 'IPv6' ? 'ipv6' : 'ipv4';
     if (this._receiveBlockList?.check?.(rinfo?.address, family)) return;
-    this._receiveResource.runInAsyncScope(
+    const deliver = () => this._receiveResource.runInAsyncScope(
       () => this.emit('message', makeNodeBytes(bytes, this._bufferClass), rinfo),
       this,
     );
+    if (typeof this._runInProcessContext === 'function') this._runInProcessContext(this._processOwner, deliver);
+    else deliver();
   }
 
   getRecvBufferSize() { return 0; }
@@ -866,7 +881,7 @@ Socket.prototype._stopReceiving = deprecatedSocketApi(
   function _stopReceiving() { stopReceiving(this); },
 );
 
-export function createBrowserDgram({ network = sharedVirtualNetwork, transport, dns = createBrowserDns(), BufferClass, trackTask, diagnostics, cluster, clusterGroupId, onListening } = {}) {
+export function createBrowserDgram({ network = sharedVirtualNetwork, transport, dns = createBrowserDns(), BufferClass, trackTask, diagnostics, cluster, clusterGroupId, onListening, runInProcessContext, processOwner } = {}) {
   const configuredNetwork = transport && network === sharedVirtualNetwork ? createVirtualNetwork({ transport }) : network;
   const createHandle = (address, port, addressType, fd, flags) => createSocketHandle(
     address,
@@ -887,6 +902,8 @@ export function createBrowserDgram({ network = sharedVirtualNetwork, transport, 
         cluster,
         clusterGroupId,
         onListening,
+        runInProcessContext,
+        processOwner,
       });
     }
   };

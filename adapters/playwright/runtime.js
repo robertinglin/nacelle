@@ -3303,6 +3303,13 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       cluster: () => cluster,
       clusterGroupId: runtimeOptions.clusterGroupId,
       onListening: notifyClusterListening,
+      processOwner: processObject,
+      runInProcessContext: (owner, callback) => {
+        const previous = scope.process;
+        scope.process = owner;
+        try { return callback(); }
+        finally { scope.process = previous; }
+      },
     });
     const internalBindingContract = createBrowserInternalBindings({
       globalObject: scope,
@@ -4385,8 +4392,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               });
               return false;
             }
+            const childHandle = wrapChildHandle(sendHandle);
             if (ipc.processHandle?.state === 'running') {
-              return ipc.processHandle.send(value, sendHandle, sendOptions, sendCallback);
+              return ipc.processHandle.send(value, childHandle, sendOptions, sendCallback);
             }
             const hasHandle = sendHandle !== undefined && sendHandle !== null;
             if (ipc.handleBacklog > 0) {
@@ -4401,7 +4409,6 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               ipc.handleBacklog = 1;
               scheduleIpcDrain();
             }
-            const childHandle = wrapChildHandle(sendHandle);
             if (ipc.process) {
               runInChildContext(() => ipc.process.emit('message', value, childHandle));
             }
@@ -5420,6 +5427,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             // Child processes may create a server after they start. Keep them
             // in this realm so later siblings can share the live registry.
             forceFallback: true,
+            preserveReferences: true,
             stdout: writeStdout,
             stderr: forwardStderr,
           });

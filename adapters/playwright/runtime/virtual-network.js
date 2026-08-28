@@ -496,6 +496,10 @@ export function createVirtualNetwork({ transport } = {}) {
     connectPipe,
     bindUdp: (owner, address, port, options) => bind(udpBindings, owner, address, port, 'udp', options),
     bindClusterUdp,
+    getClusterUdpBinding: (groupId) => {
+      const binding = [...udpBindings.values()].find((candidate) => candidate.clusterGroupId === groupId);
+      return binding ? { address: binding.address, port: binding.port } : undefined;
+    },
     allocateUdpPort: (address) => allocatePort(udpBindings, address, 'udp'),
     unbindUdp,
     sendUdp,

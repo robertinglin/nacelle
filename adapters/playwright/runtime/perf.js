@@ -1,6 +1,8 @@
 import { UnsupportedWebCapabilityError } from './errors.js';
+import { inspect } from './assert.js';
 
 const HOST_ONLY_REASON = 'this metric requires access to the host Node.js process';
+const INSPECT_CUSTOM = Symbol.for('nodejs.util.inspect.custom');
 const PERFORMANCE_METHODS = Object.freeze([
   'now',
   'getEntries',
@@ -12,6 +14,7 @@ const PERFORMANCE_METHODS = Object.freeze([
   'clearMeasures',
   'clearResourceTimings',
   'setResourceTimingBufferSize',
+  'markResourceTiming',
   'toJSON',
 ]);
 
@@ -64,6 +67,42 @@ function bindPerformanceMethod(performance, name) {
     );
   }
   return performance[name].bind(performance);
+}
+
+function inspectOptionsAtChildDepth(options = {}) {
+  return {
+    ...options,
+    depth: options.depth == null ? null : options.depth - 1,
+  };
+}
+
+function inspectPerformanceEntry(depth, options = {}) {
+  if (depth < 0) return this;
+  return `${this.constructor.name} ${inspect(this.toJSON(), inspectOptionsAtChildDepth(options))}`;
+}
+
+function installInspectCustom(target, handler) {
+  if (!target || typeof target !== 'object') return;
+  if (typeof target[INSPECT_CUSTOM] === 'function') return;
+  try {
+    Object.defineProperty(target, INSPECT_CUSTOM, {
+      configurable: true,
+      writable: true,
+      value: handler,
+    });
+  } catch {
+    // Some browser built-in prototypes may be non-extensible.
+  }
+}
+
+function installPerformanceEntryInspect(globalObject) {
+  for (const constructor of [
+    globalObject.PerformanceEntry,
+    globalObject.PerformanceMark,
+    globalObject.PerformanceMeasure,
+  ]) {
+    installInspectCustom(constructor?.prototype, inspectPerformanceEntry);
+  }
 }
 
 function scheduleMicrotask(globalObject, callback) {
@@ -246,6 +285,20 @@ function createPerformanceObserver(globalObject, functionObservers) {
     }
   }
 
+  installInspectCustom(BrowserPerformanceObserver.prototype, function inspectObserver(depth, options = {}) {
+    if (depth < 0) return this;
+    const state = stateOf(this);
+    const records = state
+      ? [...state.nativeRecords, ...state.functionRecords]
+      : [];
+    return `PerformanceObserver ${inspect({
+      connected: Boolean(state?.observedTypes.size),
+      pending: Boolean(state?.deliveryScheduled || records.length),
+      entryTypes: state ? [...state.observedTypes] : [],
+      buffer: records,
+    }, inspectOptionsAtChildDepth(options))}`;
+  });
+
   const nativeTypes = Array.isArray(NativePerformanceObserver.supportedEntryTypes)
     ? NativePerformanceObserver.supportedEntryTypes
     : [];
@@ -282,6 +335,10 @@ function createFunctionEntry(name, startTime, duration, detail) {
   if (Array.isArray(detail)) {
     detail.forEach((value, index) => { entry[index] = value; });
   }
+  Object.defineProperty(entry, INSPECT_CUSTOM, {
+    configurable: true,
+    value: inspectPerformanceEntry,
+  });
   return entry;
 }
 
@@ -591,14 +648,21 @@ function createTimerify(performance, recordFunctionEntry) {
 
     const wrapped = function timerified(...args) {
       const startTime = performance.now();
-      const result = new.target
-        ? Reflect.construct(fn, args, fn)
-        : Reflect.apply(fn, this, args);
       const complete = () => {
         const duration = performance.now() - startTime;
         options?.histogram?.record(duration * 1e6);
         recordFunctionEntry(createFunctionEntry(fn.name, startTime, duration, args));
       };
+
+      let result;
+      try {
+        result = new.target
+          ? Reflect.construct(fn, args, fn)
+          : Reflect.apply(fn, this, args);
+      } catch (error) {
+        complete();
+        throw error;
+      }
 
       if (!new.target && typeof result?.finally === 'function') return result.finally(complete);
       complete();
@@ -642,11 +706,15 @@ function createPerformanceFacade(nativePerformance, timerify, eventLoopUtilizati
     enumerable: false,
     value: eventLoopUtilization || unsupportedFunction('performance.eventLoopUtilization'),
   });
-  Object.defineProperty(performance, 'nodeTiming', {
-    configurable: true,
-    enumerable: true,
-    value: nodeTiming,
-  });
+  if (nodeTiming) {
+    Object.defineProperty(performance, 'nodeTiming', {
+      configurable: true,
+      enumerable: false,
+      value: nodeTiming,
+    });
+  } else {
+    defineUnsupportedProperty(performance, 'nodeTiming', 'performance.nodeTiming');
+  }
   return performance;
 }
 
@@ -741,6 +809,7 @@ export function createPerformancePrimitives(globalObject = globalThis, options =
     throw new TypeError('only the virtual performance fallback is supported');
   }
   const nativePerformance = requirePerformance(globalObject);
+  installPerformanceEntryInspect(globalObject);
   const functionObservers = new Set();
   const observerParts = createPerformanceObserver(globalObject, functionObservers);
   const virtual = options.fallback === 'virtual';

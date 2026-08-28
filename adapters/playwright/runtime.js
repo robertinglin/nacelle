@@ -139,7 +139,7 @@ import { createSqliteModule } from './runtime/sqlite.js';
 const BUILTIN_NAMES = Object.freeze([
   'assert', 'assert/strict', 'buffer', 'console', 'constants', 'crypto', 'domain', 'events', 'fs', 'fs/promises', 'http', 'https', 'module', 'os',
   'path', 'path/posix', 'path/win32', 'process', 'querystring', 'stream', 'stream/consumers', 'stream/promises', 'stream/web',
-  'string_decoder', 'timers', 'timers/promises', 'url', 'util', 'util/types', 'worker_threads', 'zlib', 'perf_hooks', 'async_hooks', 'diagnostics_channel', 'punycode',
+  'string_decoder', 'timers', 'timers/promises', 'url', 'util', 'sys', 'util/types', 'worker_threads', 'zlib', 'perf_hooks', 'async_hooks', 'diagnostics_channel', 'punycode',
   'child_process', 'cluster', 'dgram', 'dns', 'dns/promises', 'http2', 'net', 'repl', 'tls', 'test', 'v8', 'vm', '_http_server',
   'sea', 'sqlite', 'test/reporters', '_http_common', '_http_outgoing',
   'internal/event_target', 'internal/async_context_frame', 'internal/async_hooks', 'internal/test/binding', 'internal/test/transfer',
@@ -3906,7 +3906,34 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           process: processObject,
           console: processObject._bnhConsole || scope.console,
         }));
-        return { ...utilCompat, format: (format, ...args) => String(format).replace(/%[sdifoO%]/g, (token) => token === '%%' ? '%' : String(args.shift())), inspect: inspectFn, types: utilTypes, promisify: createPromisify(), deprecate: createDeprecate(processObject), _extend: (target, source) => Object.assign(target, source), customPromisifyArgs: Symbol.for('nodejs.util.promisify.customArgs'), getSystemErrorName: (code) => ({ [-1]: 'EPERM', [-4094]: 'UNKNOWN' }[code] || `Unknown system error ${code}`), getCallSites: createGetCallSites(), debuglog: (section) => { const sections = (String(processObject?.env?.NODE_DEBUG || '')).split(',').map((s) => s.trim()).filter(Boolean); const enabled = sections.includes(section) || sections.includes('DEBUG') || sections.some((s) => s.includes(section)); return (...args) => { if (enabled) console?.error ? console.error(...args) : console?.log ? console.log(...args) : null; }; }, TextEncoder: scope.TextEncoder, TextDecoder: scope.TextDecoder, aborted: createAborted() };
+        const getCallSites = createGetCallSites();
+        const getCallSite = (...args) => {
+          processObject.emitWarning?.(
+            "The `util.getCallSite` API has been renamed to `util.getCallSites()`." ,
+            'ExperimentalWarning',
+          );
+          return getCallSites(...args);
+        };
+        return {
+          ...utilCompat,
+          format: (...args) => utilCompat.format(...args),
+          inspect: inspectFn,
+          types: utilTypes,
+          promisify: createPromisify(),
+          deprecate: createDeprecate(processObject),
+          _extend: (target, source) => Object.assign(target, source),
+          customPromisifyArgs: Symbol.for('nodejs.util.promisify.customArgs'),
+          getCallSite,
+          getCallSites,
+          debug: debuglog,
+          debuglog,
+          getSystemErrorName: utilCompat.getSystemErrorName,
+          getSystemErrorMessage: utilCompat.getSystemErrorMessage,
+          getSystemErrorMap: utilCompat.getSystemErrorMap,
+          TextEncoder: scope.TextEncoder,
+          TextDecoder: scope.TextDecoder,
+          aborted: createAborted(),
+        };
       })(),
       'util/types': createUtilTypes(scope),
       worker_threads: { ...createBrowserIO(scope), isMainThread: true, parentPort: null, workerData: undefined },
@@ -6369,6 +6396,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       (pathname) => vfs.read(pathname),
       entry,
     );
+    builtins.sys = builtins.util;
     processObject.getBuiltinModule = function getBuiltinModule(id) {
       if (typeof id !== 'string') throw moduleArgumentTypeError('id', 'of type string', id);
       const name = builtinName(id);
@@ -6621,6 +6649,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       return invoke(hooks.length - 1, value, context);
     };
     let mainModule = null;
+    let sysWarningEmitted = false;
     const esmSourceHasTopLevelAwait = (source) => {
       const text = typeof source === 'string' ? source : new TextDecoder().decode(source);
       return /(?:^|[;\n])\s*(?:await\b|(?:let|const|var)\s+[A-Za-z_$][\w$]*\s*=\s*await\b)/.test(text);
@@ -6664,6 +6693,13 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     };
     const loadModule = (specifier, importer = entry, skipResolve = false) => {
       const name = builtinName(specifier);
+      if (name === 'sys' && !sysWarningEmitted) {
+        sysWarningEmitted = true;
+        processObject.emitWarning?.('sys is deprecated. Use util instead.', {
+          code: 'DEP0025',
+          type: 'DeprecationWarning',
+        });
+      }
       if (name === 'repl') return loadModule('/node/lib/repl.js', importer);
       if (BUILTIN_NAMES.includes(name)) {
         if (name === 'dns') scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ = Math.max(1, Number(scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ || 0));

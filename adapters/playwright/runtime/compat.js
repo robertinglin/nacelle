@@ -232,6 +232,208 @@ function invalidArgumentValue(name, value, reason) {
   return error;
 }
 
+function receivedArgument(value) {
+  if (value === null || value === undefined) return String(value);
+  if (Array.isArray(value)) return 'an instance of Array';
+  if (typeof value === 'function') return `function ${value.name || ''}`.trim();
+  if (typeof value === 'object') return `an instance of ${value.constructor?.name || 'Object'}`;
+  if (typeof value === 'string') {
+    const inspected = `'${value.replaceAll('\\', '\\\\').replaceAll("'", "\\'").replaceAll('\n', '\\n').replaceAll('\r', '\\r').replaceAll('\t', '\\t')}'`;
+    return `type string (${inspected})`;
+  }
+  return `type ${typeof value} (${String(value)})`;
+}
+
+function detailedArgumentType(name, expected, value) {
+  const error = new TypeError(`The "${name}" argument must be of type ${expected}. Received ${receivedArgument(value)}`);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+const SYSTEM_ERROR_ENTRIES = Object.freeze([
+  [-1, ['EPERM', 'operation not permitted']],
+  [-2, ['ENOENT', 'no such file or directory']],
+  [-3, ['ESRCH', 'no such process']],
+  [-4, ['EINTR', 'interrupted system call']],
+  [-5, ['EIO', 'input/output error']],
+  [-6, ['ENXIO', 'no such device or address']],
+  [-7, ['E2BIG', 'argument list too long']],
+  [-8, ['ENOEXEC', 'exec format error']],
+  [-9, ['EBADF', 'bad file descriptor']],
+  [-11, ['EAGAIN', 'resource temporarily unavailable']],
+  [-12, ['ENOMEM', 'not enough memory']],
+  [-13, ['EACCES', 'permission denied']],
+  [-14, ['EFAULT', 'bad address']],
+  [-16, ['EBUSY', 'device or resource busy']],
+  [-17, ['EEXIST', 'file already exists']],
+  [-18, ['EXDEV', 'cross-device link not permitted']],
+  [-19, ['ENODEV', 'no such device']],
+  [-20, ['ENOTDIR', 'not a directory']],
+  [-21, ['EISDIR', 'is a directory']],
+  [-22, ['EINVAL', 'invalid argument']],
+  [-23, ['ENFILE', 'file table overflow']],
+  [-24, ['EMFILE', 'too many open files']],
+  [-28, ['ENOSPC', 'no space left on device']],
+  [-30, ['EROFS', 'read-only file system']],
+  [-32, ['EPIPE', 'broken pipe']],
+  [-39, ['ENOTEMPTY', 'directory not empty']],
+  [-40, ['ELOOP', 'too many symbolic links encountered']],
+  [-98, ['EADDRINUSE', 'address already in use']],
+  [-99, ['EADDRNOTAVAIL', 'cannot assign requested address']],
+  [-101, ['ENETUNREACH', 'network is unreachable']],
+  [-103, ['ECONNABORTED', 'software caused connection abort']],
+  [-104, ['ECONNRESET', 'connection reset by peer']],
+  [-105, ['ENOBUFS', 'no buffer space available']],
+  [-106, ['EISCONN', 'socket is already connected']],
+  [-107, ['ENOTCONN', 'socket is not connected']],
+  [-110, ['ETIMEDOUT', 'connection timed out']],
+  [-111, ['ECONNREFUSED', 'connection refused']],
+  [-113, ['EHOSTUNREACH', 'no route to host']],
+  [-4095, ['EOF', 'end of file']],
+  [-3001, ['EAI_AGAIN', 'temporary failure']],
+  [-3008, ['EAI_NONAME', 'address not found']],
+]);
+
+const SYSTEM_ERROR_MAP = new Map(SYSTEM_ERROR_ENTRIES);
+
+function systemErrorEntry(code) {
+  return SYSTEM_ERROR_MAP.get(code) || ['UNKNOWN', 'unknown error'];
+}
+
+function validateSystemErrorCode(code) {
+  if (typeof code !== 'number') throw invalidArgumentType('err', 'number', code);
+  if (code >= 0 || !Number.isSafeInteger(code)) {
+    const error = new RangeError(
+      `The value of "err" is out of range. It must be a negative integer. Received ${String(code)}`,
+    );
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+}
+
+function systemErrorName(code) {
+  validateSystemErrorCode(code);
+  return SYSTEM_ERROR_MAP.get(code)?.[0] || `Unknown system error ${code}`;
+}
+
+function systemErrorMessage(code) {
+  validateSystemErrorCode(code);
+  return SYSTEM_ERROR_MAP.get(code)?.[1] || `Unknown system error ${code}`;
+}
+
+function exceptionWithHostPort(err, syscall, address, port) {
+  const [code, message] = systemErrorEntry(err);
+  const detail = port && port > 0 ? ` ${address}:${port}` : address ? ` ${address}` : '';
+  const error = new Error(`${syscall} ${code}: ${message}${detail}`);
+  error.code = code;
+  error.errno = err;
+  error.syscall = syscall;
+  error.address = address;
+  if (port) error.port = port;
+  return error;
+}
+
+function callbackifyOnRejected(reason, callback) {
+  if (!reason) {
+    const error = new Error('Promise was rejected with falsy value');
+    error.code = 'ERR_FALSY_VALUE_REJECTION';
+    error.reason = reason;
+    reason = error;
+  }
+  return callback(reason);
+}
+
+function callbackify(original, scope) {
+  if (typeof original !== 'function') {
+    throw detailedArgumentType('original', 'function', original);
+  }
+
+  function callbackified(...args) {
+    const callback = args.pop();
+    if (typeof callback !== 'function') {
+      const error = detailedArgumentType('last argument', 'function', callback);
+      error.message = error.message.replace('The "last argument" argument', 'The last argument');
+      throw error;
+    }
+    const boundCallback = callback.bind(this);
+    Reflect.apply(original, this, args).then(
+      (value) => (scope.process?.nextTick || queueMicrotask)(boundCallback, null, value),
+      (reason) => (scope.process?.nextTick || queueMicrotask)(callbackifyOnRejected, reason, boundCallback),
+    );
+  }
+
+  const descriptors = Object.getOwnPropertyDescriptors(original);
+  if (typeof descriptors.length?.value === 'number') descriptors.length.value += 1;
+  if (typeof descriptors.name?.value === 'string') descriptors.name.value += 'Callbackified';
+  Object.defineProperties(callbackified, descriptors);
+  return callbackified;
+}
+
+function myersDiff(actual, expected) {
+  const actualLength = actual.length;
+  const expectedLength = expected.length;
+  const max = actualLength + expectedLength;
+  if (max > 2 ** 31 - 1) {
+    const error = new RangeError(`The value of "myersDiff input size" is out of range. It must be < 2^31. Received ${max}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  const vector = new Int32Array(2 * max + 1);
+  const trace = [];
+  for (let level = 0; level <= max; level += 1) {
+    trace.push(new Int32Array(vector));
+    for (let diagonal = -level; diagonal <= level; diagonal += 2) {
+      const offset = diagonal + max;
+      const previous = vector[offset - 1];
+      const next = vector[offset + 1];
+      let x = diagonal === -level || (diagonal !== level && previous < next) ? next : previous + 1;
+      let y = x - diagonal;
+      while (x < actualLength && y < expectedLength && actual[x] === expected[y]) { x += 1; y += 1; }
+      vector[offset] = x;
+      if (x >= actualLength && y >= expectedLength) {
+        const result = [];
+        let currentX = actualLength;
+        let currentY = expectedLength;
+        for (let currentLevel = trace.length - 1; currentLevel >= 0; currentLevel -= 1) {
+          const state = trace[currentLevel];
+          const currentDiagonal = currentX - currentY;
+          const currentOffset = currentDiagonal + max;
+          const previousDiagonal = currentDiagonal === -currentLevel
+            || (currentDiagonal !== currentLevel && state[currentOffset - 1] < state[currentOffset + 1])
+            ? currentDiagonal + 1 : currentDiagonal - 1;
+          const previousX = state[previousDiagonal + max];
+          const previousY = previousX - previousDiagonal;
+          while (currentX > previousX && currentY > previousY) {
+            result.push([0, actual[currentX - 1]]);
+            currentX -= 1;
+            currentY -= 1;
+          }
+          if (currentLevel > 0) {
+            if (currentX > previousX) result.push([1, actual[--currentX]]);
+            else result.push([-1, expected[--currentY]]);
+          }
+        }
+        return result.reverse();
+      }
+    }
+  }
+  return [];
+}
+
+function diff(actual, expected) {
+  if (actual === expected) return [];
+  const validate = (value, name) => {
+    if (typeof value === 'string') return;
+    if (!Array.isArray(value)) throw detailedArgumentType(name, 'string', value);
+    for (let index = 0; index < value.length; index += 1) {
+      if (typeof value[index] !== 'string') throw detailedArgumentType(`${name}[${index}]`, 'string', value[index]);
+    }
+  };
+  validate(actual, 'actual');
+  validate(expected, 'expected');
+  return myersDiff(actual, expected);
+}
+
 function validateParseArgsConfig(config) {
   if (config === null || typeof config !== 'object' || Array.isArray(config)) {
     throw invalidArgumentType('config', 'object', config);
@@ -910,10 +1112,44 @@ export function createPromisify() {
   return promisify;
 }
 
+function formatWithOptions(inspectOptions, ...args) {
+  if (inspectOptions !== undefined
+    && (inspectOptions === null || typeof inspectOptions !== 'object')) {
+    throw invalidArgumentType('inspectOptions', 'object', inspectOptions);
+  }
+  return formatConsole(args, inspectOptions || {}, false);
+}
+
+function createDebug(scope) {
+  return (section) => {
+    const name = String(section).toUpperCase();
+    const enabled = String(scope?.process?.env?.NODE_DEBUG || '')
+      .split(',')
+      .map((value) => value.trim().toUpperCase())
+      .filter(Boolean);
+    const active = enabled.includes(name) || enabled.includes('*') || enabled.includes('DEBUG');
+    return (...args) => {
+      if (!active) return;
+      const output = `${name} ${scope?.process?.pid || 0}: ${formatWithOptions({}, ...args)}\n`;
+      if (typeof scope?.process?.stderr?.write === 'function') scope.process.stderr.write(output);
+      else scope?.console?.error?.(output.trimEnd());
+    };
+  };
+}
+
 export function createUtilModule(scope = globalThis) {
   const types = createUtilTypes(scope);
   return Object.freeze({
+    _exceptionWithHostPort: exceptionWithHostPort,
     MIMEParams,
+    callbackify: (original) => callbackify(original, scope),
+    debug: createDebug(scope),
+    diff,
+    format: (...args) => formatWithOptions(undefined, ...args),
+    formatWithOptions,
+    getSystemErrorMap: () => new Map(SYSTEM_ERROR_ENTRIES),
+    getSystemErrorMessage: systemErrorMessage,
+    getSystemErrorName: systemErrorName,
     isError,
     isFunction,
     isNull,
@@ -1076,16 +1312,23 @@ function formatConsole(values, inspectOptions = {}, useRuntimeInspect = false) {
   if (!values.length) return '';
   if (typeof values[0] !== 'string') return values.map((value) => inspectValue(value, inspectOptions, useRuntimeInspect)).join(' ');
   let index = 1;
-  const first = values[0].replace(/%[sdifjoO%]/g, (token) => {
+  const first = values[0].replace(/%[sdifjoOc%]/g, (token) => {
     if (token === '%%') return '%';
     if (index >= values.length) return token;
     const value = values[index++];
+    if (token === '%c') return '';
     if (token === '%j') {
       try { return JSON.stringify(value); } catch { return '[Circular]'; }
     }
     if (token === '%o' || token === '%O') return inspectValue(value, inspectOptions, useRuntimeInspect);
-    if (token === '%d' || token === '%i') return String(Number(value));
-    if (token === '%f') return String(Number.parseFloat(value));
+    if (token === '%d' || token === '%i') {
+      const number = Number(value);
+      return Object.is(number, -0) ? '-0' : String(number);
+    }
+    if (token === '%f') {
+      const number = Number.parseFloat(value);
+      return Object.is(number, -0) ? '-0' : String(number);
+    }
     return String(value);
   });
   return [first, ...values.slice(index).map((value) => typeof value === 'string' ? value : inspectValue(value, inspectOptions, useRuntimeInspect))].join(' ');

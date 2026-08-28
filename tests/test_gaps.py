@@ -71,6 +71,8 @@ class SurfaceTests(unittest.TestCase):
         self.assertIn("stableObjectKeys", source)
         self.assertIn("Array.isArray(value)", source)
         self.assertIn("prefix + \".\" + memberName", source)
+        self.assertIn("typeof mod === \"function\"", source)
+        self.assertIn("const isClassLike", source)
         self.assertIn("symbolLabel", source)
         self.assertIn("isPublicSymbol", source)
         self.assertIn("nodejs.asyncDispose", source)

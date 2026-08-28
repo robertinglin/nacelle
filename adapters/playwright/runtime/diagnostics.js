@@ -70,7 +70,7 @@ function wrapStoreRun(store, data, next, transform = defaultTransform) {
   return () => {
     let context;
     try {
-      context = (transform || defaultTransform)(data);
+      context = transform(data);
     } catch (error) {
       deferUncaughtException(error);
       return next();
@@ -89,6 +89,9 @@ class DiagnosticsChannel {
   subscribe(subscription) {
     if (typeof subscription !== 'function') throw invalidArgType('subscription', 'function', subscription);
     markChannelActive(this);
+    // Publish iterates a stable snapshot. Copy before adding so a
+    // subscription made from a callback is deferred until the next publish.
+    this._subscribers = this._subscribers.slice();
     this._subscribers.push(subscription);
   }
 

@@ -86,6 +86,11 @@ function createHTTPParserClass(scope, BufferClass, ownerProcess) {
       return this.initialize(type, this.callbacks);
     }
 
+    // Native HTTPParser inherits asyncReset from AsyncWrap. Its resource
+    // rebinding is private native/async-hooks state, so expose the safe
+    // browser surface without fabricating lifecycle events here.
+    asyncReset() {}
+
     execute(input, offset = 0, length = input?.byteLength || 0) {
       if (this._paused) return 0;
       const bytes = toBytes(input, offset, length);
@@ -227,7 +232,14 @@ function createHTTPParserClass(scope, BufferClass, ownerProcess) {
     kLenientHeaders: 1,
     kLenientChunkedLength: 2,
     kLenientKeepAlive: 4,
-    kLenientAll: 0xffff,
+    kLenientTransferEncoding: 8,
+    kLenientVersion: 16,
+    kLenientDataAfterClose: 32,
+    kLenientOptionalLFAfterCR: 64,
+    kLenientOptionalCRLFAfterChunk: 128,
+    kLenientOptionalCRBeforeLF: 256,
+    kLenientSpacesAfterChunkSize: 512,
+    kLenientAll: 1023,
   });
 
   return HTTPParser;

@@ -8,6 +8,15 @@ let defaultHighWaterMark = DEFAULT_READABLE_HIGH_WATER_MARK;
 let defaultWritableHighWaterMark = DEFAULT_WRITABLE_HIGH_WATER_MARK;
 let defaultObjectHighWaterMark = 16;
 
+const kReadableStateDataEmitted = Symbol('readableStateDataEmitted');
+const kReadableStateErrored = Symbol('readableStateErrored');
+const kReadableStateDefaultEncoding = Symbol('readableStateDefaultEncoding');
+const kReadableStateDecoder = Symbol('readableStateDecoder');
+const kReadableStateEncoding = Symbol('readableStateEncoding');
+const kReadableStateFlowing = Symbol('readableStateFlowing');
+const kReadableStateHasFlowing = Symbol('readableStateHasFlowing');
+const kReadableStatePaused = Symbol('readableStatePaused');
+
 export function setDefaultHighWaterMark(objectMode, value) {
   if (typeof objectMode !== 'boolean') throw streamError('ERR_INVALID_ARG_TYPE', 'The "objectMode" argument must be of type boolean');
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
@@ -246,6 +255,14 @@ function normalizeWritableEncoding(encoding) {
   }
   const normalized = encoding.toLowerCase();
   return normalized === 'utf-8' ? 'utf8' : normalized;
+}
+
+function readableEncodingName(encoding) {
+  const normalized = `${encoding}`.toLowerCase();
+  if (normalized === 'utf-8') return 'utf8';
+  if (normalized === 'binary') return 'latin1';
+  if (normalized === 'ucs2' || normalized === 'ucs-2' || normalized === 'utf-16le') return 'utf16le';
+  return normalized;
 }
 
 const COMBINATOR_EMPTY = Symbol('stream-combinator-empty');
@@ -604,14 +621,13 @@ export class Readable extends EventEmitter {
     this._destroyHook = options.destroy || inheritedDestroy;
     this._preserveStrings = Boolean(options.preserveStrings);
     this._decoder = null;
-    if (options.encoding) this.setEncoding(options.encoding);
     this._flowing = null;
-    this._readableState = {
-      readable: true, destroyed: false, errored: null,
-      pipes: [], flowing: null, reading: false, ended: false, endEmitted: false,
+    this._readableState = new ReadableState(options, this);
+    Object.assign(this._readableState, {
+      readable: true, destroyed: false,
+      pipes: [], reading: false, ended: false, endEmitted: false,
       readableListening: false, needReadable: false, emittedReadable: false, readingMore: false,
       resumeScheduled: false, errorEmitted: false, closeEmitted: false, multiAwaitDrain: false,
-      dataEmitted: false, defaultEncoding: options.defaultEncoding || 'utf8', decoder: null, encoding: null,
       constructed: true, sync: true,
       objectMode,
       highWaterMark: options.highWaterMark
@@ -620,7 +636,8 @@ export class Readable extends EventEmitter {
       autoDestroy: options.autoDestroy !== false, emitClose: options.emitClose !== false,
       closeEmitted: false,
       closed: false, errorEmitted: false,
-    };
+    });
+    if (options.encoding) this.setEncoding(options.encoding);
     if (options.readable === false) {
       this._ended = true;
       this._endEmitted = true;
@@ -632,7 +649,6 @@ export class Readable extends EventEmitter {
     this._resumePending = false;
     this._reading = false;
     this._readProduced = false;
-    this._readableDidRead = false;
     this._pipes = new Map();
     this._blockedPipes = new Set();
     this._sourceWaiter = null;
@@ -792,13 +808,17 @@ export class Readable extends EventEmitter {
   }
 
   setEncoding(encoding = 'utf8') {
-    this._encoding = `${encoding}`.toLowerCase();
-    const ops = resolveEncodingOps(encoding);
-    if (ops) this._decoder = { decode: (bytes) => bytes === undefined ? '' : ops.decode(bytes) };
-    else {
-      const normalized = encoding === 'utf8' ? 'utf-8' : encoding;
-      this._decoder = new TextDecoder(normalized);
+    if (typeof encoding !== 'string' || !resolveEncodingOps(encoding)) {
+      throw streamError('ERR_UNKNOWN_ENCODING', `Unknown encoding: ${encoding}`);
     }
+    this._encoding = readableEncodingName(encoding);
+    const ops = resolveEncodingOps(encoding);
+    this._decoder = {
+      encoding: this._encoding,
+      decode: (bytes) => bytes === undefined ? '' : ops.decode(bytes),
+    };
+    this._readableState.decoder = this._decoder;
+    this._readableState.encoding = this._encoding;
     this._preserveStrings = true;
     return this;
   }
@@ -817,7 +837,7 @@ export class Readable extends EventEmitter {
         ? chunks.join('')
         : toBytes(chunks.reduce((all, next) => appendBytes(all, toBytes(next)), new Uint8Array()));
     if (chunk !== null) {
-      this._readableDidRead = true;
+      this._readableState.dataEmitted = true;
       this._bufferedBytes -= chunks.reduce(
         (total, value) => total + (this.readableObjectMode ? 1 : typeof value === 'string' ? value.length : value.byteLength),
         0,
@@ -930,7 +950,6 @@ export class Readable extends EventEmitter {
       this._flowDrainScheduled = false;
       if (!this._flowing || this._destroyed) return;
       while (this._flowing && this._buffer.length) {
-        this._readableDidRead = true;
         this.emit('data', this.read(this.readableHighWaterMark));
       }
       this._maybeEmitEnd();
@@ -943,6 +962,7 @@ export class Readable extends EventEmitter {
     if (!this._flowing) this._resumePending = true;
     this._flowing = true;
     this._readableState.flowing = true;
+    this._readableState.paused = false;
     if (this._resumeScheduled) return this;
     this._resumeScheduled = true;
     queueMicrotask(() => {
@@ -964,13 +984,13 @@ export class Readable extends EventEmitter {
   }
 
   isPaused() {
-    return !this._flowing;
+    return this._readableState.paused || this._readableState.flowing === false;
   }
 
   get readableFlowing() { return this._readableState?.flowing ?? null; }
   get readableLength() { return this._bufferedBytes; }
   get readableObjectMode() { return Boolean(this._readableState?.objectMode); }
-  get readableEncoding() { return this._encoding ?? null; }
+  get readableEncoding() { return this._readableState?.encoding ?? null; }
   get readable() {
     const state = this._readableState;
     return Boolean(state && state.readable !== false && !state.destroyed
@@ -986,7 +1006,7 @@ export class Readable extends EventEmitter {
   get destroyed() { return Boolean(this._readableState?.destroyed ?? this._destroyed); }
   get readableEnded() { return Boolean(this._readableState?.endEmitted); }
   get readableAborted() { return this._destroyed && !this._endEmitted; }
-  get readableDidRead() { return this._readableDidRead; }
+  get readableDidRead() { return Boolean(this._readableState?.dataEmitted); }
   get readableListening() { return this.listenerCount('readable') > 0; }
 
   _undestroy() {
@@ -1013,6 +1033,7 @@ export class Readable extends EventEmitter {
     const wasFlowing = this._flowing;
     this._flowing = false;
     this._readableState.flowing = false;
+    this._readableState.paused = true;
     if (wasFlowing || this.listenerCount('pause') > 0) this.emit('pause');
     return this;
   }
@@ -1366,11 +1387,22 @@ for (const property of [
   'errored', 'closed', 'destroyed', 'readableEnded',
 ]) Object.defineProperty(Readable.prototype, property, { configurable: false });
 
+function readableDefaultEncoding(options) {
+  const encoding = options.defaultEncoding;
+  if (encoding == null) return 'utf8';
+  if (typeof encoding !== 'string' || !resolveEncodingOps(encoding)) {
+    throw streamError('ERR_UNKNOWN_ENCODING', `Unknown encoding: ${encoding}`);
+  }
+  return encoding === 'utf-8' ? 'utf8' : encoding;
+}
+
 function ReadableState(options = {}, stream) {
   this.objectMode = Boolean(options.readableObjectMode ?? options.objectMode);
   this.buffer = stream?._buffer || [];
   this.highWaterMark = options.highWaterMark
     ?? (this.objectMode ? defaultObjectHighWaterMark : defaultHighWaterMark);
+  this.pipes = [];
+  this.readable = true;
   this.ended = false;
   this.endEmitted = false;
   this.reading = false;
@@ -1390,10 +1422,72 @@ function ReadableState(options = {}, stream) {
   this.readingMore = false;
   this.dataEmitted = false;
   this.errored = null;
-  this.defaultEncoding = options.defaultEncoding || 'utf8';
+  this.defaultEncoding = readableDefaultEncoding(options);
   this.decoder = null;
   this.encoding = null;
 }
+
+Object.defineProperties(ReadableState.prototype, {
+  dataEmitted: {
+    configurable: false,
+    enumerable: false,
+    get() { return Boolean(this[kReadableStateDataEmitted]); },
+    set(value) { this[kReadableStateDataEmitted] = Boolean(value); },
+  },
+  errored: {
+    configurable: false,
+    enumerable: false,
+    get() { return this[kReadableStateErrored] || null; },
+    set(value) { this[kReadableStateErrored] = value || null; },
+  },
+  defaultEncoding: {
+    configurable: false,
+    enumerable: false,
+    get() { return this[kReadableStateDefaultEncoding]; },
+    set(value) {
+      this[kReadableStateDefaultEncoding] = value === 'utf-8' ? 'utf8' : value;
+    },
+  },
+  decoder: {
+    configurable: false,
+    enumerable: false,
+    get() { return this[kReadableStateDecoder] || null; },
+    set(value) { this[kReadableStateDecoder] = value || null; },
+  },
+  encoding: {
+    configurable: false,
+    enumerable: false,
+    get() { return this[kReadableStateEncoding] || null; },
+    set(value) { this[kReadableStateEncoding] = value || null; },
+  },
+  flowing: {
+    configurable: false,
+    enumerable: false,
+    get() {
+      return this[kReadableStateHasFlowing] ? Boolean(this[kReadableStateFlowing]) : null;
+    },
+    set(value) {
+      if (value == null) {
+        this[kReadableStateHasFlowing] = false;
+        this[kReadableStateFlowing] = false;
+      } else {
+        this[kReadableStateHasFlowing] = true;
+        this[kReadableStateFlowing] = Boolean(value);
+      }
+    },
+  },
+  pipesCount: {
+    configurable: false,
+    enumerable: false,
+    get() { return this.pipes?.length || 0; },
+  },
+  paused: {
+    configurable: false,
+    enumerable: false,
+    get() { return Boolean(this[kReadableStatePaused]); },
+    set(value) { this[kReadableStatePaused] = Boolean(value); },
+  },
+});
 
 function readableFromList(n, state) {
   const buffer = state?.buffer;

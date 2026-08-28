@@ -912,11 +912,13 @@ export function createUtilTypes(scope = globalThis) {
 
 export function createConstants() {
   return Object.freeze({
-    O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2, O_CREAT: 64, O_EXCL: 128, O_TRUNC: 512, O_APPEND: 1024, O_NOATIME: 0x40000,
+    O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2, O_CREAT: 64, O_EXCL: 128, O_TRUNC: 512, O_APPEND: 1024,
+    O_NOCTTY: 256, O_NONBLOCK: 2048, O_DSYNC: 4096, O_DIRECT: 16384,
+    O_DIRECTORY: 65536, O_NOFOLLOW: 131072, O_NOATIME: 0x40000, O_SYNC: 1052672,
     F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1,
     SIGINT: 2, SIGTERM: 15, SIGKILL: 9, SIGPIPE: 13,
     UV_DIRENT_FILE: 1, UV_DIRENT_DIR: 2, UV_DIRENT_LINK: 3,
-    crypto: Object.freeze({ ENGINE_METHOD_ALL: 0 }),
+    crypto: Object.freeze({ ENGINE_METHOD_ALL: 0, POINT_CONVERSION_COMPRESSED: 2 }),
   });
 }
 

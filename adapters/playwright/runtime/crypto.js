@@ -122,6 +122,59 @@ function bytes(value, encoder = globalThis.TextEncoder) {
   return new Uint8Array(toCryptoBytes(value, encoder));
 }
 
+// Node's crypto stream constructors inherit these enumerable lazy accessors
+// from internal/streams/lazy_transform. The browser Transform constructor is
+// class-based, so mirror the observable accessor contract without invoking it
+// as a legacy function.
+function installLazyTransformStateAccessors(prototype) {
+  const ensureState = (receiver) => {
+    if (Object.prototype.hasOwnProperty.call(receiver, '_readableState')
+      && Object.prototype.hasOwnProperty.call(receiver, '_writableState')) return;
+    const stream = new Transform(receiver._options || {});
+    Object.defineProperties(receiver, {
+      _readableState: {
+        configurable: true,
+        enumerable: true,
+        value: stream._readableState,
+        writable: true,
+      },
+      _writableState: {
+        configurable: true,
+        enumerable: true,
+        value: stream._writableState,
+        writable: true,
+      },
+    });
+  };
+  const getter = (name) => function getState() {
+    ensureState(this);
+    return this[name];
+  };
+  const setter = (name) => function setState(value) {
+    Object.defineProperty(this, name, {
+      configurable: true,
+      enumerable: true,
+      value,
+      writable: true,
+    });
+  };
+
+  Object.defineProperties(prototype, {
+    _readableState: {
+      configurable: true,
+      enumerable: true,
+      get: getter('_readableState'),
+      set: setter('_readableState'),
+    },
+    _writableState: {
+      configurable: true,
+      enumerable: true,
+      get: getter('_writableState'),
+      set: setter('_writableState'),
+    },
+  });
+}
+
 function rotr(value, amount) {
   return (value >>> amount) | (value << (32 - amount));
 }
@@ -531,6 +584,7 @@ export function createHashShim(BufferClass) {
   };
 
   Object.setPrototypeOf(Hash.prototype, Transform.prototype);
+  installLazyTransformStateAccessors(Hash.prototype);
   return Hash;
 }
 
@@ -665,6 +719,7 @@ export function createHmacShim(BufferClass, processObject, scope = globalThis) {
   };
 
   Object.setPrototypeOf(Hmac.prototype, Transform.prototype);
+  installLazyTransformStateAccessors(Hmac.prototype);
   return Hmac;
 }
 
@@ -2265,6 +2320,8 @@ export class Cipheriv extends Cipher {
   }
 }
 
+installLazyTransformStateAccessors(Cipheriv.prototype);
+
 export class Decipher extends Cipher {
   constructor(cipher, password, options) {
     void cipher;
@@ -2359,6 +2416,8 @@ export class Decipheriv extends Cipheriv {
     unsupportedCipherOperation('Decipheriv', 'setAAD');
   }
 }
+
+installLazyTransformStateAccessors(Decipheriv.prototype);
 
 export function createCipheriv() {
   return legacyCipherUnavailable('createCipheriv');

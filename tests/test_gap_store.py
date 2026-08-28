@@ -45,15 +45,24 @@ class GapStoreTests(unittest.TestCase):
         self.assertEqual(row["evidence"], {"exemplar_stderr": "TypeError"})
         self.assertEqual(row["status"], "open")
 
-    def test_identical_symbols_preserve_filled_status(self) -> None:
+    def test_surface_reextraction_reopens_filled_api_status(self) -> None:
         gap = sample_gap()
         self.db.replace_gaps([gap])
         self.db.set_gap_status(gap.gap_id, "filled")
-        # Re-extraction with the same surface keeps the human's progress.
+        # A fresh surface diff proves that the API is still absent. Historical
+        # status must not hide it from the current worklist.
         self.db.replace_gaps([sample_gap(affected_count=9)])
         rows = self.db.list_gaps()
-        self.assertEqual(rows[0]["status"], "filled")
+        self.assertEqual(rows[0]["status"], "open")
         self.assertEqual(rows[0]["affected_count"], 9)
+
+    def test_reextraction_preserves_filled_non_api_status(self) -> None:
+        gap = sample_gap(kind="missing-validation")
+        self.db.replace_gaps([gap])
+        self.db.set_gap_status(gap.gap_id, "filled")
+        self.db.replace_gaps([sample_gap(kind="missing-validation", affected_count=9)])
+        rows = self.db.list_gaps()
+        self.assertEqual(rows[0]["status"], "filled")
 
     def test_changed_symbols_open_a_new_gap_and_retire_the_old_one(self) -> None:
         gap = sample_gap()

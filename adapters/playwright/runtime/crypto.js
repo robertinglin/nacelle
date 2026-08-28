@@ -1276,6 +1276,21 @@ export function createCertificateShim(globalObject = globalThis, name = 'X509Cer
   const NativeCertificate = globalObject?.[name];
   if (typeof NativeCertificate === 'function') return NativeCertificate;
   return class UnsupportedCertificate {
+    static verifySpkac(spkac, encoding) {
+      void encoding;
+      return unsupportedCertificateSpkacOperation(name, 'verifySpkac', spkac);
+    }
+
+    static exportPublicKey(spkac, encoding) {
+      void encoding;
+      return unsupportedCertificateSpkacOperation(name, 'exportPublicKey', spkac);
+    }
+
+    static exportChallenge(spkac, encoding) {
+      void encoding;
+      return unsupportedCertificateSpkacOperation(name, 'exportChallenge', spkac);
+    }
+
     constructor() {
       throw new UnsupportedWebCapabilityError(
         name,
@@ -1300,6 +1315,18 @@ export function createCertificateShim(globalObject = globalThis, name = 'X509Cer
     get publicKey() { throw unsupportedCertificateProperty(name, 'publicKey'); }
     // These synchronous operations require the X.509 parser and certificate
     // fields that Web Crypto does not expose in a browser.
+    verifySpkac(spkac, encoding) {
+      void encoding;
+      return unsupportedCertificateSpkacOperation(name, 'verifySpkac', spkac);
+    }
+    exportPublicKey(spkac, encoding) {
+      void encoding;
+      return unsupportedCertificateSpkacOperation(name, 'exportPublicKey', spkac);
+    }
+    exportChallenge(spkac, encoding) {
+      void encoding;
+      return unsupportedCertificateSpkacOperation(name, 'exportChallenge', spkac);
+    }
     toString() { throw unsupportedCertificateOperation(name, 'toString'); }
     toJSON() { throw unsupportedCertificateOperation(name, 'toJSON'); }
     checkHost(hostname, options) { throw unsupportedCertificateOperation(name, 'checkHost'); }
@@ -1310,6 +1337,25 @@ export function createCertificateShim(globalObject = globalThis, name = 'X509Cer
     verify(publicKey) { throw unsupportedCertificateOperation(name, 'verify'); }
     toLegacyObject() { throw unsupportedCertificateOperation(name, 'toLegacyObject'); }
   };
+}
+
+function unsupportedCertificateSpkacOperation(name, operation, spkac) {
+  if (typeof spkac !== 'string' && !isArrayBuffer(spkac) && !isArrayBufferView(spkac)) {
+    const received = spkac === undefined
+      ? 'undefined'
+      : spkac === null
+        ? 'null'
+        : typeof spkac === 'object'
+          ? `an instance of ${spkac.constructor?.name || 'Object'}`
+          : `type ${typeof spkac} (${String(spkac)})`;
+    const error = new TypeError(
+      'The "spkac" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. '
+      + `Received ${received}`,
+    );
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  throw unsupportedCertificateOperation(name, operation);
 }
 
 function unsupportedCertificateProperty(name, property) {
@@ -1775,6 +1821,103 @@ function legacyCipherUnavailable(name) {
   throw new UnsupportedWebCapabilityError(`crypto.${name}`, LEGACY_CIPHER_BLOCKER);
 }
 
+function unsupportedCipherOperation(name, operation) {
+  const suffix = operation ? `.${operation}` : '';
+  throw new UnsupportedWebCapabilityError(`crypto.${name}${suffix}`, LEGACY_CIPHER_BLOCKER);
+}
+
+function cipherArgumentTypeError(name, expected, value) {
+  const received = value === undefined
+    ? 'undefined'
+    : value === null
+      ? 'null'
+      : typeof value === 'object'
+        ? `an instance of ${value.constructor?.name || 'Object'}`
+        : `type ${typeof value} (${String(value)})`;
+  const error = new TypeError(`The "${name}" argument must be ${expected}. Received ${received}`);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  throw error;
+}
+
+function validateCipherivArguments(cipher, key, iv) {
+  if (typeof cipher !== 'string') {
+    cipherArgumentTypeError('cipher', 'of type string', cipher);
+  }
+  const keyIsKeyObject = key && typeof key === 'object'
+    && key.type === 'secret' && Object.prototype.hasOwnProperty.call(key, 'key');
+  if (typeof key !== 'string' && !isArrayBuffer(key) && !isArrayBufferView(key)
+    && !keyIsKeyObject && !isCryptoKey(key)) {
+    cipherArgumentTypeError(
+      'key',
+      'of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey',
+      key,
+    );
+  }
+  if (iv === null) {
+    const error = new Error('Invalid initialization vector');
+    error.code = 'ERR_CRYPTO_INVALID_IV';
+    throw error;
+  }
+  if (typeof iv !== 'string' && !isArrayBuffer(iv) && !isArrayBufferView(iv)) {
+    cipherArgumentTypeError('iv', 'of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView', iv);
+  }
+}
+
+export class Cipher {
+  constructor(cipher, key, iv, options) {
+    void cipher;
+    void key;
+    void iv;
+    void options;
+    unsupportedCipherOperation('Cipher');
+  }
+
+  _transform(chunk, encoding, callback) {
+    void chunk;
+    void encoding;
+    void callback;
+    unsupportedCipherOperation('Cipher', '_transform');
+  }
+  _flush(callback) {
+    void callback;
+    unsupportedCipherOperation('Cipher', '_flush');
+  }
+  update(data, inputEncoding, outputEncoding) {
+    void data;
+    void inputEncoding;
+    void outputEncoding;
+    unsupportedCipherOperation('Cipher', 'update');
+  }
+}
+
+export class Cipheriv extends Cipher {
+  constructor(cipher, key, iv, options) {
+    void cipher;
+    void key;
+    void iv;
+    void options;
+    validateCipherivArguments(cipher, key, iv);
+    unsupportedCipherOperation('Cipheriv');
+  }
+
+  _transform(chunk, encoding, callback) {
+    void chunk;
+    void encoding;
+    void callback;
+    unsupportedCipherOperation('Cipheriv', '_transform');
+  }
+  _flush(callback) {
+    void callback;
+    unsupportedCipherOperation('Cipheriv', '_flush');
+  }
+  update(data, inputEncoding, outputEncoding) {
+    void data;
+    void inputEncoding;
+    void outputEncoding;
+    unsupportedCipherOperation('Cipheriv', 'update');
+  }
+}
+
 export function createCipheriv() {
   return legacyCipherUnavailable('createCipheriv');
 }
@@ -2014,6 +2157,8 @@ export function createCryptoContract(globalObject = globalThis) {
     timingSafeEqual,
     createCipheriv,
     createDecipheriv,
+    Cipher,
+    Cipheriv,
     constants: cryptoConstants,
     setEngine,
     getCipherInfo: (nameOrNid, options) => getCipherInfo(nameOrNid, options, globalObject),

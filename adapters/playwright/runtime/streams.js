@@ -668,7 +668,10 @@ export class Readable extends EventEmitter {
 
   on(name, listener) {
     super.on(name, listener);
-    if (name === 'readable') this._readableState.readableListening = true;
+    if (name === 'readable') {
+      this._readableState.readableListening = true;
+      this._readableState.needReadable = true;
+    }
     if (name === 'data') this._readableState.dataListening = true;
     if (name === 'data') this.resume();
     if (name === 'readable' && !this._flowing) {
@@ -901,6 +904,9 @@ export class Readable extends EventEmitter {
 
   read(size = undefined) {
     if (!this._buffer.length) {
+      if (this.listenerCount('readable') && !this._ended && !this._destroyed) {
+        this._readableState.needReadable = true;
+      }
       if (!this._ended && !this._destroyed) this._readOnce();
       return null;
     }
@@ -967,6 +973,7 @@ export class Readable extends EventEmitter {
     if (this._ended || this._destroyed || this._reading
       || (this.readableHighWaterMark > 0 && this._bufferedBytes >= this.readableHighWaterMark)) return;
     this._reading = true;
+    this._readableState.reading = true;
     let pending = false;
     try {
       const result = this._read(this.readableHighWaterMark);
@@ -975,16 +982,24 @@ export class Readable extends EventEmitter {
         result.then(
           () => {
             this._reading = false;
+            this._readableState.reading = false;
             if (this._flowing) this._scheduleFlowRead();
           },
-          (error) => { this._reading = false; this.destroy(error); },
+          (error) => {
+            this._reading = false;
+            this._readableState.reading = false;
+            this.destroy(error);
+          },
         );
         return;
       }
     } catch (error) {
       this.destroy(error);
     } finally {
-      if (!pending) this._reading = false;
+      if (!pending) {
+        this._reading = false;
+        this._readableState.reading = false;
+      }
     }
   }
 
@@ -996,12 +1011,16 @@ export class Readable extends EventEmitter {
       this._readableScheduled = false;
       if (this._flowing || this._destroyed || this._endEmitted) return;
       if (this._buffer.length || this._ended) {
+        this._readableState.needReadable = false;
         this._readableDispatching = true;
         try {
           this.emit('readable');
           this._maybeEmitEnd();
         } finally {
           this._readableDispatching = false;
+        }
+        if (!this._flowing && !this._ended && this.listenerCount('readable')) {
+          this._readableState.needReadable = true;
         }
       }
     });
@@ -1095,6 +1114,7 @@ export class Readable extends EventEmitter {
     this._readableState.closed = false;
     this._readableState.errorEmitted = false;
     this._reading = false;
+    this._readableState.reading = false;
     this._ended = this.readable === false;
     this._endEmitted = this.readable === false;
     this._readableState.ended = this._ended;
@@ -1130,6 +1150,7 @@ export class Readable extends EventEmitter {
       if (source === this) this.unpipe(destination);
     };
     this._pipes.set(destination, { onData, onEnd, onDrain, onUnpipe });
+    if (this._readableState.pipes.length === 1) this._readableState.multiAwaitDrain = true;
     this._readableState.pipes.push(destination);
     this.on('data', onData);
     this.on('end', onEnd);
@@ -1152,6 +1173,7 @@ export class Readable extends EventEmitter {
         this._pipes.delete(destination);
         const pipeIndex = this._readableState.pipes.indexOf(destination);
         if (pipeIndex >= 0) this._readableState.pipes.splice(pipeIndex, 1);
+        this._readableState.multiAwaitDrain = this._readableState.pipes.length > 1;
         if (this._pipes.size === 0) this.pause();
         destination.emit?.('unpipe', this);
         if (wasBlocked && this._blockedPipes.size === 0
@@ -1167,6 +1189,8 @@ export class Readable extends EventEmitter {
   destroy(error) {
     if (this._destroyed) return this;
     this._destroyed = true;
+    this._reading = false;
+    this._readableState.reading = false;
     this.readable = false;
     this._readableState.readable = false;
     this._readableState.destroyed = true;

@@ -1,3 +1,7 @@
+import { inspect as nodeInspect } from './assert.js';
+
+const inspectCustomSymbol = Symbol.for('nodejs.util.inspect.custom');
+
 function invalidUrl(scope, input) {
   try {
     return new scope.URL(String(input));
@@ -249,6 +253,53 @@ function encodeAuth(value) {
   return encodeURIComponent(String(value)).replace(/%3A/gi, ':');
 }
 
+function urlContextInspection(url) {
+  const href = url.href;
+  const protocolEnd = href.indexOf(':') + 1;
+  const hasAuthority = href.startsWith('//', protocolEnd);
+  const authorityStart = hasAuthority ? protocolEnd + 2 : protocolEnd;
+  const authorityEnd = hasAuthority ? href.slice(authorityStart).search(/[/?#]/) : 0;
+  const authorityLimit = authorityEnd < 0 ? href.length : authorityStart + authorityEnd;
+  const at = hasAuthority ? href.lastIndexOf('@', authorityLimit - 1) : -1;
+  const hostStart = at >= authorityStart ? at : authorityStart;
+  const usernameEnd = at >= authorityStart
+    ? href.indexOf(':', authorityStart) >= 0 && href.indexOf(':', authorityStart) < at
+      ? href.indexOf(':', authorityStart)
+      : at
+    : authorityStart;
+  const hostnameStart = at >= authorityStart ? at + 1 : authorityStart;
+  const hostname = String(url.hostname);
+  const hostEnd = hostname ? href.indexOf(hostname, hostnameStart) + hostname.length : hostnameStart;
+  const pathnameStart = hostEnd + (url.port ? String(url.port).length + 1 : 0);
+  const searchStart = href.indexOf('?');
+  const hashStart = href.indexOf('#');
+  const missing = 0xFFFFFFFF;
+  const schemeType = {
+    'http:': 0,
+    'https:': 2,
+    'ws:': 3,
+    'ftp:': 4,
+    'wss:': 5,
+    'file:': 6,
+  }[url.protocol] ?? 1;
+  const port = url.port ? Number(url.port) : missing;
+  return `URLContext {\n` +
+    `  href: ${nodeInspect(href)},\n` +
+    `  protocol_end: ${protocolEnd},\n` +
+    `  username_end: ${usernameEnd},\n` +
+    `  host_start: ${hostStart},\n` +
+    `  host_end: ${hostEnd},\n` +
+    `  pathname_start: ${pathnameStart},\n` +
+    `  search_start: ${searchStart < 0 ? missing : searchStart},\n` +
+    `  hash_start: ${hashStart < 0 ? missing : hashStart},\n` +
+    `  port: ${port},\n` +
+    `  scheme_type: ${schemeType},\n` +
+    `  [hasPort]: [Getter],\n` +
+    `  [hasSearch]: [Getter],\n` +
+    `  [hasHash]: [Getter]\n` +
+    '}';
+}
+
 function invalidSearchParamsThis(type = 'URLSearchParams') {
   const error = new TypeError(`Value of "this" must be of type ${type}`);
   error.code = 'ERR_INVALID_THIS';
@@ -294,6 +345,30 @@ function createNodeUrlSearchParams(scope) {
   class NodeURLSearchParams {
     constructor(init) {
       nativeByWrapper.set(this, new NativeSearchParams(init));
+    }
+
+    [inspectCustomSymbol](depth, options) {
+      const native = nativeByWrapper.get(this);
+      if (!native) throw invalidSearchParamsThis();
+      if (typeof depth === 'number' && depth < 0) return '[Object]';
+
+      const inspectOptions = options || {};
+      const innerOptions = { ...inspectOptions };
+      if (depth !== null) innerOptions.depth = depth - 1;
+      const entries = [];
+      for (const [name, value] of native) {
+        entries.push(`${nodeInspect(name, innerOptions)} => ${nodeInspect(value, innerOptions)}`);
+      }
+      const separator = ', ';
+      const length = entries.reduce((total, entry) => total + entry.length + separator.length, -separator.length);
+      const name = this.constructor === NodeURLSearchParams
+        ? 'URLSearchParams'
+        : this.constructor?.name || 'URLSearchParams';
+      if (length > (inspectOptions.breakLength ?? 80)) {
+        return `${name} {\n  ${entries.join(',\n  ')} }`;
+      }
+      if (entries.length) return `${name} { ${entries.join(separator)} }`;
+      return `${name} {}`;
     }
 
     append(name, value) {
@@ -404,6 +479,35 @@ function createNodeUrlSearchParams(scope) {
   }
 
   class NodeURL extends scope.URL {
+    [inspectCustomSymbol](depth, options) {
+      if (typeof depth === 'number' && depth < 0) return this;
+
+      const inspectOptions = options || {};
+      const constructor = this.constructor === NodeURL ? { name: 'URL' } : this.constructor;
+      const fields = [
+        ['href', this.href],
+        ['origin', this.origin],
+        ['protocol', this.protocol],
+        ['username', this.username],
+        ['password', this.password],
+        ['host', this.host],
+        ['hostname', this.hostname],
+        ['port', this.port],
+        ['pathname', this.pathname],
+        ['search', this.search],
+        ['searchParams', this.searchParams],
+        ['hash', this.hash],
+      ].map(([key, value]) => `${key}: ${nodeInspect(value, inspectOptions)}`);
+      if (inspectOptions.showHidden) fields.push(`[Symbol(context)]: ${urlContextInspection(this)}`);
+      const indent = (value) => value.replaceAll('\n', '\n  ');
+      const body = fields.join(', ');
+      const name = constructor?.name || 'URL';
+      if (body.length > (inspectOptions.breakLength ?? 80)) {
+        return `${name} {\n  ${fields.map(indent).join(',\n  ')}\n}`;
+      }
+      return `${name} { ${body} }`;
+    }
+
     get searchParams() {
       if (typeof nativeSearchParamsGetter !== 'function') return new NodeURLSearchParams();
       const native = nativeSearchParamsGetter.call(this);

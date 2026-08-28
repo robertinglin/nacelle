@@ -467,6 +467,294 @@ function setTraceSigInt() {
   // this operation a no-op is the browser-safe equivalent of disabling it.
 }
 
+const styleTextColors = Object.freeze({
+  reset: [0, 0], bold: [1, 22], dim: [2, 22], italic: [3, 23], underline: [4, 24],
+  blink: [5, 25], inverse: [7, 27], hidden: [8, 28], strikethrough: [9, 29],
+  doubleunderline: [21, 24], black: [30, 39], red: [31, 39], green: [32, 39],
+  yellow: [33, 39], blue: [34, 39], magenta: [35, 39], cyan: [36, 39], white: [37, 39],
+  gray: [90, 39], grey: [90, 39], bgBlack: [40, 49], bgRed: [41, 49], bgGreen: [42, 49],
+  bgYellow: [43, 49], bgBlue: [44, 49], bgMagenta: [45, 49], bgCyan: [46, 49], bgWhite: [47, 49],
+  bgGray: [100, 49], bgGrey: [100, 49],
+});
+
+function styleText(format, text, options, scope = globalThis) {
+  const formats = Array.isArray(format) ? format : [format];
+  if (!Array.isArray(format) && typeof format !== 'string') {
+    throw invalidArgumentValue('format', format, 'a valid style format');
+  }
+  if (typeof text !== 'string') throw invalidArgumentType('text', 'string', text);
+  if (!formats.every((value) => typeof value === 'string' && (value === 'none' || styleTextColors[value]))) {
+    throw invalidArgumentValue('format', format, 'a valid style format');
+  }
+  if (options !== undefined && (options === null || typeof options !== 'object' || Array.isArray(options))) {
+    throw invalidArgumentType('options', 'an Object', options);
+  }
+  const validateStream = options?.validateStream ?? true;
+  if (typeof validateStream !== 'boolean') throw invalidArgumentType('options.validateStream', 'boolean', validateStream);
+  const stream = options?.stream;
+  if (stream !== undefined && (stream === null || typeof stream !== 'object')) {
+    throw invalidArgumentType('options.stream', 'a stream', stream);
+  }
+  if (validateStream && stream !== undefined && typeof stream.isTTY !== 'boolean') {
+    throw invalidArgumentType('options.stream', 'a TTY stream', stream);
+  }
+  if (Array.isArray(format) && formats.length === 1) return styleText(formats[0], text, options, scope);
+  const env = scope?.process?.env || {};
+  if (validateStream && !env.FORCE_COLOR && stream?.isTTY === false) return text;
+  if (validateStream && !env.FORCE_COLOR && (env.NO_COLOR || env.NODE_DISABLE_COLORS)) return text;
+  let prefix = '';
+  let suffix = '';
+  let body = text;
+  const restores = new Map();
+  for (const value of formats) {
+    if (value === 'none') continue;
+    const style = styleTextColors[value];
+    if (!restores.has(style[1])) restores.set(style[1], style[0]);
+  }
+  for (const [close, open] of restores) {
+    const replacement = close >= 30 ? `\u001b[${open}m` : `\u001b[${close}m\u001b[${open}m`;
+    body = body.replace(new RegExp(`\\u001b\\[${close}m(?=[\\s\\S])`, 'g'), replacement);
+  }
+  for (const value of formats) {
+    if (value === 'none') continue;
+    const style = styleTextColors[value];
+    prefix += `\u001b[${style[0]}m`;
+    suffix = `\u001b[${style[1]}m${suffix}`;
+  }
+  return `${prefix}${body}${suffix}`;
+}
+
+function toUSVString(value) {
+  const string = String(value);
+  if (typeof string.toWellFormed === 'function') return string.toWellFormed();
+  let result = '';
+  for (let index = 0; index < string.length; index += 1) {
+    const code = string.charCodeAt(index);
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      const next = string.charCodeAt(index + 1);
+      if (next >= 0xDC00 && next <= 0xDFFF) {
+        result += string[index] + string[++index];
+      } else {
+        result += '\uFFFD';
+      }
+    } else if (code >= 0xDC00 && code <= 0xDFFF) {
+      result += '\uFFFD';
+    } else {
+      result += string[index];
+    }
+  }
+  return result;
+}
+
+const transferableAbortSignalKey = Symbol.for('bnh.util.transferableAbortSignal');
+const transferableAbortCompatibilityKey = Symbol.for('bnh.util.transferableAbortCompatibility');
+
+function unsupportedTransferableAbortSignal() {
+  const error = new Error('transferable AbortSignals require browser MessageChannel support');
+  error.name = 'CapabilityError';
+  error.code = 'ERR_UNSUPPORTED_BROWSER_BOUNDARY';
+  return error;
+}
+
+function transferListValue(input) {
+  if (input === undefined) return undefined;
+  if (Array.isArray(input)) return input;
+  if (input && typeof input === 'object' && Object.hasOwn(input, 'transfer')) return input.transfer;
+  return input;
+}
+
+function replaceAbortSignalTransferValues(value, replacements, seen = new WeakMap()) {
+  if (!value || typeof value !== 'object') return value;
+  if (replacements.has(value)) return replacements.get(value);
+  if (seen.has(value)) return seen.get(value);
+  if (Array.isArray(value)) {
+    const copy = [];
+    seen.set(value, copy);
+    for (const item of value) copy.push(replaceAbortSignalTransferValues(item, replacements, seen));
+    return copy;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return value;
+  const copy = {};
+  seen.set(value, copy);
+  for (const [key, item] of Object.entries(value)) {
+    copy[key] = replaceAbortSignalTransferValues(item, replacements, seen);
+  }
+  return copy;
+}
+
+function restoreAbortSignalTransferValues(value, signals, seen = new WeakMap()) {
+  if (!value || typeof value !== 'object') return value;
+  if (value.bnhTransferMarker === 'signal' && Number.isInteger(value.id)) return signals.get(value.id) || value;
+  if (seen.has(value)) return seen.get(value);
+  if (Array.isArray(value)) {
+    const copy = [];
+    seen.set(value, copy);
+    for (const item of value) copy.push(restoreAbortSignalTransferValues(item, signals, seen));
+    return copy;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return value;
+  const copy = {};
+  seen.set(value, copy);
+  for (const [key, item] of Object.entries(value)) {
+    copy[key] = restoreAbortSignalTransferValues(item, signals, seen);
+  }
+  return copy;
+}
+
+function createAbortSignalTransferCompatibility(scope) {
+  const MessagePortClass = scope.MessagePort;
+  const MessageChannelClass = scope.MessageChannel;
+  const AbortSignalClass = scope.AbortSignal;
+  const AbortControllerClass = scope.AbortController;
+  if (typeof MessagePortClass !== 'function' || typeof MessageChannelClass !== 'function'
+      || typeof AbortSignalClass !== 'function' || typeof AbortControllerClass !== 'function') {
+    return false;
+  }
+  const prototype = MessagePortClass.prototype;
+  const nativePostMessage = prototype.postMessage;
+  const nativeAddEventListener = prototype.addEventListener;
+  const nativeRemoveEventListener = prototype.removeEventListener;
+  if (typeof nativePostMessage !== 'function' || typeof nativeAddEventListener !== 'function'
+      || typeof nativeRemoveEventListener !== 'function') return false;
+
+  const marker = 'bnh-transferable-abort-signal';
+  const listeners = new WeakMap();
+  const onMessages = new WeakMap();
+
+  const decodeEvent = (event) => {
+    const envelope = event?.data;
+    if (!envelope || envelope[marker] !== true) return event;
+    const signals = new Map();
+    for (const record of envelope.signals || []) {
+      const controller = new AbortControllerClass();
+      const signal = controller.signal;
+      try { Object.defineProperty(signal, transferableAbortSignalKey, { configurable: true, value: true }); } catch { /* host signal may be sealed */ }
+      signals.set(record.id, signal);
+      const bridge = record.port?.raw || record.port;
+      if (bridge && typeof bridge.addEventListener === 'function') {
+        nativeAddEventListener.call(bridge, 'message', (abortEvent) => {
+          if (abortEvent?.data?.[marker] !== 'abort' || signal.aborted) return;
+          controller.abort(abortEvent.data.reason);
+          bridge.close?.();
+        });
+        bridge.start?.();
+      }
+      if (record.aborted) controller.abort(record.reason);
+    }
+    const data = restoreAbortSignalTransferValues(envelope.data, signals);
+    const decoded = { data };
+    for (const property of ['type', 'bubbles', 'cancelable', 'composed', 'origin', 'lastEventId', 'source', 'ports']) {
+      try { decoded[property] = event[property]; } catch { /* browser event property is optional */ }
+    }
+    return decoded;
+  };
+
+  const wrapListener = (port, listener) => {
+    if (typeof listener !== 'function' && (!listener || typeof listener.handleEvent !== 'function')) return listener;
+    const wrapped = function onMessage(event) {
+      const decoded = decodeEvent(event);
+      if (typeof listener === 'function') listener.call(this, decoded);
+      else listener.handleEvent.call(listener, decoded);
+    };
+    let portListeners = listeners.get(port);
+    if (!portListeners) {
+      portListeners = new Map();
+      listeners.set(port, portListeners);
+    }
+    portListeners.set(listener, wrapped);
+    return wrapped;
+  };
+
+  prototype.postMessage = function postMessage(value, options) {
+    const transfer = transferListValue(options);
+    const list = transfer === undefined ? [] : Array.from(transfer || []);
+    const abortSignals = list.filter((item) => item?.[transferableAbortSignalKey] === true);
+    if (abortSignals.length === 0) return nativePostMessage.call(this, value, options);
+    const replacements = new Map();
+    const signals = [];
+    const nativeTransfers = [];
+    for (const [index, signal] of abortSignals.entries()) {
+      const bridge = new MessageChannelClass();
+      const bridgePort1 = bridge.port1?.raw || bridge.port1;
+      const bridgePort2 = bridge.port2?.raw || bridge.port2;
+      const id = index;
+      replacements.set(signal, { bnhTransferMarker: 'signal', id });
+      signals.push({
+        id,
+        port: bridgePort2,
+        aborted: signal.aborted,
+        reason: signal.reason,
+      });
+      nativeTransfers.push(bridgePort2);
+      signal.addEventListener('abort', () => {
+        try { nativePostMessage.call(bridgePort1, { [marker]: 'abort', reason: signal.reason }); } catch { /* destination may be closed */ }
+      }, { once: true });
+    }
+    for (const item of list) if (!abortSignals.includes(item)) nativeTransfers.push(item);
+    const payload = {
+      [marker]: true,
+      data: replaceAbortSignalTransferValues(value, replacements),
+      signals,
+    };
+    return nativePostMessage.call(this, payload, nativeTransfers);
+  };
+
+  prototype.addEventListener = function addEventListener(type, listener, options) {
+    const wrapped = type === 'message' ? wrapListener(this, listener) : listener;
+    return nativeAddEventListener.call(this, type, wrapped, options);
+  };
+
+  prototype.removeEventListener = function removeEventListener(type, listener, options) {
+    const wrapped = type === 'message' ? listeners.get(this)?.get(listener) || listener : listener;
+    listeners.get(this)?.delete(listener);
+    return nativeRemoveEventListener.call(this, type, wrapped, options);
+  };
+
+  const nativeOnMessage = Object.getOwnPropertyDescriptor(prototype, 'onmessage');
+  if (nativeOnMessage?.configurable) {
+    Object.defineProperty(prototype, 'onmessage', {
+      configurable: true,
+      enumerable: nativeOnMessage.enumerable,
+      get() { return onMessages.get(this)?.listener || null; },
+      set(listener) {
+        const previous = onMessages.get(this);
+        if (previous) nativeRemoveEventListener.call(this, 'message', previous.wrapped);
+        if (listener === null || listener === undefined) {
+          onMessages.delete(this);
+          return;
+        }
+        const wrapped = wrapListener(this, listener);
+        onMessages.set(this, { listener, wrapped });
+        nativeAddEventListener.call(this, 'message', wrapped);
+      },
+    });
+  }
+  return true;
+}
+
+function markTransferableAbortSignal(scope, signal) {
+  if (!(signal instanceof scope.AbortSignal)) throw invalidArgumentType('signal', 'an instance of AbortSignal', signal);
+  if (!scope[transferableAbortCompatibilityKey]) {
+    const installed = createAbortSignalTransferCompatibility(scope);
+    if (!installed) throw unsupportedTransferableAbortSignal();
+    Object.defineProperty(scope, transferableAbortCompatibilityKey, { configurable: true, value: true });
+  }
+  try { Object.defineProperty(signal, transferableAbortSignalKey, { configurable: true, value: true }); } catch { /* host signal may be sealed */ }
+  return signal;
+}
+
+function transferableAbortController(scope) {
+  const controller = new scope.AbortController();
+  markTransferableAbortSignal(scope, controller.signal);
+  return controller;
+}
+
+function transferableAbortSignal(scope, signal) {
+  return markTransferableAbortSignal(scope, signal);
+}
+
 const promisifyCustom = Symbol.for('nodejs.util.promisify.custom');
 // Node exposes the callback result names through this well-known symbol.
 // Keeping the exact registry key matters because callers define it without
@@ -565,9 +853,13 @@ export function createUtilModule(scope = globalThis) {
     parseArgs: (config) => parseArgs(config, scope),
     parseEnv,
     promisify: createPromisify(),
+    styleText: (format, text, options) => styleText(format, text, options, scope),
     setTraceSigInt,
     stripVTControlCharacters,
     customPromisifyArgs: promisifyArgs,
+    toUSVString,
+    transferableAbortController: () => transferableAbortController(scope),
+    transferableAbortSignal: (signal) => transferableAbortSignal(scope, signal),
     types,
   });
 }

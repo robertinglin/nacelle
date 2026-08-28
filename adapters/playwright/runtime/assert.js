@@ -1064,9 +1064,23 @@ export function createAssert({ strict = false, readSource, sourcePath, process: 
   assert.doesNotMatch = (actual, regexp, message) => internalMatch(actual, regexp, message, 'doesNotMatch', false);
 
   assert.AssertionError = AssertionError;
-  assert.CallTracker = class RuntimeCallTracker extends CallTracker {
-    constructor() { super(processObject, AssertionError); }
-  };
+  let callTrackerWarned = false;
+  function deprecatedCallTracker(...args) {
+    if (!callTrackerWarned && !processObject?.noDeprecation) {
+      callTrackerWarned = true;
+      processObject?.emitWarning?.(
+        'assert.CallTracker is deprecated.',
+        { code: 'DEP0173', type: 'DeprecationWarning' },
+      );
+    }
+    if (!new.target) return Reflect.apply(CallTracker, this, args);
+    return Reflect.construct(CallTracker, [processObject, AssertionError], new.target);
+  }
+  Object.defineProperty(deprecatedCallTracker, 'name', { configurable: true, value: 'deprecated' });
+  Object.defineProperty(deprecatedCallTracker, 'length', { configurable: true, value: 0 });
+  Object.setPrototypeOf(deprecatedCallTracker, CallTracker);
+  deprecatedCallTracker.prototype = CallTracker.prototype;
+  assert.CallTracker = deprecatedCallTracker;
   assert.strict = strict ? assert : createAssert({ strict: true, readSource, sourcePath, process: processObject });
   assert.ifError = (value) => {
     if (value !== null && value !== undefined) {

@@ -4,6 +4,27 @@ function trackerError(code, message, ErrorClass = Error) {
   return error;
 }
 
+function received(value) {
+  if (value === undefined) return 'undefined';
+  if (value === null) return 'null';
+  if (typeof value === 'string') return `type string ('${value}')`;
+  if (typeof value === 'boolean') return `type boolean (${value})`;
+  if (typeof value === 'number') return String(value);
+  return `an instance of ${value?.constructor?.name || typeof value}`;
+}
+
+function getTrackedFunction(tracker, tracked) {
+  const record = tracker._trackedFunctions.get(tracked);
+  if (!record) {
+    throw trackerError(
+      'ERR_INVALID_ARG_VALUE',
+      `The argument 'tracked' is not a tracked function. Received ${received(tracked)}`,
+      TypeError,
+    );
+  }
+  return record;
+}
+
 export class CallTracker {
   constructor(processObject, AssertionError = Error) {
     this._records = new Set();
@@ -12,42 +33,49 @@ export class CallTracker {
     this._AssertionError = AssertionError;
   }
 
-  _getTrackedFunction(tracked) {
-    const record = typeof tracked === 'function' ? this._trackedFunctions.get(tracked) : undefined;
-    if (!record) throw trackerError('ERR_INVALID_ARG_VALUE', 'The "tracked" argument is not a tracked function');
-    return record;
-  }
-
-  reset(tracked = undefined) {
+  reset(tracked) {
     if (tracked === undefined) {
       for (const record of this._records) record.calls = [];
       return;
     }
-    this._getTrackedFunction(tracked).calls = [];
+    getTrackedFunction(this, tracked).calls = [];
   }
 
   getCalls(tracked) {
-    const record = this._getTrackedFunction(tracked);
+    const record = getTrackedFunction(this, tracked);
     return Object.freeze([...record.calls]);
   }
 
   calls(fn, expected = 1) {
     if (this._process?._bnhIsExited?.() || this._process?._exitRequested?.()) {
-      throw trackerError('ERR_UNAVAILABLE_DURING_EXIT', 'Cannot create a call tracker during process exit');
+      throw trackerError('ERR_UNAVAILABLE_DURING_EXIT', 'Cannot call function in process exit handler');
     }
     if (typeof fn === 'number') {
       expected = fn;
       fn = Function.prototype;
     } else if (fn === undefined) {
       fn = Function.prototype;
-    } else if (typeof fn !== 'function') {
-      throw trackerError('ERR_INVALID_ARG_TYPE', 'The "fn" argument must be of type function');
     }
     if (typeof expected !== 'number') {
-      throw trackerError('ERR_INVALID_ARG_TYPE', 'The "expected" argument must be of type number');
+      throw trackerError(
+        'ERR_INVALID_ARG_TYPE',
+        `The "expected" argument must be of type number. Received ${received(expected)}`,
+        TypeError,
+      );
     }
-    if (!Number.isInteger(expected) || expected < 0 || expected > 0xFFFF_FFFF) {
-      throw trackerError('ERR_OUT_OF_RANGE', 'The "expected" argument is out of range');
+    if (!Number.isInteger(expected)) {
+      throw trackerError(
+        'ERR_OUT_OF_RANGE',
+        `The value of "expected" is out of range. It must be an integer. Received ${expected}`,
+        RangeError,
+      );
+    }
+    if (expected < 1 || expected > 0xFFFF_FFFF) {
+      throw trackerError(
+        'ERR_OUT_OF_RANGE',
+        `The value of "expected" is out of range. It must be >= 1 && <= 4294967295. Received ${expected}`,
+        RangeError,
+      );
     }
     const record = {
       target: fn,

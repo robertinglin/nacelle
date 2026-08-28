@@ -80,6 +80,15 @@ function socketError(code, message) {
   return error;
 }
 
+function validateBufferSize(size) {
+  if (!Number.isInteger(size) || size < 0 || size > 0xffffffff) {
+    const error = new TypeError('Buffer size must be a positive integer');
+    error.code = 'ERR_SOCKET_BAD_BUFFER_SIZE';
+    throw error;
+  }
+  return size;
+}
+
 function deprecatedSocketApi(message, operation) {
   let warned = false;
   return function deprecatedSocketApiWrapper(...args) {
@@ -158,6 +167,11 @@ function createDgramHandle(type, { dns, network, lookup } = {}) {
     bound: false,
     closed: false,
     owner: null,
+    recvBufferSize: 0,
+    sendBufferSize: 0,
+    sendQueueCount: 0,
+    sendQueueSize: 0,
+    refed: true,
   };
   const handle = {
     fd: allocateHandleFd(),
@@ -202,7 +216,18 @@ function createDgramHandle(type, { dns, network, lookup } = {}) {
     },
     recvStart() { return state.closed ? UV_EINVAL : 0; },
     recvStop() { return 0; },
-    getSendQueueCount() { return 0; },
+    getSendQueueCount() { return state.sendQueueCount; },
+    getSendQueueSize() { return state.sendQueueSize; },
+    bufferSize(size, receive) {
+      const key = receive ? 'recvBufferSize' : 'sendBufferSize';
+      if (size === 0) return state[key];
+      state[key] = size;
+      return state[key];
+    },
+    ref() { state.refed = true; return handle; },
+    unref() { state.refed = false; return handle; },
+    hasRef() { return state.refed; },
+    dropSourceSpecificMembership() { return 0; },
     connect(address, port) {
       if (state.closed || !state.bound) return UV_EINVAL;
       state.remoteAddress = {
@@ -225,7 +250,14 @@ function createDgramHandle(type, { dns, network, lookup } = {}) {
     },
     send(request) {
       request?._bnhInitialize?.();
-      queueMicrotask(() => request?.oncomplete?.(0));
+      const size = Number(request?.length) || 0;
+      state.sendQueueCount += 1;
+      state.sendQueueSize += size;
+      queueMicrotask(() => {
+        state.sendQueueCount = Math.max(0, state.sendQueueCount - 1);
+        state.sendQueueSize = Math.max(0, state.sendQueueSize - size);
+        request?.oncomplete?.(0);
+      });
       return 0;
     },
     close(callback) {
@@ -310,6 +342,7 @@ export class Socket extends EventEmitter {
     this._taskRelease = null;
     this._sendResources = new Set();
     this._sendQueueCount = 0;
+    this._sendQueueSize = 0;
     // A UDP socket is an async resource whose callbacks inherit the context
     // in which the socket was created, including an active AsyncLocalStorage.
     this._receiveResource = new AsyncResource('UDPWRAP');
@@ -328,6 +361,13 @@ export class Socket extends EventEmitter {
       closeQueued: false,
       reuseAddr: Boolean(internal.reuseAddr),
       fdClusterGroupId: undefined,
+      recvBufferSize: internal.recvBufferSize === undefined
+        ? 0
+        : validateBufferSize(internal.recvBufferSize),
+      sendBufferSize: internal.sendBufferSize === undefined
+        ? 0
+        : validateBufferSize(internal.sendBufferSize),
+      refed: true,
     };
     state.handle[DGRAM_OWNER] = this;
     Object.defineProperty(state.handle, 'owner', {
@@ -365,6 +405,28 @@ export class Socket extends EventEmitter {
       return 0;
     };
     state.handle.getSendQueueCount = () => this._sendQueueCount;
+    state.handle.getSendQueueSize = () => this._sendQueueSize;
+    state.handle.bufferSize = (size, receive) => {
+      const key = receive ? 'recvBufferSize' : 'sendBufferSize';
+      if (size === 0) return state[key];
+      state[key] = size;
+      return state[key];
+    };
+    state.handle.ref = () => {
+      state.refed = true;
+      this._refed = true;
+      if (this._bound && !this._taskRelease) this._taskRelease = this._trackTask?.() || null;
+      return state.handle;
+    };
+    state.handle.unref = () => {
+      state.refed = false;
+      this._refed = false;
+      this._taskRelease?.();
+      this._taskRelease = null;
+      return state.handle;
+    };
+    state.handle.hasRef = () => state.refed;
+    state.handle.dropSourceSpecificMembership = () => 0;
     const diagnostics = typeof this._diagnostics === 'function' ? this._diagnostics() : this._diagnostics;
     const channel = diagnostics?.channel?.('udp.socket');
     if (channel?.hasSubscribers) channel.publish({ socket: this });
@@ -571,11 +633,13 @@ export class Socket extends EventEmitter {
         const resource = new AsyncResource('UDPSENDWRAP');
         this._sendResources.add(resource);
         this._sendQueueCount += 1;
+        this._sendQueueSize += bytes.byteLength;
         let callbackFinished = false;
         const runCallback = (...callbackArgs) => {
           if (!callbackFinished) {
             callbackFinished = true;
             this._sendQueueCount = Math.max(0, this._sendQueueCount - 1);
+            this._sendQueueSize = Math.max(0, this._sendQueueSize - bytes.byteLength);
           }
           return resource.runInAsyncScope(callback, this, ...callbackArgs);
         };
@@ -752,6 +816,7 @@ export class Socket extends EventEmitter {
     this[VIRTUAL_DGRAM_STATE].closeQueued = false;
     this[VIRTUAL_DGRAM_STATE].queue = undefined;
     this._sendQueueCount = 0;
+    this._sendQueueSize = 0;
     this[VIRTUAL_DGRAM_STATE].handle = null;
     this.boundPort = null;
     this.boundAddress = null;
@@ -788,11 +853,40 @@ export class Socket extends EventEmitter {
     else deliver();
   }
 
-  getRecvBufferSize() { return 0; }
-  getSendBufferSize() { return 0; }
+  dropSourceSpecificMembership(sourceAddress, groupAddress, interfaceAddress) {
+    healthCheck(this);
+    if (typeof sourceAddress !== 'string') throw invalidArgumentType('sourceAddress', 'string', sourceAddress);
+    if (typeof groupAddress !== 'string') throw invalidArgumentType('groupAddress', 'string', groupAddress);
+    const error = this[VIRTUAL_DGRAM_STATE].handle.dropSourceSpecificMembership(
+      sourceAddress,
+      groupAddress,
+      interfaceAddress,
+    );
+    if (error) throw networkError('UNKNOWN', 'dropSourceSpecificMembership', groupAddress, 0);
+  }
+
+  getRecvBufferSize() {
+    return this[VIRTUAL_DGRAM_STATE].handle.bufferSize(0, true);
+  }
+
+  getSendBufferSize() {
+    return this[VIRTUAL_DGRAM_STATE].handle.bufferSize(0, false);
+  }
+
+  getSendQueueSize() {
+    return this[VIRTUAL_DGRAM_STATE].handle.getSendQueueSize();
+  }
+
   getSendQueueCount() { return this[VIRTUAL_DGRAM_STATE].handle.getSendQueueCount(); }
-  setRecvBufferSize() { return this; }
-  setSendBufferSize() { return this; }
+  setRecvBufferSize(size) {
+    validateBufferSize(size);
+    this[VIRTUAL_DGRAM_STATE].handle.bufferSize(size, true);
+  }
+
+  setSendBufferSize(size) {
+    validateBufferSize(size);
+    this[VIRTUAL_DGRAM_STATE].handle.bufferSize(size, false);
+  }
   setBroadcast() { return this; }
   setTTL() { return this; }
   setMulticastTTL() { return this; }
@@ -800,15 +894,12 @@ export class Socket extends EventEmitter {
   addMembership() { return this; }
   dropMembership() { return this; }
   ref() {
-    this._refed = true;
-    if (this._bound && !this._taskRelease) this._taskRelease = this._trackTask?.() || null;
+    this[VIRTUAL_DGRAM_STATE].handle?.ref?.();
     return this;
   }
 
   unref() {
-    this._refed = false;
-    this._taskRelease?.();
-    this._taskRelease = null;
+    this[VIRTUAL_DGRAM_STATE].handle?.unref?.();
     return this;
   }
 }

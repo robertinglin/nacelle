@@ -3904,6 +3904,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         const inspectFn = (value, options) => nodeInspect(value, options ?? {});
         inspectFn.custom = Symbol.for('nodejs.util.inspect.custom');
         const utilCompat = createUtilModule(Object.assign(Object.create(scope), {
+          Buffer,
           process: processObject,
           console: processObject._bnhConsole || scope.console,
         }));

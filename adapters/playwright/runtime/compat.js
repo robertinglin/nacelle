@@ -218,6 +218,116 @@ function typedArray(value) {
   return ArrayBuffer.isView(value) && !(value instanceof DataView);
 }
 
+function enumerableKeys(value) {
+  return Reflect.ownKeys(value).filter((key) => Object.prototype.propertyIsEnumerable.call(value, key));
+}
+
+function equalArrayBufferBytes(first, second) {
+  if (first.byteLength !== second.byteLength) return false;
+  const firstBytes = new Uint8Array(first);
+  const secondBytes = new Uint8Array(second);
+  for (let index = 0; index < firstBytes.length; index += 1) {
+    if (firstBytes[index] !== secondBytes[index]) return false;
+  }
+  return true;
+}
+
+function equalViewBytes(first, second) {
+  if (first.byteLength !== second.byteLength) return false;
+  const firstBytes = new Uint8Array(first.buffer, first.byteOffset, first.byteLength);
+  const secondBytes = new Uint8Array(second.buffer, second.byteOffset, second.byteLength);
+  for (let index = 0; index < firstBytes.length; index += 1) {
+    if (firstBytes[index] !== secondBytes[index]) return false;
+  }
+  return true;
+}
+
+function boxedPrimitiveValue(value, kind) {
+  try {
+    if (kind === 'BigInt') return BigInt.prototype.valueOf.call(value);
+    if (kind === 'Boolean') return Boolean.prototype.valueOf.call(value);
+    if (kind === 'Number') return Number.prototype.valueOf.call(value);
+    if (kind === 'String') return String.prototype.valueOf.call(value);
+    return Symbol.prototype.valueOf.call(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function deepStrictEqual(first, second, seen = new Map()) {
+  if (Object.is(first, second)) return true;
+  if (first === null || second === null || typeof first !== 'object' || typeof second !== 'object') return false;
+
+  const previous = seen.get(first);
+  if (previous !== undefined) return previous === second;
+  seen.set(first, second);
+
+  if (first.constructor !== second.constructor) return false;
+
+  const firstTag = tag(first);
+  const secondTag = tag(second);
+  if (firstTag !== secondTag) return false;
+
+  if (firstTag === '[object Date]') {
+    if (first.getTime() !== second.getTime()) return false;
+  } else if (firstTag === '[object RegExp]') {
+    if (first.source !== second.source || first.flags !== second.flags || first.lastIndex !== second.lastIndex) return false;
+  } else if (firstTag === '[object ArrayBuffer]' || firstTag === '[object SharedArrayBuffer]') {
+    if (!equalArrayBufferBytes(first, second)) return false;
+  } else if (firstTag === '[object Map]') {
+    if (first.size !== second.size) return false;
+    const unmatched = [...second];
+    for (const [firstKey, firstValue] of first) {
+      let match = -1;
+      for (let index = 0; index < unmatched.length; index += 1) {
+        const candidateSeen = new Map(seen);
+        if (deepStrictEqual(firstKey, unmatched[index][0], candidateSeen)
+          && deepStrictEqual(firstValue, unmatched[index][1], candidateSeen)) {
+          match = index;
+          for (const [key, value] of candidateSeen) seen.set(key, value);
+          break;
+        }
+      }
+      if (match < 0) return false;
+      unmatched.splice(match, 1);
+    }
+  } else if (firstTag === '[object Set]') {
+    if (first.size !== second.size) return false;
+    const unmatched = [...second];
+    for (const firstValue of first) {
+      let match = -1;
+      for (let index = 0; index < unmatched.length; index += 1) {
+        const candidateSeen = new Map(seen);
+        if (deepStrictEqual(firstValue, unmatched[index], candidateSeen)) {
+          match = index;
+          for (const [key, value] of candidateSeen) seen.set(key, value);
+          break;
+        }
+      }
+      if (match < 0) return false;
+      unmatched.splice(match, 1);
+    }
+  } else if (ArrayBuffer.isView(first)) {
+    if (!ArrayBuffer.isView(second) || first.constructor !== second.constructor || !equalViewBytes(first, second)) return false;
+  } else if (firstTag === '[object Boolean]' || firstTag === '[object Number]'
+    || firstTag === '[object String]' || firstTag === '[object BigInt]' || firstTag === '[object Symbol]') {
+    if (!Object.is(boxedPrimitiveValue(first, firstTag.slice(8, -1)), boxedPrimitiveValue(second, secondTag.slice(8, -1)))) return false;
+  } else if (firstTag === '[object Error]') {
+    if (first.name !== second.name || first.message !== second.message) return false;
+    if (Object.prototype.hasOwnProperty.call(first, 'cause') !== Object.prototype.hasOwnProperty.call(second, 'cause')) return false;
+    if (Object.prototype.hasOwnProperty.call(first, 'cause') && !deepStrictEqual(first.cause, second.cause, seen)) return false;
+  }
+
+  const firstKeys = enumerableKeys(first);
+  const secondKeys = enumerableKeys(second);
+  if (firstTag === '[object Array]' && first.length !== second.length) return false;
+  if (firstKeys.length !== secondKeys.length) return false;
+  for (const key of firstKeys) {
+    if (!secondKeys.includes(key) || !deepStrictEqual(first[key], second[key], seen)) return false;
+  }
+  return true;
+}
+
 function invalidArgumentType(name, expected, value) {
   const received = value === null ? 'null' : Array.isArray(value) ? 'an instance of Array'
     : value === undefined ? 'undefined' : `type ${typeof value}`;
@@ -1139,6 +1249,7 @@ function createDebug(scope) {
 
 export function createUtilModule(scope = globalThis) {
   const types = createUtilTypes(scope);
+  const BufferClass = scope.Buffer;
   return Object.freeze({
     _exceptionWithHostPort: exceptionWithHostPort,
     MIMEParams,
@@ -1152,6 +1263,26 @@ export function createUtilModule(scope = globalThis) {
     getSystemErrorName: systemErrorName,
     isError,
     isFunction,
+    inherits(ctor, superCtor) {
+      if (ctor === undefined || ctor === null) throw invalidArgumentType('ctor', 'function', ctor);
+      if (superCtor === undefined || superCtor === null) throw invalidArgumentType('superCtor', 'function', superCtor);
+      if (superCtor.prototype === undefined) {
+        const error = new TypeError('The "superCtor.prototype" property must be of type object. Received undefined');
+        error.code = 'ERR_INVALID_ARG_TYPE';
+        throw error;
+      }
+      Object.defineProperty(ctor, 'super_', {
+        configurable: true,
+        value: superCtor,
+        writable: true,
+      });
+      Object.setPrototypeOf(ctor.prototype, superCtor.prototype);
+    },
+    isArray: Array.isArray,
+    isBoolean: (value) => typeof value === 'boolean',
+    isBuffer: (value) => typeof BufferClass?.isBuffer === 'function' && BufferClass.isBuffer(value),
+    isDate: types.isDate,
+    isDeepStrictEqual: deepStrictEqual,
     isNull,
     isNullOrUndefined,
     isNumber,

@@ -848,6 +848,11 @@ function isTypedArray(value) {
   return ArrayBuffer.isView(value) && !(value instanceof DataView);
 }
 
+function isUint8Array(value) {
+  return ArrayBuffer.isView(value)
+    && Object.prototype.toString.call(value) === '[object Uint8Array]';
+}
+
 function isAnyArrayBuffer(value) {
   try {
     Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength').get.call(value);
@@ -1062,18 +1067,33 @@ export function createBufferClass(scope = globalThis) {
     }
     static concat(list, totalLength) {
       if (!Array.isArray(list)) throw invalidArgumentTypeError('list', ['Array'], list);
-      const values = list.map((value) => bytesFrom(value));
-      const size = totalLength === undefined
-        ? values.reduce((sum, value) => sum + value.length, 0)
-        : normalizeInteger(totalLength, 'length', { maximum: 0x7fffffff });
+      if (list.length === 0) return new NodeBuffer(0, internalBuffer);
+      let size;
+      if (totalLength === undefined) {
+        size = 0;
+        for (const value of list) {
+          if (value?.length) size += value.length;
+        }
+      } else {
+        size = normalizeInteger(totalLength, 'length', { maximum: 0x7fffffff });
+      }
       const result = new NodeBuffer(size, internalBuffer);
       let offset = 0;
-      for (const value of values) { result.set(value.subarray(0, size - offset), offset); offset += value.length; }
+      for (let index = 0; index < list.length; index += 1) {
+        const value = list[index];
+        if (!isUint8Array(value)) {
+          throw invalidArgumentTypeError(`list[${index}]`, ['Buffer', 'Uint8Array'], value);
+        }
+        const bytes = viewBytes(value);
+        const count = Math.min(bytes.length, size - offset);
+        result.set(bytes.subarray(0, count), offset);
+        offset += count;
+      }
       return result;
     }
     static compare(left, right) {
-      if (!(left instanceof Uint8Array)) throw invalidArgumentTypeError('buf1', ['Buffer', 'Uint8Array'], left);
-      if (!(right instanceof Uint8Array)) throw invalidArgumentTypeError('buf2', ['Buffer', 'Uint8Array'], right);
+      if (!isUint8Array(left)) throw invalidArgumentTypeError('buf1', ['Buffer', 'Uint8Array'], left);
+      if (!isUint8Array(right)) throw invalidArgumentTypeError('buf2', ['Buffer', 'Uint8Array'], right);
       const a = bytesFrom(left); const b = bytesFrom(right);
       for (let index = 0; index < Math.min(a.length, b.length); index += 1) {
         if (a[index] !== b[index]) return a[index] < b[index] ? -1 : 1;
@@ -1092,11 +1112,11 @@ export function createBufferClass(scope = globalThis) {
       return textDecoder.decode(this.subarray(first, last));
     }
     equals(other) {
-      if (!(other instanceof Uint8Array)) throw invalidArgumentTypeError('otherBuffer', ['Buffer', 'Uint8Array'], other);
+      if (!isUint8Array(other)) throw invalidArgumentTypeError('otherBuffer', ['Buffer', 'Uint8Array'], other);
       return NodeBuffer.compare(this, other) === 0;
     }
     compare(other, targetStart, targetEnd, sourceStart, sourceEnd) {
-      if (!(other instanceof Uint8Array)) throw invalidArgumentTypeError('target', ['Buffer', 'Uint8Array'], other);
+      if (!isUint8Array(other)) throw invalidArgumentTypeError('target', ['Buffer', 'Uint8Array'], other);
       const targetFirst = compareRange(targetStart, 'targetStart', other.length, 0, true);
       const targetLast = compareRange(targetEnd, 'targetEnd', other.length, other.length);
       const sourceFirst = compareRange(sourceStart, 'sourceStart', this.length, 0, true);
@@ -1146,15 +1166,23 @@ export function createBufferClass(scope = globalThis) {
       for (let index = first; index < last; index += 1) this[index] = bytes[(index - first) % bytes.length];
       return this;
     }
-    copy(target, targetStart = 0, sourceStart = 0, sourceEnd = this.length) {
+    copy(target, targetStart = 0, sourceStart = 0, sourceEnd) {
       if (!ArrayBuffer.isView(this)) throw invalidArgumentTypeError('this', ['Buffer', 'Uint8Array'], this);
-      if (!(target instanceof Uint8Array)) throw invalidArgumentTypeError('target', ['Buffer', 'Uint8Array'], target);
-      const targetOffset = copyRange(targetStart, 'targetStart', target.length, 0, true);
-      const sourceOffset = copyRange(sourceStart, 'sourceStart', this.length, 0);
-      const sourceLimit = copyRange(sourceEnd, 'sourceEnd', this.length, this.length, true);
-      if (targetOffset >= target.length || sourceOffset >= sourceLimit || sourceOffset >= this.length) return 0;
-      const count = Math.min(sourceLimit - sourceOffset, target.length - targetOffset);
-      target.set(this.subarray(sourceOffset, sourceOffset + count), targetOffset);
+      if (!ArrayBuffer.isView(target)) throw invalidArgumentTypeError('target', ['Buffer', 'Uint8Array'], target);
+      const sourceBytes = viewBytes(this);
+      const targetBytes = viewBytes(target);
+      const targetOffset = copyRange(targetStart, 'targetStart', targetBytes.length, 0, true);
+      const sourceOffset = copyRange(sourceStart, 'sourceStart', sourceBytes.length, 0);
+      const sourceLimit = copyRange(
+        sourceEnd,
+        'sourceEnd',
+        sourceBytes.length,
+        sourceBytes.length,
+        true,
+      );
+      if (targetOffset >= targetBytes.length || sourceOffset >= sourceLimit || sourceOffset >= sourceBytes.length) return 0;
+      const count = Math.min(sourceLimit - sourceOffset, targetBytes.length - targetOffset);
+      targetBytes.set(sourceBytes.subarray(sourceOffset, sourceOffset + count), targetOffset);
       return count;
     }
     readUInt8(offset) { return readUnsigned(this, offset, 1, false); }

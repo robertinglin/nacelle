@@ -1030,14 +1030,17 @@ export function createBufferClass(scope = globalThis) {
   let poolBuffer = null;
   let poolOffset = 0;
   const pooledBytes = (size) => {
-    if (size <= 0 || size > 4096) return null;
-    if (!poolBuffer || poolOffset + size > 8192) {
-      poolBuffer = new ArrayBuffer(8192);
+    const configuredSize = Math.trunc(Number(Buffer.poolSize));
+    const halfPoolSize = configuredSize / 2;
+    if (!Number.isFinite(configuredSize) || configuredSize <= 0 || size <= 0 || size >= halfPoolSize) return null;
+    if (!poolBuffer || poolBuffer.byteLength !== configuredSize || poolOffset + size > configuredSize) {
+      poolBuffer = new ArrayBuffer(configuredSize);
       poolOffset = 0;
       try { Object.defineProperty(poolBuffer, untransferableMarker, { configurable: true, value: true }); } catch { /* host buffer may be sealed */ }
     }
     const view = new Uint8Array(poolBuffer, poolOffset, size);
     poolOffset += size;
+    poolOffset = (poolOffset + 7) & ~7;
     return view;
   };
   let warningEmitted = false;
@@ -1074,29 +1077,36 @@ export function createBufferClass(scope = globalThis) {
     }
     static from(value, encodingOrOffset, length) {
       if (isAnyArrayBuffer(value)) {
-        if (encodingOrOffset !== undefined && typeof encodingOrOffset === 'number' && !Number.isFinite(encodingOrOffset)) {
-          throw outOfRangeError('offset', 'an integer', encodingOrOffset);
-        }
-        const offset = typeof encodingOrOffset === 'number' && Number.isFinite(encodingOrOffset)
-          ? normalizeInteger(encodingOrOffset, 'byteOffset')
-          : 0;
+        let offset = encodingOrOffset === undefined ? 0 : Number(encodingOrOffset);
+        if (Number.isNaN(offset)) offset = 0;
         const available = value.byteLength - offset;
-        const size = length === undefined
-          ? available
-          : normalizeInteger(length, 'length', { maximum: value.byteLength });
-        if (offset > value.byteLength) {
+        if (available < 0) {
           const error = new RangeError('"offset" is outside of buffer bounds');
           error.code = 'ERR_BUFFER_OUT_OF_BOUNDS';
           throw error;
         }
+        if (length === undefined) return new NodeBuffer(value, offset, internalBuffer);
+        let size = Number(length);
+        if (Number.isNaN(size) || size <= 0) size = 0;
         if (size > available) {
           const error = new RangeError('"length" is outside of buffer bounds');
           error.code = 'ERR_BUFFER_OUT_OF_BOUNDS';
           throw error;
         }
-        return length === undefined
-          ? new NodeBuffer(value, offset, internalBuffer)
-          : new NodeBuffer(value, offset, size, internalBuffer);
+        return new NodeBuffer(value, offset, size, internalBuffer);
+      }
+      if (value && typeof value === 'object') {
+        const valueOf = value.valueOf && value.valueOf();
+        if (valueOf != null && valueOf !== value
+            && (typeof valueOf === 'string' || typeof valueOf === 'object')) {
+          return NodeBuffer.from(valueOf, encodingOrOffset, length);
+        }
+        const isArrayLike = value.length !== undefined || isAnyArrayBuffer(value.buffer)
+          || (value.type === 'Buffer' && Array.isArray(value.data));
+        if (!isArrayLike && typeof value[Symbol.toPrimitive] === 'function') {
+          const primitive = value[Symbol.toPrimitive]('string');
+          if (typeof primitive === 'string') return NodeBuffer.from(primitive, encodingOrOffset);
+        }
       }
       const bytes = bytesFrom(value, encodingOrOffset);
       const pooled = pooledBytes(bytes.byteLength);
@@ -1109,19 +1119,28 @@ export function createBufferClass(scope = globalThis) {
     static alloc(size, fill = 0, encoding) {
       const result = new NodeBuffer(validateBufferSize(size), internalBuffer);
       if (result.length === 0 || fill === 0 || fill === null || fill === undefined || fill === '') return result;
-      if (typeof fill === 'number') {
-        result.fill(fill);
-        return result;
-      }
       if (typeof fill === 'string' && encoding !== undefined && encoding !== null && typeof encoding !== 'string') {
         throw invalidArgumentTypeError('encoding', ['string'], encoding);
       }
-      const bytes = bytesFrom(fill, encoding);
-      if (bytes.length === 0) return result;
+      if (typeof fill !== 'string' && !ArrayBuffer.isView(fill)) {
+        Uint8Array.prototype.fill.call(result, fill);
+        return result;
+      }
+      const bytes = typeof fill === 'string' ? bytesFrom(fill, encoding) : viewBytes(fill);
+      if (bytes.length === 0) {
+        if (typeof fill === 'string' && fill.length === 0) return result;
+        throw invalidArgumentValueError('value', fill);
+      }
       for (let index = 0; index < result.length; index += 1) result[index] = bytes[index % bytes.length];
       return result;
     }
-    static allocUnsafe(size) { return new NodeBuffer(validateBufferSize(size), internalBuffer); }
+    static allocUnsafe(size) {
+      const validatedSize = validateBufferSize(size);
+      const pooled = pooledBytes(validatedSize);
+      return pooled
+        ? new NodeBuffer(pooled.buffer, pooled.byteOffset, pooled.byteLength, internalBuffer)
+        : new NodeBuffer(validatedSize, internalBuffer);
+    }
     static allocUnsafeSlow(size) { return new NodeBuffer(validateBufferSize(size), internalBuffer); }
     static isBuffer(value) { return value instanceof NodeBuffer; }
     static isEncoding(encoding) {
@@ -1169,11 +1188,26 @@ export function createBufferClass(scope = globalThis) {
       }
       return a.length === b.length ? 0 : a.length < b.length ? -1 : 1;
     }
-    static copyBytesFrom(view, offset = 0, length = view?.byteLength - offset) {
+    static copyBytesFrom(view, offset, length) {
       if (!isTypedArray(view)) throw invalidArgumentTypeError('view', ['TypedArray'], view);
-      const start = normalizeInteger(offset, 'offset', { maximum: view.byteLength });
-      const size = normalizeInteger(length, 'length', { maximum: view.byteLength - start });
-      return new NodeBuffer(new Uint8Array(view.buffer, view.byteOffset + start, size), internalBuffer);
+      const viewLength = view.length;
+      if (viewLength === 0) return new NodeBuffer(0, internalBuffer);
+      let start = 0;
+      let end = viewLength;
+      if (offset !== undefined || length !== undefined) {
+        if (offset !== undefined) start = normalizeInteger(offset, 'offset');
+        if (start >= viewLength) return new NodeBuffer(0, internalBuffer);
+        if (length !== undefined) {
+          const size = normalizeInteger(length, 'length');
+          end = Math.min(start + size, viewLength);
+        }
+      }
+      const bytes = new Uint8Array(
+        view.buffer,
+        view.byteOffset + (start * view.BYTES_PER_ELEMENT),
+        (end - start) * view.BYTES_PER_ELEMENT,
+      );
+      return new NodeBuffer(bytes, internalBuffer);
     }
     toString(encoding, start, end) { return encoded(this.subarray(start, end), encoding); }
     utf8Slice(start, end) {
@@ -1398,6 +1432,18 @@ export function createBufferClass(scope = globalThis) {
   Object.setPrototypeOf(Buffer, NodeBuffer);
   Buffer.prototype = NodeBuffer.prototype;
   Object.defineProperty(NodeBuffer.prototype, 'constructor', { value: Buffer, configurable: true, writable: true });
+  Buffer.poolSize = NodeBuffer.poolSize;
+  Buffer.from = NodeBuffer.from;
+  Buffer.copyBytesFrom = NodeBuffer.copyBytesFrom;
+  Buffer.alloc = NodeBuffer.alloc;
+  Buffer.allocUnsafe = NodeBuffer.allocUnsafe;
+  Buffer.allocUnsafeSlow = NodeBuffer.allocUnsafeSlow;
+  Buffer.isBuffer = NodeBuffer.isBuffer;
+  Buffer.of = (...items) => {
+    const result = new NodeBuffer(items.length, internalBuffer);
+    for (let index = 0; index < items.length; index += 1) result[index] = items[index];
+    return result;
+  };
   const maxLength = MAX_BUFFER_LENGTH;
   const maxStringLength = 0x1fffffe8;
   const constants = Object.freeze({ MAX_LENGTH: maxLength, MAX_STRING_LENGTH: maxStringLength });

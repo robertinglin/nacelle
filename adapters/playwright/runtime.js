@@ -3470,8 +3470,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     const internalOptions = { getOptionValue: () => undefined, getAllowUnauthorized: () => false };
     const internalDgram = {
       kStateSymbol: Symbol.for('bnh.dgram.state'),
-      _createSocketHandle: () => null,
-      newHandle: () => ({ close() {} }),
+      _createSocketHandle: dgram._createSocketHandle,
+      newHandle: dgram.newHandle,
     };
     class BrowserBuiltinModule {
       static exists(name) { return BUILTIN_NAMES.includes(String(name).replace(/^node:/, '')); }

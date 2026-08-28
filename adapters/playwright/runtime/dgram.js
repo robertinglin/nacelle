@@ -15,6 +15,7 @@ const UDP_CONSTANTS = Object.freeze({
 });
 
 const VIRTUAL_DGRAM_STATE = Symbol.for('bnh.dgram.state');
+const DGRAM_OWNER = Symbol.for('bnh.dgram.owner');
 const BIND_STATE_UNBOUND = 0;
 const BIND_STATE_BINDING = 1;
 const BIND_STATE_BOUND = 2;
@@ -238,6 +239,12 @@ function createDgramHandle(type, { dns, network, lookup } = {}) {
       return 0;
     },
   };
+  Object.defineProperty(handle, 'owner', {
+    configurable: true,
+    enumerable: false,
+    get() { return handle[DGRAM_OWNER]; },
+    set(value) { handle[DGRAM_OWNER] = value; },
+  });
   handle.bind6 = handle.bind;
   handle.connect = () => 0;
   handle.connect6 = handle.connect;
@@ -322,6 +329,13 @@ export class Socket extends EventEmitter {
       reuseAddr: Boolean(internal.reuseAddr),
       fdClusterGroupId: undefined,
     };
+    state.handle[DGRAM_OWNER] = this;
+    Object.defineProperty(state.handle, 'owner', {
+      configurable: true,
+      enumerable: false,
+      get() { return state.handle[DGRAM_OWNER]; },
+      set(value) { state.handle[DGRAM_OWNER] = value; },
+    });
     state.handle.recvStart = () => {
       state.receiving = true;
       return 0;
@@ -835,14 +849,12 @@ Object.defineProperty(Socket.prototype, '_bindState', {
     'Socket.prototype._bindState is deprecated',
     function getBindState() { return this[VIRTUAL_DGRAM_STATE].bindState; },
   ),
-  set: deprecatedSocketApi(
-    'Socket.prototype._bindState is deprecated',
-    function setBindState(value) {
-      this[VIRTUAL_DGRAM_STATE].bindState = value;
-      this._binding = value === BIND_STATE_BINDING;
-      this._bound = value === BIND_STATE_BOUND;
-    },
-  ),
+    set: deprecatedSocketApi(
+      'Socket.prototype._bindState is deprecated',
+      function setBindState(value) {
+        this[VIRTUAL_DGRAM_STATE].bindState = value;
+      },
+    ),
 });
 
 Object.defineProperty(Socket.prototype, '_queue', {

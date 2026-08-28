@@ -674,6 +674,114 @@ export function pbkdf2Sync(password, salt, iterations, keyLength, digest = 'sha2
   return pbkdf2SyncForGlobal(password, salt, iterations, keyLength, digest, globalThis);
 }
 
+function hkdfInputBytes(value, name, encoder) {
+  try {
+    return toCryptoBytes(value, encoder);
+  } catch {
+    const error = new TypeError(
+      `The "${name}" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView`,
+    );
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+}
+
+function validateHkdfParameters(hash, key, salt, info, keyLength, encoder = globalThis.TextEncoder) {
+  if (typeof hash !== 'string') {
+    const error = new TypeError(`The "digest" argument must be of type string. Received ${hash}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  const normalizedHash = normalizeHash(hash);
+  const keyBytes = hkdfInputBytes(key, 'ikm', encoder);
+  const saltBytes = hkdfInputBytes(salt, 'salt', encoder);
+  const infoBytes = hkdfInputBytes(info, 'info', encoder);
+  if (!Number.isSafeInteger(keyLength)) {
+    const error = new TypeError(`The "length" argument must be of type number. Received ${keyLength}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (keyLength < 0) {
+    const error = new RangeError(`The value of "length" is out of range. Received ${keyLength}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  if (infoBytes.byteLength > 1024) {
+    const error = new RangeError(
+      `The value of "info" is out of range. It must not contain more than 1024 bytes. Received ${infoBytes.byteLength}`,
+    );
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  const digestLength = { 'SHA-1': 20, 'SHA-256': 32, 'SHA-384': 48, 'SHA-512': 64 }[normalizedHash];
+  if (keyLength > 255 * digestLength) {
+    const error = new Error('Invalid key length');
+    error.code = 'ERR_CRYPTO_INVALID_KEYLEN';
+    throw error;
+  }
+  return { hash: normalizedHash, key: keyBytes, salt: saltBytes, info: infoBytes, keyLength };
+}
+
+async function hkdfForGlobal(hash, key, salt, info, keyLength, globalObject = globalThis) {
+  const parameters = validateHkdfParameters(hash, key, salt, info, keyLength, globalObject.TextEncoder);
+  const subtle = requireSubtle(globalObject, 'crypto HKDF');
+  if (typeof subtle.deriveBits !== 'function') {
+    throw new UnsupportedWebCapabilityError(
+      'crypto HKDF',
+      'SubtleCrypto.deriveBits is not available in this context',
+    );
+  }
+  if (parameters.keyLength === 0) return new Uint8Array();
+  const cryptoKey = await subtle.importKey(
+    'raw',
+    parameters.key,
+    { name: 'HKDF' },
+    false,
+    ['deriveBits'],
+  );
+  const result = await subtle.deriveBits(
+    {
+      name: 'HKDF',
+      hash: parameters.hash,
+      salt: parameters.salt,
+      info: parameters.info,
+    },
+    cryptoKey,
+    parameters.keyLength * 8,
+  );
+  return new Uint8Array(result);
+}
+
+export function hkdf(hash, key, salt, info, keyLength, callback, globalObject = globalThis) {
+  validateHkdfParameters(hash, key, salt, info, keyLength, globalObject.TextEncoder);
+  if (typeof callback !== 'function') {
+    const error = new TypeError('The "callback" argument must be of type function');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  const operation = Promise.resolve().then(() => hkdfForGlobal(
+    hash,
+    key,
+    salt,
+    info,
+    keyLength,
+    globalObject,
+  ));
+  operation.then(
+    (value) => callback(null, value),
+    (error) => callback(error),
+  );
+  return undefined;
+}
+
+export function hkdfSync(hash, key, salt, info, keyLength, globalObject = globalThis) {
+  validateHkdfParameters(hash, key, salt, info, keyLength, globalObject.TextEncoder);
+  throw new UnsupportedWebCapabilityError(
+    'crypto.hkdfSync',
+    'Web Crypto exposes HKDF only through asynchronous SubtleCrypto operations',
+  );
+}
+
 const AES_GCM_TAG_LENGTHS = new Set([32, 64, 96, 104, 112, 120, 128]);
 
 function isCryptoKey(value) {
@@ -1206,6 +1314,10 @@ export function randomBytes(length, globalObject = globalThis) {
   return bytes;
 }
 
+export function getRandomValues(array, globalObject = globalThis) {
+  return requireCrypto(globalObject).getRandomValues(array);
+}
+
 function randomFillTarget(buffer, offset = 0, size, globalObject = globalThis) {
   if (!isArrayBuffer(buffer) && !isArrayBufferView(buffer)) {
     const error = new TypeError('The "buf" argument must be an instance of ArrayBuffer or ArrayBufferView');
@@ -1392,8 +1504,8 @@ function validateScryptParameters(password, salt, keyLength, options, encoder = 
   if (p === 0) p = 1;
   if (maxmem === 0) maxmem = 32 << 20;
   if (N < 2 || (N & (N - 1)) !== 0 || r === 0 || p === 0) throw scryptOptionError('Invalid scrypt param');
-  const memory = 128 * N * r;
-  if (!Number.isSafeInteger(memory) || memory > maxmem || N >= 2 ** (r * 16) || p > 0x7fffffff / r) {
+  const memory = 128 * (N + p) * r;
+  if (!Number.isSafeInteger(memory) || memory > maxmem || N >= 2 ** (r * 16) || p > 0x3fffffff / r) {
     throw scryptOptionError('Invalid scrypt params: memory limit exceeded');
   }
   return { password: passwordBytes, salt: saltBytes, keyLength, N, r, p };
@@ -1484,6 +1596,10 @@ function scryptSyncForGlobal(password, salt, keyLength, options = {}, globalObje
   return pbkdf2Sha256(parameters.password, mixed, 1, parameters.keyLength, globalObject.TextEncoder);
 }
 
+export function scryptSync(password, salt, keyLength, options = {}, globalObject = globalThis) {
+  return scryptSyncForGlobal(password, salt, keyLength, options, globalObject);
+}
+
 export function scrypt(password, salt, keyLength, options, callback, globalObject = globalThis) {
   if (typeof options === 'function') {
     globalObject = callback || globalObject;
@@ -1522,6 +1638,70 @@ export function publicDecrypt() {
 
 export function publicEncrypt() {
   return rsaCipherUnavailable('publicEncrypt');
+}
+
+function validatePrimeSize(size) {
+  if (!Number.isSafeInteger(size) || size < 1 || size > 0x7fffffff) {
+    const error = new RangeError(`The value of "size" is out of range. Received ${size}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+}
+
+function unsupportedPrimeGeneration(name) {
+  throw new UnsupportedWebCapabilityError(
+    `crypto.${name}`,
+    'Web Crypto does not expose browser-native prime generation',
+  );
+}
+
+export function generatePrime(size, options, callback) {
+  if (typeof options === 'function') callback = options;
+  validatePrimeSize(size);
+  if (typeof callback !== 'function') {
+    const error = new TypeError('The "callback" argument must be of type function');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  Promise.resolve().then(() => {
+    unsupportedPrimeGeneration('generatePrime');
+  }).then(
+    (value) => callback(null, value),
+    (error) => callback(error),
+  );
+  return undefined;
+}
+
+export function generatePrimeSync(size, options = {}) {
+  validatePrimeSize(size);
+  return unsupportedPrimeGeneration('generatePrimeSync');
+}
+
+export function getCipherInfo(nameOrNid, options) {
+  if (typeof nameOrNid !== 'string' && typeof nameOrNid !== 'number') {
+    const error = new TypeError('The "nameOrNid" argument must be of type string or number');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (typeof nameOrNid === 'number' && (!Number.isSafeInteger(nameOrNid)
+    || nameOrNid < -0x80000000 || nameOrNid > 0x7fffffff)) {
+    const error = new RangeError(`The value of "nameOrNid" is out of range. Received ${nameOrNid}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  if (options !== undefined && (options === null || typeof options !== 'object' || Array.isArray(options))) {
+    const error = new TypeError('The "options" argument must be an object');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  throw new UnsupportedWebCapabilityError(
+    'crypto.getCipherInfo',
+    'Web Crypto does not expose the OpenSSL cipher registry',
+  );
+}
+
+export function secureHeapUsed() {
+  return { total: 0, used: 0, utilization: 0, min: 0 };
 }
 
 function validateRandomUUIDOptions(options) {
@@ -1576,6 +1756,7 @@ export function createCryptoContract(globalObject = globalThis) {
   const crypto = requireCrypto(globalObject);
   return Object.freeze({
     randomBytes: (length) => randomBytes(length, globalObject),
+    getRandomValues: (array) => getRandomValues(array, globalObject),
     randomUUID: (options) => randomUUID(globalObject, options),
     digest: (algorithm, value) => digest(algorithm, value, globalObject),
     hmac: (value, key, options = {}) => hmac(value, key, { ...options, globalObject }),
@@ -1585,10 +1766,23 @@ export function createCryptoContract(globalObject = globalThis) {
     pbkdf2Sync: (password, salt, iterations, keyLength, digestAlgorithm = 'sha256') => (
       pbkdf2SyncForGlobal(password, salt, iterations, keyLength, digestAlgorithm, globalObject)
     ),
+    hkdf: (hash, key, salt, info, keyLength, callback) => (
+      hkdf(hash, key, salt, info, keyLength, callback, globalObject)
+    ),
+    hkdfSync: (hash, key, salt, info, keyLength) => (
+      hkdfSync(hash, key, salt, info, keyLength, globalObject)
+    ),
     randomInt: (min, max, callback) => randomInt(min, max, callback, globalObject),
     scrypt: (password, salt, keyLength, options, callback) => (
       scrypt(password, salt, keyLength, options, callback, globalObject)
     ),
+    scryptSync: (password, salt, keyLength, options = {}) => (
+      scryptSync(password, salt, keyLength, options, globalObject)
+    ),
+    generatePrime: (size, options, callback) => generatePrime(size, options, callback, globalObject),
+    generatePrimeSync: (size, options = {}) => generatePrimeSync(size, options, globalObject),
+    getCipherInfo: (nameOrNid, options) => getCipherInfo(nameOrNid, options, globalObject),
+    secureHeapUsed: () => secureHeapUsed(globalObject),
     privateDecrypt,
     privateEncrypt,
     publicDecrypt,

@@ -1125,11 +1125,6 @@ class Database:
                     acceptance_json=excluded.acceptance_json,
                     evidence_json=excluded.evidence_json,
                     status=CASE
-                        -- A fresh surface diff is authoritative for API
-                        -- presence. If an API gap reappears after a prior
-                        -- fill/close, reopen it so the worklist cannot hide
-                        -- a regression behind historical status.
-                        WHEN excluded.kind = 'missing-api' THEN 'open'
                         WHEN gaps.symbols_json = excluded.symbols_json THEN gaps.status
                         ELSE 'open'
                     END,

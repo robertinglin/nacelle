@@ -156,6 +156,127 @@ function unsupportedCapability(name, reason) {
   throw error;
 }
 
+function typeDescription(value) {
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  if (Array.isArray(value)) return 'an instance of Array';
+  switch (typeof value) {
+    case 'bigint': return `type bigint (${value}n)`;
+    case 'number': {
+      if (Number.isNaN(value)) return 'type number (NaN)';
+      if (Object.is(value, -0)) return 'type number (-0)';
+      if (value === Infinity || value === -Infinity) return `type number (${value})`;
+      return `type number (${value})`;
+    }
+    case 'boolean': return `type boolean (${value})`;
+    case 'symbol': return `type symbol (${String(value)})`;
+    case 'function': return `function ${value.name}`;
+    case 'string': {
+      const text = value.length > 28 ? `${value.slice(0, 25)}...` : value;
+      return text.includes("'") ? `type string (${JSON.stringify(text)})` : `type string ('${text}')`;
+    }
+    case 'object': {
+      const constructorName = value.constructor?.name;
+      return constructorName ? `an instance of ${constructorName}` : 'an instance of Object';
+    }
+    default: return `type ${typeof value} (${String(value)})`;
+  }
+}
+
+function invalidArgumentType(name, expected, value) {
+  const error = new TypeError(
+    `The "${name}" argument must be of type ${expected}. Received ${typeDescription(value)}`,
+  );
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function invalidArgumentValue(name, value, reason) {
+  const error = new TypeError(
+    `The "${name}" argument is invalid. Received ${String(value)}${reason ? ` (${reason})` : ''}`,
+  );
+  error.code = 'ERR_INVALID_ARG_VALUE';
+  return error;
+}
+
+function validateString(value, name) {
+  if (typeof value !== 'string') throw invalidArgumentType(name, 'string', value);
+}
+
+function validateUint32(value, name, positive = false) {
+  if (typeof value !== 'number') throw invalidArgumentType(name, 'number', value);
+  if (!Number.isInteger(value)) {
+    const error = new RangeError(
+      `The "${name}" argument must be an integer. Received ${String(value)}`,
+    );
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  const min = positive ? 1 : 0;
+  if (value < min || value > 0xffffffff) {
+    const error = new RangeError(
+      `The "${name}" argument must be >= ${min} && <= 4294967295. Received ${String(value)}`,
+    );
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+}
+
+function validateOptionsObject(value, name) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw invalidArgumentType(name, 'object', value);
+  }
+}
+
+function createUnsupportedPromiseHooks() {
+  const unsupported = () => unsupportedCapability(
+    'v8.promiseHooks',
+    'native V8 promise instrumentation is unavailable in the browser runtime',
+  );
+  const validateHook = (hook, name) => {
+    if (typeof hook !== 'function') throw invalidArgumentType(name, 'function', hook);
+  };
+  const validateCreateHookOptions = (options) => {
+    validateOptionsObject(options, 'options');
+    for (const name of ['init', 'before', 'after', 'settled']) {
+      if (options[name] !== undefined) validateHook(options[name], `${name}Hook`);
+    }
+  };
+  return Object.freeze({
+    createHook(options = {}) {
+      validateCreateHookOptions(options);
+      return unsupported();
+    },
+    onInit(hook) {
+      validateHook(hook, 'initHook');
+      return unsupported();
+    },
+    onBefore(hook) {
+      validateHook(hook, 'beforeHook');
+      return unsupported();
+    },
+    onAfter(hook) {
+      validateHook(hook, 'afterHook');
+      return unsupported();
+    },
+    onSettled(hook) {
+      validateHook(hook, 'settledHook');
+      return unsupported();
+    },
+  });
+}
+
+function browserCppHeapStatistics(type, globalObject) {
+  return {
+    committed_size_bytes: 0,
+    resident_size_bytes: 0,
+    used_size_bytes: 0,
+    detail_level: type,
+    space_statistics: new globalObject.Array(),
+    type_names: new globalObject.Array(),
+  };
+}
+
 function makeDataCloneError(serializer, value, globalObject) {
   const message = describeCloneFailure(value, globalObject);
   const ErrorConstructor = serializer._getDataCloneError;
@@ -800,6 +921,7 @@ export function createV8Module(processObject, globalObject = globalThis) {
   const serializeCallbacks = [];
   const deserializeCallbacks = [];
   let deserializeMainFunction = null;
+  const promiseHooks = createUnsupportedPromiseHooks();
   const DefaultSerializer = createDefaultSerializerClass(globalObject);
   const DefaultDeserializer = createDefaultDeserializerClass(globalObject);
 
@@ -819,6 +941,71 @@ export function createV8Module(processObject, globalObject = globalThis) {
     deserializer.readHeader();
     return deserializer.readValue();
   }
+
+  function isStringOneByteRepresentation(content) {
+    validateString(content, 'content');
+    for (let index = 0; index < content.length; index += 1) {
+      if (content.charCodeAt(index) > 0xff) return false;
+    }
+    return true;
+  }
+
+  function setFlagsFromString(flags) {
+    validateString(flags, 'flags');
+    return unsupportedCapability(
+      'v8.setFlagsFromString',
+      'changing native V8 flags is unavailable in the browser runtime',
+    );
+  }
+
+  function setHeapSnapshotNearHeapLimit(limit) {
+    validateUint32(limit, 'limit', true);
+    return unsupportedCapability(
+      'v8.setHeapSnapshotNearHeapLimit',
+      'native heap-limit callbacks are unavailable in the browser runtime',
+    );
+  }
+
+  function queryObjects(ctor, options = undefined) {
+    if (typeof ctor !== 'function') throw invalidArgumentType('ctor', 'function', ctor);
+    if (options !== undefined) validateOptionsObject(options, 'options');
+    const format = options?.format ?? 'count';
+    if (format !== 'count' && format !== 'summary') {
+      throw invalidArgumentValue('options.format', format, 'must be one of "count" or "summary"');
+    }
+    return unsupportedCapability(
+      'v8.queryObjects',
+      'enumerating the native V8 heap is unavailable in the browser runtime',
+    );
+  }
+
+  function writeHeapSnapshot(filename = undefined, options = undefined) {
+    if (filename !== undefined) {
+      const isURL = globalObject.URL && filename instanceof globalObject.URL;
+      const isBuffer = globalObject.Buffer && filename instanceof globalObject.Buffer;
+      if (typeof filename !== 'string' && !isURL && !isBuffer) {
+        throw invalidArgumentType('path', 'string or an instance of Buffer or URL', filename);
+      }
+    }
+    if (options !== undefined) validateOptionsObject(options, 'options');
+    return unsupportedCapability(
+      'v8.writeHeapSnapshot',
+      'writing native V8 heap snapshots is unavailable in the browser runtime',
+    );
+  }
+
+  function getCppHeapStatistics(type = 'detailed') {
+    if (type !== 'brief' && type !== 'detailed') {
+      throw invalidArgumentValue('type', type, 'must be "brief" or "detailed"');
+    }
+    return browserCppHeapStatistics(type, globalObject);
+  }
+
+  // Coverage collection is controlled by the browser's inspector rather than
+  // NODE_V8_COVERAGE. Keep these calls harmless when no inspector adapter is
+  // installed, matching Node's no-op behavior when coverage is disabled.
+  function takeCoverage() {}
+  function stopCoverage() {}
 
   const startupSnapshot = {
     addSerializeCallback(callback, ...args) {
@@ -846,5 +1033,14 @@ export function createV8Module(processObject, globalObject = globalThis) {
     DefaultDeserializer,
     serialize,
     deserialize,
+    getCppHeapStatistics,
+    isStringOneByteRepresentation,
+    promiseHooks,
+    queryObjects,
+    setFlagsFromString,
+    setHeapSnapshotNearHeapLimit,
+    stopCoverage,
+    takeCoverage,
+    writeHeapSnapshot,
   };
 }

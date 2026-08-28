@@ -397,6 +397,7 @@ export class Socket extends EventEmitter {
     let port;
     let address;
     let callback;
+    const connected = this._connected;
     if (args[0] && typeof args[0] === 'object' && !Array.isArray(args[0])) {
       const options = args.shift();
       offset = options.offset || 0;
@@ -404,16 +405,32 @@ export class Socket extends EventEmitter {
       port = options.port;
       address = options.address;
       callback = options.callback;
-    } else if (typeof args[0] === 'number' && typeof args[1] === 'number' && typeof args[2] === 'number') {
+    } else if (typeof args[0] === 'number' && typeof args[1] === 'number'
+      && (!connected || typeof args[2] === 'function' || args[2] === undefined)) {
       offset = args.shift();
       length = args.shift();
-      port = args.shift();
-      address = args.shift();
-      callback = args.shift();
+      if (connected) {
+        callback = args.shift();
+        port = args.shift();
+        address = args.shift();
+      } else {
+        port = args.shift();
+        address = args.shift();
+        callback = args.shift();
+      }
     } else {
-      port = args.shift();
-      address = args.shift();
-      callback = args.shift();
+      if (connected) {
+        callback = args.shift();
+        port = args.shift();
+        address = args.shift();
+      } else {
+        port = args.shift();
+        if (typeof args[0] === 'function') callback = args.shift();
+        else {
+          address = args.shift();
+          callback = args.shift();
+        }
+      }
     }
     if (typeof port === 'function') {
       callback = port;
@@ -423,7 +440,6 @@ export class Socket extends EventEmitter {
       callback = address;
       address = undefined;
     }
-    const connected = this._connected;
     if (connected && (port !== undefined || address !== undefined)) {
       throw socketError('ERR_SOCKET_DGRAM_IS_CONNECTED', 'Already connected');
     }
@@ -441,15 +457,12 @@ export class Socket extends EventEmitter {
     }
     const callbackProvided = typeof callback === 'function';
     if (typeof callback !== 'function') callback = () => {};
-    let bytes;
-    try {
-      bytes = asBytes(message, offset, length);
-      port = port ?? this._remoteAddress?.port;
-      port = validatePort(port);
-    } catch (error) {
-      queueMicrotask(() => callback(error));
-      return false;
+    const bytes = asBytes(message, offset, length);
+    port = port ?? this._remoteAddress?.port;
+    if (port === undefined) {
+      throw socketError('ERR_SOCKET_BAD_PORT', 'Port should be specified');
     }
+    port = validatePort(port);
     const transmit = () => {
       queueMicrotask(() => {
         const family = this.type === 'udp6' ? 'ipv6' : 'ipv4';

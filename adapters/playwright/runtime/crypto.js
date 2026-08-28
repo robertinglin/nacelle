@@ -1280,8 +1280,16 @@ export function createCertificateShim(globalObject = globalThis, name = 'X509Cer
     get validFrom() { throw unsupportedCertificateProperty(name, 'validFrom'); }
     get validTo() { throw unsupportedCertificateProperty(name, 'validTo'); }
     get ca() { throw unsupportedCertificateProperty(name, 'ca'); }
+    get fingerprint() { throw unsupportedCertificateProperty(name, 'fingerprint'); }
+    get fingerprint256() { throw unsupportedCertificateProperty(name, 'fingerprint256'); }
+    get fingerprint512() { throw unsupportedCertificateProperty(name, 'fingerprint512'); }
+    get keyUsage() { throw unsupportedCertificateProperty(name, 'keyUsage'); }
+    get serialNumber() { throw unsupportedCertificateProperty(name, 'serialNumber'); }
+    get raw() { throw unsupportedCertificateProperty(name, 'raw'); }
+    get publicKey() { throw unsupportedCertificateProperty(name, 'publicKey'); }
     // These synchronous operations require the X.509 parser and certificate
     // fields that Web Crypto does not expose in a browser.
+    toString() { throw unsupportedCertificateOperation(name, 'toString'); }
     toJSON() { throw unsupportedCertificateOperation(name, 'toJSON'); }
     checkHost(hostname, options) { throw unsupportedCertificateOperation(name, 'checkHost'); }
     checkEmail(email, options) { throw unsupportedCertificateOperation(name, 'checkEmail'); }

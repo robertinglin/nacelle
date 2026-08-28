@@ -93,6 +93,10 @@ const RESOLVER_TYPES = Object.freeze({
   SOA: 'resolveSoa',
 });
 
+const RESOLVE_TYPES = Object.freeze([
+  'A', 'AAAA', 'ANY', 'TXT', ...Object.keys(RESOLVER_TYPES),
+]);
+
 function isIPv4Literal(value) {
   const parts = String(value).split('.');
   return parts.length === 4 && parts.every((part) => /^(?:0|[1-9]\d{0,2})$/.test(part) && Number(part) <= 255);
@@ -703,7 +707,12 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
   }
 
   function resolve(hostname, rrtype, callback, resolverHandle) {
-    if (typeof rrtype !== 'function' && typeof rrtype !== 'string') {
+    let type;
+    if (typeof rrtype === 'function') {
+      type = 'A';
+    } else if (typeof rrtype === 'string') {
+      type = rrtype;
+    } else {
       const received = rrtype === undefined
         ? 'undefined'
         : rrtype === null
@@ -718,8 +727,7 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
         'ERR_INVALID_ARG_TYPE',
       );
     }
-    const type = typeof rrtype === 'function' ? 'A' : rrtype.toUpperCase();
-    if (!['A', 'AAAA', 'ANY', 'TXT', ...Object.keys(RESOLVER_TYPES)].includes(type)) {
+    if (!RESOLVE_TYPES.includes(type)) {
       throw invalidArgumentError(`The argument 'rrtype' is invalid. Received '${rrtype}'`, 'ERR_INVALID_ARG_VALUE');
     }
     validateResolverName(hostname);
@@ -999,19 +1007,19 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
       return promiseFor(() => new Promise((resolve, reject) => reverse(address, (error, names) => error ? reject(error) : resolve(names))), synchronous);
     },
     resolve(hostname, rrtype = 'A') {
-      if (typeof rrtype !== 'string') {
+      const type = rrtype;
+      if (typeof type !== 'string') {
         throw invalidArgumentError(
-          `The "rrtype" argument must be of type string. Received type ${typeof rrtype}`,
+          `The "rrtype" argument must be of type string. Received type ${typeof type}`,
           'ERR_INVALID_ARG_TYPE',
         );
       }
-      validateResolverName(hostname);
-      const type = rrtype.toUpperCase();
-      if (!['A', 'AAAA', 'ANY', 'TXT', ...Object.keys(RESOLVER_TYPES)].includes(type)) {
-        throw invalidArgumentError(`The argument 'rrtype' is invalid. Received '${rrtype}'`, 'ERR_INVALID_ARG_VALUE');
+      if (!RESOLVE_TYPES.includes(type)) {
+        throw invalidArgumentError(`The argument 'rrtype' is invalid. Received '${type}'`, 'ERR_INVALID_ARG_VALUE');
       }
+      validateResolverName(hostname);
       if (RESOLVER_TYPES[type]) return queryPromise(hostname, type);
-      return new Promise((resolveValue, reject) => resolve(hostname, rrtype, (error, value) => error ? reject(error) : resolveValue(value)));
+      return new Promise((resolveValue, reject) => resolve(hostname, type, (error, value) => error ? reject(error) : resolveValue(value)));
     },
     resolve4(hostname) { return promiseFor(() => [lookupAddress(hostname, 4).address], synchronous); },
     resolve6(hostname) { return promiseFor(() => [lookupAddress(hostname, 6).address], synchronous); },
@@ -1129,12 +1137,11 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
           'ERR_INVALID_ARG_TYPE',
         );
       }
-      validateResolverName(hostname);
-      const normalized = type.toUpperCase();
-      if (!['A', 'AAAA', 'ANY', 'TXT', ...Object.keys(RESOLVER_TYPES)].includes(normalized)) {
+      if (!RESOLVE_TYPES.includes(type)) {
         throw invalidArgumentError(`The argument 'rrtype' is invalid. Received '${type}'`, 'ERR_INVALID_ARG_VALUE');
       }
-      if (RESOLVER_TYPES[normalized]) return queryPromise(hostname, normalized, this._handle);
+      validateResolverName(hostname);
+      if (RESOLVER_TYPES[type]) return queryPromise(hostname, type, this._handle);
       return new Promise((resolveValue, reject) => resolve(hostname, type, (error, value) => error ? reject(error) : resolveValue(value), this._handle));
     }
     resolve4(hostname) { return promises.resolve4(hostname); }

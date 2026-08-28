@@ -253,6 +253,45 @@ const COMBINATOR_EOF = Symbol('stream-combinator-eof');
 
 const legacyStreamState = new WeakMap();
 
+const kNodejsAsyncDispose = Symbol.for('nodejs.asyncDispose');
+const kAsyncDispose = typeof Symbol.asyncDispose === 'symbol' ? Symbol.asyncDispose : null;
+
+function streamAsyncDispose() {
+  if (this.closed || this.destroyed) return Promise.resolve();
+  return new Promise((resolve) => {
+    this.once?.('close', resolve);
+    this.destroy?.();
+    if (!this.destroy) resolve();
+  });
+}
+
+function defineAsyncDispose(prototype) {
+  Object.defineProperty(prototype, kNodejsAsyncDispose, {
+    configurable: true,
+    enumerable: false,
+    value: streamAsyncDispose,
+    writable: true,
+  });
+  if (kAsyncDispose && kAsyncDispose !== kNodejsAsyncDispose) {
+    Object.defineProperty(prototype, kAsyncDispose, {
+      configurable: true,
+      enumerable: false,
+      value: streamAsyncDispose,
+      writable: true,
+    });
+  }
+}
+
+function syncLegacyEvents(stream) {
+  const state = legacyState(stream);
+  const events = Object.create(null);
+  for (const [name, listeners] of state.listeners) {
+    if (listeners.size > 0) events[name] = listeners.size === 1 ? [...listeners][0] : [...listeners];
+  }
+  stream._events = events;
+  stream._eventsCount = state.listeners.size;
+}
+
 function legacyState(stream) {
   let state = legacyStreamState.get(stream);
   if (!state) {
@@ -266,15 +305,26 @@ function legacyState(stream) {
 // state store keeps Stream.call(this) usable for old-style stream prototypes.
 export function Stream() {
   legacyState(this);
+  if (!Object.prototype.hasOwnProperty.call(this, '_events')) this._events = Object.create(null);
+  if (!Object.prototype.hasOwnProperty.call(this, '_eventsCount')) this._eventsCount = 0;
+  if (!Object.prototype.hasOwnProperty.call(this, '_maxListeners')) this._maxListeners = undefined;
 }
 
 Stream.prototype.on = function on(name, listener) {
   const listeners = legacyState(this).listeners.get(name) || new Set();
   listeners.add(listener);
   legacyState(this).listeners.set(name, listeners);
+  syncLegacyEvents(this);
   return this;
 };
 Stream.prototype.addListener = Stream.prototype.on;
+Stream.prototype.prependListener = function prependListener(name, listener) {
+  if (typeof listener !== 'function') throw streamError('ERR_INVALID_ARG_TYPE', 'The "listener" argument must be of type function');
+  const current = legacyState(this).listeners.get(name) || new Set();
+  legacyState(this).listeners.set(name, new Set([listener, ...current]));
+  syncLegacyEvents(this);
+  return this;
+};
 Stream.prototype.once = function once(name, listener) {
   const wrapped = (...args) => {
     this.removeListener(name, wrapped);
@@ -282,6 +332,15 @@ Stream.prototype.once = function once(name, listener) {
   };
   wrapped.listener = listener;
   return this.on(name, wrapped);
+};
+Stream.prototype.prependOnceListener = function prependOnceListener(name, listener) {
+  if (typeof listener !== 'function') throw streamError('ERR_INVALID_ARG_TYPE', 'The "listener" argument must be of type function');
+  const wrapped = (...args) => {
+    this.removeListener(name, wrapped);
+    listener.apply(this, args);
+  };
+  wrapped.listener = listener;
+  return this.prependListener(name, wrapped);
 };
 Stream.prototype.removeListener = function removeListener(name, listener) {
   if (typeof listener !== 'function') {
@@ -303,6 +362,7 @@ Stream.prototype.removeListener = function removeListener(name, listener) {
     }
   }
   if (listeners?.size === 0) state.listeners.delete(name);
+  syncLegacyEvents(this);
   return this;
 };
 Stream.prototype.off = Stream.prototype.removeListener;
@@ -327,6 +387,7 @@ Stream.prototype.removeAllListeners = function removeAllListeners(name) {
   const state = legacyState(this);
   if (arguments.length === 0) state.listeners.clear();
   else state.listeners.delete(name);
+  syncLegacyEvents(this);
   return this;
 };
 Stream.prototype.emit = function emit(name, ...args) {
@@ -357,6 +418,21 @@ Stream.prototype.pipe = function pipe(destination) {
 Stream._isArrayBufferView = isArrayBufferView;
 Stream._isUint8Array = isUint8Array;
 Stream._uint8ArrayToBuffer = _uint8ArrayToBuffer;
+Stream.setMaxListeners = EventEmitter.setMaxListeners;
+Stream.getMaxListeners = EventEmitter.getMaxListeners;
+Stream.prototype.setMaxListeners = function setMaxListeners(value) {
+  if (typeof value !== 'number' || Number.isNaN(value) || value < 0) throw streamError('ERR_OUT_OF_RANGE', 'The value of "n" is out of range. It must be >= 0');
+  this._maxListeners = value;
+  return this;
+};
+Stream.prototype.getMaxListeners = function getMaxListeners() {
+  return this._maxListeners ?? EventEmitter.defaultMaxListeners ?? 10;
+};
+Object.setPrototypeOf(Stream, EventEmitter);
+Object.setPrototypeOf(Stream.prototype, EventEmitter.prototype);
+Stream.prototype._events = undefined;
+Stream.prototype._eventsCount = 0;
+Stream.prototype._maxListeners = undefined;
 
 function validateCombinatorOptions(options) {
   if (options === undefined || options === null) return {};
@@ -534,11 +610,15 @@ export class Readable extends EventEmitter {
       readable: true, destroyed: false, errored: null,
       pipes: [], flowing: null, reading: false, ended: false, endEmitted: false,
       readableListening: false, needReadable: false, emittedReadable: false, readingMore: false,
+      resumeScheduled: false, errorEmitted: false, closeEmitted: false, multiAwaitDrain: false,
+      dataEmitted: false, defaultEncoding: options.defaultEncoding || 'utf8', decoder: null, encoding: null,
+      constructed: true, sync: true,
       objectMode,
       highWaterMark: options.highWaterMark
         ?? (objectMode ? defaultObjectHighWaterMark : defaultHighWaterMark),
       buffer: this._buffer,
       autoDestroy: options.autoDestroy !== false, emitClose: options.emitClose !== false,
+      closeEmitted: false,
       closed: false, errorEmitted: false,
     };
     if (options.readable === false) {
@@ -1286,6 +1366,52 @@ for (const property of [
   'errored', 'closed', 'destroyed', 'readableEnded',
 ]) Object.defineProperty(Readable.prototype, property, { configurable: false });
 
+function ReadableState(options = {}, stream) {
+  this.objectMode = Boolean(options.readableObjectMode ?? options.objectMode);
+  this.buffer = stream?._buffer || [];
+  this.highWaterMark = options.highWaterMark
+    ?? (this.objectMode ? defaultObjectHighWaterMark : defaultHighWaterMark);
+  this.ended = false;
+  this.endEmitted = false;
+  this.reading = false;
+  this.constructed = true;
+  this.sync = true;
+  this.needReadable = false;
+  this.emittedReadable = false;
+  this.readableListening = false;
+  this.resumeScheduled = false;
+  this.errorEmitted = false;
+  this.emitClose = options.emitClose !== false;
+  this.autoDestroy = options.autoDestroy !== false;
+  this.destroyed = false;
+  this.closed = false;
+  this.closeEmitted = false;
+  this.multiAwaitDrain = false;
+  this.readingMore = false;
+  this.dataEmitted = false;
+  this.errored = null;
+  this.defaultEncoding = options.defaultEncoding || 'utf8';
+  this.decoder = null;
+  this.encoding = null;
+}
+
+function readableFromList(n, state) {
+  const buffer = state?.buffer;
+  if (!Array.isArray(buffer) || buffer.length === 0) return null;
+  if (state.objectMode) return buffer.shift();
+  if (!n || n >= buffer.reduce((total, chunk) => total + (chunk?.byteLength ?? chunk?.length ?? 0), 0)) {
+    const values = buffer.splice(0);
+    return values.every((value) => typeof value === 'string')
+      ? values.join('')
+      : bufferChunk(values.reduce((joined, value) => appendBytes(joined, toBytes(value)), new Uint8Array(0)));
+  }
+  return buffer.shift();
+}
+
+Readable.ReadableState = ReadableState;
+Readable._fromList = readableFromList;
+defineAsyncDispose(Readable.prototype);
+
 class WritableImpl extends EventEmitter {
   constructor(options = {}) {
     super();
@@ -1328,11 +1454,16 @@ class WritableImpl extends EventEmitter {
       errored: null,
       ended: false,
       finished: false,
+      finalCalled: false, needDrain: false, ending: false,
+      writing: false, sync: true, bufferProcessing: false, constructed: true, prefinished: false,
+      decodeStrings: this.decodeStrings, allBuffers: true, allNoop: true, writecb: null,
+      afterWriteTickInfo: null, buffered: this._queue,
       length: 0,
       objectMode: this.writableObjectMode,
       highWaterMark,
       defaultEncoding,
       autoDestroy: options.autoDestroy !== false, emitClose: options.emitClose !== false,
+      closeEmitted: false,
       closed: false, errorEmitted: false,
     };
     if (options.writable === false) {
@@ -1778,6 +1909,33 @@ export function Writable(options = {}) {
 }
 
 Writable.prototype = WritableImpl.prototype;
+
+Writable.WritableState = function WritableState(options = {}, stream) {
+  Object.assign(this, {
+    objectMode: Boolean(options.writableObjectMode ?? options.objectMode),
+    finalCalled: false, needDrain: false, ending: false, ended: false, finished: false,
+    destroyed: false, decodeStrings: options.decodeStrings !== false, writing: false,
+    sync: true, bufferProcessing: false, constructed: true, prefinished: false,
+    errorEmitted: false, emitClose: options.emitClose !== false,
+    autoDestroy: options.autoDestroy !== false, closed: false, allBuffers: true,
+    allNoop: true, errored: null, writable: options.writable !== false,
+    defaultEncoding: options.defaultEncoding || 'utf8',
+    highWaterMark: options.highWaterMark ?? defaultWritableHighWaterMark,
+    writecb: null, afterWriteTickInfo: null, buffered: stream?._queue || [],
+  });
+};
+Writable.WritableState.prototype.getBuffer = function getBuffer() {
+  return this.buffered?.slice?.() || [];
+};
+Object.defineProperty(Writable.WritableState.prototype, 'bufferedRequestCount', {
+  configurable: true,
+  get() { return this.buffered?.length || 0; },
+});
+Object.defineProperty(Writable, Symbol.hasInstance, {
+  configurable: true,
+  value(value) { return Boolean(value && value._writableState); },
+});
+defineAsyncDispose(Writable.prototype);
 
 export function ensureOutputStream(stream) {
   if (stream && typeof stream.write === 'function' && typeof stream.on === 'function' && typeof stream.once === 'function') {

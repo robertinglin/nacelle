@@ -1,5 +1,5 @@
 import { EventEmitter } from './events.js';
-import { Duplex } from './streams.js';
+import { Duplex, Stream } from './streams.js';
 import { createProxyCapability } from './proxy.js';
 
 const SERVER_REGISTRY = new Map();
@@ -610,6 +610,76 @@ class VirtualHttp2Stream extends Duplex {
   }
 }
 
+// Compatibility response surface used by the request-oriented HTTP/2 API.
+// Keep these accessors backed by the virtual stream so the response observes
+// the same lifecycle and writable state as the raw stream API.
+export class Http2ServerResponse extends Stream {
+  constructor(stream, options) {
+    super(options);
+    this._stream = stream;
+    this._state = {
+      sendDate: true,
+      statusCode: 200,
+    };
+  }
+
+  get socket() {
+    if (this._stream?.closed || this._stream?.destroyed) return undefined;
+    return this._stream;
+  }
+
+  get connection() {
+    return this.socket;
+  }
+
+  get stream() {
+    return this._stream;
+  }
+
+  get headersSent() {
+    return Boolean(this._stream?.headersSent);
+  }
+
+  get sendDate() {
+    return this._state.sendDate;
+  }
+
+  set sendDate(value) {
+    this._state.sendDate = Boolean(value);
+  }
+
+  get statusCode() {
+    return this._state.statusCode;
+  }
+
+  set statusCode(value) {
+    const code = value | 0;
+    if (code >= 100 && code < 200) {
+      const error = new RangeError('Informational status codes cannot be used');
+      error.code = 'ERR_HTTP2_INFO_STATUS_NOT_ALLOWED';
+      throw error;
+    }
+    if (code < 100 || code > 599) {
+      const error = new RangeError(`Invalid status code: ${code}`);
+      error.code = 'ERR_HTTP2_STATUS_INVALID';
+      throw error;
+    }
+    this._state.statusCode = code;
+  }
+
+  get writableCorked() {
+    return this._stream?.writableCorked ?? 0;
+  }
+
+  get writableHighWaterMark() {
+    return this._stream?.writableHighWaterMark;
+  }
+
+  get writableFinished() {
+    return this._stream?.writableFinished ?? false;
+  }
+}
+
 export class ClientHttp2Session extends EventEmitter {
   constructor(authority, options, internal) {
     super();
@@ -922,6 +992,7 @@ export function createHttp2Module(scope = globalThis, options = {}) {
     Http2Stream: VirtualHttp2Stream,
     Http2Server,
     Http2SecureServer: Http2Server,
+    Http2ServerResponse,
   });
 }
 

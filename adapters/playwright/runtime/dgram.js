@@ -63,6 +63,20 @@ function socketError(code, message) {
   return error;
 }
 
+function deprecatedSocketApi(message, operation) {
+  let warned = false;
+  return function deprecatedSocketApiWrapper(...args) {
+    if (!warned) {
+      warned = true;
+      globalThis.process?.emitWarning?.(message, {
+        type: 'DeprecationWarning',
+        code: 'DEP0112',
+      });
+    }
+    return operation.call(this, ...args);
+  };
+}
+
 function healthCheck(socket) {
   if (socket._closed || !socket[VIRTUAL_DGRAM_STATE]?.handle) {
     throw socketError('ERR_SOCKET_DGRAM_NOT_RUNNING', 'Not running');
@@ -285,7 +299,8 @@ export class Socket extends EventEmitter {
 
   bind(port_, address_, callback_) {
     healthCheck(this);
-    if (this._bindState !== BIND_STATE_UNBOUND) {
+    const state = this[VIRTUAL_DGRAM_STATE];
+    if (state.bindState !== BIND_STATE_UNBOUND) {
       throw socketError('ERR_SOCKET_ALREADY_BOUND', 'Socket is already bound');
     }
     let options = {};
@@ -297,7 +312,7 @@ export class Socket extends EventEmitter {
       port = options.port ?? 0;
       address = options.address;
       callback = address_;
-      this._reuseAddr = Boolean(options.reuseAddr);
+      state.reuseAddr = Boolean(options.reuseAddr);
       this._reusePort = Boolean(options.reusePort);
       this._ipv6Only = Boolean(options.ipv6Only);
       if (options.fd !== undefined) {
@@ -328,7 +343,7 @@ export class Socket extends EventEmitter {
     let normalizedAddress = normalizeVirtualAddress(address || (family === 6 ? '::' : '0.0.0.0'), family);
     const requestedPort = validatePort(port ?? 0);
     this._binding = true;
-    this[VIRTUAL_DGRAM_STATE].bindState = BIND_STATE_BINDING;
+    state.bindState = BIND_STATE_BINDING;
     queueMicrotask(() => {
       if (this._closed) return;
       const handle = this[VIRTUAL_DGRAM_STATE].handle;
@@ -349,13 +364,13 @@ export class Socket extends EventEmitter {
           const groupId = this._clusterGroupId || cluster?.worker?.process?.ppid;
           const result = cluster?.isWorker && typeof this._network.bindClusterUdp === 'function'
             ? this._network.bindClusterUdp(groupId, normalizedAddress, requestedPort, {
-                reuseAddr: this._reuseAddr,
+                reuseAddr: state.reuseAddr,
                 reusePort: this._reusePort,
                 ipv6Only: this._ipv6Only,
                 socket: this,
               })
             : this._network.bindUdp(this, normalizedAddress, requestedPort, {
-                reuseAddr: this._reuseAddr,
+                reuseAddr: state.reuseAddr,
                 reusePort: this._reusePort,
                 ipv6Only: this._ipv6Only,
               });
@@ -364,7 +379,6 @@ export class Socket extends EventEmitter {
           this._taskRelease = this._refed ? this._trackTask?.() || null : null;
           this._binding = false;
           this._bound = true;
-          const state = this[VIRTUAL_DGRAM_STATE];
           state.bindState = BIND_STATE_BOUND;
           state.handle.recvStart?.();
           this.emit('listening');
@@ -685,49 +699,81 @@ export class Socket extends EventEmitter {
 Object.defineProperty(Socket.prototype, '_handle', {
   configurable: false,
   enumerable: false,
-  get() { return this[VIRTUAL_DGRAM_STATE]?.handle || null; },
-  set(value) { this[VIRTUAL_DGRAM_STATE].handle = value; },
+  get: deprecatedSocketApi(
+    'Socket.prototype._handle is deprecated',
+    function getHandle() { return this[VIRTUAL_DGRAM_STATE]?.handle || null; },
+  ),
+  set: deprecatedSocketApi(
+    'Socket.prototype._handle is deprecated',
+    function setHandle(value) { this[VIRTUAL_DGRAM_STATE].handle = value; },
+  ),
 });
 
 Object.defineProperty(Socket.prototype, '_receiving', {
   configurable: false,
   enumerable: false,
-  get() { return this[VIRTUAL_DGRAM_STATE].receiving; },
-  set(value) { this[VIRTUAL_DGRAM_STATE].receiving = value; },
+  get: deprecatedSocketApi(
+    'Socket.prototype._receiving is deprecated',
+    function getReceiving() { return this[VIRTUAL_DGRAM_STATE].receiving; },
+  ),
+  set: deprecatedSocketApi(
+    'Socket.prototype._receiving is deprecated',
+    function setReceiving(value) { this[VIRTUAL_DGRAM_STATE].receiving = value; },
+  ),
 });
 
 Object.defineProperty(Socket.prototype, '_bindState', {
   configurable: false,
   enumerable: false,
-  get() { return this[VIRTUAL_DGRAM_STATE].bindState; },
-  set(value) {
-    this[VIRTUAL_DGRAM_STATE].bindState = value;
-    this._binding = value === BIND_STATE_BINDING;
-    this._bound = value === BIND_STATE_BOUND;
-  },
+  get: deprecatedSocketApi(
+    'Socket.prototype._bindState is deprecated',
+    function getBindState() { return this[VIRTUAL_DGRAM_STATE].bindState; },
+  ),
+  set: deprecatedSocketApi(
+    'Socket.prototype._bindState is deprecated',
+    function setBindState(value) {
+      this[VIRTUAL_DGRAM_STATE].bindState = value;
+      this._binding = value === BIND_STATE_BINDING;
+      this._bound = value === BIND_STATE_BOUND;
+    },
+  ),
 });
 
 Object.defineProperty(Socket.prototype, '_queue', {
   configurable: false,
   enumerable: false,
-  get() { return this[VIRTUAL_DGRAM_STATE].queue; },
-  set(value) { this[VIRTUAL_DGRAM_STATE].queue = value; },
+  get: deprecatedSocketApi(
+    'Socket.prototype._queue is deprecated',
+    function getQueue() { return this[VIRTUAL_DGRAM_STATE].queue; },
+  ),
+  set: deprecatedSocketApi(
+    'Socket.prototype._queue is deprecated',
+    function setQueue(value) { this[VIRTUAL_DGRAM_STATE].queue = value; },
+  ),
 });
 
 Object.defineProperty(Socket.prototype, '_reuseAddr', {
   configurable: false,
   enumerable: false,
-  get() { return this[VIRTUAL_DGRAM_STATE].reuseAddr; },
-  set(value) { this[VIRTUAL_DGRAM_STATE].reuseAddr = value; },
+  get: deprecatedSocketApi(
+    'Socket.prototype._reuseAddr is deprecated',
+    function getReuseAddr() { return this[VIRTUAL_DGRAM_STATE].reuseAddr; },
+  ),
+  set: deprecatedSocketApi(
+    'Socket.prototype._reuseAddr is deprecated',
+    function setReuseAddr(value) { this[VIRTUAL_DGRAM_STATE].reuseAddr = value; },
+  ),
 });
 
-Socket.prototype._healthCheck = function _healthCheck() {
-  healthCheck(this);
-};
+Socket.prototype._healthCheck = deprecatedSocketApi(
+  'Socket.prototype._healthCheck() is deprecated',
+  function _healthCheck() { healthCheck(this); },
+);
 
-Socket.prototype._stopReceiving = function _stopReceiving() {
-  stopReceiving(this);
-};
+Socket.prototype._stopReceiving = deprecatedSocketApi(
+  'Socket.prototype._stopReceiving() is deprecated',
+  function _stopReceiving() { stopReceiving(this); },
+);
 
 export function createBrowserDgram({ network = sharedVirtualNetwork, transport, dns = createBrowserDns(), BufferClass, trackTask, diagnostics, cluster, clusterGroupId, onListening } = {}) {
   const configuredNetwork = transport && network === sharedVirtualNetwork ? createVirtualNetwork({ transport }) : network;

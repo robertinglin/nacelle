@@ -5,6 +5,8 @@ import { AsyncResource, ownerSymbol } from './async-hooks.js';
 import { createVirtualNetwork, sharedVirtualNetwork, normalizeVirtualAddress, virtualAddressFamily } from './virtual-network.js';
 
 let nextClientPort = 62000;
+let nextReusePortGroup = 1;
+const reusePortGroups = new WeakMap();
 const socketHandle = Symbol('socketHandle');
 // Keep the Node compatibility symbol stable across realms. Some runtimes
 // expose Symbol.asyncDispose as a distinct symbol, while Node's fallback API
@@ -181,6 +183,27 @@ function nextLocalPort() {
   nextClientPort += 1;
   if (nextClientPort > 65000) nextClientPort = 62000;
   return nextClientPort;
+}
+
+function reusePortEndpointKey(address, port) {
+  return `${address}:${port}`;
+}
+
+function reusePortGroupId(network, address, port) {
+  // A fixed endpoint gets one browser-local fan-out group, matching the
+  // kernel's SO_REUSEPORT behavior without opening a host socket. Ephemeral
+  // listeners must remain independent because their selected ports differ.
+  const groups = reusePortGroups.get(network) || new Map();
+  reusePortGroups.set(network, groups);
+  if (port) {
+    const key = reusePortEndpointKey(address, port);
+    const existing = groups.get(key);
+    if (existing) return existing;
+    const groupId = `bnh-reuse-port:${address}:${port}`;
+    groups.set(key, groupId);
+    return groupId;
+  }
+  return `bnh-reuse-port:${address}:ephemeral:${nextReusePortGroup++}`;
 }
 
 /** A Node-shaped Duplex socket whose transport is entirely browser-local. */
@@ -827,6 +850,7 @@ export class Server extends EventEmitter {
     this._taskRelease = null;
     this._closeRequested = false;
     this._clusterHandle = null;
+    this._reusePortBinding = null;
     this._handle = null;
     this._unref = false;
     this._connections = 0;
@@ -875,7 +899,21 @@ export class Server extends EventEmitter {
     const tcpResource = new AsyncResource('TCPSERVERWRAP');
     this._tcpResource = tcpResource;
     try {
-      const result = this._network.bindTcp(this, address, port);
+      let result;
+      if (options.reusePort && typeof this._network.bindClusterTcp === 'function') {
+        const groupId = reusePortGroupId(this._network, address, port);
+        result = this._network.bindClusterTcp(groupId, address, port, {
+          ipv6Only: options.ipv6Only === true,
+        });
+        result.addServer?.(this);
+        if (!port) {
+          const groups = reusePortGroups.get(this._network);
+          groups?.set(reusePortEndpointKey(address, result.port), groupId);
+        }
+        this._reusePortBinding = result;
+      } else {
+        result = this._network.bindTcp(this, address, port);
+      }
       this._boundPort = result.port;
       this._boundAddress = result.address;
       this._handle = this._createServerHandle();
@@ -1031,7 +1069,12 @@ export class Server extends EventEmitter {
     this._handle = null;
     const tcpResource = this._tcpResource;
     this._tcpResource = null;
-    this._network.unbindTcp(this);
+    if (this._reusePortBinding) {
+      this._reusePortBinding.removeServer?.(this);
+      this._reusePortBinding = null;
+    } else {
+      this._network.unbindTcp(this);
+    }
     this._network.unbindPipe?.(this);
     this._taskRelease?.();
     this._taskRelease = null;

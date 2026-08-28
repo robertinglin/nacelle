@@ -501,6 +501,12 @@ function installProcessStdoutIterableSurface(stream, processObject) {
     value() { return readable[Symbol.asyncIterator](); },
   });
   Object.defineProperties(iterablePrototype, {
+    address: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return {}; },
+    },
     readable: {
       configurable: false,
       enumerable: false,
@@ -646,6 +652,12 @@ function installProcessStderrSocketSurface(stream, processObject) {
   };
 
   const socketPrototype = Object.create(Object.getPrototypeOf(stream));
+  Object.defineProperty(socketPrototype, Symbol.asyncIterator, {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value() { return new Readable({ read() {}, readable: false })[Symbol.asyncIterator](); },
+  });
   Object.defineProperties(socketPrototype, {
     localAddress: {
       configurable: false,
@@ -702,6 +714,64 @@ function installProcessStderrSocketSurface(stream, processObject) {
     },
   });
   Object.setPrototypeOf(stream, socketPrototype);
+}
+
+function installProcessStdinSurface(stream) {
+  if (!stream || stream.__BNH_STDIN_SURFACE__) return;
+  Object.defineProperty(stream, '__BNH_STDIN_SURFACE__', {
+    configurable: false,
+    enumerable: false,
+    value: true,
+  });
+  if (!('fd' in stream)) stream.fd = 0;
+  Object.defineProperties(stream, {
+    autoClose: {
+      configurable: true,
+      enumerable: false,
+      get: () => stream._readableState?.autoDestroy,
+      set: (value) => { if (stream._readableState) stream._readableState.autoDestroy = value; },
+    },
+    open: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() {},
+    },
+    _construct: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(callback) { callback?.(); },
+    },
+    close: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(callback) {
+        if (typeof callback === 'function') this.once?.('close', callback);
+        this.fd = null;
+        this.destroy?.();
+      },
+    },
+    pending: {
+      configurable: true,
+      enumerable: false,
+      get: () => stream.fd === null,
+    },
+  });
+  Object.defineProperty(stream, Symbol.for('nodejs.asyncDispose'), {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value() {
+      if (stream.destroyed || stream.closed) return Promise.resolve();
+      return new Promise((resolve) => {
+        stream.once?.('close', resolve);
+        stream.destroy?.();
+        if (typeof stream.once !== 'function') resolve();
+      });
+    },
+  });
 }
 
 function browserHeapSnapshot(scope) {
@@ -1440,6 +1510,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
   let beforeExitEventEmitted = false;
   const stdin = new Readable({ read() {} });
   stdin.isTTY = false;
+  installProcessStdinSurface(stdin);
   const terminateBySignal = (signal) => {
     if (exited) return;
     exitSignal = signal;
@@ -1940,6 +2011,12 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       processObject._bnhReleaseTasks?.();
       for (const handle of timers) clearTimer(handle);
     },
+  });
+  Object.defineProperty(processObject, Symbol.toStringTag, {
+    configurable: false,
+    enumerable: false,
+    writable: true,
+    value: 'process',
   });
   installProcessStdoutIterableSurface(processObject.stdout, processObject);
   installProcessStderrSocketSurface(processObject.stderr, processObject);
@@ -4561,47 +4638,19 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         }
 
         function outputStream() {
-          const events = new EventEmitter();
-          const pending = [];
-          let endPending = false;
-          const flush = () => {
-            while (pending.length && events.listenerCount('data')) events.emit('data', pending.shift());
-            if (endPending && pending.length === 0 && events.listenerCount('end')) {
-              endPending = false;
-              events.emit('end');
-            }
+          const stream = new Readable({ read() {} });
+          stream.write = (value, encoding, callback) => {
+            const accepted = stream.push(value, encoding);
+            callback?.();
+            return accepted;
           };
-          const addListener = events.on.bind(events);
-          events.on = (name, listener) => {
-            const result = addListener(name, listener);
-            if (name === 'data' || name === 'end') flush();
-            return result;
+          stream.end = (value, encoding, callback) => {
+            if (value !== undefined && value !== null) stream.write(value, encoding);
+            stream.push(null);
+            callback?.();
+            return stream;
           };
-          events.setEncoding = () => events;
-          events.write = (value) => {
-            pending.push(typeof value === 'string' ? value : Buffer.from(value).toString());
-            flush();
-            return true;
-          };
-          events.end = (value) => {
-            if (value !== undefined) events.write(value);
-            endPending = true;
-            flush();
-            return events;
-          };
-          events.pipe = (destination) => {
-            if (!destination || typeof destination.write !== 'function') {
-              throw new TypeError('The "destination" argument must be a writable stream');
-            }
-            events.on('data', (value) => destination.write(value));
-            events.on('end', () => {
-              if (typeof destination.end === 'function') destination.end();
-            });
-            flush();
-            return destination;
-          };
-          events.destroy = () => { events.end(); return events; };
-          return events;
+          return stream;
         }
 
         function virtualAsync(file, args, options, callback, isExecFile = false) {
@@ -6117,6 +6166,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           } else {
             processObject.stdin = injectedStdin || processObject.stdin;
           }
+          installProcessStdinSurface(processObject.stdin);
           processObject.exit = (code) => {
             processObject.exitCode = Number(code) || 0;
             processObject.emit('exit', processObject.exitCode);

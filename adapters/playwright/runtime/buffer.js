@@ -1160,7 +1160,7 @@ export function createBufferClass(scope = globalThis) {
       if (totalLength === undefined) {
         size = 0;
         for (const value of list) {
-          if (value?.length) size += value.length;
+          if (value.length) size += value.length;
         }
       } else {
         size = normalizeInteger(totalLength, 'length', { maximum: 0x7fffffff });
@@ -1382,6 +1382,7 @@ export function createBufferClass(scope = globalThis) {
     utf8Write(value, offset, length) { return nativeWrite(this, value, offset, length, UTF8_OPS); }
     toJSON() { return { type: 'Buffer', data: [...this] }; }
   }
+  Object.defineProperty(NodeBuffer, 'name', { configurable: true, value: 'FastBuffer' });
   // Plain functions (not class methods): Buffer#lastIndexOf must remain
   // constructible so misuse reports ERR_INVALID_ARG_TYPE instead of failing
   // with a generic "not a constructor" error.
@@ -1439,6 +1440,12 @@ export function createBufferClass(scope = globalThis) {
   Buffer.allocUnsafe = NodeBuffer.allocUnsafe;
   Buffer.allocUnsafeSlow = NodeBuffer.allocUnsafeSlow;
   Buffer.isBuffer = NodeBuffer.isBuffer;
+  Buffer.isEncoding = NodeBuffer.isEncoding;
+  Buffer.concat = NodeBuffer.concat;
+  Object.defineProperty(Buffer, Symbol.species, {
+    configurable: true,
+    get() { return NodeBuffer; },
+  });
   Buffer.of = (...items) => {
     const result = new NodeBuffer(items.length, internalBuffer);
     for (let index = 0; index < items.length; index += 1) result[index] = items[index];

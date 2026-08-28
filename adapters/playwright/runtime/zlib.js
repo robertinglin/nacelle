@@ -526,7 +526,16 @@ class BrotliDecompress extends ZlibStream {
   constructor(_options, bufferClass, scope) { super('br', 'decompress', bufferClass, scope); }
 }
 
-for (const Constructor of [BrotliCompress, BrotliDecompress, Deflate, DeflateRaw]) {
+for (const Constructor of [
+  BrotliCompress,
+  BrotliDecompress,
+  Deflate,
+  DeflateRaw,
+  Gunzip,
+  Gzip,
+  Inflate,
+  InflateRaw,
+]) {
   Constructor.prototype.params = zlibParams;
   Constructor.prototype[SymbolNodeAsyncDispose] = zlibAsyncDispose;
   if (SymbolAsyncDispose !== SymbolNodeAsyncDispose) {

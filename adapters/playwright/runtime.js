@@ -77,7 +77,7 @@ import { createZlibShim as createZlibShimModule } from './runtime/zlib.js';
 import {
   createConsoleModule,
   installConsoleErrorHandlers,
-  createConstants,
+  createConstants as createBaseConstants,
   createPromisify,
   createQuerystring,
   createStreamConsumers,
@@ -125,6 +125,39 @@ const BUILTIN_NAMES = Object.freeze([
 
 function builtinName(name) {
   return name.startsWith('node:') ? name.slice(5) : name;
+}
+
+function createConstants() {
+  const { crypto, ...baseConstants } = createBaseConstants();
+  return Object.freeze({
+    ...baseConstants,
+    ...crypto,
+    EISDIR: 21,
+    EOPNOTSUPP: 95,
+    EOVERFLOW: 75,
+    EPERM: 1,
+    EPIPE: 32,
+    EPROTO: 71,
+    EPROTONOSUPPORT: 93,
+    EPROTOTYPE: 91,
+    ERANGE: 34,
+  });
+}
+
+const ERRNO_CONSTANT_NAMES = Object.freeze([
+  'EISDIR', 'EOPNOTSUPP', 'EOVERFLOW', 'EPERM', 'EPIPE',
+  'EPROTO', 'EPROTONOSUPPORT', 'EPROTOTYPE', 'ERANGE',
+]);
+
+function installErrnoConstants(target, constants) {
+  for (const name of ERRNO_CONSTANT_NAMES) {
+    Object.defineProperty(target, name, {
+      configurable: false,
+      enumerable: true,
+      value: constants[name],
+      writable: false,
+    });
+  }
 }
 
 function nativeMessagePort(value, scope) {
@@ -2254,6 +2287,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
 
   function makeBuiltins(processObject, runtimeRequire, diagnosticsChannels, runtimeOptions, performancePrimitives, trackTask, stdout, stderr, readSource, sourcePath) {
     const fs = vfs.fs;
+    const constants = createConstants();
     const moduleWrapper = [
       '(function (exports, require, module, __filename, __dirname) { ',
       '\n});',
@@ -2353,7 +2387,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       return error;
     };
     const utilTypes = createUtilTypes(scope);
-    fs.constants ||= createConstants();
+    fs.constants ||= constants;
     fs.promises.constants = fs.constants;
     class BrowserChildProcess extends EventEmitter {
       constructor() {
@@ -3196,13 +3230,15 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     });
     const internalBindingContract = createBrowserInternalBindings({
       globalObject: scope,
-      constants: createConstants(),
+      constants: createBaseConstants(),
       network: virtualNetwork,
       onWorkerMessage: (message) => {
         if (!options.workerThread || typeof processObject?.send !== 'function') return;
         processObject.send({ __bnhInternalWorkerMessage: message?.type });
       },
     });
+    installErrnoConstants(internalBindingContract.bindings.constants.os.errno, constants);
+    delete internalBindingContract.bindings.constants.fs.crypto;
     processObject.binding = (name) => {
       if (name === 'test') {
         const error = new Error('No such module: test');
@@ -3585,7 +3621,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         isAscii,
         isUtf8,
       },
-      console: createConsoleModule(processObject), constants: createConstants(), crypto: nodeCrypto,
+      console: createConsoleModule(processObject), constants, crypto: nodeCrypto,
       domain: createDomainModule(processObject),
       events: (() => {
         EventEmitter.EventEmitter = EventEmitter;

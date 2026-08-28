@@ -106,6 +106,7 @@ def surface_probe_source(modules: Sequence[str]) -> str:
         "      .sort();\n"
         "    const recordValue = (prefix, propertyKey, value, depth) => {\n"
         "      if (!value || (typeof value !== \"function\" && typeof value !== \"object\") || depth > 2) return;\n"
+        "      if (Array.isArray(value) && depth > 0) return;\n"
         "      const valueType = typeof value;\n"
         "      const prototypeOfValue = Object.getPrototypeOf(value);\n"
         "      const stableObjectKeys = new Set([\"constants\", \"versions\", \"features\", \"STATUS_CODES\"]);\n"

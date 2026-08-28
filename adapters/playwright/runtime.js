@@ -135,10 +135,22 @@ function builtinName(name) {
   return name.startsWith('node:') ? name.slice(5) : name;
 }
 
+const BROWSER_SIGNAL_CONSTANTS = Object.freeze({
+  SIGTSTP: 20,
+  SIGTTIN: 21,
+  SIGTTOU: 22,
+  SIGURG: 23,
+  SIGUSR1: 10,
+  SIGUSR2: 12,
+  SIGVTALRM: 26,
+  SIGWINCH: 28,
+});
+
 function createConstants() {
   const { crypto, ...baseConstants } = createBaseConstants();
   return Object.freeze({
     ...baseConstants,
+    ...BROWSER_SIGNAL_CONSTANTS,
     ...crypto,
     EISDIR: 21,
     EOPNOTSUPP: 95,
@@ -3272,6 +3284,10 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         if (!options.workerThread || typeof processObject?.send !== 'function') return;
         processObject.send({ __bnhInternalWorkerMessage: message?.type });
       },
+    });
+    internalBindingContract.bindings.constants.os.signals = Object.freeze({
+      ...internalBindingContract.bindings.constants.os.signals,
+      ...BROWSER_SIGNAL_CONSTANTS,
     });
     installErrnoConstants(internalBindingContract.bindings.constants.os.errno, constants);
     delete internalBindingContract.bindings.constants.fs.crypto;

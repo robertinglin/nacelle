@@ -677,7 +677,7 @@ export class AsyncResource {
   }
 
   bind(callback, thisArg) {
-    if (typeof callback !== 'function') throw invalidArgumentType('fn', 'function', callback);
+    if (typeof callback !== 'function') throw invalidArgumentType('fn', 'Function', callback);
     const bound = function boundAsyncResource(...args) {
       const receiver = thisArg === undefined ? this : thisArg;
       return thisResource.runInAsyncScope(callback, receiver, ...args);

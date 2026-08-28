@@ -736,6 +736,10 @@ export function createVmModule(scope = globalThis) {
       FunctionConstructor(this.code);
     }
 
+    createCachedData() {
+      return scope.Buffer?.alloc?.(0) || new Uint8Array(0);
+    }
+
     runInContext(contextifiedObject, options = {}) {
       validateContext(contextifiedObject, isContext);
       const runOptions = getRunInContextArgs(options);

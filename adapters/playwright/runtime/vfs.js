@@ -7,6 +7,8 @@ import { createGlob } from './fs-glob.js';
 import { markAsUncloneable } from './messaging.js';
 
 const textEncoder = new TextEncoder();
+const SymbolDispose = Symbol.dispose || Symbol.for('nodejs.dispose');
+const SymbolAsyncDispose = Symbol.asyncDispose || Symbol.for('nodejs.asyncDispose');
 const READ_FILE_ASYNC_STAGES = 4;
 const S_IFMT = 0o170000;
 const S_IFIFO = 0o010000;
@@ -600,6 +602,16 @@ class Dir {
     } finally {
       if (!this.#closed) await this.close();
     }
+  }
+
+  [SymbolDispose]() {
+    if (this.#closed) return;
+    this.closeSync();
+  }
+
+  async [SymbolAsyncDispose]() {
+    if (this.#closed) return;
+    await this.close();
   }
 }
 
@@ -2207,6 +2219,19 @@ export function createVfs(options = {}) {
     this.destroy();
   };
 
+  Object.defineProperty(ReadStream.prototype, SymbolAsyncDispose, {
+    configurable: true,
+    value: async function () {
+      if (!this.destroyed) {
+        const error = this.readableEnded ? null : abortError();
+        this.destroy(error);
+      }
+      if (this._closeEmitted) return;
+      await new Promise((resolve) => this.once('close', resolve));
+    },
+    writable: true,
+  });
+
   Object.defineProperty(ReadStream.prototype, 'pending', {
     configurable: true,
     get() { return this.fd === null; },
@@ -2600,6 +2625,19 @@ export function createVfs(options = {}) {
     if (!this.autoClose) this.once('finish', () => this.destroy());
     this.end();
   };
+
+  Object.defineProperty(WriteStream.prototype, SymbolAsyncDispose, {
+    configurable: true,
+    value: async function () {
+      if (!this.destroyed) {
+        const error = this.writableFinished ? null : abortError();
+        this.destroy(error);
+      }
+      if (this._closeEmitted) return;
+      await new Promise((resolve) => this.once('close', resolve));
+    },
+    writable: true,
+  });
 
   WriteStream.prototype.destroySoon = WriteStream.prototype.end;
 

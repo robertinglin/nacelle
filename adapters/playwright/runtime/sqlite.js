@@ -26,6 +26,12 @@ function invalidArgType(name, expected, value) {
   return error;
 }
 
+function invalidBooleanArg(name) {
+  const error = new TypeError(`The "${name}" argument must be a boolean.`);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
 function invalidState(message) {
   const error = new Error(message);
   error.code = 'ERR_INVALID_STATE';
@@ -78,6 +84,35 @@ function validateDatabaseReceiver(value) {
 function validateStatementReceiver(value) {
   if (!(value instanceof StatementSync) || !statementInstances.has(value)) {
     throw invalidState('statement has been finalized');
+  }
+}
+
+function validateBackupOptions(options) {
+  if (options === null || (typeof options !== 'object' && typeof options !== 'function')) {
+    const error = new TypeError('The "options" argument must be an object.');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (options.rate !== undefined
+    && (!Number.isInteger(options.rate) || options.rate < -2147483648 || options.rate > 2147483647)) {
+    const error = new TypeError('The "options.rate" argument must be an integer.');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (options.source !== undefined && typeof options.source !== 'string') {
+    const error = new TypeError('The "options.source" argument must be a string.');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (options.target !== undefined && typeof options.target !== 'string') {
+    const error = new TypeError('The "options.target" argument must be a string.');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (options.progress !== undefined && typeof options.progress !== 'function') {
+    const error = new TypeError('The "options.progress" argument must be a function.');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
   }
 }
 
@@ -248,8 +283,56 @@ class StatementSync {
     validateStatementReceiver(this);
     unavailable();
   }
+
+  columns() {
+    validateStatementReceiver(this);
+    unavailable();
+  }
+
+  setAllowBareNamedParameters() {
+    validateStatementReceiver(this);
+    const enabled = arguments[0];
+    if (typeof enabled !== 'boolean') throw invalidBooleanArg('allowBareNamedParameters');
+    unavailable();
+  }
+
+  setAllowUnknownNamedParameters() {
+    validateStatementReceiver(this);
+    const enabled = arguments[0];
+    if (typeof enabled !== 'boolean') throw invalidBooleanArg('enabled');
+    unavailable();
+  }
+
+  setReadBigInts() {
+    validateStatementReceiver(this);
+    const enabled = arguments[0];
+    if (typeof enabled !== 'boolean') throw invalidBooleanArg('readBigInts');
+    unavailable();
+  }
+
+  setReturnArrays() {
+    validateStatementReceiver(this);
+    const enabled = arguments[0];
+    if (typeof enabled !== 'boolean') throw invalidBooleanArg('returnArrays');
+    unavailable();
+  }
+}
+
+function backup(sourceDb, destination, options = undefined) {
+  if (sourceDb === null || (typeof sourceDb !== 'object' && typeof sourceDb !== 'function')) {
+    const error = new TypeError('The "sourceDb" argument must be an object.');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (typeof destination !== 'string') {
+    const error = new TypeError('The "destination" argument must be a string.');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (arguments.length > 2) validateBackupOptions(options);
+  unavailable();
 }
 
 export function createSqliteModule() {
-  return Object.freeze({ DatabaseSync, StatementSync, constants });
+  return Object.freeze({ DatabaseSync, StatementSync, backup, constants });
 }

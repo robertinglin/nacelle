@@ -17,9 +17,13 @@ const SymbolAsyncDispose = Symbol.asyncDispose || Symbol.for('nodejs.asyncDispos
 const BODYLESS_METHODS = new Set(['GET', 'HEAD']);
 const objectToString = Object.prototype.toString;
 const HTTP_TOKEN_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
-const HTTP_TOKEN_CHARACTERS = new Set("^_`a-zA-Z-0-9!#$%&'*+.|~".split(''));
+const HTTP_TOKEN_CHARACTERS = new Set("!#$%&'*+-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ^_`abcdefghijklmnopqrstuvwxyz|~".split(''));
 const INVALID_HEADER_CHAR_PATTERN = /[^\t\x20-\x7e\x80-\xff]/;
 const httpParsers = { max: 1000 };
+const continueExpression = /(?:^|\W)100-continue(?:$|\W)/i;
+const CRLF = '\r\n';
+const kIncomingMessage = Symbol('IncomingMessage');
+const kSkipPendingData = Symbol('SkipPendingData');
 const kOutgoingHeaders = Symbol('outgoingHeaders');
 const kOutgoingSocket = Symbol('outgoingSocket');
 const kOutgoingHighWaterMark = Symbol('outgoingHighWaterMark');
@@ -196,6 +200,16 @@ function createHTTPParserClass(scope, BufferClass, ownerProcess) {
     }
   }
 
+  // These native binding methods are lifecycle hooks used by Node's HTTP
+  // parser pool. The browser parser has no native allocation to detach, but
+  // free must still release its async resource and remove is intentionally a
+  // no-op so the shared freeParser path remains safe.
+  HTTPParser.prototype.free = function free() {
+    this.close();
+  };
+
+  HTTPParser.prototype.remove = function remove() {};
+
   Object.assign(HTTPParser, {
     REQUEST: HTTP_PARSER_REQUEST,
     RESPONSE: HTTP_PARSER_RESPONSE,
@@ -214,6 +228,28 @@ function createHTTPParserClass(scope, BufferClass, ownerProcess) {
   });
 
   return HTTPParser;
+}
+
+function freeParser(parser, req, socket) {
+  if (parser) {
+    if (parser._consumed) parser.unconsume();
+    parser._headers = [];
+    parser._url = '';
+    parser.socket = null;
+    parser.incoming = null;
+    parser.outgoing = null;
+    parser._consumed = false;
+    parser.onIncoming = null;
+    parser.joinDuplicateHeaders = null;
+    parser.remove();
+    parser.free();
+  }
+  if (req) req.parser = null;
+  if (socket) socket.parser = null;
+}
+
+function isLenient() {
+  return false;
 }
 
 function findHeaderEnd(bytes) {
@@ -3715,6 +3751,12 @@ export function createHttpCompatibility(scope = globalThis, {
       _checkInvalidHeaderChar: checkInvalidHeaderChar,
       _checkIsHttpToken: checkIsHttpToken,
       chunkExpression,
+      continueExpression,
+      CRLF,
+      freeParser,
+      isLenient,
+      kIncomingMessage,
+      kSkipPendingData,
       prepareError,
     },
     ClientRequest,

@@ -333,11 +333,18 @@ export class Socket extends Duplex {
 
   _connectAddress(address, family, port, options, onError = (error) => this._failConnect(error), onConnected = () => {}) {
     // Documentation-only networks are intentionally unroutable. Keep their
-    // connection pending so Socket#setTimeout can deliver the observable
-    // timeout event instead of converting the black hole into ECONNREFUSED.
-    const hasEgressTransport = typeof this._transport === 'function'
-      || typeof this._transport?.connect === 'function';
-    if (!hasEgressTransport && !options.autoSelectFamily && isVirtualBlackholeAddress(address)) return;
+    // connection pending when the browser-local network has no egress route,
+    // so Socket#setTimeout can deliver the observable timeout event instead
+    // of converting the black hole into ECONNREFUSED. Let a configured
+    // network transport see the request first; it is the only browser-native
+    // route that can connect an external address.
+    const preserveBlackholeTimeout = !options.autoSelectFamily && isVirtualBlackholeAddress(address);
+    const reportError = preserveBlackholeTimeout
+      ? (error) => {
+          if (error?.code === 'ECONNREFUSED') return;
+          onError(error);
+        }
+      : onError;
     if (options.blockList?.check?.(address, family === 6 ? 'ipv6' : 'ipv4')) {
       schedule(() => onError(socketError('ERR_IP_BLOCKED', 'connect', address, port)));
       return;
@@ -361,7 +368,7 @@ export class Socket extends Duplex {
           if (onConnected() === false) return;
           this._establish(connection, family);
         },
-        onError,
+        onError: reportError,
       });
     });
   }

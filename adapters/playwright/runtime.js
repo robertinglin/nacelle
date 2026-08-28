@@ -547,6 +547,24 @@ function installProcessStdoutIterableSurface(stream, processObject) {
       writable: true,
       value: 'pipe',
     },
+    connecting: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: false,
+    },
+    destroySoon: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    fd: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: 1,
+    },
     allowHalfOpen: {
       configurable: true,
       enumerable: true,
@@ -632,6 +650,34 @@ function installProcessStdoutIterableSurface(stream, processObject) {
       configurable: false,
       enumerable: true,
       get: () => bytesDispatched,
+    },
+    bytesRead: {
+      configurable: false,
+      enumerable: true,
+      get: () => 0,
+    },
+    bytesWritten: {
+      configurable: false,
+      enumerable: true,
+      get: () => bytesDispatched,
+    },
+    compose: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) { return readable.compose(...args); },
+    },
+    connect: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    drop: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.drop(...args); },
     },
     _reset: {
       configurable: true,

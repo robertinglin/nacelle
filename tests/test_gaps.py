@@ -64,6 +64,7 @@ class SurfaceTests(unittest.TestCase):
         # The probe must run as plain CJS through both adapters.
         self.assertIn("require(", source)
         self.assertIn("Object.getPrototypeOf", source)
+        self.assertIn('typeof value === "object"', source)
 
     def test_module_list_source_uses_the_same_marker(self) -> None:
         self.assertIn("__BNH_SURFACE_JSON__", module_list_source())

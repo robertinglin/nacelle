@@ -471,6 +471,85 @@ function normalizeOutputChunk(value) {
   return String(value);
 }
 
+function installProcessStdoutIterableSurface(stream) {
+  if (!stream || stream.__BNH_STDOUT_ITERABLE_SURFACE__) return;
+  Object.defineProperty(stream, '__BNH_STDOUT_ITERABLE_SURFACE__', {
+    configurable: false,
+    enumerable: false,
+    value: true,
+  });
+  const readable = new Readable({ read() {}, readable: false });
+  const iterablePrototype = Object.create(Object.getPrototypeOf(stream));
+  for (const name of ['every', 'forEach', 'reduce', 'toArray', 'some', 'find']) {
+    Object.defineProperty(iterablePrototype, name, {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable[name](...args); },
+    });
+  }
+  Object.defineProperty(iterablePrototype, Symbol.for('nodejs.asyncDispose'), {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value: async function asyncDispose() {},
+  });
+  Object.defineProperty(iterablePrototype, Symbol.asyncIterator, {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value() { return readable[Symbol.asyncIterator](); },
+  });
+  Object.defineProperties(iterablePrototype, {
+    readable: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readable,
+      set: (value) => { readable.readable = value; },
+    },
+    readableDidRead: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableDidRead,
+    },
+    readableAborted: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableAborted,
+    },
+    readableHighWaterMark: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableHighWaterMark,
+    },
+    readableBuffer: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableBuffer,
+    },
+    readableFlowing: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableFlowing,
+      set: (value) => {
+        readable._flowing = value;
+        readable._readableState.flowing = value;
+      },
+    },
+    readableLength: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableLength,
+    },
+    readableObjectMode: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableObjectMode,
+    },
+  });
+  Object.setPrototypeOf(stream, iterablePrototype);
+}
+
 function installProcessStderrSocketSurface(stream) {
   if (!stream || stream.__BNH_STDERR_SOCKET_SURFACE__) return;
   Object.defineProperty(stream, '__BNH_STDERR_SOCKET_SURFACE__', {
@@ -1784,6 +1863,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       for (const handle of timers) clearTimer(handle);
     },
   });
+  installProcessStdoutIterableSurface(processObject.stdout);
   installProcessStderrSocketSurface(processObject.stderr);
   const preloads = [];
   const execArgv = options.execArgv || [];
@@ -5946,6 +6026,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           // Preserve injected process identity and capabilities (stdout, stderr, exit control, IPC)
           processObject.stdout = injectedProcess.stdout || processObject.stdout;
           processObject.stderr = injectedProcess.stderr || processObject.stderr;
+          installProcessStdoutIterableSurface(processObject.stdout);
           installProcessStderrSocketSurface(processObject.stderr);
           const injectedStdin = injectedProcess.stdin;
           if (injectedStdin && [

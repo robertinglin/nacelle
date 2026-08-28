@@ -535,6 +535,7 @@ for (const Constructor of [
   Gzip,
   Inflate,
   InflateRaw,
+  Unzip,
 ]) {
   Constructor.prototype.params = zlibParams;
   Constructor.prototype[SymbolNodeAsyncDispose] = zlibAsyncDispose;
@@ -549,6 +550,13 @@ class ZstdCompress extends ZlibStream {
 
 class ZstdDecompress extends ZlibStream {
   constructor(_options, bufferClass, scope) { super('zstd', 'decompress', bufferClass, scope); }
+}
+
+for (const Constructor of [ZstdCompress, ZstdDecompress]) {
+  Constructor.prototype[SymbolNodeAsyncDispose] = zlibAsyncDispose;
+  if (SymbolAsyncDispose !== SymbolNodeAsyncDispose) {
+    Constructor.prototype[SymbolAsyncDispose] = zlibAsyncDispose;
+  }
 }
 
 function operation(value, format, mode, BufferClass, scope, optionsOrCallback, callback) {

@@ -11,9 +11,13 @@ const PRIME_BLOCKER = 'Web Crypto does not expose browser-native prime testing';
 const KEY_OBJECT_BLOCKER = 'Web Crypto returns CryptoKey objects, but this browser runtime has no synchronous Node KeyObject adapter for generated symmetric keys';
 
 const CRYPTO_CONSTANTS = Object.freeze({
-  // This is the only crypto constant exposed by the browser compatibility
-  // layer. OpenSSL cipher and engine registries are not browser capabilities.
   ENGINE_METHOD_ALL: 0,
+  SSL_OP_ALL: 2147485776,
+  SSL_OP_ALLOW_NO_DHE_KEX: 1024,
+  SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION: 262144,
+  SSL_OP_CIPHER_SERVER_PREFERENCE: 4194304,
+  SSL_OP_CISCO_ANYCONNECT: 32768,
+  SSL_OP_COOKIE_EXCHANGE: 8192,
 });
 
 export const cryptoConstants = CRYPTO_CONSTANTS;
@@ -972,6 +976,50 @@ function missingPassphraseError() {
   return new Error('error:07880109:common libcrypto routines::interrupted or cancelled');
 }
 
+function invalidSigningData(value) {
+  const received = value === undefined
+    ? 'undefined'
+    : value === null
+      ? 'null'
+      : typeof value === 'object'
+        ? `an instance of ${value.constructor?.name || 'Object'}`
+        : `type ${typeof value} (${String(value)})`;
+  const error = new TypeError(
+    'The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. '
+    + `Received ${received}`,
+  );
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function assertSigningData(value) {
+  if (typeof value === 'string' || isArrayBuffer(value) || isArrayBufferView(value)) return;
+  throw invalidSigningData(value);
+}
+
+function invalidSigningAlgorithm(algorithm) {
+  const received = algorithm === undefined
+    ? 'undefined'
+    : algorithm === null
+      ? 'null'
+      : typeof algorithm === 'object'
+        ? `an instance of ${algorithm.constructor?.name || 'Object'}`
+        : `type ${typeof algorithm} (${String(algorithm)})`;
+  const error = new TypeError(`The "algorithm" argument must be of type string. Received ${received}`);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function assertSigningAlgorithm(algorithm) {
+  if (typeof algorithm !== 'string') throw invalidSigningAlgorithm(algorithm);
+}
+
+function invalidSigningKey() {
+  const error = new Error('No key provided to sign');
+  error.code = 'ERR_CRYPTO_SIGN_KEY_REQUIRED';
+  return error;
+}
+
 function virtualSignature(record, value, globalObject) {
   const data = toCryptoBytes(value, globalObject.TextEncoder);
   return sha256(`${record.id}:${base64(data)}`);
@@ -993,13 +1041,80 @@ export function verifySync(algorithm, value, key, signature, options = {}, globa
   return expected.every((byte, index) => byte === actual[index]);
 }
 
-export function createVerifyShim(algorithm, BufferClass, globalObject = globalThis) {
-  if (typeof algorithm !== 'string') {
-    const received = algorithm === null ? 'null' : algorithm === undefined ? 'undefined' : typeof algorithm;
-    const error = new TypeError(`The "algorithm" argument must be of type string. Received ${received}`);
-    error.code = 'ERR_INVALID_ARG_TYPE';
-    throw error;
+export function createSignShim(algorithm, BufferClass, globalObject = globalThis) {
+  assertSigningAlgorithm(algorithm);
+
+  function Sign() {
+    this._chunks = [];
+    this._finalized = false;
   }
+
+  Sign.prototype._write = function _write(chunk, encoding, callback) {
+    this.update(chunk, encoding);
+    callback();
+  };
+
+  Sign.prototype.update = function update(value, encoding) {
+    if (this._finalized) {
+      const error = new Error('Not initialised');
+      error.code = 'ERR_CRYPTO_INVALID_STATE';
+      throw error;
+    }
+    assertSigningData(value);
+    this._chunks.push(BufferClass.from(value, encoding));
+    return this;
+  };
+
+  Sign.prototype.sign = function signValue(key, outputEncoding) {
+    if (this._finalized) {
+      const error = new Error('Not initialised');
+      error.code = 'ERR_CRYPTO_INVALID_STATE';
+      throw error;
+    }
+    if (key === undefined || key === null) throw invalidSigningKey();
+    this._finalized = true;
+    const data = BufferClass.concat(this._chunks);
+    const options = outputEncoding && typeof outputEncoding === 'object' ? outputEncoding : {};
+    const result = signSync(algorithm, data, key, options, globalObject);
+    if (result === undefined) {
+      throw new UnsupportedWebCapabilityError(
+        'Sign.sign',
+        'Web Crypto exposes only asynchronous SubtleCrypto.sign; no browser-native synchronous signer is available for this key',
+      );
+    }
+    const signature = BufferClass.from(result);
+    if (outputEncoding === undefined || typeof outputEncoding === 'object') return signature;
+    return signature.toString(outputEncoding);
+  };
+
+  return Sign;
+}
+
+export function createSignClass(BufferClass, globalObject = globalThis) {
+  function Sign(algorithm, options) {
+    void options;
+    const Implementation = createSignShim(algorithm, BufferClass, globalObject);
+    this._implementation = new Implementation();
+  }
+
+  Sign.prototype._write = function _write(chunk, encoding, callback) {
+    this._implementation._write(chunk, encoding, callback);
+  };
+
+  Sign.prototype.update = function update(value, encoding) {
+    this._implementation.update(value, encoding);
+    return this;
+  };
+
+  Sign.prototype.sign = function signValue(key, outputEncoding) {
+    return this._implementation.sign(key, outputEncoding);
+  };
+
+  return Sign;
+}
+
+export function createVerifyShim(algorithm, BufferClass, globalObject = globalThis) {
+  assertSigningAlgorithm(algorithm);
 
   function Verify() {
     this._chunks = [];
@@ -1012,13 +1127,14 @@ export function createVerifyShim(algorithm, BufferClass, globalObject = globalTh
       error.code = 'ERR_CRYPTO_INVALID_STATE';
       throw error;
     }
-    if (value === undefined) {
-      const error = new TypeError('The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received undefined');
-      error.code = 'ERR_INVALID_ARG_TYPE';
-      throw error;
-    }
+    assertSigningData(value);
     this._chunks.push(BufferClass.from(value, encoding));
     return this;
+  };
+
+  Verify.prototype._write = function _write(chunk, encoding, callback) {
+    this.update(chunk, encoding);
+    callback();
   };
 
   Verify.prototype.verify = function verifyValue(key, signature, signatureEncoding) {
@@ -1052,6 +1168,10 @@ export function createVerifyClass(BufferClass, globalObject = globalThis) {
   Verify.prototype.update = function update(value, encoding) {
     this._implementation.update(value, encoding);
     return this;
+  };
+
+  Verify.prototype._write = function _write(chunk, encoding, callback) {
+    this._implementation._write(chunk, encoding, callback);
   };
 
   Verify.prototype.verify = function verifyValue(key, signature, signatureEncoding) {
@@ -1419,6 +1539,8 @@ export function createCertificateShim(globalObject = globalThis, name = 'X509Cer
     get infoAccess() { throw unsupportedCertificateProperty(name, 'infoAccess'); }
     get validFrom() { throw unsupportedCertificateProperty(name, 'validFrom'); }
     get validTo() { throw unsupportedCertificateProperty(name, 'validTo'); }
+    get validFromDate() { throw unsupportedCertificateProperty(name, 'validFromDate'); }
+    get validToDate() { throw unsupportedCertificateProperty(name, 'validToDate'); }
     get ca() { throw unsupportedCertificateProperty(name, 'ca'); }
     get fingerprint() { throw unsupportedCertificateProperty(name, 'fingerprint'); }
     get fingerprint256() { throw unsupportedCertificateProperty(name, 'fingerprint256'); }

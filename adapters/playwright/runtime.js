@@ -44,9 +44,9 @@ import {
   aesGcmEncrypt,
   createHashShim,
   createHmacShim,
+  createSignClass,
   createVerifyClass,
   createSecretKeyShim,
-  createVerifyShim,
   checkPrime,
   checkPrimeSync,
   browserCryptoVersion,
@@ -156,6 +156,8 @@ const BROWSER_SIGNAL_CONSTANTS = Object.freeze({
   SIGUSR2: 12,
   SIGVTALRM: 26,
   SIGWINCH: 28,
+  SIGXCPU: 24,
+  SIGXFSZ: 25,
 });
 
 function createConstants() {
@@ -1597,6 +1599,8 @@ function createCryptoShim(scope, Buffer, processObject) {
   const crypto = scope.crypto;
   const Hmac = createHmacShim(Buffer, processObject, scope);
   const Hash = createHashShim(Buffer);
+  const Sign = createSignClass(Buffer, scope);
+  const Verify = createVerifyClass(Buffer, scope);
   const wrapBuffer = (operation) => (...args) => operation(...args).then((value) => Buffer.from(value));
   const runCallback = (resource, callback, ...args) => {
     resource.runInAsyncScope(() => {
@@ -1698,19 +1702,8 @@ function createCryptoShim(scope, Buffer, processObject) {
     const result = Buffer.from(hashSync(algorithm, value));
     return encoding && encoding !== 'buffer' ? result.toString(encoding) : result;
   };
-  const createSign = (algorithm) => {
-    const chunks = [];
-    return {
-      update(value, encoding) {
-        chunks.push(Buffer.from(value, encoding));
-        return this;
-      },
-      sign(key) {
-        return nodeSign(algorithm, Buffer.concat(chunks), key);
-      },
-    };
-  };
-  const createVerify = (algorithm) => createVerifyShim(algorithm, Buffer, scope);
+  const createSign = (algorithm, options) => new Sign(algorithm, options);
+  const createVerify = (algorithm, options) => new Verify(algorithm, options);
   const nodeCrypto = {
     webcrypto: crypto,
     subtle: crypto?.subtle,
@@ -1781,7 +1774,8 @@ function createCryptoShim(scope, Buffer, processObject) {
     aesGcmDecrypt: wrapBuffer(aesGcmDecrypt),
     sign: nodeSign,
     verify: nodeVerify,
-    Verify: createVerifyClass(Buffer, scope),
+    Sign,
+    Verify,
     createSign,
     createVerify,
     generateKeyPair: (type, options, callback) => generateKeyPair(type, options, callback, scope),

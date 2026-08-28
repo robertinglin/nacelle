@@ -70,6 +70,7 @@ class SurfaceTests(unittest.TestCase):
         self.assertIn("ownNamesForCheck.filter", source)
         self.assertIn("stableObjectKeys", source)
         self.assertIn("Array.isArray(value)", source)
+        self.assertIn("Array.isArray(value) && depth > 0", source)
         self.assertIn("prefix + \".\" + memberName", source)
         self.assertIn("typeof mod === \"function\"", source)
         self.assertIn("const isClassLike", source)

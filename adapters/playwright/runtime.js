@@ -729,6 +729,18 @@ function installProcessStderrSocketSurface(stream, processObject) {
   };
 
   Object.defineProperties(stream, {
+    _closeAfterHandlingError: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: false,
+    },
+    _hadError: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: false,
+    },
     _server: {
       configurable: true,
       enumerable: true,
@@ -788,6 +800,18 @@ function installProcessStderrSocketSurface(stream, processObject) {
         if (typeof callback === 'function') callback();
       },
     },
+    _getpeername: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return {}; },
+    },
+    _getsockname: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return {}; },
+    },
     _bytesDispatched: {
       configurable: false,
       enumerable: true,
@@ -833,6 +857,16 @@ function installProcessStderrSocketSurface(stream, processObject) {
       enumerable: true,
       writable: true,
       value() { return this; },
+    },
+    _connecting: {
+      configurable: false,
+      enumerable: false,
+      get: () => false,
+    },
+    _handle: {
+      configurable: false,
+      enumerable: false,
+      get: () => null,
     },
     bufferSize: {
       configurable: false,
@@ -1571,6 +1605,8 @@ const BROWSER_PROCESS_CONFIG = Object.freeze({
 const BROWSER_PROCESS_FEATURES = Object.freeze({
   inspector: false,
   debug: false,
+  uv: false,
+  typescript: false,
 });
 
 const DEFAULT_RUNTIME_CAPABILITIES = Object.freeze({

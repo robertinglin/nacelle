@@ -513,7 +513,7 @@ function workerHeapStatistics() {
 }
 
 function createBrowserV8Module(processObject, scope) {
-  const v8 = createV8Module(processObject);
+  const v8 = createV8Module(processObject, scope);
   return {
     ...v8,
     getHeapSnapshot() {

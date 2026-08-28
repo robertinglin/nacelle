@@ -1083,9 +1083,17 @@ function formatConsole(values, inspectOptions = {}, useRuntimeInspect = false) {
   return [first, ...values.slice(index).map((value) => typeof value === 'string' ? value : inspectValue(value, inspectOptions, useRuntimeInspect))].join(' ');
 }
 
+function consoleReceivedType(value) {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'an instance of Array';
+  if (value === undefined) return 'undefined';
+  if (typeof value === 'function') return `function ${value.name || ''}`;
+  if (typeof value === 'object') return `an instance of ${value.constructor?.name || 'Object'}`;
+  return `type ${typeof value} (${inspectConsole(value)})`;
+}
+
 function invalidConsoleType(name, value, expected) {
-  const received = value === null ? 'null' : value === undefined ? 'undefined' : typeof value === 'object'
-    ? `an instance of ${value.constructor?.name || 'Object'}` : `type ${typeof value} (${String(value)})`;
+  const received = consoleReceivedType(value);
   const error = new TypeError(`The "${name}" argument must be ${expected}. Received ${received}`);
   error.code = 'ERR_INVALID_ARG_TYPE';
   return error;

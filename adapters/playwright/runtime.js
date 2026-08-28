@@ -675,6 +675,33 @@ function installProcessStderrSocketSurface(stream, processObject) {
     return result;
   };
 
+  Object.defineProperties(stream, {
+    _server: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    _sockname: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    _type: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: 'pipe',
+    },
+    allowHalfOpen: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: false,
+    },
+  });
+
   const socketPrototype = Object.create(Object.getPrototypeOf(stream));
   Object.defineProperty(socketPrototype, Symbol.asyncIterator, {
     configurable: true,
@@ -735,6 +762,29 @@ function installProcessStderrSocketSurface(stream, processObject) {
       enumerable: true,
       writable: true,
       value(...args) { return processObject?.rawListeners?.(...args) || []; },
+    },
+    _unrefTimer: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { this._timeout?.refresh?.(); },
+    },
+    address: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return {}; },
+    },
+    _reset: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    bufferSize: {
+      configurable: false,
+      enumerable: false,
+      get: () => stream.writableLength || 0,
     },
   });
   Object.setPrototypeOf(stream, socketPrototype);

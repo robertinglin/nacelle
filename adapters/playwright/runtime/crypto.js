@@ -1,6 +1,7 @@
 import { assertByteLength, hex } from './binary.js';
 import { UnsupportedWebCapabilityError } from './errors.js';
 import { createDiffieHellman, createDiffieHellmanGroup } from './diffie-hellman.js';
+import { Transform } from './streams.js';
 
 const objectToString = Object.prototype.toString;
 const virtualKeyPairs = new Map();
@@ -2111,13 +2112,13 @@ function validateCipherivArguments(cipher, key, iv) {
   }
 }
 
-export class Cipher {
+export class Cipher extends Transform {
   constructor(cipher, key, iv, options) {
+    super(options ?? {});
     void cipher;
     void key;
     void iv;
-    void options;
-    unsupportedCipherOperation('Cipher');
+    if (new.target === Cipher) unsupportedCipherOperation('Cipher');
   }
 
   _transform(chunk, encoding, callback) {

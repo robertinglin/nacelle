@@ -471,7 +471,7 @@ function normalizeOutputChunk(value) {
   return String(value);
 }
 
-function installProcessStdoutIterableSurface(stream) {
+function installProcessStdoutIterableSurface(stream, processObject) {
   if (!stream || stream.__BNH_STDOUT_ITERABLE_SURFACE__) return;
   Object.defineProperty(stream, '__BNH_STDOUT_ITERABLE_SURFACE__', {
     configurable: false,
@@ -546,11 +546,83 @@ function installProcessStdoutIterableSurface(stream) {
       enumerable: false,
       get: () => readable.readableObjectMode,
     },
+    _unrefTimer: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { this._timeout?.refresh?.(); },
+    },
+    _final: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(callback) { callback?.(); },
+    },
+    setTimeout: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(milliseconds, callback) {
+        if (typeof milliseconds !== 'number') {
+          const error = new TypeError('The "msecs" argument must be of type number');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        if (!Number.isFinite(milliseconds) || milliseconds < 0) {
+          const error = new RangeError(`The value of "msecs" is out of range. It must be >= 0 && <= ${Number.MAX_SAFE_INTEGER}. Received ${milliseconds}`);
+          error.code = 'ERR_OUT_OF_RANGE';
+          throw error;
+        }
+        if (callback !== undefined && typeof callback !== 'function') {
+          const error = new TypeError('The "callback" argument must be of type function');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        this.timeout = milliseconds;
+        if (this._timeout) processObject?._bnhClearTimer?.(this._timeout);
+        this._timeout = null;
+        if (milliseconds === 0) {
+          if (callback) this.removeListener?.('timeout', callback);
+          return this;
+        }
+        if (callback) this.once?.('timeout', callback);
+        this._timeout = processObject?._bnhSetTimer?.(
+          () => { this._timeout = null; this._onTimeout(); },
+          milliseconds,
+          false,
+          'Timeout',
+        );
+        this._timeout?.unref?.();
+        return this;
+      },
+    },
+    _onTimeout: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { processObject?.emit?.('timeout'); },
+    },
+    setNoDelay: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(enable = true) { this._noDelay = Boolean(enable); return this; },
+    },
+    setKeepAlive: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(enable = false, initialDelayMsecs = 0) {
+        this._keepAlive = Boolean(enable);
+        this._keepAliveInitialDelay = ~~(initialDelayMsecs / 1000);
+        return this;
+      },
+    },
   });
   Object.setPrototypeOf(stream, iterablePrototype);
 }
 
-function installProcessStderrSocketSurface(stream) {
+function installProcessStderrSocketSurface(stream, processObject) {
   if (!stream || stream.__BNH_STDERR_SOCKET_SURFACE__) return;
   Object.defineProperty(stream, '__BNH_STDERR_SOCKET_SURFACE__', {
     configurable: false,
@@ -621,6 +693,12 @@ function installProcessStderrSocketSurface(stream) {
       enumerable: true,
       writable: true,
       value() { return this; },
+    },
+    rawListeners: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) { return processObject?.rawListeners?.(...args) || []; },
     },
   });
   Object.setPrototypeOf(stream, socketPrototype);
@@ -1863,8 +1941,8 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       for (const handle of timers) clearTimer(handle);
     },
   });
-  installProcessStdoutIterableSurface(processObject.stdout);
-  installProcessStderrSocketSurface(processObject.stderr);
+  installProcessStdoutIterableSurface(processObject.stdout, processObject);
+  installProcessStderrSocketSurface(processObject.stderr, processObject);
   const preloads = [];
   const execArgv = options.execArgv || [];
   for (let index = 0; index < execArgv.length; index += 1) {
@@ -6026,8 +6104,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           // Preserve injected process identity and capabilities (stdout, stderr, exit control, IPC)
           processObject.stdout = injectedProcess.stdout || processObject.stdout;
           processObject.stderr = injectedProcess.stderr || processObject.stderr;
-          installProcessStdoutIterableSurface(processObject.stdout);
-          installProcessStderrSocketSurface(processObject.stderr);
+          installProcessStdoutIterableSurface(processObject.stdout, processObject);
+          installProcessStderrSocketSurface(processObject.stderr, processObject);
           const injectedStdin = injectedProcess.stdin;
           if (injectedStdin && [
             'readableLength', 'readableObjectMode', 'readableEncoding', 'errored',
@@ -7003,6 +7081,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       module.loaded = true;
       return module.exports;
     };
+    Object.defineProperty(builtins, 'repl', {
+      configurable: true,
+      enumerable: true,
+      get: () => loadModule('/node/lib/repl.js', entry),
+    });
     const esmLoader = createModuleLoader({
       files: {
         has: (pathname) => vfs.files.has(pathname),

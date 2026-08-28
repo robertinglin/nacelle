@@ -6,8 +6,21 @@ import { createVirtualNetwork, sharedVirtualNetwork, normalizeVirtualAddress, vi
 
 let nextClientPort = 62000;
 const socketHandle = Symbol('socketHandle');
-const SymbolAsyncDispose = Symbol.asyncDispose || Symbol.for('nodejs.asyncDispose');
+// Keep the Node compatibility symbol stable across realms. Some runtimes
+// expose Symbol.asyncDispose as a distinct symbol, while Node's fallback API
+// is observable through Symbol.for('nodejs.asyncDispose').
+const SymbolAsyncDispose = Symbol.for('nodejs.asyncDispose');
+const NativeSymbolAsyncDispose = Symbol.asyncDispose;
 const inspectCustomSymbol = Symbol.for('nodejs.util.inspect.custom');
+
+function exposeNativeAsyncDispose(ctor) {
+  if (!NativeSymbolAsyncDispose || NativeSymbolAsyncDispose === SymbolAsyncDispose) return;
+  Object.defineProperty(ctor.prototype, NativeSymbolAsyncDispose, {
+    value: ctor.prototype[SymbolAsyncDispose],
+    writable: true,
+    configurable: true,
+  });
+}
 
 function schedule(callback) {
   queueMicrotask(callback);
@@ -783,6 +796,8 @@ export class Socket extends Duplex {
   }
 }
 
+exposeNativeAsyncDispose(Socket);
+
 Object.defineProperty(Socket.prototype, '_handle', {
   configurable: false,
   enumerable: false,
@@ -1168,6 +1183,8 @@ export class Server extends EventEmitter {
     });
   }
 }
+
+exposeNativeAsyncDispose(Server);
 
 function createDetachedServerHandle(network, config, address, port, addressType, fd) {
   if (typeof fd === 'number' && fd >= 0) return -1;

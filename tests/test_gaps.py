@@ -359,6 +359,17 @@ class GapCardEmissionTests(unittest.TestCase):
         )
         self.assertEqual(_runtime_surface(gap), "runtime/messaging.js + runtime.js")
 
+    def test_process_surfaces_own_runtime_export_layer(self) -> None:
+        for module in ("child_process", "process"):
+            gap = Gap(
+                gap_id=module,
+                kind=MISSING_API,
+                module=module,
+                symbols=("symbol",),
+                affected_count=1,
+            )
+            self.assertEqual(_runtime_surface(gap), "runtime.js")
+
     def test_cards_carry_prompt_task_reference_and_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

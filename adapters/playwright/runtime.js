@@ -472,6 +472,12 @@ function normalizeOutputChunk(value) {
 }
 
 function installProcessStderrSocketSurface(stream) {
+  if (!stream || stream.__BNH_STDERR_SOCKET_SURFACE__) return;
+  Object.defineProperty(stream, '__BNH_STDERR_SOCKET_SURFACE__', {
+    configurable: false,
+    enumerable: false,
+    value: true,
+  });
   let bytesDispatched = 0;
   const outputWrite = stream.write;
   const byteLength = (value) => {
@@ -488,7 +494,8 @@ function installProcessStderrSocketSurface(stream) {
     return result;
   };
 
-  Object.defineProperties(stream, {
+  const socketPrototype = Object.create(Object.getPrototypeOf(stream));
+  Object.defineProperties(socketPrototype, {
     localAddress: {
       configurable: false,
       enumerable: true,
@@ -537,6 +544,7 @@ function installProcessStderrSocketSurface(stream) {
       value() { return this; },
     },
   });
+  Object.setPrototypeOf(stream, socketPrototype);
 }
 
 function browserHeapSnapshot(scope) {
@@ -5938,6 +5946,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           // Preserve injected process identity and capabilities (stdout, stderr, exit control, IPC)
           processObject.stdout = injectedProcess.stdout || processObject.stdout;
           processObject.stderr = injectedProcess.stderr || processObject.stderr;
+          installProcessStderrSocketSurface(processObject.stderr);
           const injectedStdin = injectedProcess.stdin;
           if (injectedStdin && [
             'readableLength', 'readableObjectMode', 'readableEncoding', 'errored',

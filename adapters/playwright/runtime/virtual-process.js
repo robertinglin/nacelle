@@ -218,6 +218,7 @@ function createInMemoryProcess(options) {
     signalGrants: options.signalGrants,
     exit: () => {},
   });
+  ipcPair.child.unref?.();
 
   const finish = (kind, code = childProcess.getCode?.() || 0, signal = null, error = null, forced = false) => {
     if (terminal) return;
@@ -232,10 +233,12 @@ function createInMemoryProcess(options) {
     resolveCompletion(terminal);
   };
 
-  childProcess.on('message', (message, handle) => events.emit('child-message', message, handle));
+  emitDisconnect._bnhInternal = true;
   childProcess.on('disconnect', emitDisconnect);
   childProcess.on('exit', (code) => finish(pendingSignal ? 'signal' : (pendingFailure ? 'rejection' : 'exit'), pendingSignal ? null : code, pendingSignal, pendingFailure));
-  ipcPair.parent.on('message', (message, handle) => events.emit('message', message, handle));
+  ipcPair.parent.on('message', (message, handle) => {
+    events.emit('message', message, handle);
+  });
   ipcPair.parent.on('peerDisconnect', emitDisconnect);
   ipcPair.child.on('message', (message, handle) => childProcess.emit('message', message, handle));
   ipcPair.child.on('peerDisconnect', () => {
@@ -271,8 +274,17 @@ function createInMemoryProcess(options) {
       return ipcPair.parent.sendWithHandle(value, sendHandle, undefined, callback);
     },
     disconnect() {
-      if (!ipcPair.parent.disconnect()) return false;
-      emitDisconnect();
+      if (!ipcPair.parent.connected) return false;
+      queueMicrotask(() => {
+        emitDisconnect();
+        queueMicrotask(() => {
+          if (!ipcPair.parent.connected || !ipcPair.parent.disconnect()) return;
+          if (options.clusterGroupId !== undefined) {
+            childProcess._markExited?.();
+            if (!terminal) finish('exit', childProcess.getCode?.() || 0);
+          }
+        });
+      });
       return true;
     },
     kill(signal = 'SIGTERM') {
@@ -334,6 +346,7 @@ function createInMemoryProcess(options) {
       }, (error) => {
         if (terminal) return;
         pendingFailure = error;
+        output.stderr?.(`${error?.stack || error}\n`);
         childProcess.exitCode = 1;
         childProcess._markExited();
       });

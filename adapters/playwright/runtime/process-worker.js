@@ -108,13 +108,59 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
 
   function makeEmitter() {
     const listeners = new Map();
-    return {
-      on(name, listener) { const set = listeners.get(name) || new Set(); set.add(listener); listeners.set(name, set); return this; },
-      once(name, listener) { const wrapped = (...args) => { this.off(name, wrapped); listener(...args); }; return this.on(name, wrapped); },
-      off(name, listener) { listeners.get(name)?.delete(listener); return this; },
-      emit(name, ...args) { const set = listeners.get(name); if (!set) return false; for (const listener of [...set]) listener(...args); return set.size > 0; },
-      listenerCount(name) { return listeners.get(name)?.size || 0; },
+    const emitter = {
+      on(name, listener) {
+        const set = listeners.get(name) || [];
+        set.push(listener);
+        listeners.set(name, set);
+        return this;
+      },
+      addListener(name, listener) { return this.on(name, listener); },
+      prependListener(name, listener) {
+        const set = listeners.get(name) || [];
+        set.unshift(listener);
+        listeners.set(name, set);
+        return this;
+      },
+      once(name, listener) {
+        const wrapped = (...args) => { this.off(name, wrapped); listener(...args); };
+        wrapped.listener = listener;
+        return this.on(name, wrapped);
+      },
+      prependOnceListener(name, listener) {
+        const wrapped = (...args) => { this.off(name, wrapped); listener(...args); };
+        wrapped.listener = listener;
+        return this.prependListener(name, wrapped);
+      },
+      off(name, listener) {
+        const set = listeners.get(name);
+        if (!set) return this;
+        const index = [...set].reverse().findIndex((candidate) => candidate === listener || candidate.listener === listener);
+        if (index >= 0) set.splice(set.length - 1 - index, 1);
+        if (!set.length) listeners.delete(name);
+        return this;
+      },
+      removeListener(name, listener) { return this.off(name, listener); },
+      removeAllListeners(name) {
+        if (name === undefined) listeners.clear();
+        else listeners.delete(name);
+        return this;
+      },
+      emit(name, ...args) {
+        const set = listeners.get(name);
+        if (!set?.length) return false;
+        for (const listener of [...set]) listener(...args);
+        return true;
+      },
+      listenerCount(name) { return listeners.get(name)?.length || 0; },
+      listeners(name) { return (listeners.get(name) || []).map((listener) => listener.listener || listener); },
+      rawListeners(name) { return [...(listeners.get(name) || [])]; },
+      eventNames() { return [...listeners.keys()]; },
+      getMaxListeners() { return 10; },
+      setMaxListeners() { return this; },
     };
+    emitter.off = emitter.removeListener;
+    return emitter;
   }
 
   function installProcessContract(process) {

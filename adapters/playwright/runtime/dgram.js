@@ -11,6 +11,7 @@ import {
 
 const UDP_CONSTANTS = Object.freeze({
   UV_UDP_REUSEADDR: 4,
+  UV_UDP_REUSEPORT: 2,
   IPV6_ONLY: 27,
 });
 
@@ -21,6 +22,7 @@ const SymbolAsyncDispose = Symbol.asyncDispose || SymbolNodeAsyncDispose;
 const BIND_STATE_UNBOUND = 0;
 const BIND_STATE_BINDING = 1;
 const BIND_STATE_BOUND = 2;
+const UV_EBADF = -9;
 const UV_EINVAL = -22;
 const UV_EADDRINUSE = -98;
 let nextVirtualDescriptor = 1000;
@@ -110,6 +112,40 @@ function validateBufferSize(size) {
   return size;
 }
 
+function bufferSizeError(receive, errno) {
+  const syscall = `uv_${receive ? 'recv' : 'send'}_buffer_size`;
+  const code = errno === UV_EBADF ? 'EBADF' : 'EINVAL';
+  const message = errno === UV_EBADF ? 'bad file descriptor' : 'invalid argument';
+  const error = new Error(
+    `Could not get or set buffer size: ${syscall} returned ${code} (${message})`,
+  );
+  error.name = 'SystemError';
+  error.code = 'ERR_SOCKET_BUFFER_SIZE';
+  error.info = { code, message, errno, syscall };
+  error.errno = errno;
+  error.syscall = syscall;
+  return error;
+}
+
+function virtualBufferSize(state, size, receive, bound) {
+  if (!bound) return UV_EBADF;
+  const key = receive ? 'recvBufferSize' : 'sendBufferSize';
+  if (size === 0) return state[key];
+  if (size > 0x7fffffff) return UV_EINVAL;
+  // Linux doubles the requested socket buffer in the kernel. The virtual
+  // runtime exposes linux platform semantics without using a host socket.
+  state[key] = globalThis.process?.platform === 'linux' ? size * 2 : size;
+  return state[key];
+}
+
+function virtualTTL(state, value) {
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value < 1 || value > 255) {
+    return UV_EINVAL;
+  }
+  state.ttl = value;
+  return 0;
+}
+
 function deprecatedSocketApi(message, operation) {
   let warned = false;
   return function deprecatedSocketApiWrapper(...args) {
@@ -174,7 +210,7 @@ function allocateHandleFd() {
   return fd;
 }
 
-function createDgramHandle(type, { dns, network, lookup } = {}) {
+function createDgramHandle(type, { dns, network, lookup, BufferClass, cluster, clusterGroupId, trackTask } = {}) {
   if (type !== 'udp4' && type !== 'udp6') throw socketTypeError(type);
 
   const family = type === 'udp6' ? 6 : 4;
@@ -200,6 +236,8 @@ function createDgramHandle(type, { dns, network, lookup } = {}) {
     memberships: new Map(),
     sourceMemberships: new Map(),
     refed: true,
+    messageListeners: [],
+    nextMessageListener: 0,
   };
   const handle = {
     fd: allocateHandleFd(),
@@ -211,9 +249,18 @@ function createDgramHandle(type, { dns, network, lookup } = {}) {
       if (typeof address !== 'string' || virtualAddressFamily(address) !== family) return UV_EINVAL;
       const normalizedAddress = normalizeVirtualAddress(address, family);
       try {
-        const binding = network?.bindUdp?.(handle, normalizedAddress, validatePort(port), {
+        const clusterObject = typeof cluster === 'function' ? cluster() : cluster;
+        const groupId = clusterGroupId ?? clusterObject?._bnhGroupId;
+        const bind = groupId !== undefined && clusterObject?.isPrimary
+          ? network?.bindClusterUdp?.bind(network, groupId)
+          : network?.bindUdp?.bind(network);
+        const binding = bind?.(groupId !== undefined && clusterObject?.isPrimary
+          ? groupId
+          : handle, normalizedAddress, validatePort(port), {
           reuseAddr: (Number(flags) & UDP_CONSTANTS.UV_UDP_REUSEADDR) !== 0,
+          reusePort: (Number(flags) & UDP_CONSTANTS.UV_UDP_REUSEPORT) !== 0,
           ipv6Only: false,
+          socket: handle,
         });
         if (!binding) return UV_EINVAL;
         state.address = binding.address;
@@ -221,6 +268,7 @@ function createDgramHandle(type, { dns, network, lookup } = {}) {
         state.port = binding.port;
         state.bound = true;
         state.owner = handle;
+        state.taskRelease = state.refed ? trackTask?.() || null : null;
         udpHandles?.set(handle.fd, { handle, ...state });
         return 0;
       } catch (error) {
@@ -242,12 +290,16 @@ function createDgramHandle(type, { dns, network, lookup } = {}) {
       state.owner = descriptor.owner || descriptor.handle;
       return 0;
     },
-    recvStart() { return state.closed ? UV_EINVAL : 0; },
-    recvStop() { return 0; },
+    recvStart() {
+      if (state.closed) return UV_EINVAL;
+      state.receiving = true;
+      return 0;
+    },
+    recvStop() { state.receiving = false; return 0; },
     getSendQueueCount() { return state.sendQueueCount; },
     getSendQueueSize() { return state.sendQueueSize; },
     setBroadcast(value) { state.broadcast = value ? 1 : 0; return 0; },
-    setTTL(value) { state.ttl = value; return 0; },
+    setTTL(value) { return virtualTTL(state, value); },
     setMulticastTTL(value) { state.multicastTTL = value; return 0; },
     setMulticastLoopback(value) { state.multicastLoopback = value ? 1 : 0; return 0; },
     setMulticastInterface(value) { state.multicastInterface = value; return 0; },
@@ -275,13 +327,19 @@ function createDgramHandle(type, { dns, network, lookup } = {}) {
       return 0;
     },
     bufferSize(size, receive) {
-      const key = receive ? 'recvBufferSize' : 'sendBufferSize';
-      if (size === 0) return state[key];
-      state[key] = size;
-      return state[key];
+      return virtualBufferSize(state, size, receive, state.bound);
     },
-    ref() { state.refed = true; return handle; },
-    unref() { state.refed = false; return handle; },
+    ref() {
+      state.refed = true;
+      if (state.bound && !state.taskRelease) state.taskRelease = trackTask?.() || null;
+      return handle;
+    },
+    unref() {
+      state.refed = false;
+      state.taskRelease?.();
+      state.taskRelease = null;
+      return handle;
+    },
     hasRef() { return state.refed; },
     connect(address, port) {
       if (state.closed || !state.bound) return UV_EINVAL;
@@ -303,21 +361,76 @@ function createDgramHandle(type, { dns, network, lookup } = {}) {
       });
       return 0;
     },
-    send(request) {
+    _bnhBindCluster(groupId, address, port, options = {}) {
+      if (state.closed || state.bound) return UV_EINVAL;
+      try {
+        const binding = network?.bindClusterUdp?.(groupId, address, validatePort(port), {
+          ...options,
+          socket: handle,
+        });
+        if (!binding) return UV_EINVAL;
+        state.address = binding.address;
+        state.family = family === 6 ? 'IPv6' : 'IPv4';
+        state.port = binding.port;
+        state.bound = true;
+        state.owner = handle;
+        state.taskRelease = state.refed ? trackTask?.() || null : null;
+        udpHandles?.set(handle.fd, { handle, ...state });
+        return 0;
+      } catch (error) {
+        return error?.code === 'EADDRINUSE' ? UV_EADDRINUSE : UV_EINVAL;
+      }
+    },
+    _receiveDatagram(bytes, rinfo) {
+      if (state.closed || !state.receiving) return;
+      const buffer = makeNodeBytes(bytes, BufferClass);
+      const listeners = state.messageListeners.filter(({ owner }) => !owner?._closed);
+      if (!listeners.length) return;
+      const listener = listeners[state.nextMessageListener % listeners.length];
+      state.nextMessageListener = (state.nextMessageListener + 1) % listeners.length;
+      const receiver = Object.create(handle);
+      Object.defineProperty(receiver, DGRAM_OWNER, { configurable: true, value: listener.owner });
+      listener.callback.call(receiver, buffer.byteLength, receiver, buffer, rinfo);
+    },
+    send(request, buffer, offset, length, port, address) {
       request?._bnhInitialize?.();
-      const size = Number(request?.length) || 0;
+      const list = Array.isArray(buffer) ? buffer : [buffer];
+      const bytes = list.reduce((result, item) => {
+        const part = asBytes(item);
+        const next = new Uint8Array(result.byteLength + part.byteLength);
+        next.set(result);
+        next.set(part, result.byteLength);
+        return next;
+      }, new Uint8Array(0));
+      const targetPort = Array.isArray(buffer)
+        ? (typeof length === 'number' && length > 0 ? length : state.remoteAddress?.port)
+        : port;
+      const targetAddress = Array.isArray(buffer)
+        ? (typeof port === 'string' ? port : state.remoteAddress?.address)
+        : address;
+      const size = bytes.byteLength;
       state.sendQueueCount += 1;
       state.sendQueueSize += size;
       queueMicrotask(() => {
         state.sendQueueCount = Math.max(0, state.sendQueueCount - 1);
         state.sendQueueSize = Math.max(0, state.sendQueueSize - size);
-        request?.oncomplete?.(0);
+        if (state.bound && targetPort !== undefined) {
+          network?.sendUdp?.({
+            source: handle,
+            address: targetAddress || (family === 6 ? '::1' : '127.0.0.1'),
+            port: targetPort,
+            bytes,
+          });
+        }
+        request?.oncomplete?.call(request, 0, size);
       });
       return 0;
     },
     close(callback) {
       if (state.closed) return 0;
-      if (state.bound && state.owner === handle) network?.unbindUdp?.(handle);
+      if (state.bound) network?.unbindUdp?.(handle);
+      state.taskRelease?.();
+      state.taskRelease = null;
       state.bound = false;
       state.closed = true;
       descriptors?.delete(handle.fd);
@@ -330,7 +443,28 @@ function createDgramHandle(type, { dns, network, lookup } = {}) {
     configurable: true,
     enumerable: false,
     get() { return handle[DGRAM_OWNER]; },
-    set(value) { handle[DGRAM_OWNER] = value; },
+    set(value) {
+      handle[DGRAM_OWNER] = value;
+      if (value && !state.messageListeners.some(({ owner }) => owner === value)) {
+        state.messageListeners.push({ owner: value, callback: handle.onmessage });
+      }
+    },
+  });
+  Object.defineProperty(handle, 'onmessage', {
+    configurable: true,
+    enumerable: false,
+    get() { return state.messageListeners.at(-1)?.callback; },
+    set(callback) {
+      if (typeof callback !== 'function') return;
+      const owner = handle[DGRAM_OWNER];
+      const existing = state.messageListeners.find((listener) => listener.owner === owner);
+      if (existing) existing.callback = callback;
+      else if (owner) state.messageListeners.push({ owner, callback });
+    },
+  });
+  Object.defineProperties(handle, {
+    boundAddress: { configurable: true, enumerable: false, get: () => state.address },
+    boundPort: { configurable: true, enumerable: false, get: () => state.port },
   });
   handle.bind6 = handle.bind;
   handle.connect = () => 0;
@@ -356,6 +490,7 @@ function createSocketHandle(address, port, addressType, fd, flags, options) {
     handle.close();
     return error;
   }
+  handle._bnhRawUdpHandle = false;
   return handle;
 }
 
@@ -399,11 +534,15 @@ export class Socket extends EventEmitter {
     this.boundAddress = null;
     this._taskRelease = null;
     this._sendResources = new Set();
+    this._pendingSends = new Set();
     this._sendQueueCount = 0;
     this._sendQueueSize = 0;
     // A UDP socket is an async resource whose callbacks inherit the context
     // in which the socket was created, including an active AsyncLocalStorage.
-    this._receiveResource = new AsyncResource('UDPWRAP');
+    const createReceiveResource = () => new AsyncResource('UDPWRAP');
+    this._receiveResource = typeof this._runInProcessContext === 'function'
+      ? this._runInProcessContext(this._processOwner, createReceiveResource)
+      : createReceiveResource();
     const state = this[VIRTUAL_DGRAM_STATE] = {
       handle: {
         fd: nextVirtualDescriptor++,
@@ -417,7 +556,7 @@ export class Socket extends EventEmitter {
       bindState: BIND_STATE_UNBOUND,
       queue: undefined,
       closeQueued: false,
-      reuseAddr: Boolean(internal.reuseAddr),
+      reuseAddr: internal.reuseAddr,
       fdClusterGroupId: undefined,
       recvBufferSize: internal.recvBufferSize === undefined
         ? 0
@@ -469,16 +608,22 @@ export class Socket extends EventEmitter {
       });
       return 0;
     };
+    state.handle.getsockname = (address) => {
+      if (!this._bound) return UV_EINVAL;
+      if (address) Object.assign(address, {
+        address: this.boundAddress,
+        port: this.boundPort,
+        family: this.type === 'udp6' ? 'IPv6' : 'IPv4',
+      });
+      return 0;
+    };
     state.handle.getSendQueueCount = () => this._sendQueueCount;
     state.handle.getSendQueueSize = () => this._sendQueueSize;
     state.handle.setBroadcast = (value) => {
       state.broadcast = value ? 1 : 0;
       return 0;
     };
-    state.handle.setTTL = (value) => {
-      state.ttl = value;
-      return 0;
-    };
+    state.handle.setTTL = (value) => virtualTTL(state, value);
     state.handle.setMulticastTTL = (value) => {
       state.multicastTTL = value;
       return 0;
@@ -514,12 +659,7 @@ export class Socket extends EventEmitter {
       state.sourceMemberships.delete(`${sourceAddress}\u0000${groupAddress}\u0000${interfaceAddress ?? ''}`);
       return 0;
     };
-    state.handle.bufferSize = (size, receive) => {
-      const key = receive ? 'recvBufferSize' : 'sendBufferSize';
-      if (size === 0) return state[key];
-      state[key] = size;
-      return state[key];
-    };
+    state.handle.bufferSize = (size, receive) => virtualBufferSize(state, size, receive, this._bound);
     state.handle.ref = () => {
       state.refed = true;
       this._refed = true;
@@ -548,12 +688,48 @@ export class Socket extends EventEmitter {
     return super.off(name, listener);
   }
 
+  emit(name, ...args) {
+    return super.emit(name, ...args);
+  }
+
+  eventNames() {
+    return super.eventNames();
+  }
+
+  getMaxListeners() {
+    return super.getMaxListeners();
+  }
+
   listenerCount(name) {
     return super.listenerCount(name);
   }
 
   listeners(name) {
     return super.listeners(name);
+  }
+
+  once(name, listener) {
+    return super.once(name, listener);
+  }
+
+  prependListener(name, listener) {
+    return super.prependListener(name, listener);
+  }
+
+  prependOnceListener(name, listener) {
+    return super.prependOnceListener(name, listener);
+  }
+
+  rawListeners(name) {
+    return super.rawListeners(name);
+  }
+
+  removeAllListeners(name) {
+    return super.removeAllListeners(name);
+  }
+
+  removeListener(name, listener) {
+    return super.removeListener(name, listener);
   }
 
   bind(port_, address_, callback_) {
@@ -571,22 +747,22 @@ export class Socket extends EventEmitter {
       port = options.port ?? 0;
       address = options.address;
       callback = address_;
-      state.reuseAddr = Boolean(options.reuseAddr);
-      this._reusePort = Boolean(options.reusePort);
-      this._ipv6Only = Boolean(options.ipv6Only);
+      if (Object.hasOwn(options, 'reuseAddr')) state.reuseAddr = options.reuseAddr;
+      if (Object.hasOwn(options, 'reusePort')) this._reusePort = Boolean(options.reusePort);
+      if (Object.hasOwn(options, 'ipv6Only')) this._ipv6Only = Boolean(options.ipv6Only);
       if (options.fd !== undefined) {
         const fd = Number(options.fd);
         const descriptors = globalThis.__BNH_VIRTUAL_FD_TYPES__;
         const descriptorType = descriptors?.get(fd);
-        if (descriptorType !== 'udp') {
+        const fdGroupId = `browser-udp-fd-${fd}`;
+        const sharedBinding = this._network.getClusterUdpBinding?.(fdGroupId);
+        if (descriptorType !== 'udp' && !sharedBinding) {
           const error = new Error(descriptorType === 'tcp' ? 'Unsupported fd type: TCP' : 'open EEXIST');
           error.code = descriptorType === 'tcp' ? 'ERR_INVALID_FD_TYPE' : 'EEXIST';
           error.name = descriptorType === 'tcp' ? 'TypeError' : 'Error';
           throw error;
         }
         const descriptor = globalThis.__BNH_VIRTUAL_UDP_HANDLES__?.get(fd);
-        const fdGroupId = `browser-udp-fd-${fd}`;
-        const sharedBinding = this._network.getClusterUdpBinding?.(fdGroupId);
         if (!descriptor?.bound && !sharedBinding) throw socketError('EEXIST', 'open EEXIST');
         address = descriptor?.address ?? sharedBinding.address;
         port = descriptor?.port ?? sharedBinding.port;
@@ -607,12 +783,15 @@ export class Socket extends EventEmitter {
     const requestedPort = validatePort(port ?? 0);
     this._binding = true;
     state.bindState = BIND_STATE_BINDING;
+    this._taskRelease = this._refed ? this._trackTask?.() || null : null;
     queueMicrotask(() => {
       if (this._closed) return;
       const handle = this[VIRTUAL_DGRAM_STATE].handle;
       handle.lookup.call(handle, normalizedAddress, (lookupError, resolvedAddress, resolvedFamily) => {
         if (this._closed) return;
         if (lookupError) {
+          this._taskRelease?.();
+          this._taskRelease = null;
           this._binding = false;
           this[VIRTUAL_DGRAM_STATE].bindState = BIND_STATE_UNBOUND;
           this.emit('error', lookupError);
@@ -642,7 +821,7 @@ export class Socket extends EventEmitter {
               });
           this.boundPort = result.port;
           this.boundAddress = result.address;
-          this._taskRelease = this._refed ? this._trackTask?.() || null : null;
+          if (!this._taskRelease && this._refed) this._taskRelease = this._trackTask?.() || null;
           this._binding = false;
           this._bound = true;
           state.bindState = BIND_STATE_BOUND;
@@ -651,6 +830,8 @@ export class Socket extends EventEmitter {
           this._onListening?.(this.address());
           callback?.call(this);
         } catch (error) {
+          this._taskRelease?.();
+          this._taskRelease = null;
           this._binding = false;
           this[VIRTUAL_DGRAM_STATE].bindState = BIND_STATE_UNBOUND;
           this.emit('error', error);
@@ -662,12 +843,10 @@ export class Socket extends EventEmitter {
 
   address() {
     healthCheck(this);
-    if (!this._bound) throw socketError('EBADF', 'getsockname EBADF');
-    return {
-      address: this.boundAddress,
-      port: this.boundPort,
-      family: this.type === 'udp6' ? 'IPv6' : 'IPv4',
-    };
+    const result = {};
+    const error = this[VIRTUAL_DGRAM_STATE].handle.getsockname(result);
+    if (error) throw handleError(error, 'getsockname');
+    return result;
   }
 
   send(message, ...args) {
@@ -685,6 +864,7 @@ export class Socket extends EventEmitter {
       port = options.port;
       address = options.address;
       callback = options.callback;
+      if (typeof args[0] === 'function') callback = args.shift();
     } else if (typeof args[0] === 'number' && typeof args[1] === 'number'
       && (!connected || typeof args[2] === 'function' || args[2] === undefined)) {
       offset = args.shift();
@@ -743,27 +923,42 @@ export class Socket extends EventEmitter {
       throw socketError('ERR_SOCKET_BAD_PORT', 'Port should be specified');
     }
     port = validatePort(port);
+    const sendState = {
+      bytes: bytes.byteLength,
+      resource: null,
+      finished: false,
+    };
+    this._pendingSends.add(sendState);
+    this._sendQueueCount += 1;
+    this._sendQueueSize += bytes.byteLength;
+    const releaseSend = () => {
+      if (sendState.finished) return false;
+      sendState.finished = true;
+      this._pendingSends.delete(sendState);
+      this._sendQueueCount = Math.max(0, this._sendQueueCount - 1);
+      this._sendQueueSize = Math.max(0, this._sendQueueSize - sendState.bytes);
+      return true;
+    };
+    sendState.release = releaseSend;
     const transmit = (defer = true) => {
       const run = () => {
-        if (this._closed || !this[VIRTUAL_DGRAM_STATE].handle) return;
+        if (this._closed || !this[VIRTUAL_DGRAM_STATE].handle) {
+          releaseSend();
+          return;
+        }
         const family = this.type === 'udp6' ? 'ipv6' : 'ipv4';
         if (this._sendBlockList?.check?.(address, family)) {
           const error = networkError('ERR_IP_BLOCKED', 'send', address, port);
           if (callbackProvided) callback(error);
           else this.emit('error', error);
+          releaseSend();
           return;
         }
         const resource = new AsyncResource('UDPSENDWRAP');
+        sendState.resource = resource;
         this._sendResources.add(resource);
-        this._sendQueueCount += 1;
-        this._sendQueueSize += bytes.byteLength;
-        let callbackFinished = false;
         const runCallback = (...callbackArgs) => {
-          if (!callbackFinished) {
-            callbackFinished = true;
-            this._sendQueueCount = Math.max(0, this._sendQueueCount - 1);
-            this._sendQueueSize = Math.max(0, this._sendQueueSize - bytes.byteLength);
-          }
+          if (!releaseSend()) return undefined;
           return resource.runInAsyncScope(callback, this, ...callbackArgs);
         };
         const handleSend = this[VIRTUAL_DGRAM_STATE].handle.send;
@@ -772,14 +967,14 @@ export class Socket extends EventEmitter {
           try {
             result = handleSend.call(this[VIRTUAL_DGRAM_STATE].handle, bytes, port, address);
           } catch (error) {
-            this.emit('error', error);
+            if (!callbackProvided) this.emit('error', error);
             runCallback(error);
             return;
           }
           if (result !== undefined && result !== 0) {
             const error = networkError('UNKNOWN', 'send', address, port);
             error.errno = -4094;
-            this.emit('error', error);
+            if (!callbackProvided) this.emit('error', error);
             runCallback(error);
             return;
           }
@@ -791,7 +986,7 @@ export class Socket extends EventEmitter {
           bytes,
           onDelivered: (size) => runCallback(null, size),
           onError: (error) => {
-            this.emit('error', error);
+            if (!callbackProvided) this.emit('error', error);
             runCallback(error);
           },
         });
@@ -815,6 +1010,7 @@ export class Socket extends EventEmitter {
         if (error) {
           if (callbackProvided) callback(error);
           else this.emit('error', error);
+          releaseSend();
           return;
         }
         address = normalizeVirtualAddress(resolvedAddress, resolvedFamily || (this.type === 'udp6' ? 6 : 4));
@@ -832,7 +1028,11 @@ export class Socket extends EventEmitter {
     if (typeof length !== 'number') throw invalidArgumentType('length', 'number', length);
     if (typeof port !== 'number') throw invalidArgumentType('port', 'number', port);
     if (typeof address !== 'string') throw invalidArgumentType('address', 'string', address);
-    return this.send(buffer, offset, length, port, address, callback);
+    this.send(buffer, offset, length, port, address, callback);
+  }
+
+  setMaxListeners(value) {
+    return super.setMaxListeners(value);
   }
 
   connect(port, address, callback) {
@@ -926,20 +1126,22 @@ export class Socket extends EventEmitter {
       return this;
     }
     if (state.closeQueued) return this;
-    healthCheck(this);
     if (this._closed) return this;
+    healthCheck(this);
     this._closed = true;
     this._binding = false;
     if (this._bound) this._network.unbindUdp(this);
     stopReceiving(this);
     this._taskRelease?.();
     this._taskRelease = null;
+    this._processOwner?._bnhTryExit?.();
     this._bound = false;
     this[VIRTUAL_DGRAM_STATE].bindState = BIND_STATE_UNBOUND;
     this[VIRTUAL_DGRAM_STATE].closeQueued = false;
     this[VIRTUAL_DGRAM_STATE].queue = undefined;
-    this._sendQueueCount = 0;
-    this._sendQueueSize = 0;
+    for (const sendState of this._pendingSends) {
+      sendState.release?.();
+    }
     this[VIRTUAL_DGRAM_STATE].handle = null;
     this.boundPort = null;
     this.boundAddress = null;
@@ -996,26 +1198,32 @@ export class Socket extends EventEmitter {
   }
 
   getRecvBufferSize() {
-    return this[VIRTUAL_DGRAM_STATE].handle.bufferSize(0, true);
+    const result = this[VIRTUAL_DGRAM_STATE].handle?.bufferSize?.(0, true) ?? UV_EBADF;
+    if (result < 0) throw bufferSizeError(true, result);
+    return result;
   }
 
   getSendBufferSize() {
-    return this[VIRTUAL_DGRAM_STATE].handle.bufferSize(0, false);
+    const result = this[VIRTUAL_DGRAM_STATE].handle?.bufferSize?.(0, false) ?? UV_EBADF;
+    if (result < 0) throw bufferSizeError(false, result);
+    return result;
   }
 
   getSendQueueSize() {
-    return this[VIRTUAL_DGRAM_STATE].handle.getSendQueueSize();
+    return this._sendQueueSize;
   }
 
-  getSendQueueCount() { return this[VIRTUAL_DGRAM_STATE].handle.getSendQueueCount(); }
+  getSendQueueCount() { return this._sendQueueCount; }
   setRecvBufferSize(size) {
     validateBufferSize(size);
-    this[VIRTUAL_DGRAM_STATE].handle.bufferSize(size, true);
+    const result = this[VIRTUAL_DGRAM_STATE].handle?.bufferSize?.(size, true) ?? UV_EBADF;
+    if (result < 0) throw bufferSizeError(true, result);
   }
 
   setSendBufferSize(size) {
     validateBufferSize(size);
-    this[VIRTUAL_DGRAM_STATE].handle.bufferSize(size, false);
+    const result = this[VIRTUAL_DGRAM_STATE].handle?.bufferSize?.(size, false) ?? UV_EBADF;
+    if (result < 0) throw bufferSizeError(false, result);
   }
   setBroadcast(arg) {
     const error = this[VIRTUAL_DGRAM_STATE].handle.setBroadcast(arg ? 1 : 0);
@@ -1096,6 +1304,16 @@ export class Socket extends EventEmitter {
     return this;
   }
 }
+
+// Keep the EventEmitter alias on Socket itself as well. The native dgram
+// wrapper exposes addListener as the same callable as on, and callers can
+// inspect this surface directly on Socket.prototype.
+Object.defineProperty(Socket.prototype, 'addListener', {
+  configurable: true,
+  enumerable: false,
+  value: Socket.prototype.on,
+  writable: true,
+});
 
 if (SymbolAsyncDispose !== SymbolNodeAsyncDispose) {
   Object.defineProperty(Socket.prototype, SymbolAsyncDispose, {
@@ -1188,13 +1406,23 @@ Socket.prototype._stopReceiving = deprecatedSocketApi(
 
 export function createBrowserDgram({ network = sharedVirtualNetwork, transport, dns = createBrowserDns(), BufferClass, trackTask, diagnostics, cluster, clusterGroupId, onListening, runInProcessContext, processOwner } = {}) {
   const configuredNetwork = transport && network === sharedVirtualNetwork ? createVirtualNetwork({ transport }) : network;
+  const sockets = new Set();
+  const closeProcessSockets = () => {
+    for (const socket of [...sockets]) {
+      if (!socket._closed) socket.close();
+    }
+    sockets.clear();
+  };
+  closeProcessSockets._bnhInternal = true;
+  processOwner?.once?.('disconnect', closeProcessSockets);
+  processOwner?.once?.('exit', closeProcessSockets);
   const createHandle = (address, port, addressType, fd, flags) => createSocketHandle(
     address,
     port,
     addressType,
     fd,
     flags,
-    { dns, network: configuredNetwork },
+    { dns, network: configuredNetwork, BufferClass, cluster, clusterGroupId, trackTask },
   );
   const SocketWithDefaults = class BrowserDgramSocket extends Socket {
     constructor(type, listener) {
@@ -1213,11 +1441,24 @@ export function createBrowserDgram({ network = sharedVirtualNetwork, transport, 
     }
   };
   return {
-    createSocket: function createSocket(type, listener) { return new SocketWithDefaults(type, listener); },
+    createSocket: function createSocket(type, listener) {
+      const socket = new SocketWithDefaults(type, listener);
+      sockets.add(socket);
+      socket.once('close', () => sockets.delete(socket));
+      return socket;
+    },
     Socket: SocketWithDefaults,
     constants: UDP_CONSTANTS,
     _createSocketHandle: createHandle,
-    newHandle: (type, lookup) => createDgramHandle(type, { dns, network: configuredNetwork, lookup }),
+    newHandle: (type, lookup) => createDgramHandle(type, {
+      dns,
+      network: configuredNetwork,
+      lookup,
+      BufferClass,
+      cluster,
+      clusterGroupId,
+      trackTask,
+    }),
   };
 }
 
@@ -1227,6 +1468,7 @@ export function _createSocketHandle(address, port, addressType, fd, flags) {
   return createSocketHandle(address, port, addressType, fd, flags, {
     dns: createBrowserDns(),
     network: sharedVirtualNetwork,
+    BufferClass: undefined,
   });
 }
 
@@ -1234,6 +1476,7 @@ export function newHandle(type, lookup) {
   return createDgramHandle(type, {
     dns: createBrowserDns(),
     network: sharedVirtualNetwork,
+    BufferClass: undefined,
     lookup,
   });
 }

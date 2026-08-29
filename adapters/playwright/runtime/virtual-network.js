@@ -336,13 +336,26 @@ export function createVirtualNetwork({ transport } = {}) {
   }
 
   function connectTcp({ address, port, client, serverSocket, onConnected, onError, localAddress, localPort }) {
+    let settled = false;
+    const fail = (error) => {
+      if (settled) return false;
+      settled = true;
+      onError(error);
+      return false;
+    };
+    const establish = (connection) => {
+      if (settled) return false;
+      settled = true;
+      return onConnected(connection) !== false;
+    };
     const connect = () => {
+      if (settled) return;
       const server = findBinding(tcpBindings, address, port);
       if (!server) {
         // The unref compatibility test uses the public DNS endpoint only to
         // create a long-lived connection; keep that endpoint local and inert.
         if (address === '8.8.8.8' && port === 53) {
-          onConnected({
+          establish({
             client,
             localAddress: localAddress || LOOPBACK_V4,
             localPort: localPort || 0,
@@ -351,7 +364,7 @@ export function createVirtualNetwork({ transport } = {}) {
           });
           return;
         }
-        onError(networkError('ECONNREFUSED', 'connect', address, port));
+        fail(networkError('ECONNREFUSED', 'connect', address, port));
         return;
       }
       const connection = {
@@ -363,7 +376,7 @@ export function createVirtualNetwork({ transport } = {}) {
         remotePort: port,
       };
       connection.serverSocket = serverSocket || server.owner._createAcceptedSocket?.(connection);
-      onConnected(connection);
+      if (!establish(connection)) return;
       server.owner._acceptConnection(connection);
       client._runTcpResource?.(() => {});
     };
@@ -394,14 +407,14 @@ export function createVirtualNetwork({ transport } = {}) {
           localPort,
         });
       } catch (error) {
-        onError(error);
+        fail(error);
         return;
       }
       const establishTransport = (value) => {
         const connection = value && typeof value === 'object' && value.transport
           ? value
           : { transport: value };
-        onConnected({
+        establish({
           ...connection,
           localAddress: connection.localAddress || localAddress,
           localPort: connection.localPort || localPort || 0,
@@ -410,7 +423,7 @@ export function createVirtualNetwork({ transport } = {}) {
         });
       };
       if (result && typeof result.then === 'function') {
-        result.then((value) => value ? establishTransport(value) : connect(), onError);
+        result.then((value) => value ? establishTransport(value) : connect(), fail);
       } else if (result) {
         establishTransport(result);
       } else {
@@ -420,10 +433,13 @@ export function createVirtualNetwork({ transport } = {}) {
   }
 
   function connectPipe({ path, client, serverSocket, onConnected, onError }) {
+    let settled = false;
     schedule(() => {
+      if (settled) return;
       const name = normalizePipePath(path);
       const server = pipeBindings.get(name);
       if (!server) {
+        settled = true;
         onError(networkError('ECONNREFUSED', 'connect', name));
         return;
       }
@@ -440,8 +456,9 @@ export function createVirtualNetwork({ transport } = {}) {
         serverPipeResource: serverSocketResource,
       };
       connection.serverSocket = serverSocket || server.owner._createAcceptedSocket?.(connection);
+      settled = true;
+      if (onConnected(connection) === false) return;
       server.owner._acceptConnection(connection);
-      onConnected(connection);
     });
   }
 

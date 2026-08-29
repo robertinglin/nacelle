@@ -233,6 +233,8 @@ export class Socket extends Duplex {
     this._transportPeer = null;
     this._tcpResource = null;
     this._tcpConnectResource = null;
+    this._tcpConnectResources = new Set();
+    this._connectAttempt = null;
     this._pendingWrite = null;
     this._writeDispatched = false;
     this._timeout = null;
@@ -255,6 +257,8 @@ export class Socket extends Duplex {
       schedule(() => this.emit('error', socketError('ERR_SOCKET_ALREADY_CONNECTED', 'connect', options.host || 'localhost', options.port)));
       return this;
     }
+    const attempt = { settled: false };
+    this._connectAttempt = attempt;
     if (options.path !== undefined) return this._connectPipe(options.path, options);
     if (!this._tcpResource) this._tcpResource = new AsyncResource('TCPWRAP');
     const port = validatePort(options.port);
@@ -332,6 +336,8 @@ export class Socket extends Duplex {
   }
 
   _connectAddress(address, family, port, options, onError = (error) => this._failConnect(error), onConnected = () => {}) {
+    const attempt = this._connectAttempt;
+    let connectResource = null;
     // Documentation-only networks are intentionally unroutable. Keep their
     // connection pending when the browser-local network has no egress route,
     // so Socket#setTimeout can deliver the observable timeout event instead
@@ -339,14 +345,14 @@ export class Socket extends Duplex {
     // network transport see the request first; it is the only browser-native
     // route that can connect an external address.
     const preserveBlackholeTimeout = !options.autoSelectFamily && isVirtualBlackholeAddress(address);
-    const reportError = preserveBlackholeTimeout
-      ? (error) => {
-          if (error?.code === 'ECONNREFUSED') return;
-          onError(error);
-        }
-      : onError;
+    const reportError = (error) => {
+      this._releaseConnectResource(connectResource);
+      if (this.destroyed || this._connectAttempt !== attempt || attempt?.settled) return;
+      if (preserveBlackholeTimeout && error?.code === 'ECONNREFUSED') return;
+      onError(error);
+    };
     if (options.blockList?.check?.(address, family === 6 ? 'ipv6' : 'ipv4')) {
-      schedule(() => onError(socketError('ERR_IP_BLOCKED', 'connect', address, port)));
+      schedule(() => reportError(socketError('ERR_IP_BLOCKED', 'connect', address, port)));
       return;
     }
     const localAddress = options.localAddress
@@ -354,10 +360,12 @@ export class Socket extends Duplex {
       : (family === 6 ? '::1' : '127.0.0.1');
     const localPort = options.localPort === undefined ? nextLocalPort() : validatePort(options.localPort, true);
     schedule(() => {
-      if (this.destroyed) return;
-      this._tcpConnectResource = new AsyncResource('TCPCONNECTWRAP', {
+      if (this.destroyed || this._connectAttempt !== attempt || attempt?.settled) return;
+      connectResource = new AsyncResource('TCPCONNECTWRAP', {
         triggerAsyncId: this._tcpResource?.asyncId(),
       });
+      this._tcpConnectResource = connectResource;
+      this._tcpConnectResources.add(connectResource);
       this._network.connectTcp({
         address,
         port,
@@ -365,8 +373,15 @@ export class Socket extends Duplex {
         localAddress,
         localPort,
         onConnected: (connection) => {
-          if (onConnected() === false) return;
-          this._establish(connection, family);
+          if (this.destroyed || this._connectAttempt !== attempt || attempt?.settled) {
+            this._releaseConnectResource(connectResource);
+            return false;
+          }
+          if (onConnected(connection) === false) {
+            this._releaseConnectResource(connectResource);
+            return false;
+          }
+          return this._establish(connection, family, attempt, connectResource);
         },
         onError: reportError,
       });
@@ -396,14 +411,24 @@ export class Socket extends Duplex {
     this._network.connectPipe({
       path,
       client: this,
-      onConnected: (connection) => this._establish(connection),
+      onConnected: (connection) => this._establish(connection, undefined, this._connectAttempt),
       onError: (error) => this._failConnect(error),
     });
     return this;
   }
 
-  _establish(connection, family) {
-    if (this.destroyed) return;
+  _releaseConnectResource(resource) {
+    if (!resource || !this._tcpConnectResources.delete(resource)) return;
+    if (this._tcpConnectResource === resource) this._tcpConnectResource = null;
+    queueMicrotask(() => resource.emitDestroy());
+  }
+
+  _establish(connection, family, attempt = this._connectAttempt, connectResource = this._tcpConnectResource) {
+    if (this.destroyed || this._connectAttempt !== attempt || attempt?.settled) return false;
+    if (attempt) attempt.settled = true;
+    for (const resource of [...this._tcpConnectResources]) this._releaseConnectResource(resource);
+    this._timeout && clearTimeout(this._timeout);
+    this._timeout = null;
     this.connecting = false;
     this._pending = false;
     this._readyState = 'open';
@@ -430,13 +455,17 @@ export class Socket extends Duplex {
       handle.setKeepAlive(true, this._keepAliveInitialDelay);
     }
     const emitConnect = () => this.emit('connect');
-    if (this._pipeConnectResource) {
-      this._pipeConnectResource.runInAsyncScope(emitConnect, this);
-      queueMicrotask(() => this._pipeConnectResource.emitDestroy());
-    } else if (this._tcpConnectResource) {
-      this._tcpConnectResource.runInAsyncScope(emitConnect, this);
+    const pipeConnectResource = this._pipeConnectResource;
+    const establishedResource = pipeConnectResource || connectResource;
+    this._pipeConnectResource = null;
+    this._tcpConnectResource = null;
+    if (establishedResource) {
+      if (pipeConnectResource) queueMicrotask(() => establishedResource.emitDestroy());
+      establishedResource.runInAsyncScope(emitConnect, this);
+      if (!pipeConnectResource) this._releaseConnectResource(establishedResource);
     } else emitConnect();
     this._flushPendingWrite();
+    return true;
   }
 
   _runTcpResource(callback) {
@@ -445,11 +474,11 @@ export class Socket extends Duplex {
   }
 
   _failConnect(error) {
-    if (this.destroyed) return;
+    if (this.destroyed || (this._connectAttempt?.settled && !this.connecting)) return;
+    if (this._connectAttempt) this._connectAttempt.settled = true;
     this.connecting = false;
     this._pending = false;
     this._readyState = 'closed';
-    if (this._unrefed) return;
     this.destroy(error);
   }
 
@@ -532,11 +561,17 @@ export class Socket extends Duplex {
       if (transport?.write) {
         this._bytesWritten += bytes.byteLength;
         this._writeDispatched = true;
-        try {
-          const result = transport.write(bytes, callback);
-          if (result && typeof result.then === 'function') result.then(() => callback(), callback);
-        } catch (error) {
+        let completed = false;
+        const complete = (error) => {
+          if (completed) return;
+          completed = true;
           callback(error);
+        };
+        try {
+          const result = transport.write(bytes, complete);
+          if (result && typeof result.then === 'function') result.then(() => complete(), complete);
+        } catch (error) {
+          complete(error);
         }
         return;
       }
@@ -560,14 +595,20 @@ export class Socket extends Duplex {
     if (!this.destroyed && this.readyState === 'open') this._readyState = 'readOnly';
     const shutdownParent = this._pipeResource || this._tcpResource;
     const shutdownResource = shutdownParent ? this._createPipeResource('SHUTDOWNWRAP', shutdownParent) : null;
+    let completed = false;
     const complete = (error) => {
+      if (completed) return;
+      completed = true;
       const finish = () => error ? callback(error) : callback();
       if (shutdownResource) shutdownResource.runInAsyncScope(finish, this);
       else finish();
       if (shutdownResource) queueMicrotask(() => shutdownResource.emitDestroy());
     };
     if (this._transportPeer?.end) {
-      try { this._transportPeer.end(complete); } catch (error) { complete(error); }
+      try {
+        const result = this._transportPeer.end(complete);
+        if (result && typeof result.then === 'function') result.then(() => complete(), complete);
+      } catch (error) { complete(error); }
       return;
     }
     const peer = this._peer;
@@ -579,6 +620,7 @@ export class Socket extends Duplex {
   }
 
   _onTimeout() {
+    this._timeout = null;
     this.emit('timeout');
   }
 
@@ -786,6 +828,9 @@ export class Socket extends Duplex {
 
   _destroy(error, callback) {
     if (this._timeout) clearTimeout(this._timeout);
+    this._timeout = null;
+    if (this._connectAttempt) this._connectAttempt.settled = true;
+    for (const resource of [...this._tcpConnectResources]) this._releaseConnectResource(resource);
     for (const destination of this._pipes.keys()) destination.destroy?.(error);
     this.unpipe();
     const peer = this._peer;
@@ -961,7 +1006,13 @@ export class Server extends EventEmitter {
     this._pipeName = path;
     this._pipeResource = new AsyncResource('PIPESERVERWRAP');
     schedule(() => {
-      if (this.listening) return;
+      if (this.listening || this._closeRequested) {
+        taskRelease?.();
+        this._pipeResource?.emitDestroy();
+        this._pipeResource = null;
+        this._pipeName = null;
+        return;
+      }
       try {
         this._network.bindPipe(this, path);
         this._taskRelease = taskRelease;
@@ -983,8 +1034,11 @@ export class Server extends EventEmitter {
 
   _listenCluster(options, address, family, callback) {
     const port = validatePort(options.port, true);
+    const trackTask = this._config.getTaskTracker?.() || this._config.trackTask;
+    this._taskTracker = trackTask;
+    let settled = false;
     schedule(() => {
-      if (this.listening) return;
+      if (this.listening || this._closeRequested) return;
       const query = {
         address,
         port,
@@ -996,16 +1050,22 @@ export class Server extends EventEmitter {
       };
       try {
         configuredCluster(this._config)._getServer(this, query, (error, handle) => {
+          if (settled) return;
+          settled = true;
           if (error) {
             this.emit('error', error);
             callback?.call(this, error);
+            return;
+          }
+          if (this._closeRequested) {
+            handle.close?.();
             return;
           }
           this._clusterHandle = handle;
           this._handle = handle;
           this._boundAddress = handle.address || address;
           this._boundPort = handle.port;
-          this._taskRelease = this._config.trackTask?.() || null;
+          this._taskRelease = this._unref ? null : trackTask?.() || null;
           this._listening = true;
           this._ownerDisconnectListener = () => {
             this._ownerDisconnectListener = null;
@@ -1026,20 +1086,29 @@ export class Server extends EventEmitter {
   }
 
   _listenClusterPipe(path, callback) {
+    const trackTask = this._config.getTaskTracker?.() || this._config.trackTask;
+    this._taskTracker = trackTask;
+    let settled = false;
     schedule(() => {
-      if (this.listening) return;
+      if (this.listening || this._closeRequested) return;
       try {
         configuredCluster(this._config)._getServer(this, { address: path, port: -1, addressType: -1, fd: -1 }, (error, handle) => {
+          if (settled) return;
+          settled = true;
           if (error) {
             this.emit('error', error);
             callback?.call(this, error);
+            return;
+          }
+          if (this._closeRequested) {
+            handle.close?.();
             return;
           }
           this._clusterHandle = handle;
           this._handle = handle;
           this._pipeName = handle.path || path;
           this._pipeResource = new AsyncResource('PIPESERVERWRAP');
-          this._taskRelease = this._config.trackTask?.() || null;
+          this._taskRelease = this._unref ? null : trackTask?.() || null;
           this._listening = true;
           this._ownerDisconnectListener = () => {
             this._ownerDisconnectListener = null;
@@ -1110,6 +1179,9 @@ export class Server extends EventEmitter {
     this._pipeName = null;
     queueMicrotask(() => pipeResource?.emitDestroy());
     queueMicrotask(() => tcpResource?.emitDestroy());
+    if (this._ownerProcess && this._ownerProcess.connected === false) {
+      for (const socket of [...this._activeSockets]) socket.destroy();
+    }
     this._emitCloseIfDrained();
     return this;
   }
@@ -1182,6 +1254,9 @@ export class Server extends EventEmitter {
     accepted.server = this;
     accepted._server = this;
     accepted._peer = connection.client;
+    if (connection.client && !connection.client._transportPeer && !connection.client.destroyed) {
+      connection.client._peer = accepted;
+    }
     accepted.path = connection.path;
     accepted._pipeResource = connection.serverPipeResource;
     accepted.connecting = false;

@@ -145,7 +145,7 @@ const BUILTIN_NAMES = Object.freeze([
   'assert', 'assert/strict', 'buffer', 'console', 'constants', 'crypto', 'domain', 'events', 'fs', 'fs/promises', 'http', 'https', 'module', 'os',
   'path', 'path/posix', 'path/win32', 'process', 'querystring', 'stream', 'stream/consumers', 'stream/promises', 'stream/web',
   'string_decoder', 'timers', 'timers/promises', 'url', 'util', 'sys', 'util/types', 'worker_threads', 'zlib', 'perf_hooks', 'async_hooks', 'diagnostics_channel', 'punycode',
-  'child_process', 'cluster', 'dgram', 'dns', 'dns/promises', 'http2', 'inspector', 'inspector/promises', 'net', 'repl', 'tls', 'test', 'v8', 'vm', '_http_server',
+  'child_process', 'cluster', 'dgram', 'dns', 'dns/promises', 'http2', 'inspector', 'inspector/promises', 'net', 'readline', 'readline/promises', 'repl', 'tls', 'test', 'v8', 'vm', '_http_server',
   'sea', 'sqlite', 'test/reporters', '_http_common', '_http_outgoing', 'trace_events',
   'internal/event_target', 'internal/async_context_frame', 'internal/async_hooks', 'internal/test/binding', 'internal/test/transfer',
   'internal/bootstrap/realm', 'internal/modules/cjs/loader', 'internal/modules/esm/utils', 'internal/vm/module',
@@ -8573,6 +8573,16 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       configurable: true,
       enumerable: true,
       get: () => ensureReplDispose(loadModule('/node/lib/repl.js', entry)),
+    });
+    Object.defineProperty(builtins, 'readline', {
+      configurable: true,
+      enumerable: true,
+      get: () => loadModule('/node/lib/readline.js', entry),
+    });
+    Object.defineProperty(builtins, 'readline/promises', {
+      configurable: true,
+      enumerable: true,
+      get: () => loadModule('/node/lib/readline/promises.js', entry),
     });
     const esmLoader = createModuleLoader({
       files: {

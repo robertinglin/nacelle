@@ -809,6 +809,8 @@ export function createModuleLoader({
     }
     // Native data modules do not have a file URL. Preserve the Node-facing
     // identity used by code that builds URLs relative to import.meta.url.
+    rewritten = rewritten.replace(/\bimport\.meta\.filename\b/g, quote(importer));
+    rewritten = rewritten.replace(/\bimport\.meta\.dirname\b/g, quote(posix.dirname(importer)));
     rewritten = rewritten.replace(/\bimport\.meta\.url\b/g, quote(importer.startsWith('data:') ? importer : `file://${importer}`));
     return rewritten;
   }

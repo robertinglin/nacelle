@@ -5250,7 +5250,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       get() { return timerPromises; },
     });
     const timerPromises = createTimerPromises(scope, trackTask);
-    const nodeTest = createNodeTest({ scope, processObject, stdout, stderr, trackTask, assert: assert.strict });
+    const nodeTest = createNodeTest({ scope, processObject, stdout, stderr, trackTask, assert: assert.strict, timers, timerPromises, sourcePath });
     const vm = createVmModule(scope);
     const asyncHooks = createAsyncHooksModule();
     processObject._bnhExecutionAsyncId = asyncHooks.executionAsyncId;
@@ -7055,6 +7055,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                 }
                 const childSource = prepared.source === null ? undefined : prepared.source;
                 loadModuleSync(entryPath, entryPath, childProc.processObject, scope, Buffer, stderrArr, childSource, moduleState, true, compileCacheState, false, syncStreamWebApi);
+                if (prepared.executionArgv.some((value) => String(value) === '--test')) {
+                  for (const extraPath of prepared.afterScript.filter((value) => String(value).endsWith('.js'))) {
+                    loadModuleSync(normalizePath(extraPath, prepared.cwd), entryPath, childProc.processObject, scope, Buffer, stderrArr, undefined, moduleState, true, compileCacheState, false, syncStreamWebApi);
+                  }
+                }
                 if (prepared.buildSnapshot && prepared.snapshotBlobPath) {
                   fs.writeFileSync(
                     prepared.snapshotBlobPath,

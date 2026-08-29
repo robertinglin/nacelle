@@ -1,5 +1,5 @@
 import { EventEmitter } from './events.js';
-import { Duplex } from './streams.js';
+import { Duplex, duplexPair } from './streams.js';
 import { createBrowserNet } from './net.js';
 import { AsyncResource } from './async-hooks.js';
 import { createProxyCapability } from './proxy.js';
@@ -33,7 +33,11 @@ const constants = Object.freeze({
 });
 
 const tlsError = (code, message, details = {}) => {
-  const error = code === 'ERR_INVALID_ARG_TYPE' ? new TypeError(message) : new Error(message);
+  const error = code === 'ERR_INVALID_ARG_TYPE'
+    ? new TypeError(message)
+    : code === 'ERR_TLS_INVALID_CONTEXT' || code === 'ERR_TLS_INVALID_PROTOCOL_VERSION'
+      ? new TypeError(message)
+    : code === 'ERR_OUT_OF_RANGE' ? new RangeError(message) : new Error(message);
   error.code = code;
   Object.assign(error, details);
   return error;
@@ -88,32 +92,107 @@ function certificateNames(certificate) {
 
 function isIpAddress(value) {
   const text = String(value);
-  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(text) || text.includes(':');
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(text)) {
+    return text.split('.').every((part) => Number(part) <= 255);
+  }
+  return /^[0-9a-f:]+$/i.test(text) && text.includes(':');
 }
 
 function matchesCertificateName(hostname, name) {
   const host = String(hostname).toLowerCase().replace(/\.$/, '');
   const candidate = String(name).toLowerCase().replace(/\.$/, '');
   if (isIpAddress(host) || isIpAddress(candidate)) return host === candidate;
+  if (!candidate || /[^\x21-\x7f]/.test(host) || /[^\x21-\x7f]/.test(candidate)
+    || candidate.includes('..')) return false;
   if (!candidate.includes('*')) return host === candidate;
-  if (!candidate.startsWith('*.') || candidate.slice(2).includes('*')) return false;
-  const suffix = candidate.slice(1);
-  return host.endsWith(suffix) && host.split('.').length === candidate.split('.').length;
+  const candidateParts = candidate.split('.');
+  const hostParts = host.split('.');
+  if (candidateParts.length <= 2 || candidateParts.length !== hostParts.length) return false;
+  const pattern = candidateParts[0];
+  if ((pattern.match(/\*/g) || []).length !== 1) return false;
+  if (pattern.includes('xn--')) return false;
+  if (!candidateParts.slice(1).every((part, index) => part === hostParts[index + 1])) return false;
+  const [prefix, suffix] = pattern.split('*');
+  return hostParts[0].startsWith(prefix) && hostParts[0].endsWith(suffix)
+    && hostParts[0].length >= prefix.length + suffix.length;
 }
 
 /** Validate a virtual peer certificate using Node's hostname-matching shape. */
 export function checkServerIdentity(hostname, certificate = {}) {
-  const host = String(hostname || '');
-  const names = certificateNames(certificate);
-  if (names.some((name) => matchesCertificateName(host, name))) return undefined;
-  const reason = names.length
-    ? `Host: ${host}. is not in the cert's altnames: ${names.join(', ')}.`
-    : `Host: ${host}. is not in the cert's subject name.`;
+  const host = String(hostname);
+  const normalizedHost = host.replace(/\.$/, '');
+  const altNames = certificate?.subjectaltname || certificate?.subjectAltName;
+  const dnsNames = [];
+  const ipNames = [];
+  if (typeof altNames === 'string') {
+    for (const value of altNames.split(/,\s*/)) {
+      if (value.startsWith('DNS:')) dnsNames.push(value.slice(4));
+      else if (value.startsWith('IP Address:') && isIpAddress(value.slice(11))) {
+        ipNames.push(value.slice(11));
+      }
+    }
+  }
+  let valid = false;
+  let reason;
+  if (isIpAddress(normalizedHost)) {
+    valid = ipNames.some((name) => matchesCertificateName(normalizedHost, name));
+    if (!valid) reason = `IP: ${normalizedHost} is not in the cert's list: ${ipNames.join(', ')}`;
+  } else if (dnsNames.length) {
+    valid = dnsNames.some((name) => matchesCertificateName(normalizedHost, name));
+    if (!valid) reason = `Host: ${normalizedHost}. is not in the cert's altnames: ${altNames}`;
+  } else if (certificate?.subject?.CN) {
+    const commonName = certificate?.subject?.CN;
+    const names = Array.isArray(commonName) ? commonName : [commonName];
+    valid = names.some((name) => matchesCertificateName(normalizedHost, name));
+    if (!valid) reason = `Host: ${normalizedHost}. is not cert's CN: ${commonName}`;
+  } else {
+    reason = 'Cert does not contain a DNS name';
+  }
+  if (valid) return undefined;
+  if (!reason) reason = 'Cert does not contain a DNS name';
   return tlsError('ERR_TLS_CERT_ALTNAME_INVALID', reason, {
     reason,
-    host,
+    host: normalizedHost,
     cert: certificate,
   });
+}
+
+function valueDescription(value) {
+  if (value === null) return 'null';
+  if (typeof value === 'string') return `type string ('${value}')`;
+  if (typeof value === 'number') return `type number (${value})`;
+  if (typeof value === 'boolean') return `type boolean (${value})`;
+  return `an instance of ${value?.constructor?.name || typeof value}`;
+}
+
+function validateTlsOptions(options = {}) {
+  if (!isRecord(options)) throw tlsError('ERR_INVALID_ARG_TYPE', 'The "options" argument must be an object');
+  const optionType = (name, expected, value) => {
+    if (value !== undefined && typeof value !== expected) {
+      throw tlsError(
+        'ERR_INVALID_ARG_TYPE',
+        `The "options.${name}" property must be of type ${expected}. Received ${valueDescription(value)}`,
+      );
+    }
+  };
+  optionType('ciphers', 'string', options.ciphers);
+  optionType('passphrase', 'string', options.passphrase);
+  optionType('ecdhCurve', 'string', options.ecdhCurve);
+  optionType('handshakeTimeout', 'number', options.handshakeTimeout);
+  optionType('sessionTimeout', 'number', options.sessionTimeout);
+  for (const name of ['minVersion', 'maxVersion']) {
+    optionType(name, 'string', options[name]);
+    if (options[name] !== undefined && !/^TLSv(?:1|1\.1|1\.2|1\.3)$/.test(options[name])) {
+      throw tlsError('ERR_TLS_INVALID_PROTOCOL_VERSION', `"${options[name]}" is not a valid TLS protocol version`);
+    }
+  }
+  if (options.ticketKeys !== undefined) {
+    const isBytes = ArrayBuffer.isView(options.ticketKeys) || options.ticketKeys instanceof ArrayBuffer;
+    if (!isBytes) throw tlsError('ERR_INVALID_ARG_TYPE', 'The "options.ticketKeys" property must be an instance of Buffer');
+    if (options.ticketKeys.byteLength !== 48) {
+      throw tlsError('ERR_INVALID_ARG_VALUE', 'The property \'options.ticketKeys\' must be exactly 48 bytes');
+    }
+  }
 }
 
 function normalizeAuthority(options = {}) {
@@ -192,7 +271,7 @@ function certificateCommonNames(value) {
 }
 
 function certificateCommonName(value) {
-  return certificateCommonNames(value).at(-1);
+  return certificateCommonNames(value)[0];
 }
 
 function certificateDetails(value, fallbackHostname) {
@@ -201,7 +280,7 @@ function certificateDetails(value, fallbackHostname) {
   return {
     ...virtualCertificate(commonName),
     subject: { CN: commonName },
-    issuer: { CN: certificateCommonNames(value)[0] || commonName },
+    issuer: { CN: certificateCommonNames(value)[1] || commonName },
   };
 }
 
@@ -224,6 +303,76 @@ function bytesFor(value, scope) {
   }
   if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
   throw new TypeError('TLS stream chunks must be strings or Uint8Array values');
+}
+
+function clientHelloServername(value) {
+  const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
+  if (bytes.length < 9 || bytes[0] !== 0x16 || bytes[5] !== 0x01) return undefined;
+  const handshakeLength = (bytes[6] << 16) | (bytes[7] << 8) | bytes[8];
+  if (bytes.length < 9 + handshakeLength) return undefined;
+  let offset = 9 + 2 + 32;
+  if (offset >= bytes.length) return undefined;
+  const sessionLength = bytes[offset++];
+  offset += sessionLength;
+  if (offset + 2 > bytes.length) return undefined;
+  offset += 2 + ((bytes[offset] << 8) | bytes[offset + 1]);
+  if (offset >= bytes.length) return undefined;
+  offset += 1 + bytes[offset];
+  if (offset + 2 > bytes.length) return undefined;
+  const extensionsEnd = offset + 2 + ((bytes[offset] << 8) | bytes[offset + 1]);
+  offset += 2;
+  if (extensionsEnd > bytes.length) return undefined;
+  while (offset + 4 <= extensionsEnd) {
+    const type = (bytes[offset] << 8) | bytes[offset + 1];
+    const length = (bytes[offset + 2] << 8) | bytes[offset + 3];
+    offset += 4;
+    if (offset + length > extensionsEnd) return undefined;
+    if (type === 0x0000 && length >= 5) {
+      const namesEnd = offset + 2 + ((bytes[offset] << 8) | bytes[offset + 1]);
+      let nameOffset = offset + 2;
+      while (nameOffset + 3 <= namesEnd && namesEnd <= offset + length) {
+        const nameType = bytes[nameOffset++];
+        const nameLength = (bytes[nameOffset] << 8) | bytes[nameOffset + 1];
+        nameOffset += 2;
+        if (nameOffset + nameLength > namesEnd) return undefined;
+        if (nameType === 0) return new TextDecoder().decode(bytes.subarray(nameOffset, nameOffset + nameLength));
+        nameOffset += nameLength;
+      }
+    }
+    offset += length;
+  }
+  return undefined;
+}
+
+function convertALPNProtocolsForBuffer(protocols, out, BufferClass) {
+  if (Array.isArray(protocols)) {
+    const lengths = new Array(protocols.length);
+    const total = protocols.reduce((size, protocol, index) => {
+      const length = BufferClass.byteLength(protocol);
+      if (length > 255) {
+        throw tlsError(
+          'ERR_OUT_OF_RANGE',
+          `The byte length of the protocol at index ${index} exceeds the maximum length. It must be <= 255. Received ${length}`,
+        );
+      }
+      lengths[index] = length;
+      return size + 1 + length;
+    }, 0);
+    const buffer = BufferClass.allocUnsafe(total);
+    let offset = 0;
+    for (let index = 0; index < protocols.length; index += 1) {
+      buffer[offset++] = lengths[index];
+      buffer.write(protocols[index], offset);
+      offset += lengths[index];
+    }
+    out.ALPNProtocols = buffer;
+  } else if (protocols instanceof Uint8Array) {
+    out.ALPNProtocols = BufferClass.from(protocols);
+  } else if (ArrayBuffer.isView(protocols)) {
+    out.ALPNProtocols = BufferClass.from(
+      protocols.buffer.slice(protocols.byteOffset, protocols.byteOffset + protocols.byteLength),
+    );
+  }
 }
 
 function tlsClientAuthError(serverOptions, clientOptions) {
@@ -438,6 +587,7 @@ function validatePfx(pfx, passphrase) {
 class SecureContext {
   constructor(options = {}) {
     if (!isRecord(options)) throw new TypeError('secure context options must be an object');
+    validateTlsOptions(options);
     const context = { ...options };
     const requireReceiver = (receiver) => {
       if (receiver !== context) throw new TypeError('Illegal invocation');
@@ -448,6 +598,7 @@ class SecureContext {
         value(optionsToApply = {}) {
           requireReceiver(this);
           if (!isRecord(optionsToApply)) throw new TypeError('secure context options must be an object');
+          validateTlsOptions(optionsToApply);
           Object.assign(context, optionsToApply);
         },
       },
@@ -469,6 +620,13 @@ class SecureContext {
           const current = context.ca === undefined ? [] : [].concat(context.ca);
           current.push(certificate);
           context.ca = current;
+        },
+      },
+      _external: {
+        configurable: true,
+        get() {
+          requireReceiver(this);
+          return undefined;
         },
       },
     });
@@ -495,15 +653,16 @@ export class TLSSocket extends Duplex {
     this._proxy = internal.proxy;
     this._diagnostics = internal.diagnostics;
     this._socket = socket || null;
+    this._handle = socket || null;
     this._resource = internal.resource || new AsyncResource('TLSWRAP');
-    this._options = { ...options };
+    this._options = { ...options, _isServer: options._isServer ?? options.isServer ?? false };
     this._authority = normalizeAuthority(options);
     this.authorized = false;
     this.authorizationError = null;
     this.encrypted = true;
     this.connecting = true;
-    this.pending = !socket;
-    this.readyState = 'opening';
+    this._pending = !socket;
+    this._readyState = 'opening';
     this.alpnProtocol = options.ALPNProtocols?.[0] || options.alpnProtocol || false;
     this.servername = options.servername || this._authority.host;
     this.protocol = options.protocol || 'TLSv1.3';
@@ -511,6 +670,11 @@ export class TLSSocket extends Duplex {
     this._secureContext = options.secureContext || new SecureContext(options);
     this._closed = false;
     this._handshakeStarted = false;
+    this._controlReleased = false;
+    this._renegotiationDisabled = false;
+    this._bytesRead = 0;
+    this._bytesWritten = 0;
+    this._unrefed = false;
     this._virtualInternetBackingSocket = isVirtualInternetBackingSocket(socket);
     this._underlyingEnded = false;
     this._writable._write = (chunk, encoding, callback) => this._writeTransport(chunk, encoding, callback);
@@ -520,10 +684,30 @@ export class TLSSocket extends Duplex {
 
   _attachSocket(socket) {
     if (!socket) return;
-    for (const name of ['localAddress', 'localPort', 'localFamily', 'remoteAddress', 'remotePort', 'remoteFamily']) {
-      if (socket[name] !== undefined) this[name] = socket[name];
+    socket.on?.('data', (chunk) => {
+      const bytes = bytesFor(chunk, this._scope);
+      this._bytesRead += bytes.byteLength;
+      this.push(chunk);
+    });
+    if (this._options._isServer && typeof this._options.SNICallback === 'function') {
+      let pending = new Uint8Array();
+      let invoked = false;
+      socket.on('data', (chunk) => {
+        if (invoked) return;
+        const bytes = bytesFor(chunk, this._scope);
+        const combined = new Uint8Array(pending.length + bytes.length);
+        combined.set(pending);
+        combined.set(bytes, pending.length);
+        pending = combined;
+        const servername = clientHelloServername(pending);
+        if (servername === undefined) return;
+        invoked = true;
+        this._options.SNICallback(servername, (error, context) => {
+          if (error) this.destroy(error);
+          else if (context instanceof SecureContext) this._secureContext = context;
+        });
+      });
     }
-    socket.on?.('data', (chunk) => this.push(chunk));
     socket.on?.('end', () => {
       this._underlyingEnded = true;
       this.push(null);
@@ -547,8 +731,8 @@ export class TLSSocket extends Duplex {
     if (this._closed) return;
     this._closed = true;
     this.connecting = false;
-    this.pending = false;
-    this.readyState = 'closed';
+    this._pending = false;
+    this._readyState = 'closed';
     this._resource.runInAsyncScope(() => super.destroy(), this);
     this._resource.emitDestroy();
   }
@@ -560,6 +744,7 @@ export class TLSSocket extends Duplex {
     }
     try {
       const value = bytesFor(chunk, this._scope);
+      this._bytesWritten += value.byteLength;
       const result = this._socket.write(value, encoding, callback);
       if (result && typeof result.then === 'function') result.then(() => callback(), callback);
     } catch (error) {
@@ -568,6 +753,7 @@ export class TLSSocket extends Duplex {
   }
 
   _endTransport(callback) {
+    if (!this.destroyed && this.readyState === 'open') this._readyState = 'readOnly';
     if (this._socket?.end) {
       try { this._socket.end(callback); } catch (error) { callback(error); }
       return;
@@ -642,8 +828,8 @@ export class TLSSocket extends Duplex {
       }
       if (this.authorizationError && this._options.rejectUnauthorized !== false) throw this.authorizationError;
       this.connecting = false;
-      this.pending = false;
-      this.readyState = 'open';
+      this._pending = false;
+      this._readyState = 'open';
       if (this._options._isServer) this._resource.runInAsyncScope(() => {}, this);
       this._resource.runInAsyncScope(() => {
         this.emit('secureConnect');
@@ -651,8 +837,8 @@ export class TLSSocket extends Duplex {
       }, this);
     } catch (error) {
       this.connecting = false;
-      this.pending = false;
-      this.readyState = 'closed';
+      this._pending = false;
+      this._readyState = 'closed';
       this.destroy(error);
     }
   }
@@ -673,8 +859,7 @@ export class TLSSocket extends Duplex {
         this._peerCertificate = virtualCertificate(this.servername);
         this._socket = null;
         backingSocket.destroy();
-        this.remoteAddress = this.servername;
-        this.remotePort = this._authority.port;
+        this._authority = { host: this.servername, port: this._authority.port };
         schedule(() => void this._handshake());
         return this;
       }
@@ -707,16 +892,167 @@ export class TLSSocket extends Duplex {
     );
   }
   getPeerCertificate() { return clone(this._peerCertificate); }
-  getSession() { return new Uint8Array([0x42, 0x4e, 0x48, 0x2d, 0x54, 0x4c, 0x53]); }
-  isSessionReused() { return false; }
+  getSession() {
+    if (this._session !== undefined) return this._session;
+    return new Uint8Array([0x42, 0x4e, 0x48, 0x2d, 0x54, 0x4c, 0x53]);
+  }
+  isSessionReused() { return Boolean(this._sessionReused); }
   setMaxSendFragment() { return true; }
-  setServername(servername) { this.servername = String(servername); return this; }
-  renegotiate(_options, callback) { schedule(() => callback?.(null)); return true; }
+  setServername(servername) {
+    if (this._options._isServer) throw tlsError('ERR_TLS_SNI_FROM_SERVER', 'Cannot set SNI from a server');
+    if (typeof servername !== 'string') throw tlsError('ERR_INVALID_ARG_TYPE', 'The "name" argument must be of type string');
+    this.servername = servername;
+    return this;
+  }
+
+  get _connecting() { return this.connecting; }
+  get pending() { return this._pending ?? (!this._handle || this.connecting); }
+  get readyState() {
+    if (this.connecting) return 'opening';
+    if (this._readyState === 'closed' || this.destroyed) return 'closed';
+    if (this._readyState === 'readOnly' && this.readable) return 'readOnly';
+    if (this._readyState === 'writeOnly' && this.writable) return 'writeOnly';
+    return this.readable && this.writable ? 'open' : this.readable ? 'readOnly' : 'writeOnly';
+  }
+  get bufferSize() { return this.writableLength ?? 0; }
+  get bytesRead() { return this._bytesRead; }
+  get bytesWritten() { return this._bytesWritten + (this.writableLength ?? 0); }
+  get _bytesDispatched() { return this._bytesWritten; }
+  get remoteAddress() { return this._socket?.remoteAddress ?? this._authority.host; }
+  get remotePort() { return this._socket?.remotePort ?? this._authority.port; }
+  get remoteFamily() { return this._socket?.remoteFamily ?? (isIpAddress(this.remoteAddress) ? 'IPv4' : undefined); }
+  get localAddress() { return this._socket?.localAddress; }
+  get localPort() { return this._socket?.localPort; }
+  get localFamily() { return this._socket?.localFamily; }
+  address() {
+    if (this._socket?.address) return this._socket.address();
+    return this.localAddress === undefined ? {} : {
+      address: this.localAddress,
+      family: this.localFamily,
+      port: this.localPort,
+    };
+  }
+
+  _getpeername() {
+    return { address: this.remoteAddress, family: this.remoteFamily, port: this.remotePort };
+  }
+  _getsockname() { return this.address(); }
+  _wrapHandle(wrap, handle) { return handle || wrap || this._socket || null; }
+  _init() { return this; }
+  _start() { return this.connect(); }
+  _final(callback) { return this._endTransport(callback); }
+  _writeGeneric(_writev, data, encoding, callback) { return this._writeTransport(data, encoding, callback); }
+  _handleTimeout() { this._emitTLSError(tlsError('ERR_TLS_HANDSHAKE_TIMEOUT', 'TLS handshake timeout')); }
+  _tlsError(error) { this.emit('_tlsError', error); return this._controlReleased ? error : null; }
+  _emitTLSError(error) { const value = this._tlsError(error); if (value) this.emit('error', value); }
+  _finishInit() {
+    if (this.destroyed) return;
+    this._secureEstablished = true;
+    if (this._timeout) this.setTimeout(0);
+    this.emit('secure');
+  }
+  _releaseControl() {
+    if (this._controlReleased) return false;
+    this._controlReleased = true;
+    return true;
+  }
+  _unrefTimer() { this._timeout?.refresh?.(); }
+  _destroySSL() { return undefined; }
+  _reset() { return this.resetAndDestroy(); }
+
+  setNoDelay(enable) {
+    const value = Boolean(enable === undefined ? true : enable);
+    this._noDelay = value;
+    this._socket?.setNoDelay?.(value);
+    return this;
+  }
+
+  setKeepAlive(enable, initialDelayMsecs) {
+    const value = Boolean(enable);
+    const initialDelay = ~~(initialDelayMsecs / 1000);
+    this._keepAlive = value;
+    this._keepAliveInitialDelay = initialDelay;
+    this._socket?.setKeepAlive?.(value, initialDelayMsecs);
+    return this;
+  }
+
+  setSession(session) {
+    if (session === undefined) return undefined;
+    const value = typeof session === 'string' && this._BufferClass?.from
+      ? this._BufferClass.from(session, 'latin1')
+      : session;
+    if (this._socket?.setSession) this._socket.setSession(value);
+    else this._session = value;
+    return undefined;
+  }
+
+  _onTimeout() { this.emit('timeout'); }
+
+  setTimeout(milliseconds, callback) {
+    if (this.destroyed) return this;
+    if (typeof milliseconds !== 'number') {
+      throw tlsError('ERR_INVALID_ARG_TYPE', 'The "msecs" argument must be of type number');
+    }
+    if (!Number.isFinite(milliseconds) || milliseconds < 0) {
+      throw tlsError(
+        'ERR_OUT_OF_RANGE',
+        `The value of "msecs" is out of range. It must be >= 0 && <= ${Number.MAX_SAFE_INTEGER}. Received ${milliseconds}`,
+      );
+    }
+    if (callback !== undefined && typeof callback !== 'function') {
+      throw tlsError('ERR_INVALID_ARG_TYPE', 'The "callback" argument must be of type function');
+    }
+    this.timeout = milliseconds;
+    if (this._timeout) clearTimeout(this._timeout);
+    this._timeout = null;
+    if (milliseconds === 0) {
+      if (callback !== undefined) this.removeListener('timeout', callback);
+      return this;
+    }
+    if (callback) this.once('timeout', callback);
+    this._timeout = setTimeout(() => this._onTimeout(), milliseconds);
+    this._timeout?.unref?.();
+    return this;
+  }
+
+  unref() {
+    this._unrefed = true;
+    if (this._socket?.unref) this._socket.unref();
+    else if (this.connecting) this.once('connect', this.unref);
+    return this;
+  }
+  ref() {
+    this._unrefed = false;
+    this._socket?.ref?.();
+    return this;
+  }
+
+  renegotiate(options, callback) {
+    if (!isRecord(options)) throw tlsError('ERR_INVALID_ARG_TYPE', 'The "options" argument must be of type object');
+    if (callback !== undefined && typeof callback !== 'function') {
+      throw tlsError('ERR_INVALID_ARG_TYPE', 'The "callback" argument must be of type function');
+    }
+    if (this.destroyed) return undefined;
+    if (this._renegotiationDisabled) {
+      const error = tlsError('ERR_TLS_RENEGOTIATION_DISABLED', 'TLS session renegotiation disabled for this socket');
+      if (callback) schedule(() => callback(error));
+      return true;
+    }
+    if (callback) schedule(() => callback(null));
+    return true;
+  }
+  disableRenegotiation() { this._renegotiationDisabled = true; }
+  destroySoon() {
+    if (this.writable) this.end();
+    if (this.writableFinished) this.destroy();
+    else this.once('finish', () => this.destroy());
+  }
 
   // Browser WebSocket/TLS does not expose the peer certificate as an X509
   // object. The legacy getPeerCertificate() metadata above is intentionally
   // not promoted to this API because it is not a parsed certificate.
   getX509Certificate() { return undefined; }
+  getPeerX509Certificate() { return undefined; }
 
   // Browser TLS credentials are selected by the user agent before the
   // WebSocket handshake. There is no browser API to replace them on an open
@@ -753,11 +1089,50 @@ export class TLSSocket extends Duplex {
     if (this._closed) return this;
     this._closed = true;
     this.connecting = false;
-    this.pending = false;
-    this.readyState = 'closed';
+    this._pending = false;
+    this._readyState = 'closed';
     if (this._socket && !this._socket.destroyed) this._socket.destroy(error);
     this._resource.emitDestroy();
     return super.destroy(error);
+  }
+
+  resetAndDestroy() {
+    if (this.destroyed) return this;
+    const error = tlsError('ECONNRESET', 'read ECONNRESET');
+    if (this._socket?.resetAndDestroy) this._socket.resetAndDestroy();
+    this.destroy(error);
+    return this;
+  }
+}
+
+class SecurePair extends EventEmitter {
+  constructor(secureContext, isServer = false, requestCert = !isServer,
+    rejectUnauthorized = false, options = {}, internal = {}) {
+    super();
+    if (secureContext === undefined) secureContext = internal.createSecureContext();
+    if (secureContext !== null && !(secureContext instanceof SecureContext)) {
+      throw tlsError('ERR_TLS_INVALID_CONTEXT', 'context must be a SecureContext');
+    }
+    const [encrypted, transport] = duplexPair();
+    const tlsOptions = {
+      secureContext,
+      isServer,
+      _isServer: isServer,
+      requestCert,
+      rejectUnauthorized,
+      ...options,
+    };
+    this.server = options?.server;
+    this.credentials = secureContext;
+    this.encrypted = encrypted;
+    this.cleartext = new TLSSocket(transport, tlsOptions, internal);
+    this.cleartext.once('secureConnect', () => this.emit('secure'));
+    this.cleartext.connect();
+  }
+
+  destroy() {
+    this.cleartext.destroy();
+    this.encrypted.destroy();
   }
 }
 
@@ -768,7 +1143,18 @@ class TLSServer extends EventEmitter {
       listener = options;
       options = {};
     }
+    validateTlsOptions(options);
     this._options = { ...options };
+    this.options = this._options;
+    this._BufferClass = internal.BufferClass || this._scope.Buffer;
+    this.requestCert = options.requestCert === true;
+    this.rejectUnauthorized = options.rejectUnauthorized !== false;
+    this._ticketKeys = options.ticketKeys
+      ? (options.ticketKeys instanceof ArrayBuffer
+        ? new Uint8Array(options.ticketKeys).slice()
+        : new Uint8Array(options.ticketKeys.buffer, options.ticketKeys.byteOffset, options.ticketKeys.byteLength).slice())
+      : new Uint8Array(48);
+    this._secureContext = new SecureContext(options);
     this._contexts = [];
     this._scope = internal.scope || globalThis;
     this._net = internal.net || createBrowserNet({ BufferClass: internal.BufferClass });
@@ -807,6 +1193,54 @@ class TLSServer extends EventEmitter {
   getConnections(callback) { return this._raw.getConnections(callback); }
   ref() { this._raw.ref(); return this; }
   unref() { this._raw.unref(); return this; }
+
+  setSecureContext(options) {
+    validateTlsOptions(options);
+    this._options = { ...this._options, ...options };
+    this.options = this._options;
+    this._secureContext = new SecureContext(this._options);
+    if (options.ticketKeys !== undefined) this.setTicketKeys(options.ticketKeys);
+    return this;
+  }
+
+  _getServerData() {
+    return { ticketKeys: hexBytes(this._ticketKeys) };
+  }
+
+  _setServerData(data) {
+    if (!isRecord(data) || typeof data.ticketKeys !== 'string') {
+      throw tlsError('ERR_INVALID_ARG_TYPE', 'The "data" argument must contain ticketKeys');
+    }
+    const bytes = new Uint8Array(data.ticketKeys.match(/[\da-f]{2}/gi)?.map((value) => Number.parseInt(value, 16)) || []);
+    this.setTicketKeys(bytes);
+  }
+
+  getTicketKeys() {
+    return this._BufferClass?.from ? this._BufferClass.from(this._ticketKeys) : this._ticketKeys.slice();
+  }
+
+  setTicketKeys(keys) {
+    const isBytes = ArrayBuffer.isView(keys) || keys instanceof ArrayBuffer;
+    if (!isBytes) throw tlsError('ERR_INVALID_ARG_TYPE', 'The "keys" argument must be an instance of Buffer');
+    if (keys.byteLength !== 48) {
+      throw tlsError('ERR_INVALID_ARG_VALUE', 'Session ticket keys must be a 48-byte buffer');
+    }
+    const bytes = keys instanceof ArrayBuffer
+      ? new Uint8Array(keys)
+      : new Uint8Array(keys.buffer, keys.byteOffset, keys.byteLength);
+    this._ticketKeys = bytes.slice();
+  }
+
+  setOptions(options) {
+    validateTlsOptions(options);
+    this.requestCert = options.requestCert === true;
+    this.rejectUnauthorized = options.rejectUnauthorized !== false;
+    return this.setSecureContext(options);
+  }
+
+  [Symbol.for('nodejs.asyncDispose')]() {
+    return new Promise((resolve) => this.close(resolve));
+  }
 
   addContext(servername, context) {
     if (typeof servername !== 'string' || servername.length === 0) {
@@ -877,12 +1311,36 @@ export function createTlsModule(scope = globalThis, options = {}) {
     return new SecureContext(contextOptions);
   }
 
+  let securePairWarned = false;
+  function createSecurePair(...args) {
+    const processObject = scope.process;
+    if (!securePairWarned && !processObject?.noDeprecation) {
+      securePairWarned = true;
+      processObject?.emitWarning?.(
+        'tls.createSecurePair() is deprecated. Please use tls.TLSSocket instead.',
+        { code: 'DEP0064', type: 'DeprecationWarning' },
+      );
+    }
+    return new SecurePair(args[0], args[1], args[2], args[3], args[4], {
+      scope,
+      net,
+      BufferClass,
+      proxy,
+      diagnostics: options.diagnostics,
+      createSecureContext,
+    });
+  }
+
   function connect(...args) {
     let callback;
     if (typeof args.at(-1) === 'function') callback = args.pop();
     let input = args[0];
     let connectOptions = isRecord(input) ? { ...input } : { port: input };
     if (typeof args[1] === 'object' && args[1] !== null && !isRecord(input)) connectOptions = { ...connectOptions, ...args[1] };
+    if (Object.hasOwn(connectOptions, 'checkServerIdentity')
+      && typeof connectOptions.checkServerIdentity !== 'function') {
+      throw tlsError('ERR_INVALID_ARG_TYPE', 'The "checkServerIdentity" option must be a function');
+    }
     const hasTransport = connectOptions.port !== undefined
       || connectOptions.socket !== undefined
       || connectOptions.path !== undefined
@@ -966,13 +1424,16 @@ export function createTlsModule(scope = globalThis, options = {}) {
     connect,
     createConnection: connect,
     createSecureContext,
+    createSecurePair,
     createServer,
     checkServerIdentity,
+    convertALPNProtocols: (protocols, out) => convertALPNProtocolsForBuffer(protocols, out, BufferClass),
     getCiphers: () => [...CIPHERS],
     setDefaultCACertificates,
     getCACertificates,
     DEFAULT_CIPHERS,
     DEFAULT_MIN_VERSION: constants.DEFAULT_MIN_VERSION,
+    DEFAULT_ECDH_CURVE: constants.DEFAULT_ECDH_CURVE,
     DEFAULT_MAX_VERSION: constants.DEFAULT_MAX_VERSION,
     CLIENT_RENEG_LIMIT: constants.CLIENT_RENEG_LIMIT,
     CLIENT_RENEG_WINDOW: constants.CLIENT_RENEG_WINDOW,
@@ -998,7 +1459,9 @@ const defaultTls = createTlsModule();
 export const connect = defaultTls.connect;
 export const createConnection = defaultTls.createConnection;
 export const createSecureContext = defaultTls.createSecureContext;
+export const createSecurePair = defaultTls.createSecurePair;
 export const createServer = defaultTls.createServer;
+export const convertALPNProtocols = defaultTls.convertALPNProtocols;
 export const getCiphers = defaultTls.getCiphers;
 export const rootCertificates = defaultTls.rootCertificates;
 export { DEFAULT_CIPHERS, constants, SecureContext };

@@ -27,6 +27,224 @@ export const constants = Object.freeze({
   NGHTTP2_ENHANCE_YOUR_CALM: 11,
   NGHTTP2_INADEQUATE_SECURITY: 12,
   NGHTTP2_HTTP_1_1_REQUIRED: 13,
+  NGHTTP2_ERR_DEFERRED: -508,
+  NGHTTP2_ERR_STREAM_ID_NOT_AVAILABLE: -509,
+  NGHTTP2_ERR_INVALID_ARGUMENT: -501,
+  NGHTTP2_ERR_STREAM_CLOSED: -510,
+  NGHTTP2_ERR_NOMEM: -901,
+  NGHTTP2_ERR_FRAME_SIZE_ERROR: -522,
+  NGHTTP2_HCAT_REQUEST: 0,
+  NGHTTP2_HCAT_RESPONSE: 1,
+  NGHTTP2_HCAT_PUSH_RESPONSE: 2,
+  NGHTTP2_HCAT_HEADERS: 3,
+  NGHTTP2_NV_FLAG_NONE: 0,
+  NGHTTP2_NV_FLAG_NO_INDEX: 1,
+  NGHTTP2_SESSION_SERVER: 0,
+  NGHTTP2_SESSION_CLIENT: 1,
+  NGHTTP2_STREAM_STATE_IDLE: 1,
+  NGHTTP2_STREAM_STATE_OPEN: 2,
+  NGHTTP2_STREAM_STATE_RESERVED_LOCAL: 3,
+  NGHTTP2_STREAM_STATE_RESERVED_REMOTE: 4,
+  NGHTTP2_STREAM_STATE_HALF_CLOSED_LOCAL: 5,
+  NGHTTP2_STREAM_STATE_HALF_CLOSED_REMOTE: 6,
+  NGHTTP2_STREAM_STATE_CLOSED: 7,
+  NGHTTP2_FLAG_ACK: 1,
+  NGHTTP2_DEFAULT_WEIGHT: 16,
+  DEFAULT_SETTINGS_ENABLE_CONNECT_PROTOCOL: 0,
+  MAX_MAX_FRAME_SIZE: 16777215,
+  MIN_MAX_FRAME_SIZE: 16384,
+  MAX_INITIAL_WINDOW_SIZE: 2147483647,
+  NGHTTP2_SETTINGS_HEADER_TABLE_SIZE: 1,
+  NGHTTP2_SETTINGS_ENABLE_PUSH: 2,
+  NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS: 3,
+  NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE: 4,
+  NGHTTP2_SETTINGS_MAX_FRAME_SIZE: 5,
+  NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE: 6,
+  NGHTTP2_SETTINGS_ENABLE_CONNECT_PROTOCOL: 8,
+  PADDING_STRATEGY_NONE: 0,
+  PADDING_STRATEGY_ALIGNED: 1,
+  PADDING_STRATEGY_MAX: 2,
+  PADDING_STRATEGY_CALLBACK: 1,
+  STREAM_OPTION_EMPTY_PAYLOAD: 1,
+  STREAM_OPTION_GET_TRAILERS: 2,
+  HTTP2_HEADER_ACCEPT_ENCODING: 'accept-encoding',
+  HTTP2_HEADER_ACCEPT_LANGUAGE: 'accept-language',
+  HTTP2_HEADER_ACCEPT_RANGES: 'accept-ranges',
+  HTTP2_HEADER_ACCESS_CONTROL_ALLOW_CREDENTIALS: 'access-control-allow-credentials',
+  HTTP2_HEADER_ACCESS_CONTROL_ALLOW_HEADERS: 'access-control-allow-headers',
+  HTTP2_HEADER_ACCESS_CONTROL_ALLOW_METHODS: 'access-control-allow-methods',
+  HTTP2_HEADER_ACCESS_CONTROL_ALLOW_ORIGIN: 'access-control-allow-origin',
+  HTTP2_HEADER_ACCESS_CONTROL_EXPOSE_HEADERS: 'access-control-expose-headers',
+  HTTP2_HEADER_ACCESS_CONTROL_REQUEST_HEADERS: 'access-control-request-headers',
+  HTTP2_HEADER_ACCESS_CONTROL_REQUEST_METHOD: 'access-control-request-method',
+  HTTP2_HEADER_AGE: 'age',
+  HTTP2_HEADER_AUTHORIZATION: 'authorization',
+  HTTP2_HEADER_CACHE_CONTROL: 'cache-control',
+  HTTP2_HEADER_CONNECTION: 'connection',
+  HTTP2_HEADER_CONTENT_DISPOSITION: 'content-disposition',
+  HTTP2_HEADER_CONTENT_ENCODING: 'content-encoding',
+  HTTP2_HEADER_COOKIE: 'cookie',
+  HTTP2_HEADER_DATE: 'date',
+  HTTP2_HEADER_ETAG: 'etag',
+  HTTP2_HEADER_FORWARDED: 'forwarded',
+  HTTP2_HEADER_HOST: 'host',
+  HTTP2_HEADER_PROTOCOL: ':protocol',
+  HTTP2_HEADER_IF_MODIFIED_SINCE: 'if-modified-since',
+  HTTP2_HEADER_IF_NONE_MATCH: 'if-none-match',
+  HTTP2_HEADER_IF_RANGE: 'if-range',
+  HTTP2_HEADER_IF_UNMODIFIED_SINCE: 'if-unmodified-since',
+  HTTP2_HEADER_LAST_MODIFIED: 'last-modified',
+  HTTP2_HEADER_LINK: 'link',
+  HTTP2_HEADER_LOCATION: 'location',
+  HTTP2_HEADER_MAX_FORWARDS: 'max-forwards',
+  HTTP2_HEADER_RANGE: 'range',
+  HTTP2_HEADER_REFERER: 'referer',
+  HTTP2_HEADER_RETRY_AFTER: 'retry-after',
+  HTTP2_HEADER_SERVER: 'server',
+  HTTP2_HEADER_SET_COOKIE: 'set-cookie',
+  HTTP2_HEADER_STRICT_TRANSPORT_SECURITY: 'strict-transport-security',
+  HTTP2_HEADER_TRANSFER_ENCODING: 'transfer-encoding',
+  HTTP2_HEADER_UPGRADE_INSECURE_REQUESTS: 'upgrade-insecure-requests',
+  HTTP2_HEADER_UPGRADE: 'upgrade',
+  HTTP2_HEADER_VARY: 'vary',
+  HTTP2_HEADER_X_CONTENT_TYPE_OPTIONS: 'x-content-type-options',
+  HTTP2_HEADER_X_FRAME_OPTIONS: 'x-frame-options',
+  HTTP2_HEADER_X_XSS_PROTECTION: 'x-xss-protection',
+  HTTP2_HEADER_KEEP_ALIVE: 'keep-alive',
+  HTTP2_HEADER_PROXY_CONNECTION: 'proxy-connection',
+  HTTP2_HEADER_ALT_SVC: 'alt-svc',
+  HTTP2_HEADER_CONTENT_SECURITY_POLICY: 'content-security-policy',
+  HTTP2_HEADER_EARLY_DATA: 'early-data',
+  HTTP2_HEADER_EXPECT_CT: 'expect-ct',
+  HTTP2_HEADER_ORIGIN: 'origin',
+  HTTP2_HEADER_PURPOSE: 'purpose',
+  HTTP2_HEADER_TIMING_ALLOW_ORIGIN: 'timing-allow-origin',
+  HTTP2_HEADER_X_FORWARDED_FOR: 'x-forwarded-for',
+  HTTP2_HEADER_PRIORITY: 'priority',
+  HTTP2_HEADER_ACCEPT_CHARSET: 'accept-charset',
+  HTTP2_HEADER_ACCESS_CONTROL_MAX_AGE: 'access-control-max-age',
+  HTTP2_HEADER_ALLOW: 'allow',
+  HTTP2_HEADER_CONTENT_LANGUAGE: 'content-language',
+  HTTP2_HEADER_CONTENT_LOCATION: 'content-location',
+  HTTP2_HEADER_CONTENT_MD5: 'content-md5',
+  HTTP2_HEADER_CONTENT_RANGE: 'content-range',
+  HTTP2_HEADER_DNT: 'dnt',
+  HTTP2_HEADER_EXPECT: 'expect',
+  HTTP2_HEADER_EXPIRES: 'expires',
+  HTTP2_HEADER_FROM: 'from',
+  HTTP2_HEADER_IF_MATCH: 'if-match',
+  HTTP2_HEADER_PREFER: 'prefer',
+  HTTP2_HEADER_PROXY_AUTHENTICATE: 'proxy-authenticate',
+  HTTP2_HEADER_PROXY_AUTHORIZATION: 'proxy-authorization',
+  HTTP2_HEADER_REFRESH: 'refresh',
+  HTTP2_HEADER_TRAILER: 'trailer',
+  HTTP2_HEADER_TK: 'tk',
+  HTTP2_HEADER_VIA: 'via',
+  HTTP2_HEADER_WARNING: 'warning',
+  HTTP2_HEADER_WWW_AUTHENTICATE: 'www-authenticate',
+  HTTP2_HEADER_HTTP2_SETTINGS: 'http2-settings',
+  HTTP2_METHOD_ACL: 'ACL',
+  HTTP2_METHOD_BASELINE_CONTROL: 'BASELINE-CONTROL',
+  HTTP2_METHOD_BIND: 'BIND',
+  HTTP2_METHOD_CHECKIN: 'CHECKIN',
+  HTTP2_METHOD_CHECKOUT: 'CHECKOUT',
+  HTTP2_METHOD_COPY: 'COPY',
+  HTTP2_METHOD_CONNECT: 'CONNECT',
+  HTTP2_METHOD_DELETE: 'DELETE',
+  HTTP2_METHOD_GET: 'GET',
+  HTTP2_METHOD_HEAD: 'HEAD',
+  HTTP2_METHOD_LABEL: 'LABEL',
+  HTTP2_METHOD_LINK: 'LINK',
+  HTTP2_METHOD_LOCK: 'LOCK',
+  HTTP2_METHOD_MERGE: 'MERGE',
+  HTTP2_METHOD_MKACTIVITY: 'MKACTIVITY',
+  HTTP2_METHOD_MKCALENDAR: 'MKCALENDAR',
+  HTTP2_METHOD_MKCOL: 'MKCOL',
+  HTTP2_METHOD_MKREDIRECTREF: 'MKREDIRECTREF',
+  HTTP2_METHOD_MKWORKSPACE: 'MKWORKSPACE',
+  HTTP2_METHOD_MOVE: 'MOVE',
+  HTTP2_METHOD_OPTIONS: 'OPTIONS',
+  HTTP2_METHOD_ORDERPATCH: 'ORDERPATCH',
+  HTTP2_METHOD_PATCH: 'PATCH',
+  HTTP2_METHOD_POST: 'POST',
+  HTTP2_METHOD_PRI: 'PRI',
+  HTTP2_METHOD_PROPFIND: 'PROPFIND',
+  HTTP2_METHOD_PROPPATCH: 'PROPPATCH',
+  HTTP2_METHOD_PUT: 'PUT',
+  HTTP2_METHOD_REBIND: 'REBIND',
+  HTTP2_METHOD_REPORT: 'REPORT',
+  HTTP2_METHOD_SEARCH: 'SEARCH',
+  HTTP2_METHOD_TRACE: 'TRACE',
+  HTTP2_METHOD_UNBIND: 'UNBIND',
+  HTTP2_METHOD_UNCHECKOUT: 'UNCHECKOUT',
+  HTTP2_METHOD_UNLINK: 'UNLINK',
+  HTTP2_METHOD_UNLOCK: 'UNLOCK',
+  HTTP2_METHOD_UPDATE: 'UPDATE',
+  HTTP2_METHOD_UPDATEREDIRECTREF: 'UPDATEREDIRECTREF',
+  HTTP2_METHOD_VERSION_CONTROL: 'VERSION-CONTROL',
+  HTTP_STATUS_CONTINUE: 100,
+  HTTP_STATUS_SWITCHING_PROTOCOLS: 101,
+  HTTP_STATUS_EARLY_HINTS: 103,
+  HTTP_STATUS_OK: 200,
+  HTTP_STATUS_CREATED: 201,
+  HTTP_STATUS_ACCEPTED: 202,
+  HTTP_STATUS_NON_AUTHORITATIVE_INFORMATION: 203,
+  HTTP_STATUS_NO_CONTENT: 204,
+  HTTP_STATUS_RESET_CONTENT: 205,
+  HTTP_STATUS_MULTI_STATUS: 207,
+  HTTP_STATUS_ALREADY_REPORTED: 208,
+  HTTP_STATUS_IM_USED: 226,
+  HTTP_STATUS_MULTIPLE_CHOICES: 300,
+  HTTP_STATUS_MOVED_PERMANENTLY: 301,
+  HTTP_STATUS_FOUND: 302,
+  HTTP_STATUS_SEE_OTHER: 303,
+  HTTP_STATUS_NOT_MODIFIED: 304,
+  HTTP_STATUS_USE_PROXY: 305,
+  HTTP_STATUS_TEMPORARY_REDIRECT: 307,
+  HTTP_STATUS_BAD_REQUEST: 400,
+  HTTP_STATUS_UNAUTHORIZED: 401,
+  HTTP_STATUS_FORBIDDEN: 403,
+  HTTP_STATUS_NOT_FOUND: 404,
+  HTTP_STATUS_METHOD_NOT_ALLOWED: 405,
+  HTTP_STATUS_NOT_ACCEPTABLE: 406,
+  HTTP_STATUS_REQUEST_TIMEOUT: 408,
+  HTTP_STATUS_CONFLICT: 409,
+  HTTP_STATUS_GONE: 410,
+  HTTP_STATUS_LENGTH_REQUIRED: 411,
+  HTTP_STATUS_URI_TOO_LONG: 414,
+  HTTP_STATUS_UNSUPPORTED_MEDIA_TYPE: 415,
+  HTTP_STATUS_RANGE_NOT_SATISFIABLE: 416,
+  HTTP_STATUS_EXPECTATION_FAILED: 417,
+  HTTP_STATUS_TEAPOT: 418,
+  HTTP_STATUS_MISDIRECTED_REQUEST: 421,
+  HTTP_STATUS_UNPROCESSABLE_ENTITY: 422,
+  HTTP_STATUS_LOCKED: 423,
+  HTTP_STATUS_FAILED_DEPENDENCY: 424,
+  HTTP_STATUS_TOO_EARLY: 425,
+  HTTP_STATUS_UPGRADE_REQUIRED: 426,
+  HTTP_STATUS_TOO_MANY_REQUESTS: 429,
+  HTTP_STATUS_REQUEST_HEADER_FIELDS_TOO_LARGE: 431,
+  HTTP_STATUS_UNAVAILABLE_FOR_LEGAL_REASONS: 451,
+  HTTP_STATUS_INTERNAL_SERVER_ERROR: 500,
+  HTTP_STATUS_NOT_IMPLEMENTED: 501,
+  HTTP_STATUS_BAD_GATEWAY: 502,
+  HTTP_STATUS_SERVICE_UNAVAILABLE: 503,
+  HTTP_STATUS_GATEWAY_TIMEOUT: 504,
+  HTTP_STATUS_HTTP_VERSION_NOT_SUPPORTED: 505,
+  HTTP_STATUS_VARIANT_ALSO_NEGOTIATES: 506,
+  HTTP_STATUS_INSUFFICIENT_STORAGE: 507,
+  HTTP_STATUS_LOOP_DETECTED: 508,
+  HTTP_STATUS_BANDWIDTH_LIMIT_EXCEEDED: 509,
+  HTTP_STATUS_NOT_EXTENDED: 510,
+  HTTP_STATUS_NETWORK_AUTHENTICATION_REQUIRED: 511,
+  HTTP_STATUS_PROCESSING: 102,
+  HTTP_STATUS_PARTIAL_CONTENT: 206,
+  HTTP_STATUS_PAYMENT_REQUIRED: 402,
+  HTTP_STATUS_PROXY_AUTHENTICATION_REQUIRED: 407,
+  HTTP_STATUS_PRECONDITION_FAILED: 412,
+  HTTP_STATUS_PAYLOAD_TOO_LARGE: 413,
+  HTTP_STATUS_PRECONDITION_REQUIRED: 428,
+  HTTP_STATUS_PERMANENT_REDIRECT: 308,
   NGHTTP2_FLAG_NONE: 0,
   NGHTTP2_FLAG_END_STREAM: 1,
   NGHTTP2_FLAG_END_HEADERS: 4,
@@ -66,6 +284,7 @@ const DEFAULT_SETTINGS = Object.freeze({
   maxFrameSize: constants.DEFAULT_SETTINGS_MAX_FRAME_SIZE,
   maxConcurrentStreams: constants.DEFAULT_SETTINGS_MAX_CONCURRENT_STREAMS,
   maxHeaderListSize: constants.DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE,
+  enableConnectProtocol: false,
 });
 
 export const sensitiveHeaders = Symbol('nodejs.http2.sensitiveHeaders');
@@ -94,6 +313,25 @@ function http2CompatError(type, code, message) {
   const error = new type(message);
   error.code = code;
   return error;
+}
+
+let statusMessageWarned = false;
+
+function warnUnsupportedStatusMessage(scope) {
+  if (statusMessageWarned) return;
+  statusMessageWarned = true;
+  scope?.process?.emitWarning?.(
+    'Status message is not supported by HTTP/2 (RFC7540 8.1.2.4)',
+    'UnsupportedWarning',
+  );
+}
+
+function invalidHeaderNameError(name) {
+  return http2CompatError(
+    TypeError,
+    'ERR_INVALID_ARG_TYPE',
+    `The "name" argument must be of type string.${invalidArgumentDescription(name)}`,
+  );
 }
 
 function validateCompatHeader(name, value) {
@@ -198,6 +436,148 @@ function rawHeaderPairs(headers) {
     const values = Array.isArray(value) ? value : [value];
     return values.flatMap((item) => [name, item]);
   });
+}
+
+const SETTINGS_FIELDS = [
+  ['headerTableSize', constants.NGHTTP2_SETTINGS_HEADER_TABLE_SIZE, 0, 0xffffffff],
+  ['enablePush', constants.NGHTTP2_SETTINGS_ENABLE_PUSH, 0, 1],
+  ['maxConcurrentStreams', constants.NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 0, 0xffffffff],
+  ['initialWindowSize', constants.NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE, 0, constants.MAX_INITIAL_WINDOW_SIZE],
+  ['maxFrameSize', constants.NGHTTP2_SETTINGS_MAX_FRAME_SIZE, constants.MIN_MAX_FRAME_SIZE, constants.MAX_MAX_FRAME_SIZE],
+  ['maxHeaderListSize', constants.NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE, 0, 0xffffffff],
+  ['enableConnectProtocol', constants.NGHTTP2_SETTINGS_ENABLE_CONNECT_PROTOCOL, 0, 1],
+];
+
+function settingError(name, value, type = RangeError) {
+  return http2CompatError(type, 'ERR_HTTP2_INVALID_SETTING_VALUE', `Invalid value for setting "${name}": ${value}`);
+}
+
+function invalidArgumentDescription(value) {
+  if (value === null || value === undefined) return ` Received ${value}`;
+  if (typeof value === 'object') {
+    const constructorName = value.constructor?.name;
+    return constructorName ? ` Received an instance of ${constructorName}` : ` Received ${String(value)}`;
+  }
+  const inspected = typeof value === 'string' ? `'${value}'` : String(value);
+  return ` Received type ${typeof value} (${inspected})`;
+}
+
+function validateSettings(settings) {
+  if (settings === undefined) return;
+  if (!isRecord(settings)) {
+    throw http2CompatError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The "settings" argument must be of type object');
+  }
+  for (const [name, , min, max] of SETTINGS_FIELDS) {
+    if (settings[name] === undefined) continue;
+    const value = settings[name];
+    if (name === 'enablePush' || name === 'enableConnectProtocol') {
+      if (typeof value !== 'boolean') throw settingError(name, value, TypeError);
+      continue;
+    }
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max) {
+      throw settingError(name, value);
+    }
+  }
+  if (settings.maxHeaderSize !== undefined) {
+    const value = settings.maxHeaderSize;
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 0xffffffff) {
+      throw settingError('maxHeaderSize', value);
+    }
+  }
+  const custom = settings.customSettings;
+  if (custom === undefined) return;
+  if (!isRecord(custom)) throw settingError('customSettings', custom, TypeError);
+  const keys = Object.keys(custom);
+  if (keys.length > 10) throw http2CompatError(RangeError, 'ERR_HTTP2_TOO_MANY_CUSTOM_SETTINGS', 'Too many custom settings');
+  for (const key of keys) {
+    const id = Number(key);
+    const value = custom[key];
+    if (!Number.isInteger(id) || id <= 0 || id > 0xffff || !Number.isInteger(value) || value < 0 || value > 0xffffffff) {
+      throw settingError('customSettings', value);
+    }
+  }
+}
+
+function settingValue(settings, name) {
+  if (name === 'maxHeaderListSize' && settings.maxHeaderSize !== undefined) return settings.maxHeaderSize;
+  if (name === 'enablePush' || name === 'enableConnectProtocol') return Number(settings[name]);
+  return settings[name];
+}
+
+function getPackedSettingsForScope(settings = {}, scope = globalThis) {
+  validateSettings(settings);
+  const records = [];
+  for (const [name, id] of SETTINGS_FIELDS) {
+    if (settings[name] === undefined && !(name === 'maxHeaderListSize' && settings.maxHeaderSize !== undefined)) continue;
+    records.push([id, settingValue(settings, name)]);
+  }
+  for (const key of Object.keys(settings.customSettings || {})) {
+    const id = Number(key);
+    if (id >= 1 && id <= 8 && SETTINGS_FIELDS.some(([, knownId]) => knownId === id)) continue;
+    records.push([id, settings.customSettings[key]]);
+  }
+  const bytes = new Uint8Array(records.length * 6);
+  const view = new DataView(bytes.buffer);
+  records.forEach(([id, value], index) => {
+    const offset = index * 6;
+    view.setUint16(offset, id);
+    view.setUint32(offset + 2, value >>> 0);
+  });
+  return scope.Buffer?.from ? scope.Buffer.from(bytes) : bytes;
+}
+
+export function getPackedSettings(settings, scope = globalThis) {
+  return getPackedSettingsForScope(settings, scope);
+}
+
+export function getUnpackedSettings(buf, options = {}) {
+  if (!ArrayBuffer.isView(buf) || buf.length === undefined) {
+    throw http2CompatError(
+      TypeError,
+      'ERR_INVALID_ARG_TYPE',
+      `The "buf" argument must be an instance of Buffer or TypedArray.${invalidArgumentDescription(buf)}`,
+    );
+  }
+  if (buf.length % 6 !== 0) {
+    throw http2CompatError(RangeError, 'ERR_HTTP2_INVALID_PACKED_SETTINGS_LENGTH', 'Packed settings length must be a multiple of six');
+  }
+  const settings = {};
+  for (let offset = 0; offset < buf.length; offset += 6) {
+    const id = buf[offset] * 0x100 + buf[offset + 1];
+    const value = (buf[offset + 2] * 0x1000000)
+      + (buf[offset + 3] * 0x10000)
+      + (buf[offset + 4] * 0x100)
+      + buf[offset + 5];
+    switch (id) {
+      case 1: settings.headerTableSize = value; break;
+      case 2: settings.enablePush = value !== 0; break;
+      case 3: settings.maxConcurrentStreams = value; break;
+      case 4: settings.initialWindowSize = value; break;
+      case 5: settings.maxFrameSize = value; break;
+      case 6:
+        settings.maxHeaderListSize = value;
+        settings.maxHeaderSize = value;
+        break;
+      case 8: settings.enableConnectProtocol = value !== 0; break;
+      default: (settings.customSettings ||= {})[id] = value;
+    }
+  }
+  if (options?.validate) validateSettings(settings);
+  return settings;
+}
+
+export function performServerHandshake(socket, options = {}) {
+  if (socket && socket._http2ServerSession) {
+    throw http2Error('ERR_HTTP2_SOCKET_BOUND', 'The socket is already bound to an HTTP/2 session');
+  }
+  const session = new ClientHttp2Session(
+    { host: 'localhost', port: 0, protocol: options?.encrypted === false ? 'http:' : 'https:' },
+    { ...options },
+    { scope: globalThis, vfs: options?.vfs, diagnostics: options?.diagnostics },
+  );
+  session.type = constants.NGHTTP2_SESSION_SERVER;
+  if (socket && typeof socket === 'object') socket._http2ServerSession = session;
+  return session;
 }
 
 function serverFor(host, port) {
@@ -330,7 +710,7 @@ function compatibilitySocket(stream) {
 
 class VirtualHttp2Stream extends Duplex {
   constructor(session, options = {}) {
-    super({ highWaterMark: options.highWaterMark });
+    super({ highWaterMark: options.highWaterMark, autoDestroy: false });
     this.session = session;
     this.id = options.id || nextStreamId;
     if (!options.id) nextStreamId += 2;
@@ -346,6 +726,7 @@ class VirtualHttp2Stream extends Duplex {
     this._diagnostics = session._diagnostics;
     this._role = options.role || 'client';
     this._isPush = Boolean(options.push);
+    if (this._role !== 'server') this.additionalHeaders = undefined;
     Object.defineProperty(this, 'constructor', {
       configurable: true,
       value: { name: this._role === 'server' ? 'ServerHttp2Stream' : 'ClientHttp2Stream' },
@@ -399,6 +780,8 @@ class VirtualHttp2Stream extends Duplex {
     }
     return result;
   }
+
+  _read() {}
 
   _bodyBytes() {
     const size = this._body.reduce((total, part) => total + part.byteLength, 0);
@@ -460,12 +843,16 @@ class VirtualHttp2Stream extends Duplex {
   }
 
   _receiveResponse(headers, body, done = false) {
+    const status = headers?.[':status'];
+    if (status >= 100 && status < 200) {
+      this.emit('headers', headers, 0);
+      return;
+    }
     if (!this._responseHeaders) {
       this._responseHeaders = headers;
       this.pending = false;
       if (this._role === 'client') this._publishFinishDiagnostics(headers);
       this.emit('response', headers, 0);
-      this.emit('headers', headers, 0);
     }
     if (body?.byteLength) this.push(body);
     if (done) {
@@ -487,7 +874,11 @@ class VirtualHttp2Stream extends Duplex {
     if (!this.sentHeaders[':status']) this.sentHeaders[':status'] = 200;
     this.headersSent = true;
     if (this._role === 'server') this._publishFinishDiagnostics(this.sentHeaders);
-    this._peer?._receiveResponse(this.sentHeaders, null, Boolean(options.endStream));
+    const wireHeaders = { ...this.sentHeaders };
+    for (const [name, value] of Object.entries(wireHeaders)) {
+      if (Array.isArray(value) && name !== 'set-cookie') wireHeaders[name] = value.join(', ');
+    }
+    schedule(() => this._peer?._receiveResponse(wireHeaders, null, Boolean(options.endStream)));
     return this;
   }
 
@@ -601,19 +992,24 @@ class VirtualHttp2Stream extends Duplex {
   }
 
   additionalHeaders(headers) {
-    if (this._role !== 'server' || !this.headersSent) throw http2Error('ERR_HTTP2_INVALID_STREAM', 'Additional headers require an active response');
+    if (this._role !== 'server' || this.closed || this.destroyed) throw http2Error('ERR_HTTP2_INVALID_STREAM', 'Additional headers require an active response');
     this._peer?.emit('headers', normalizeHeaders(headers), 0);
   }
 
   _sendResponseChunk(bytes) {
     if (!this.headersSent) this.respond({ ':status': 200 });
-    this._peer?._receiveResponse(null, bytes, false);
+    schedule(() => this._peer?._receiveResponse(null, bytes, false));
   }
 
   _finishResponse() {
     if (!this.headersSent) this.respond({ ':status': 200 });
     this.closed = true;
-    this._peer?._receiveResponse(null, this._bodyBytes(), true);
+    const body = this._bodyBytes();
+    schedule(() => {
+      this._peer?._receiveResponse(null, body, true);
+      this._responseComplete = true;
+      this._compatResponse?._finishResponse?.();
+    });
     this._releaseResponseFile();
     this._publishCloseDiagnostics();
     schedule(() => this.emit('close'));
@@ -872,6 +1268,11 @@ export class Http2ServerRequest extends Readable {
     if (!this._compatState.closed) this._stream.setTimeout(milliseconds, callback);
     return this;
   }
+
+  [Symbol.for('nodejs.asyncDispose')]() {
+    this.destroy();
+    return Promise.resolve();
+  }
 }
 
 // Compatibility response surface used by the request-oriented HTTP/2 API.
@@ -891,12 +1292,14 @@ export class Http2ServerResponse extends Stream {
       statusCode: 200,
     };
     this.req = stream?._compatRequest;
-    stream?.once('close', () => {
+    const finishResponse = () => {
       if (this._state.closed) return;
       this._state.closed = true;
       this.emit('finish');
       this.emit('close');
-    });
+    };
+    this._finishResponse = finishResponse;
+    if (stream) stream._compatResponse = this;
   }
 
   get _header() {
@@ -1085,13 +1488,108 @@ export class Http2ServerResponse extends Stream {
 
   getHeader(name) {
     if (typeof name !== 'string') {
-      throw http2CompatError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The "name" argument must be of type string');
+      throw invalidHeaderNameError(name);
     }
     return this._headers[name.trim().toLowerCase()];
   }
 
   getHeaderNames() {
     return Object.keys(this._headers);
+  }
+
+  getHeaders() {
+    return Object.assign(Object.create(null), this._headers);
+  }
+
+  hasHeader(name) {
+    if (typeof name !== 'string') throw invalidHeaderNameError(name);
+    return Object.hasOwn(this._headers, name.trim().toLowerCase());
+  }
+
+  removeHeader(name) {
+    if (typeof name !== 'string') throw invalidHeaderNameError(name);
+    if (this.headersSent) throw http2Error('ERR_HTTP2_HEADERS_SENT', 'Response has already been initiated.');
+    name = name.trim().toLowerCase();
+    if (name === 'date') {
+      this._state.sendDate = false;
+      return;
+    }
+    delete this._headers[name];
+  }
+
+  setHeader(name, value) {
+    if (typeof name !== 'string') throw invalidHeaderNameError(name);
+    if (this.headersSent) throw http2Error('ERR_HTTP2_HEADERS_SENT', 'Response has already been initiated.');
+    name = name.trim().toLowerCase();
+    validateCompatHeader(name, value);
+    this._headers[name] = value;
+  }
+
+  appendHeader(name, value) {
+    if (typeof name !== 'string') throw invalidHeaderNameError(name);
+    if (this.headersSent) throw http2Error('ERR_HTTP2_HEADERS_SENT', 'Response has already been initiated.');
+    name = name.trim().toLowerCase();
+    validateCompatHeader(name, value);
+    if (!Object.hasOwn(this._headers, name)) return this.setHeader(name, value);
+    const current = Array.isArray(this._headers[name]) ? this._headers[name] : [this._headers[name]];
+    this._headers[name] = current.concat(Array.isArray(value) ? value : [value]);
+  }
+
+  get statusMessage() {
+    warnUnsupportedStatusMessage(this._stream?._scope);
+    return '';
+  }
+
+  set statusMessage(value) {
+    warnUnsupportedStatusMessage(this._stream?._scope);
+  }
+
+  flushHeaders() {
+    if (!this._state.closed && !this.headersSent) this.writeHead(this._state.statusCode);
+  }
+
+  writeHead(statusCode, statusMessage, headers) {
+    if (this._state.closed || this._stream.destroyed || this._stream.closed) return this;
+    if (this.headersSent) throw http2Error('ERR_HTTP2_HEADERS_SENT', 'Response has already been initiated.');
+    if (typeof statusMessage === 'string') warnUnsupportedStatusMessage(this._stream?._scope);
+    if (headers === undefined && statusMessage && typeof statusMessage === 'object') headers = statusMessage;
+
+    if (Array.isArray(headers)) {
+      const pairs = Array.isArray(headers[0]) ? headers : Array.from(
+        { length: Math.ceil(headers.length / 2) },
+        (_, index) => [headers[index * 2], headers[index * 2 + 1]],
+      );
+      if (headers.length % 2 !== 0 && !Array.isArray(headers[0])) {
+        throw http2CompatError(TypeError, 'ERR_INVALID_ARG_VALUE', 'The "headers" argument is invalid');
+      }
+      for (const [name] of pairs) this.removeHeader(name);
+      for (const [name, value] of pairs) this.appendHeader(name, value);
+    } else if (headers && typeof headers === 'object') {
+      for (const [name, value] of Object.entries(headers)) this.setHeader(name, value);
+    }
+
+    this.statusCode = statusCode;
+    this._stream.respond({ ...this._headers, ':status': this._state.statusCode }, {
+      endStream: this._state.ending,
+      sendDate: this._state.sendDate,
+    });
+    return this;
+  }
+
+  writeEarlyHints(hints) {
+    if (hints === null || typeof hints !== 'object' || Array.isArray(hints)) {
+      throw http2CompatError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The "hints" argument must be of type object');
+    }
+    const link = hints.link;
+    let linkValue;
+    if (typeof link === 'string') linkValue = link;
+    else if (Array.isArray(link)) linkValue = link.join(', ');
+    else throw http2CompatError(TypeError, 'ERR_INVALID_ARG_VALUE', `The "hints" argument is invalid`);
+    if (!linkValue) return false;
+    if (this.headersSent || this._state.closed) return false;
+    const headers = { ...hints, link: linkValue, ':status': constants.HTTP_STATUS_EARLY_HINTS };
+    this._stream.additionalHeaders(headers);
+    return true;
   }
 }
 
@@ -1418,6 +1916,9 @@ export function createHttp2Module(scope = globalThis, options = {}) {
     createSecureServer,
     constants,
     getDefaultSettings,
+    getPackedSettings: (settings) => getPackedSettingsForScope(settings, scope),
+    getUnpackedSettings,
+    performServerHandshake,
     sensitiveHeaders,
     sensitiveHTTP2Headers,
     ClientHttp2Session,

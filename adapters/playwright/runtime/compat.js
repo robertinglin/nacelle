@@ -45,7 +45,61 @@ function appendQueryValue(target, key, value) {
   else target[key] = [target[key], value];
 }
 
-export function createQuerystring() {
+export function createQuerystring(BufferClass) {
+  const unhexTable = new Int8Array(256).fill(-1);
+  for (let code = 48; code <= 57; code += 1) unhexTable[code] = code - 48;
+  for (let code = 65; code <= 70; code += 1) unhexTable[code] = code - 55;
+  for (let code = 97; code <= 102; code += 1) unhexTable[code] = code - 87;
+
+  const unescapeBuffer = (value, decodeSpaces) => {
+    const s = value;
+    const out = BufferClass.allocUnsafe(s.length);
+    let index = 0;
+    let outIndex = 0;
+    let currentChar;
+    let nextChar;
+    let hexHigh;
+    let hexLow;
+    const maxLength = s.length - 2;
+    let hasHex = false;
+
+    while (index < s.length) {
+      currentChar = s.charCodeAt(index);
+      if (currentChar === 43 && decodeSpaces) {
+        out[outIndex++] = 32;
+        index++;
+        continue;
+      }
+      if (currentChar === 37 && index < maxLength) {
+        currentChar = s.charCodeAt(++index);
+        hexHigh = unhexTable[currentChar];
+        if (!(hexHigh >= 0)) {
+          out[outIndex++] = 37;
+          continue;
+        }
+        nextChar = s.charCodeAt(++index);
+        hexLow = unhexTable[nextChar];
+        if (!(hexLow >= 0)) {
+          out[outIndex++] = 37;
+          index--;
+        } else {
+          hasHex = true;
+          currentChar = hexHigh * 16 + hexLow;
+        }
+      }
+      out[outIndex++] = currentChar;
+      index++;
+    }
+    return hasHex ? out.slice(0, outIndex) : out;
+  };
+
+  const unescape = (value, decodeSpaces) => {
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return unescapeBuffer(value, decodeSpaces).toString();
+    }
+  };
   const stringify = (value, separator = '&', equal = '=') => Object.entries(value || {})
     .flatMap(([key, item]) => (Array.isArray(item) ? item : [item]).map((entry) => (
       `${encodeComponent(key)}${equal}${entry === null || entry === undefined ? '' : encodeComponent(entry)}`
@@ -68,27 +122,257 @@ export function createQuerystring() {
     parse,
     decode: parse,
     escape: encodeURIComponent,
-    unescape: decodeURIComponent,
+    unescapeBuffer,
+    unescape,
   });
 }
 
 export function createStringDecoder() {
-  return class StringDecoder {
-    constructor(encoding = 'utf8') {
-      const normalized = String(encoding).toLowerCase();
-      this.encoding = normalized;
-      const browserEncoding = normalized === 'utf8' ? 'utf-8' : normalized;
-      this.decoder = new TextDecoder(browserEncoding === 'utf-8' ? browserEncoding : 'utf-8');
-    }
+  const continuation = (value) => value >= 0x80 && value <= 0xbf;
 
-    write(value) {
-      return this.decoder.decode(bytes(value), { stream: true });
-    }
+  const utf8Character = (value) => {
+    if (value >= 0xc0 && value <= 0xdf) return 2;
+    if (value >= 0xe0 && value <= 0xef) return 3;
+    if (value >= 0xf0 && value <= 0xf7) return 4;
+    return 0;
+  };
 
-    end(value) {
-      return `${value === undefined ? '' : this.decoder.decode(bytes(value), { stream: true })}${this.decoder.decode()}`;
+  const normalize = (encoding) => {
+    const value = encoding === undefined ? 'utf8' : String(encoding).toLowerCase();
+    switch (value) {
+      case 'utf8':
+      case 'utf-8':
+        return 'utf8';
+      case 'utf16le':
+      case 'utf-16le':
+      case 'ucs2':
+      case 'ucs-2':
+        return 'utf16le';
+      case 'latin1':
+      case 'binary':
+        return 'latin1';
+      case 'ascii':
+      case 'base64':
+      case 'base64url':
+      case 'hex':
+        return value;
+      default: {
+        const error = new TypeError(`Unknown encoding: ${encoding}`);
+        error.code = 'ERR_UNKNOWN_ENCODING';
+        throw error;
+      }
     }
   };
+
+  const viewBytes = (value) => new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+
+  const invalidBuffer = (value) => {
+    let received;
+    if (value === null) received = 'null';
+    else if (value === undefined) received = 'undefined';
+    else if (value?.constructor?.name) received = `an instance of ${value.constructor.name}`;
+    else received = `type ${typeof value}`;
+    const error = new TypeError(
+      `The "buf" argument must be an instance of Buffer, TypedArray, or DataView. Received ${received}`,
+    );
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    return error;
+  };
+
+  const invalidThis = () => {
+    const error = new TypeError('Invalid this');
+    error.code = 'ERR_INVALID_THIS';
+    return error;
+  };
+
+  const encodeBase64 = (input, urlSafe) => {
+    let binary = '';
+    for (const value of input) binary += String.fromCharCode(value);
+    const encoded = btoa(binary);
+    return urlSafe ? encoded.replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '') : encoded;
+  };
+
+  const encodeHex = (input) => {
+    let result = '';
+    for (const value of input) result += value.toString(16).padStart(2, '0');
+    return result;
+  };
+
+  const decodeUtf8 = (input, decoder) => {
+    let result = '';
+    let index = 0;
+    let pending = new Uint8Array(0);
+    while (index < input.length) {
+      const total = utf8Character(input[index]);
+      if (!total) {
+        result += input[index] <= 0x7f
+          ? String.fromCharCode(input[index])
+          : decoder.decode(input.slice(index, index + 1));
+        index += 1;
+        continue;
+      }
+      let end = index + 1;
+      while (end < input.length && end < index + total && continuation(input[end])) end += 1;
+      if (end - index < total) {
+        if (end === input.length) {
+          pending = input.slice(index);
+          break;
+        }
+        result += decoder.decode(input.slice(index, end));
+        index = end;
+        continue;
+      }
+      result += decoder.decode(input.slice(index, index + total));
+      index += total;
+    }
+    return { result, pending };
+  };
+
+  const asLastChar = (value) => {
+    const BufferClass = globalThis.Buffer;
+    if (typeof BufferClass?.from !== 'function') return value;
+    try {
+      return BufferClass.from(value.buffer, value.byteOffset, value.byteLength);
+    } catch {
+      return BufferClass.from(value);
+    }
+  };
+
+  function StringDecoder(encoding) {
+    this.encoding = normalize(encoding);
+    this._decoder = this.encoding === 'utf8' ? new TextDecoder('utf-8') : null;
+    this._pending = new Uint8Array(0);
+    this._lastChar = new Uint8Array(4);
+    this._lastNeed = 0;
+    this._lastTotal = 0;
+  }
+
+  StringDecoder.prototype.write = function write(value) {
+    if (typeof value === 'string') return value;
+    if (!ArrayBuffer.isView(value)) throw invalidBuffer(value);
+    if (!this || !this._pending || !this.encoding) throw invalidThis();
+    const input = viewBytes(value);
+
+    if (this.encoding === 'utf8') {
+      const previous = this._pending;
+      const combined = new Uint8Array(previous.length + input.length);
+      combined.set(previous);
+      combined.set(input, previous.length);
+      const decoded = decodeUtf8(combined, this._decoder);
+      this._pending = decoded.pending;
+      this._lastChar.fill(0);
+      this._lastChar.set(this._pending);
+      const total = this._pending.length ? utf8Character(this._pending[0]) : 0;
+      this._lastNeed = total - this._pending.length;
+      this._lastTotal = total;
+      return decoded.result;
+    }
+
+    if (this.encoding === 'utf16le') {
+      const previous = this._pending;
+      const combined = new Uint8Array(previous.length + input.length);
+      combined.set(previous);
+      combined.set(input, previous.length);
+      let completeLength = combined.length & ~1;
+      let holdFrom = completeLength;
+      let result = '';
+      for (let index = 0; index < completeLength; index += 2) {
+        const code = combined[index] | (combined[index + 1] << 8);
+        if (code >= 0xd800 && code <= 0xdbff) {
+          if (index + 3 >= completeLength) {
+            if (index < previous.length || combined.length - index === 2) {
+              holdFrom = index;
+              break;
+            }
+            result += String.fromCharCode(code);
+            holdFrom = completeLength;
+            break;
+          }
+          const next = combined[index + 2] | (combined[index + 3] << 8);
+          result += String.fromCharCode(code);
+          if (next >= 0xdc00 && next <= 0xdfff) {
+            result += String.fromCharCode(next);
+            index += 2;
+          }
+        } else {
+          result += String.fromCharCode(code);
+        }
+      }
+      this._pending = combined.slice(holdFrom);
+      this._lastChar.fill(0);
+      this._lastChar.set(this._pending.slice(0, 4));
+      const firstCode = this._pending.length >= 2
+        ? this._pending[0] | (this._pending[1] << 8)
+        : 0;
+      const total = firstCode >= 0xd800 && firstCode <= 0xdbff ? 4 : 2;
+      this._lastNeed = this._pending.length ? total - this._pending.length : 0;
+      this._lastTotal = this._pending.length ? total : 0;
+      return result;
+    }
+
+    if (this.encoding === 'base64' || this.encoding === 'base64url') {
+      const previous = this._pending;
+      const combined = new Uint8Array(previous.length + input.length);
+      combined.set(previous);
+      combined.set(input, previous.length);
+      const completeLength = combined.length - (combined.length % 3);
+      const result = encodeBase64(combined.slice(0, completeLength), this.encoding === 'base64url');
+      this._pending = combined.slice(completeLength);
+      this._lastChar.fill(0);
+      this._lastChar.set(this._pending);
+      this._lastNeed = this._pending.length ? 3 - this._pending.length : 0;
+      this._lastTotal = this._pending.length ? 3 : 0;
+      return result;
+    }
+
+    if (this.encoding === 'hex') return encodeHex(input);
+    let result = '';
+    for (const byte of input) result += String.fromCharCode(this.encoding === 'ascii' ? byte & 0x7f : byte);
+    return result;
+  };
+
+  StringDecoder.prototype.end = function end(value) {
+    if (!this || !this._pending || !this.encoding) throw invalidThis();
+    let result = value === undefined ? '' : this.write(value);
+    if (this.encoding === 'utf8') {
+      if (this._pending.length) result += this._decoder.decode(this._pending);
+    }
+    else if (this.encoding === 'utf16le') {
+      if (this._pending.length >= 2) result += String.fromCharCode(this._pending[0] | (this._pending[1] << 8));
+    } else if (this.encoding === 'base64' || this.encoding === 'base64url') {
+      result += encodeBase64(this._pending, this.encoding === 'base64url');
+    }
+    this._pending = new Uint8Array(0);
+    this._lastNeed = 0;
+    this._lastTotal = 0;
+    return result;
+  };
+
+  StringDecoder.prototype.text = function text(value, offset) {
+    if (!ArrayBuffer.isView(value)) throw invalidBuffer(value);
+    this.end();
+    return this.write(viewBytes(value).subarray(offset));
+  };
+
+  Object.defineProperties(StringDecoder.prototype, {
+    lastChar: {
+      configurable: true,
+      enumerable: true,
+      get() { return asLastChar(this._lastChar); },
+    },
+    lastNeed: {
+      configurable: true,
+      enumerable: true,
+      get() { return this._lastNeed; },
+    },
+    lastTotal: {
+      configurable: true,
+      enumerable: true,
+      get() { return this._lastTotal; },
+    },
+  });
+
+  return StringDecoder;
 }
 
 function tag(value) {
@@ -141,16 +425,73 @@ function isRegExp(value) {
 
 const NOT_HTTP_TOKEN_CODE_POINT = /[^!#$%&'*+\-.^_`|~A-Za-z0-9]/;
 const NOT_HTTP_QUOTED_STRING_CODE_POINT = /[^\t\u0020-~\u0080-\u00FF]/;
+const MIME_LEADING_WHITESPACE = /[^\r\n\t ]|$/;
+const MIME_TRAILING_WHITESPACE = /[\r\n\t ]*$/;
 
 function invalidMimeSyntax(production, value, invalidIndex) {
   const suffix = invalidIndex === -1 ? '' : ` at ${invalidIndex}`;
   const error = new TypeError(`The MIME syntax for a ${production} in "${value}" is invalid${suffix}`);
+  error.name = 'TypeError [ERR_INVALID_MIME_SYNTAX]';
   error.code = 'ERR_INVALID_MIME_SYNTAX';
   return error;
 }
 
+function asciiLower(value) {
+  return value.replace(/[A-Z]/g, (character) => character.toLowerCase());
+}
+
+function parseMimeParams(serialized, params) {
+  let position = 0;
+  while (position < serialized.length) {
+    while (position < serialized.length && /[\r\n\t ]/.test(serialized[position])) position += 1;
+    if (serialized[position] === ';') position += 1;
+    while (position < serialized.length && /[\r\n\t ]/.test(serialized[position])) position += 1;
+    if (position >= serialized.length) break;
+
+    const equals = serialized.indexOf('=', position);
+    const semicolon = serialized.indexOf(';', position);
+    if (equals === -1 || (semicolon !== -1 && semicolon < equals)) {
+      if (semicolon === -1) break;
+      position = semicolon + 1;
+      continue;
+    }
+
+    const name = asciiLower(serialized.slice(position, equals));
+    position = equals + 1;
+    let value;
+    if (serialized[position] === '"') {
+      position += 1;
+      let quoted = '';
+      while (position < serialized.length) {
+        const character = serialized[position++];
+        if (character === '"') break;
+        if (character === '\\' && position < serialized.length) quoted += serialized[position++];
+        else quoted += character;
+      }
+      value = quoted;
+    } else {
+      const end = serialized.indexOf(';', position);
+      const raw = end === -1 ? serialized.slice(position) : serialized.slice(position, end);
+      value = raw.replace(MIME_TRAILING_WHITESPACE, '');
+      position = end === -1 ? serialized.length : end;
+    }
+    if (name.length > 0 && !NOT_HTTP_TOKEN_CODE_POINT.test(name)
+      && value !== undefined && !NOT_HTTP_QUOTED_STRING_CODE_POINT.test(value)
+      && !params.has(name)) {
+      params.set(name, value);
+    }
+    if (serialized[position] === ';') position += 1;
+  }
+}
+
 class MIMEParams {
   #data = new Map();
+
+  static from(serialized) {
+    const params = new MIMEParams();
+    parseMimeParams(String(serialized), params.#data);
+    return params;
+  }
 
   delete(name) {
     this.#data.delete(name);
@@ -203,6 +544,9 @@ class MIMEParams {
   }
 }
 
+const createMIMEParams = MIMEParams.from;
+delete MIMEParams.from;
+
 Object.defineProperty(MIMEParams.prototype, Symbol.iterator, {
   configurable: true,
   value: MIMEParams.prototype.entries,
@@ -211,6 +555,93 @@ Object.defineProperty(MIMEParams.prototype, Symbol.iterator, {
 Object.defineProperty(MIMEParams.prototype, 'toJSON', {
   configurable: true,
   value: MIMEParams.prototype.toString,
+  writable: true,
+});
+
+const mimeTypeInstances = new WeakSet();
+
+class MIMEType {
+  #type;
+  #subtype;
+  #parameters;
+
+  constructor(string) {
+    string = `${string}`;
+    const start = string.search(MIME_LEADING_WHITESPACE);
+    const slash = string.indexOf('/', start);
+    const rawType = slash === -1 ? string.slice(start) : string.slice(start, slash);
+    const invalidTypeIndex = rawType.search(NOT_HTTP_TOKEN_CODE_POINT);
+    if (rawType.length === 0 || invalidTypeIndex !== -1 || slash === -1) {
+      throw invalidMimeSyntax('type', string, invalidTypeIndex);
+    }
+
+    const subtypeStart = slash + 1;
+    const semicolon = string.indexOf(';', subtypeStart);
+    const rawSubtype = semicolon === -1
+      ? string.slice(subtypeStart)
+      : string.slice(subtypeStart, semicolon);
+    const subtype = rawSubtype.slice(0, rawSubtype.search(MIME_TRAILING_WHITESPACE));
+    const invalidSubtypeIndex = subtype.search(NOT_HTTP_TOKEN_CODE_POINT);
+    if (subtype.length === 0 || invalidSubtypeIndex !== -1) {
+      throw invalidMimeSyntax('subtype', string, invalidSubtypeIndex);
+    }
+
+    this.#type = asciiLower(rawType);
+    this.#subtype = asciiLower(subtype);
+    this.#parameters = createMIMEParams(semicolon === -1 ? '' : string.slice(semicolon));
+    mimeTypeInstances.add(this);
+  }
+
+  get type() {
+    if (!mimeTypeInstances.has(this)) throw new TypeError('Invalid receiver');
+    return this.#type;
+  }
+
+  set type(value) {
+    if (!mimeTypeInstances.has(this)) throw new TypeError('Invalid receiver');
+    value = `${value}`;
+    const invalidIndex = value.search(NOT_HTTP_TOKEN_CODE_POINT);
+    if (value.length === 0 || invalidIndex !== -1) {
+      throw invalidMimeSyntax('type', value, invalidIndex);
+    }
+    this.#type = asciiLower(value);
+  }
+
+  get subtype() {
+    if (!mimeTypeInstances.has(this)) throw new TypeError('Invalid receiver');
+    return this.#subtype;
+  }
+
+  set subtype(value) {
+    if (!mimeTypeInstances.has(this)) throw new TypeError('Invalid receiver');
+    value = `${value}`;
+    const invalidIndex = value.search(NOT_HTTP_TOKEN_CODE_POINT);
+    if (value.length === 0 || invalidIndex !== -1) {
+      throw invalidMimeSyntax('subtype', value, invalidIndex);
+    }
+    this.#subtype = asciiLower(value);
+  }
+
+  get essence() {
+    if (!mimeTypeInstances.has(this)) throw new TypeError('Invalid receiver');
+    return `${this.#type}/${this.#subtype}`;
+  }
+
+  get params() {
+    if (!mimeTypeInstances.has(this)) throw new TypeError('Invalid receiver');
+    return this.#parameters;
+  }
+
+  toString() {
+    if (!mimeTypeInstances.has(this)) throw new TypeError('Invalid receiver');
+    const params = this.#parameters.toString();
+    return `${this.essence}${params ? `;${params}` : ''}`;
+  }
+}
+
+Object.defineProperty(MIMEType.prototype, 'toJSON', {
+  configurable: true,
+  value: MIMEType.prototype.toString,
   writable: true,
 });
 
@@ -429,6 +860,17 @@ function systemErrorName(code) {
 function systemErrorMessage(code) {
   validateSystemErrorCode(code);
   return SYSTEM_ERROR_MAP.get(code)?.[1] || `Unknown system error ${code}`;
+}
+
+function errnoException(err, syscall, path) {
+  validateSystemErrorCode(err);
+  const code = systemErrorName(err);
+  const suffix = path ? ` ${path}` : '';
+  const error = new Error(`${syscall} ${code}${suffix}`);
+  error.errno = err;
+  error.code = code;
+  error.syscall = syscall;
+  return error;
 }
 
 function exceptionWithHostPort(err, syscall, address, port) {
@@ -1247,12 +1689,69 @@ function createDebug(scope) {
   };
 }
 
-export function createUtilModule(scope = globalThis) {
-  const types = createUtilTypes(scope);
+export function installTextEncoderInspect(scope = globalThis) {
+  const TextEncoderClass = scope?.TextEncoder || globalThis.TextEncoder;
+  if (typeof TextEncoderClass !== 'function' || !TextEncoderClass.prototype) return;
+  const symbol = Symbol.for('nodejs.util.inspect.custom');
+  Object.defineProperty(TextEncoderClass.prototype, symbol, {
+    configurable: true,
+    value(depth, options) {
+      if (!(this instanceof TextEncoderClass)) {
+        const error = new TypeError('Value of "this" must be of type TextEncoder');
+        error.code = 'ERR_INVALID_THIS';
+        throw error;
+      }
+      if (typeof depth === 'number' && depth < 0) return this;
+      let encoding;
+      try {
+        encoding = this.encoding;
+      } catch {
+        const error = new TypeError('Value of "this" must be of type TextEncoder');
+        error.code = 'ERR_INVALID_THIS';
+        throw error;
+      }
+      return `{ encoding: ${runtimeInspect(encoding, options || {})} }`;
+    },
+    writable: true,
+  });
+}
+
+export function installTextDecoderInspect(scope = globalThis) {
+  const TextDecoderClass = scope?.TextDecoder || globalThis.TextDecoder;
+  if (typeof TextDecoderClass !== 'function' || !TextDecoderClass.prototype) return;
+  const symbol = Symbol.for('nodejs.util.inspect.custom');
+  Object.defineProperty(TextDecoderClass.prototype, symbol, {
+    configurable: true,
+    value(depth, options) {
+      if (!(this instanceof TextDecoderClass)) {
+        const error = new TypeError('Value of "this" must be of type TextDecoder');
+        error.code = 'ERR_INVALID_THIS';
+        throw error;
+      }
+      if (typeof depth === 'number' && depth < 0) return this;
+      try {
+        const constructor = this.constructor?.name || TextDecoderClass.name || 'TextDecoder';
+        return `${constructor} { encoding: ${runtimeInspect(this.encoding, options || {})}, fatal: ${this.fatal}, ignoreBOM: ${this.ignoreBOM} }`;
+      } catch {
+        const error = new TypeError('Value of "this" must be of type TextDecoder');
+        error.code = 'ERR_INVALID_THIS';
+        throw error;
+      }
+    },
+    writable: true,
+  });
+}
+
+export function createUtilModule(scope = globalThis, keyObjectResolver) {
+  installTextEncoderInspect(scope);
+  installTextDecoderInspect(scope);
+  const types = createUtilTypes(scope, keyObjectResolver);
   const BufferClass = scope.Buffer;
   return Object.freeze({
+    _errnoException: errnoException,
     _exceptionWithHostPort: exceptionWithHostPort,
     MIMEParams,
+    MIMEType,
     callbackify: (original) => callbackify(original, scope),
     debug: createDebug(scope),
     diff,
@@ -1307,14 +1806,29 @@ export function createUtilModule(scope = globalThis) {
   });
 }
 
-export function createUtilTypes(scope = globalThis) {
+export function createUtilTypes(scope = globalThis, keyObjectResolver = () => undefined) {
   const isTag = (name) => (value) => tag(value) === `[object ${name}]`;
+  const isBigIntObject = (value) => {
+    if (value === null || typeof value !== 'object') return false;
+    try {
+      BigInt.prototype.valueOf.call(value);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const isFloat16Array = (value) => ArrayBuffer.isView(value) && tag(value) === '[object Float16Array]';
+  const isKeyObject = (value) => {
+    const KeyObject = keyObjectResolver?.();
+    return typeof KeyObject === 'function' && value instanceof KeyObject;
+  };
   return Object.freeze({
     isAnyArrayBuffer: (value) => value instanceof ArrayBuffer || (typeof scope.SharedArrayBuffer === 'function' && value instanceof scope.SharedArrayBuffer),
     isArrayBuffer: (value) => value instanceof ArrayBuffer,
     isArrayBufferView: (value) => ArrayBuffer.isView(value),
     isArgumentsObject: isTag('Arguments'),
     isAsyncFunction: isTag('AsyncFunction'),
+    isBigIntObject,
     isBigInt64Array: (value) => value instanceof BigInt64Array,
     isBigUint64Array: (value) => value instanceof BigUint64Array,
     isBooleanObject: isTag('Boolean'),
@@ -1324,11 +1838,13 @@ export function createUtilTypes(scope = globalThis) {
     isDate: isTag('Date'),
     isFloat32Array: (value) => value instanceof Float32Array,
     isFloat64Array: (value) => value instanceof Float64Array,
+    isFloat16Array,
     isGeneratorFunction: isTag('GeneratorFunction'),
     isGeneratorObject: isTag('Generator'),
     isInt16Array: (value) => value instanceof Int16Array,
     isInt32Array: (value) => value instanceof Int32Array,
     isInt8Array: (value) => value instanceof Int8Array,
+    isKeyObject,
     isMap: (value) => value instanceof Map,
     isNativeError: (value) => value instanceof Error,
     isNumberObject: isTag('Number'),
@@ -1358,16 +1874,51 @@ export function createConstants() {
     O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2, O_CREAT: 64, O_EXCL: 128, O_TRUNC: 512, O_APPEND: 1024,
     O_NOCTTY: 256, O_NONBLOCK: 2048, O_DSYNC: 4096, O_DIRECT: 16384,
     O_DIRECTORY: 65536, O_NOFOLLOW: 131072, O_NOATIME: 0x40000, O_SYNC: 1052672,
+    S_IFSOCK: 0o140000,
+    S_IRGRP: 0o040,
+    S_IROTH: 0o004,
+    S_IRUSR: 0o400,
+    S_IRWXG: 0o070,
+    S_IRWXO: 0o007,
+    S_IRWXU: 0o700,
+    S_IWGRP: 0o020,
     F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1,
     COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4,
-    SIGINT: 2, SIGTERM: 15, SIGKILL: 9, SIGPIPE: 13,
-    UV_DIRENT_FILE: 1, UV_DIRENT_DIR: 2, UV_DIRENT_LINK: 3,
+    UV_FS_COPYFILE_EXCL: 1, UV_FS_COPYFILE_FICLONE: 2, UV_FS_COPYFILE_FICLONE_FORCE: 4,
+    UV_FS_O_FILEMAP: 0, UV_FS_SYMLINK_DIR: 1, UV_FS_SYMLINK_JUNCTION: 2,
+    RTLD_LAZY: 1, RTLD_NOW: 2, RTLD_GLOBAL: 256, RTLD_LOCAL: 0, RTLD_DEEPBIND: 8,
+    SIGCHLD: 17, SIGCONT: 18, SIGFPE: 8, SIGHUP: 1, SIGILL: 4, SIGINT: 2, SIGIO: 29, SIGIOT: 6,
+    SIGTERM: 15,
+    SIGKILL: 9, SIGPOLL: 29, SIGPIPE: 13, SIGABRT: 6, SIGALRM: 14, SIGBUS: 7,
+    SIGPROF: 27, SIGPWR: 30, SIGQUIT: 3, SIGSEGV: 11, SIGSTKFLT: 16, SIGSTOP: 19, SIGSYS: 31, SIGTRAP: 5,
+    UV_DIRENT_UNKNOWN: 0, UV_DIRENT_FILE: 1, UV_DIRENT_DIR: 2, UV_DIRENT_LINK: 3,
+    UV_DIRENT_FIFO: 4, UV_DIRENT_SOCKET: 5, UV_DIRENT_CHAR: 6, UV_DIRENT_BLOCK: 7,
+    S_IFMT: 0o170000, S_IFIFO: 0o010000, S_IFCHR: 0o020000, S_IFDIR: 0o040000,
+    S_IFBLK: 0o060000, S_IFREG: 0o100000, S_IFLNK: 0o120000,
+    S_IWUSR: 0o200, S_IXUSR: 0o100,
+    S_IXGRP: 0o010,
+    S_IWOTH: 0o002, S_IXOTH: 0o001,
     crypto: Object.freeze({
       DH_CHECK_P_NOT_PRIME: 1,
       DH_CHECK_P_NOT_SAFE_PRIME: 2,
       DH_NOT_SUITABLE_GENERATOR: 8,
       DH_UNABLE_TO_CHECK_GENERATOR: 4,
+      TLS1_VERSION: 769,
+      TLS1_1_VERSION: 770,
+      TLS1_2_VERSION: 771,
+      TLS1_3_VERSION: 772,
+      OPENSSL_VERSION_NUMBER: 810549360,
       ENGINE_METHOD_ALL: 0,
+      ENGINE_METHOD_CIPHERS: 64,
+      ENGINE_METHOD_DH: 4,
+      ENGINE_METHOD_DIGESTS: 128,
+      ENGINE_METHOD_DSA: 2,
+      ENGINE_METHOD_EC: 2048,
+      ENGINE_METHOD_NONE: 0,
+      ENGINE_METHOD_PKEY_ASN1_METHS: 1024,
+      ENGINE_METHOD_PKEY_METHS: 512,
+      ENGINE_METHOD_RAND: 8,
+      defaultCoreCipherList: 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384:DHE-RSA-AES256-SHA384:ECDHE-RSA-AES256-SHA256:DHE-RSA-AES256-SHA256:HIGH:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!SRP:!CAMELLIA',
       POINT_CONVERSION_COMPRESSED: 2,
       SSL_OP_ALL: 2147485776,
       SSL_OP_ALLOW_NO_DHE_KEX: 1024,
@@ -1383,6 +1934,15 @@ export function createConstants() {
       SSL_OP_NO_QUERY_MTU: 4096,
       SSL_OP_NO_RENEGOTIATION: 1073741824,
       SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION: 65536,
+      SSL_OP_TLS_ROLLBACK_BUG: 8388608,
+      SSL_OP_NO_SSLv2: 0,
+      SSL_OP_NO_SSLv3: 33554432,
+      SSL_OP_NO_TICKET: 16384,
+      SSL_OP_NO_TLSv1: 67108864,
+      SSL_OP_NO_TLSv1_1: 268435456,
+      SSL_OP_NO_TLSv1_2: 134217728,
+      SSL_OP_NO_TLSv1_3: 536870912,
+      SSL_OP_PRIORITIZE_CHACHA: 2097152,
     }),
   });
 }

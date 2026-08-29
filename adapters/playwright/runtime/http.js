@@ -905,6 +905,165 @@ function validateServerOptions(options) {
   throw error;
 }
 
+function virtualTlsSession(seed, BufferClass) {
+  let first = 0x811c9dc5;
+  let second = 0x9e3779b9;
+  for (let index = 0; index < seed.length; index += 1) {
+    const code = seed.charCodeAt(index);
+    first ^= code;
+    first = Math.imul(first, 0x01000193);
+    second ^= code + index;
+    second = Math.imul(second, 0x85ebca6b);
+  }
+  const bytes = new Uint8Array(16);
+  for (let index = 0; index < bytes.length; index += 1) {
+    const word = index < 8 ? first : second;
+    bytes[index] = (word >>> ((index % 4) * 8)) & 0xff;
+  }
+  return typeof BufferClass?.from === 'function' ? BufferClass.from(bytes) : bytes;
+}
+
+function httpsPfxAgentKey(pfx, passphrase) {
+  if (!Array.isArray(pfx)) return pfx;
+  let key = '';
+  for (const value of pfx) {
+    const raw = value?.buf || value;
+    const pass = value?.passphrase || passphrase;
+    key += `:${raw}:${pass}`;
+  }
+  return key;
+}
+
+function httpsTicketKeys(BufferClass) {
+  const bytes = new Uint8Array(48);
+  return typeof BufferClass?.from === 'function' ? BufferClass.from(bytes) : bytes;
+}
+
+function httpsBufferCopy(value, BufferClass) {
+  if (typeof BufferClass?.from === 'function') return BufferClass.from(value);
+  return new Uint8Array(value);
+}
+
+function validateHttpsOptions(options, name = 'options') {
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    throw invalidArgumentType(name, 'object', options);
+  }
+}
+
+function validateHttpsTicketKeys(keys, BufferClass) {
+  if (!BufferClass?.isBuffer?.(keys)) {
+    throw invalidArgumentType('keys', 'a 48-byte buffer', keys);
+  }
+  if (keys.byteLength !== 48) {
+    const error = new TypeError('Session ticket keys must be a 48-byte buffer');
+    error.code = 'ERR_INVALID_ARG_VALUE';
+    throw error;
+  }
+}
+
+function httpsCertificateNames(value, scope) {
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => httpsCertificateNames(entry?.buf || entry, scope));
+  }
+  if (value && typeof value.toString === 'function') {
+    const text = value.toString();
+    if (text.includes('BEGIN CERTIFICATE')) value = text;
+  }
+  let bytes;
+  if (typeof value === 'string' && value.includes('BEGIN CERTIFICATE')) {
+    const body = value.replace(/-----BEGIN CERTIFICATE-----|-----END CERTIFICATE-----|\s+/g, '');
+    try {
+      const binary = (scope.atob || atob)(body);
+      bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    } catch {
+      return [];
+    }
+  } else if (value instanceof ArrayBuffer) {
+    bytes = new Uint8Array(value);
+  } else if (ArrayBuffer.isView(value)) {
+    bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  } else if (typeof value.byteLength === 'number' || typeof value.length === 'number') {
+    const length = Number(value.byteLength ?? value.length);
+    bytes = Uint8Array.from({ length }, (_item, index) => Number(value[index]) || 0);
+  } else {
+    return [];
+  }
+  const oid = [0x06, 0x03, 0x55, 0x04, 0x03];
+  const names = [];
+  const Decoder = scope.TextDecoder || TextDecoder;
+  for (let index = 0; index <= bytes.length - oid.length - 2; index += 1) {
+    if (!oid.every((byte, offset) => bytes[index + offset] === byte)) continue;
+    const length = bytes[index + oid.length + 1];
+    if ((length & 0x80) || index + oid.length + 2 + length > bytes.length) continue;
+    const name = new Decoder().decode(bytes.subarray(index + oid.length + 2, index + oid.length + 2 + length));
+    if (name) names.push(name);
+  }
+  return names;
+}
+
+function httpsCertificate(value, fallbackHostname, scope) {
+  const names = httpsCertificateNames(value, scope);
+  // In the DER certificate the issuer is commonly encoded before the
+  // subject; the last common name is the leaf certificate's subject.
+  const commonName = names.at(-1) || String(fallbackHostname || 'localhost');
+  return {
+    subject: { CN: commonName },
+    issuer: { CN: names[0] || commonName },
+    subjectaltname: `DNS:${commonName}`,
+  };
+}
+
+function httpsCheckServerIdentity(hostname, certificate) {
+  const host = String(hostname || '').replace(/\.$/, '').toLowerCase();
+  const names = String(certificate?.subjectaltname || '')
+    .split(/,\s*/)
+    .map((value) => value.replace(/^DNS:/i, '').toLowerCase())
+    .filter(Boolean);
+  const commonName = String(certificate?.subject?.CN || '').toLowerCase();
+  const valid = [...names, commonName].some((name) => {
+    if (!name.includes('*')) return name === host;
+    const [prefix, suffix] = name.split('*');
+    return host.startsWith(prefix) && host.endsWith(suffix)
+      && host.slice(prefix.length, host.length - suffix.length).includes('.') === false;
+  });
+  if (valid) return undefined;
+  const displayName = certificate?.subject?.CN || '';
+  const error = new Error(
+    `Hostname/IP does not match certificate's altnames: Host: ${host}. is not cert's CN: ${displayName}`,
+  );
+  error.code = 'ERR_TLS_CERT_ALTNAME_INVALID';
+  return error;
+}
+
+function httpsAuthorizationError(clientOptions, serverOptions, scope) {
+  if (clientOptions?.rejectUnauthorized === false || !serverOptions?.cert) return undefined;
+  const certificate = httpsCertificate(serverOptions.cert, clientOptions.servername, scope);
+  const trustedNames = httpsCertificateNames(clientOptions.ca, scope);
+  if (clientOptions.ca !== undefined
+    && trustedNames.length
+    && certificate.issuer?.CN
+    && !trustedNames.includes(certificate.issuer.CN)) {
+    const error = new Error('unable to verify the first certificate');
+    error.code = 'UNABLE_TO_VERIFY_LEAF_SIGNATURE';
+    return error;
+  }
+  const checker = clientOptions.checkServerIdentity;
+  if (typeof checker === 'function') {
+    try {
+      return checker(
+        clientOptions.servername || clientOptions.hostname || clientOptions.host || 'localhost',
+        certificate,
+      ) || undefined;
+    } catch (error) {
+      return error;
+    }
+  }
+  return httpsCheckServerIdentity(
+    clientOptions.servername || clientOptions.hostname || clientOptions.host || 'localhost',
+    certificate,
+  );
+}
+
 function serverListenOptions(args) {
   let options = {};
   let callback;
@@ -940,11 +1099,14 @@ function hostMatches(bindingHost, requestHost) {
 function createDeferredBody() {
   const chunks = [];
   let closed = false;
+  let failure = null;
   let pendingRead = null;
-  const wake = (result) => {
+  const wake = (result, error = null) => {
     const resolve = pendingRead;
     pendingRead = null;
-    resolve?.(result);
+    if (!resolve) return;
+    if (error) resolve.reject(error);
+    else resolve.resolve(result);
   };
   const body = {
     enqueue(chunk) {
@@ -957,12 +1119,20 @@ function createDeferredBody() {
       closed = true;
       if (!chunks.length) wake({ value: undefined, done: true });
     },
+    error(reason) {
+      if (closed) return;
+      closed = true;
+      failure = reason;
+      chunks.length = 0;
+      wake(undefined, reason);
+    },
     getReader() {
       return {
         read() {
           if (chunks.length) return Promise.resolve({ value: chunks.shift(), done: false });
+          if (failure) return Promise.reject(failure);
           if (closed) return Promise.resolve({ value: undefined, done: true });
-          return new Promise((resolve) => { pendingRead = resolve; });
+          return new Promise((resolve, reject) => { pendingRead = { resolve, reject }; });
         },
         cancel() {
           closed = true;
@@ -1065,7 +1235,6 @@ class VirtualServerRequest extends Readable {
     this.httpVersion = '1.1';
     this.complete = false;
     this.aborted = false;
-    this.readableEnded = false;
     this.readableComplete = false;
     this.socket = null;
     this.connection = null;
@@ -1085,7 +1254,6 @@ class VirtualServerRequest extends Readable {
       if (this.destroyed) return;
       if (this._body.byteLength) this.push(nodeChunk(this._body, this._scope, this._BufferClass));
       this.complete = true;
-      this.readableEnded = true;
       this.readableComplete = true;
       this.push(null);
     });
@@ -1686,10 +1854,10 @@ class VirtualServerResponse extends Writable {
       write(chunk, _encoding, callback) {
         this._chunks.push(new Uint8Array(chunk));
         const responseSocket = this.connection || this.socket;
-        if (responseSocket && typeof responseSocket.bytesWritten === 'number') {
-          responseSocket.bytesWritten += chunk.byteLength;
+        if (responseSocket && typeof responseSocket._bytesWritten === 'number') {
+          responseSocket._bytesWritten += chunk.byteLength;
         }
-        callback();
+        schedule(scope, callback);
       },
       final(callback) {
         this._finalizeResponse(callback);
@@ -1697,7 +1865,6 @@ class VirtualServerResponse extends Writable {
     });
     this.headersSent = false;
     this.finished = false;
-    this.writableEnded = false;
     this._scope = scope;
     this._BufferClass = BufferClass;
     this._request = request;
@@ -1840,7 +2007,7 @@ class VirtualServerResponse extends Writable {
     if (this._headersFlushed) return this;
     this.headersSent = true;
     this._headersFlushed = true;
-    this._flushResponse?.({
+    this._responseBody = this._flushResponse?.({
       statusCode: this.statusCode,
       statusMessage: this.statusMessage,
       headers: this.getHeaders(),
@@ -1856,6 +2023,12 @@ class VirtualServerResponse extends Writable {
   end(...args) {
     this.headersSent = true;
     return Writable.prototype.end.apply(this, args);
+  }
+
+  destroy(error) {
+    if (this._responseBody) this._responseBody._bnhTerminated = true;
+    this._responseBody?.close();
+    return super.destroy(error);
   }
 
   _finalizeResponse(callback) {
@@ -2127,6 +2300,7 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
       binding.rawServer = netModule.createServer({ allowHalfOpen: true }, (socket) => attachRawSocket(binding, socket));
       binding.rawServer.on?.('error', (error) => server.emit('error', error));
       binding.rawServer.listen(port, host);
+      if (server._unrefRequested) binding.rawServer.unref?.();
     }
     return { host, port };
   }
@@ -2223,6 +2397,7 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
             request.socket,
             responseBody,
           ));
+          return responseBody;
         },
       );
       request.once('close', () => {
@@ -2237,6 +2412,37 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
       schedule(scope, () => {
         try {
           request.socket = new netModule.Socket();
+          request.socket._httpsServer = binding.server;
+          request.socket._httpsSessionGeneration = binding.server._ticketKeyGeneration || 0;
+          request.socket._httpsClientOptions = init.__bnhHttpsOptions;
+          request.socket.servername = init.__bnhHttpsOptions?.servername || false;
+          request.socket._httpsServerOptions = binding.protocol === DEFAULT_HTTPS_PROTOCOL
+            ? (binding.server._selectSecureContext?.(init.__bnhHttpsOptions?.servername)
+              || binding.server._secureContextOptions)
+            : undefined;
+          if (binding.protocol === DEFAULT_HTTPS_PROTOCOL) {
+            const clientOptions = request.socket._httpsClientOptions || {};
+            const clientCertificate = clientOptions.cert || clientOptions.pfx;
+            request.socket.getPeerCertificate = () => httpsCertificate(
+              clientCertificate,
+              clientOptions.servername || clientOptions.host,
+              scope,
+            );
+            const authorizationError = httpsAuthorizationError(
+              clientOptions,
+              request.socket._httpsServerOptions,
+              scope,
+            );
+            request.socket._httpsAuthorizationChecked =
+              Object.hasOwn(clientOptions, 'checkServerIdentity');
+            request.socket.authorized = clientOptions.rejectUnauthorized !== false
+              && !authorizationError;
+            request.socket.authorizationError = authorizationError || null;
+            if (authorizationError) {
+              reject(authorizationError);
+              return;
+            }
+          }
           const serverAsyncId = binding.rawServer?._tcpResource?.asyncId();
           request.socket._tcpResource = new AsyncResource('TCPWRAP',
             serverAsyncId === undefined ? {} : { triggerAsyncId: serverAsyncId });
@@ -2424,11 +2630,17 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask) {
       this.maxHeadersCount = null;
       this._bound = null;
       this._taskRelease = null;
+      this._taskTracker = trackTask;
+      this._unrefRequested = false;
       this._closeRequested = false;
       this._closeEmitted = false;
       this._connections = 0;
       this._usingWorkers = false;
       this._workers = [];
+      this._secureContextOptions = { ...this.options };
+      this._ticketKeyGeneration = 0;
+      this._ticketKeys = httpsTicketKeys(BufferClass);
+      this._contexts = [];
       this[kConnectionsCheckingInterval] = { _destroyed: false };
       // Node's internal HTTP connection listener annotates every accepted
       // socket before user connection listeners run, including manually
@@ -2454,7 +2666,7 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask) {
         try {
           const bound = registry.bind(this, protocol, options);
           this._bound = bound;
-          this._taskRelease = trackTask?.() || null;
+          this._taskRelease = this._unrefRequested ? null : trackTask?.() || null;
           this._closeRequested = false;
           this._closeEmitted = false;
           this[kConnectionsCheckingInterval]._destroyed = false;
@@ -2518,8 +2730,101 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask) {
     closeAllConnections() { return this; }
     closeIdleConnections() { return this; }
     getConnections(callback) { schedule(scope, () => callback?.(null, 0)); }
-    ref() { return this; }
-    unref() { return this; }
+    ref() {
+      if (this._unrefRequested) {
+        this._unrefRequested = false;
+        if (this.listening && !this._taskRelease) this._taskRelease = this._taskTracker?.() || null;
+        this._bound?.rawServer?.ref?.();
+      }
+      return this;
+    }
+    unref() {
+      this._unrefRequested = true;
+      this._taskRelease?.();
+      this._taskRelease = null;
+      this._bound?.rawServer?.unref?.();
+      return this;
+    }
+  }
+
+  if (protocol === DEFAULT_HTTPS_PROTOCOL) {
+    Server.prototype.setSecureContext = function setSecureContext(options) {
+      validateHttpsOptions(options);
+      this._secureContextOptions = { ...this._secureContextOptions, ...options };
+      this.options = { ...this.options, ...options };
+      this.requestCert = options.requestCert === true;
+      this.rejectUnauthorized = options.rejectUnauthorized !== false;
+      if (options.ticketKeys !== undefined) this.setTicketKeys(options.ticketKeys);
+      return this;
+    };
+
+    Server.prototype._getServerData = function _getServerData() {
+      return { ticketKeys: this.getTicketKeys().toString('hex') };
+    };
+
+    Server.prototype._setServerData = function _setServerData(data) {
+      if (data === null || typeof data !== 'object' || typeof data.ticketKeys !== 'string') {
+        throw invalidArgumentType('data', 'an object containing ticketKeys', data);
+      }
+      const keys = BufferClass.from(data.ticketKeys, 'hex');
+      this.setTicketKeys(keys);
+      return this;
+    };
+
+    Server.prototype.getTicketKeys = function getTicketKeys() {
+      return httpsBufferCopy(this._ticketKeys, BufferClass);
+    };
+
+    Server.prototype.setTicketKeys = function setTicketKeys(keys) {
+      validateHttpsTicketKeys(keys, BufferClass);
+      this._ticketKeys = httpsBufferCopy(keys, BufferClass);
+      this._ticketKeyGeneration += 1;
+    };
+
+    Server.prototype.setOptions = function setOptions(options) {
+      validateHttpsOptions(options);
+      this.requestCert = options.requestCert === true;
+      this.rejectUnauthorized = options.rejectUnauthorized !== false;
+      return this.setSecureContext(options);
+    };
+
+    Server.prototype.addContext = function addContext(servername, context) {
+      if (typeof servername !== 'string' || servername.length === 0) {
+        const error = invalidArgumentType('servername', 'string', servername);
+        error.code = 'ERR_TLS_REQUIRED_SERVER_NAME';
+        throw error;
+      }
+      if (context === null || typeof context !== 'object') {
+        throw invalidArgumentType('context', 'an object', context);
+      }
+      this._contexts.push({
+        servername: servername.toLowerCase(),
+        options: context.options || { ...context },
+      });
+      return this;
+    };
+
+    Server.prototype._selectSecureContext = function _selectSecureContext(servername) {
+      const host = String(servername || '').toLowerCase();
+      for (let index = this._contexts.length - 1; index >= 0; index -= 1) {
+        const context = this._contexts[index];
+        if (context.servername === host) return context.options;
+        if (context.servername.startsWith('*.')
+          && host.endsWith(context.servername.slice(1))
+          && host.split('.').length === context.servername.split('.').length) {
+          return context.options;
+        }
+      }
+      const callback = this.options?.SNICallback;
+      if (typeof callback === 'function' && host) {
+        let selected;
+        callback(host, (error, context) => {
+          if (!error && context) selected = context.options || context;
+        });
+        if (selected) return selected;
+      }
+      return undefined;
+    };
   }
 
   // Node exposes http.Server as a callable constructor as well as a
@@ -3268,6 +3573,19 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       this._url = url;
       this._options = options;
       this._agent = options.agent;
+      this._httpsAgent = this._agent?.protocol === DEFAULT_HTTPS_PROTOCOL
+        && typeof this._agent._getSession === 'function'
+        ? this._agent
+        : null;
+      this._httpsSessionKey = this._httpsAgent?.getName?.(options);
+      this._httpsSession = this._httpsAgent && this._httpsSessionKey !== undefined
+        ? this._httpsAgent._getSession(this._httpsSessionKey)
+        : undefined;
+      this._httpsSessionCacheable = Boolean(
+        this._httpsAgent
+        && this._options.checkServerIdentity === undefined,
+      );
+      this._socketEventEmitted = false;
       this.timeout = Number(options.timeout ?? this._agent?.options?.timeout ?? 0) || 0;
       this._virtualNetwork = virtualNetwork;
       this._proxy = proxy;
@@ -3353,6 +3671,7 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
         }
         this.socket = socket;
         this.connection = socket;
+        this._socketEventEmitted = true;
         this.emit('socket', socket);
         this._flush?.();
       });
@@ -3774,12 +4093,68 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
         if (this._options[name] !== undefined) init[name] = this._options[name];
       }
       if (this._options.body !== undefined && !body.byteLength) init.body = this._options.body;
+      if (this.protocol === DEFAULT_HTTPS_PROTOCOL) init.__bnhHttpsOptions = this._options;
       return init;
     }
 
     _handleResponse(response) {
       if (this.destroyed) return;
       this._runInAsyncScope(() => this._runInOwnerContext(() => {
+        const socket = response?.socket || this.socket;
+        if (socket && this.protocol === DEFAULT_HTTPS_PROTOCOL) {
+          const serverOptions = socket._httpsServerOptions
+            || socket._httpsServer?._secureContextOptions || {};
+          const host = this._options.servername || this.host
+            || (() => { try { return new scope.URL(this._url).hostname; } catch { return 'localhost'; } })();
+          const certificate = httpsCertificate(serverOptions.cert, host, scope);
+          const checker = this._options.checkServerIdentity
+            || this._httpsAgent?.options?.checkServerIdentity;
+          const rejectUnauthorized = this._options.rejectUnauthorized
+            ?? this._httpsAgent?.options?.rejectUnauthorized;
+          let identityError;
+          try {
+            if (socket._httpsAuthorizationChecked
+              && Object.hasOwn(this._options, 'checkServerIdentity')) {
+              identityError = socket.authorizationError || undefined;
+            } else if (typeof checker === 'function'
+              && (this._httpsSession === undefined || this._options.checkServerIdentity !== undefined)) {
+              identityError = checker(host, certificate);
+            } else if (typeof checker !== 'function'
+              && this._options.rejectUnauthorized !== false
+              && serverOptions.cert) {
+              identityError = httpsCheckServerIdentity(host, certificate);
+            }
+          } catch (error) {
+            identityError = error;
+          }
+          socket.authorized = rejectUnauthorized !== false && !identityError;
+          socket.authorizationError = identityError || null;
+          socket.getPeerCertificate = () => certificate;
+          if (identityError) {
+            this.destroy(identityError);
+            return;
+          }
+          const generation = socket._httpsSessionGeneration || 0;
+          const reused = Boolean(this._httpsAgent && this._httpsSession !== undefined
+            && this._httpsAgent._sessionGenerations.get(this._httpsSessionKey) === generation);
+          const nonce = this._httpsAgent ? ++this._httpsAgent._sessionNonce : 0;
+          const session = reused ? this._httpsSession : virtualTlsSession(
+            `${this._httpsSessionKey || host}:${generation}:${nonce}`,
+            this._httpsAgent?._BufferClass || BufferClass,
+          );
+          this.socket = socket;
+          this.connection = socket;
+          if (!this._socketEventEmitted) {
+            this._socketEventEmitted = true;
+            this.emit('socket', socket);
+          }
+          socket.getSession ||= () => session;
+          socket.isSessionReused ||= () => reused;
+          socket.emit?.('session', session);
+          if (this._httpsSessionCacheable && !reused) {
+            this._httpsAgent._cacheSession(this._httpsSessionKey, session, generation);
+          }
+        }
         this.response = new IncomingMessage(response, this, scope, BufferClass);
         this.emit('response', this.response);
         void this.response.start();
@@ -3949,18 +4324,107 @@ export function createHttpCompatibility(scope = globalThis, {
   const HttpAgent = class Agent extends BrowserAgent {
     constructor(options = {}) { super(options, DEFAULT_HTTP_PROTOCOL, net.createConnection); }
   };
-  const HttpsAgent = class Agent extends BrowserAgent {
-    constructor(options = {}) { super(options, DEFAULT_HTTPS_PROTOCOL, net.createConnection); }
+  const HttpsAgentClass = class Agent extends BrowserAgent {
+    constructor(options = {}) {
+      const agentOptions = {
+        ...options,
+        defaultPort: options.defaultPort ?? 443,
+        protocol: options.protocol ?? DEFAULT_HTTPS_PROTOCOL,
+      };
+      super(agentOptions, DEFAULT_HTTPS_PROTOCOL, net.createConnection);
+      this.maxCachedSessions = this.options.maxCachedSessions;
+      if (this.maxCachedSessions === undefined) this.maxCachedSessions = 100;
+      this._sessionCache = { map: {}, list: [] };
+      this._sessionGenerations = new Map();
+      this._sessionNonce = 0;
+      this._BufferClass = BufferClass;
+    }
+
+    getName(options = {}) {
+      let name = super.getName(options);
+      name += ':';
+      if (options.ca) name += options.ca;
+      name += ':';
+      if (options.cert) name += options.cert;
+      name += ':';
+      if (options.clientCertEngine) name += options.clientCertEngine;
+      name += ':';
+      if (options.ciphers) name += options.ciphers;
+      name += ':';
+      if (options.key) name += options.key;
+      name += ':';
+      if (options.pfx) name += httpsPfxAgentKey(options.pfx, options.passphrase);
+      name += ':';
+      if (options.rejectUnauthorized !== undefined) name += options.rejectUnauthorized;
+      name += ':';
+      if (options.servername && options.servername !== options.host) name += options.servername;
+      name += ':';
+      if (options.minVersion) name += options.minVersion;
+      name += ':';
+      if (options.maxVersion) name += options.maxVersion;
+      name += ':';
+      if (options.secureProtocol) name += options.secureProtocol;
+      name += ':';
+      if (options.crl) name += options.crl;
+      name += ':';
+      if (options.honorCipherOrder !== undefined) name += options.honorCipherOrder;
+      name += ':';
+      if (options.ecdhCurve) name += options.ecdhCurve;
+      name += ':';
+      if (options.dhparam) name += options.dhparam;
+      name += ':';
+      if (options.secureOptions !== undefined) name += options.secureOptions;
+      name += ':';
+      if (options.sessionIdContext) name += options.sessionIdContext;
+      name += ':';
+      if (options.sigalgs) name += JSON.stringify(options.sigalgs);
+      name += ':';
+      if (options.privateKeyIdentifier) name += options.privateKeyIdentifier;
+      name += ':';
+      if (options.privateKeyEngine) name += options.privateKeyEngine;
+      return name;
+    }
+
+    _getSession(key) {
+      return this._sessionCache.map[key];
+    }
+
+    _cacheSession(key, session, generation = 0) {
+      if (this.maxCachedSessions === 0) return;
+      if (this._sessionCache.map[key]) {
+        this._sessionCache.map[key] = session;
+        this._sessionGenerations.set(key, generation);
+        return;
+      }
+      if (this._sessionCache.list.length >= this.maxCachedSessions) {
+        const oldKey = this._sessionCache.list.shift();
+        delete this._sessionCache.map[oldKey];
+        this._sessionGenerations.delete(oldKey);
+      }
+      this._sessionCache.list.push(key);
+      this._sessionCache.map[key] = session;
+      this._sessionGenerations.set(key, generation);
+    }
+
+    _evictSession(key) {
+      const index = this._sessionCache.list.indexOf(key);
+      if (index === -1) return;
+      this._sessionCache.list.splice(index, 1);
+      delete this._sessionCache.map[key];
+      this._sessionGenerations.delete(key);
+    }
   };
+  function HttpsAgent(options) {
+    return new HttpsAgentClass(options);
+  }
+  HttpsAgent.prototype = HttpsAgentClass.prototype;
   HttpAgent.defaultMaxSockets = Infinity;
   Object.setPrototypeOf(HttpsAgent, HttpAgent);
   const agentMethods = [
     'createConnection',
-    'getName',
     'addRequest',
     'createSocket',
     'removeSocket',
-    'keepSocketAlive',
     'reuseSocket',
     'destroy',
   ];

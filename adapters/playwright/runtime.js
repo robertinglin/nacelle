@@ -48,6 +48,7 @@ import {
   createSignClass,
   createVerifyClass,
   createSecretKeyShim,
+  installCryptoKeyMaterialTracking,
   checkPrime,
   checkPrimeSync,
   browserCryptoVersion,
@@ -106,6 +107,7 @@ import {
   createStringDecoder,
   createUtilModule,
   createUtilTypes,
+  installTextEncoderInspect,
   createInternalEventTarget,
   installBrowserAbortSignalCompatibility,
   createAborted,
@@ -135,13 +137,16 @@ import { createUrlModule } from './runtime/url.js';
 import { installWarningContract } from './runtime/warnings.js';
 import { nativeAddonDisabledError, unsupportedNativeAddon } from './runtime/errors.js';
 import { createSqliteModule } from './runtime/sqlite.js';
+import { createInspectorModule, createInspectorPromisesModule } from './runtime/inspector.js';
+import { createTraceEventsModule, traceEventsUnavailableError } from './runtime/trace-events.js';
+import { createSeaModule } from './runtime/sea.js';
 
 const BUILTIN_NAMES = Object.freeze([
   'assert', 'assert/strict', 'buffer', 'console', 'constants', 'crypto', 'domain', 'events', 'fs', 'fs/promises', 'http', 'https', 'module', 'os',
   'path', 'path/posix', 'path/win32', 'process', 'querystring', 'stream', 'stream/consumers', 'stream/promises', 'stream/web',
   'string_decoder', 'timers', 'timers/promises', 'url', 'util', 'sys', 'util/types', 'worker_threads', 'zlib', 'perf_hooks', 'async_hooks', 'diagnostics_channel', 'punycode',
-  'child_process', 'cluster', 'dgram', 'dns', 'dns/promises', 'http2', 'net', 'repl', 'tls', 'test', 'v8', 'vm', '_http_server',
-  'sea', 'sqlite', 'test/reporters', '_http_common', '_http_outgoing',
+  'child_process', 'cluster', 'dgram', 'dns', 'dns/promises', 'http2', 'inspector', 'inspector/promises', 'net', 'repl', 'tls', 'test', 'v8', 'vm', '_http_server',
+  'sea', 'sqlite', 'test/reporters', '_http_common', '_http_outgoing', 'trace_events',
   'internal/event_target', 'internal/async_context_frame', 'internal/async_hooks', 'internal/test/binding', 'internal/test/transfer',
   'internal/bootstrap/realm', 'internal/modules/cjs/loader', 'internal/modules/esm/utils', 'internal/vm/module',
   'internal/util', 'internal/util/debuglog', 'internal/util/types', 'internal/options', 'internal/dgram',
@@ -149,6 +154,23 @@ const BUILTIN_NAMES = Object.freeze([
 
 function builtinName(name) {
   return name.startsWith('node:') ? name.slice(5) : name;
+}
+
+function ensureReplDispose(replModule) {
+  const prototype = replModule?.REPLServer?.prototype;
+  if (!prototype) return replModule;
+  const disposeSymbol = Symbol.for('nodejs.dispose');
+  if (typeof prototype[disposeSymbol] === 'function') return replModule;
+  const nativeDispose = Symbol.dispose;
+  const dispose = nativeDispose && typeof prototype[nativeDispose] === 'function'
+    ? prototype[nativeDispose]
+    : function dispose() { this.close(); };
+  Object.defineProperty(prototype, disposeSymbol, {
+    configurable: true,
+    value: dispose,
+    writable: true,
+  });
+  return replModule;
 }
 
 const BROWSER_SIGNAL_CONSTANTS = Object.freeze({
@@ -170,7 +192,38 @@ function createConstants() {
     ...baseConstants,
     ...BROWSER_SIGNAL_CONSTANTS,
     ...crypto,
+    EACCES: 13,
+    EADDRINUSE: 98,
+    EADDRNOTAVAIL: 99,
+    EAFNOSUPPORT: 97,
+    EAGAIN: 11,
+    EALREADY: 114,
+    EBADF: 9,
+    EBADMSG: 74,
     E2BIG: 7,
+    EBUSY: 16,
+    ECANCELED: 125,
+    ECHILD: 10,
+    ECONNABORTED: 103,
+    ECONNREFUSED: 111,
+    ECONNRESET: 104,
+    EDEADLK: 35,
+    EDESTADDRREQ: 89,
+    EDOM: 33,
+    EDQUOT: 122,
+    EEXIST: 17,
+    EFAULT: 14,
+    EFBIG: 27,
+    EHOSTUNREACH: 113,
+    EIDRM: 43,
+    EILSEQ: 84,
+    EMSGSIZE: 90,
+    EMULTIHOP: 72,
+    ENAMETOOLONG: 36,
+    ENETDOWN: 100,
+    ENETRESET: 102,
+    ENETUNREACH: 101,
+    ENFILE: 23,
     EISDIR: 21,
     EOPNOTSUPP: 95,
     EOVERFLOW: 75,
@@ -180,12 +233,24 @@ function createConstants() {
     EPROTONOSUPPORT: 93,
     EPROTOTYPE: 91,
     ERANGE: 34,
+    ESRCH: 3,
+    ESTALE: 116,
+    ETIME: 62,
+    ETIMEDOUT: 110,
+    ETXTBSY: 26,
+    EWOULDBLOCK: 11,
+    EXDEV: 18,
   });
 }
 
 const ERRNO_CONSTANT_NAMES = Object.freeze([
-  'E2BIG', 'EISDIR', 'EOPNOTSUPP', 'EOVERFLOW', 'EPERM', 'EPIPE',
-  'EPROTO', 'EPROTONOSUPPORT', 'EPROTOTYPE', 'ERANGE',
+  'EACCES', 'EADDRINUSE', 'EADDRNOTAVAIL', 'EAFNOSUPPORT', 'EAGAIN', 'EALREADY', 'EBADF', 'EBADMSG',
+  'E2BIG', 'EBUSY', 'ECANCELED', 'ECHILD', 'ECONNABORTED', 'ECONNREFUSED', 'ECONNRESET', 'EDEADLK',
+  'EDESTADDRREQ', 'EDOM', 'EDQUOT', 'EEXIST', 'EFAULT', 'EFBIG', 'EHOSTUNREACH', 'EIDRM', 'EILSEQ',
+  'EMSGSIZE', 'EMULTIHOP', 'ENAMETOOLONG', 'ENETDOWN',
+  'ENETRESET', 'ENETUNREACH', 'ENFILE', 'EISDIR', 'EOPNOTSUPP', 'EOVERFLOW', 'EPERM', 'EPIPE',
+  'EPROTO', 'EPROTONOSUPPORT', 'EPROTOTYPE', 'ERANGE', 'ESRCH', 'ESTALE',
+  'ETIME', 'ETIMEDOUT', 'ETXTBSY', 'EWOULDBLOCK', 'EXDEV',
 ]);
 
 function installErrnoConstants(target, constants) {
@@ -377,7 +442,7 @@ function onceCallback(callback, { preserveReturnValue = false } = {}) {
   };
 }
 
-function createNodeWebStreamModule(runtimeRequire) {
+function createNodeWebStreamModule(runtimeRequire, scope = globalThis) {
   const module = {};
   const exports = [
     ['ReadableStream', 'internal/webstreams/readablestream'],
@@ -399,7 +464,23 @@ function createNodeWebStreamModule(runtimeRequire) {
     ['DecompressionStream', 'internal/webstreams/compression'],
   ];
   const cache = new Map();
-  const load = (path) => {
+  const inspectCustom = Symbol.for('nodejs.util.inspect.custom');
+  const patchCompressionInspect = (StreamClass, name) => {
+    if (typeof StreamClass !== 'function' || !StreamClass.prototype
+      || typeof StreamClass.prototype[inspectCustom] === 'function') return;
+    Object.defineProperty(StreamClass.prototype, inspectCustom, {
+      configurable: true,
+      value() { return `${name} { readable: ReadableStream, writable: WritableStream }`; },
+    });
+  };
+  const load = (path, name) => {
+    if (typeof scope[name] === 'function') {
+      const value = scope[name];
+      if (name === 'CompressionStream' || name === 'DecompressionStream') {
+        patchCompressionInspect(value, name);
+      }
+      return { [name]: value };
+    }
     if (!cache.has(path)) cache.set(path, runtimeRequire(path));
     return cache.get(path);
   };
@@ -407,7 +488,7 @@ function createNodeWebStreamModule(runtimeRequire) {
     Object.defineProperty(module, name, {
       configurable: true,
       enumerable: true,
-      get: () => load(path)[name],
+      get: () => load(path, name)[name],
     });
   }
   return module;
@@ -471,6 +552,122 @@ function normalizeOutputChunk(value) {
   return String(value);
 }
 
+function createTestReportersModule(processObject) {
+  class LcovReporter extends Transform {
+    constructor(options) {
+      super({ ...options, writableObjectMode: true, __proto__: null });
+    }
+
+    _transform(event, _encoding, callback) {
+      if (event.type !== 'test:coverage') return callback(null);
+      let output = 'TN:\n';
+      const {
+        data: {
+          summary: { workingDirectory },
+        },
+      } = event;
+      try {
+        for (const file of event.data.summary.files) {
+          output += `SF:${path.relative(workingDirectory, file.path)}\n`;
+          let functionData = '';
+          for (let index = 0; index < file.functions.length; index += 1) {
+            const func = file.functions[index];
+            const name = func.name || `anonymous_${index}`;
+            output += `FN:${func.line},${name}\n`;
+            functionData += `FNDA:${func.count},${name}\n`;
+          }
+          output += functionData;
+          output += `FNF:${file.totalFunctionCount}\n`;
+          output += `FNH:${file.coveredFunctionCount}\n`;
+          for (let index = 0; index < file.branches.length; index += 1) {
+            const branch = file.branches[index];
+            output += `BRDA:${branch.line},${index},0,${branch.count}\n`;
+          }
+          output += `BRF:${file.totalBranchCount}\n`;
+          output += `BRH:${file.coveredBranchCount}\n`;
+          const lines = file.lines.toSorted((a, b) => a.line - b.line);
+          for (const line of lines) output += `DA:${line.line},${line.count}\n`;
+          output += `LH:${file.coveredLineCount}\n`;
+          output += `LF:${file.totalLineCount}\n`;
+          output += 'end_of_record\n';
+        }
+      } catch (error) {
+        callback(error);
+        return;
+      }
+      callback(null, output);
+    }
+  }
+
+  async function* dot(source) {
+    let count = 0;
+    let columns = Math.max(Number(processObject.stdout?.columns) || 20, 20);
+    const failures = [];
+    for await (const event of source) {
+      if (event.type === 'test:pass') yield '.';
+      if (event.type === 'test:fail') {
+        yield 'X';
+        failures.push(event.data);
+      }
+      if ((event.type === 'test:pass' || event.type === 'test:fail') && ++count === columns) {
+        yield '\n';
+        columns = Math.max(Number(processObject.stdout?.columns) || 20, 20);
+        count = 0;
+      }
+    }
+    yield '\n';
+    if (failures.length) yield `\nFailed tests:\n\n${failures.map((item) => `${item.name}\n`).join('')}`;
+  }
+
+  async function* tap(source) {
+    yield 'TAP version 13\n';
+    for await (const event of source) {
+      if (event.type === 'test:start') yield `${'    '.repeat(event.data.nesting)}# Subtest: ${event.data.name}\n`;
+      else if (event.type === 'test:pass' || event.type === 'test:fail') {
+        const indent = '    '.repeat(event.data.nesting);
+        yield `${indent}${event.type === 'test:pass' ? 'ok' : 'not ok'} ${event.data.testNumber || ''}${event.data.name ? ` - ${event.data.name}` : ''}\n`;
+      } else if (event.type === 'test:plan') {
+        yield `${'    '.repeat(event.data.nesting)}1..${event.data.count}\n`;
+      } else if (event.type === 'test:diagnostic') {
+        yield `${'    '.repeat(event.data.nesting)}# ${event.data.message}\n`;
+      }
+    }
+  }
+
+  class SpecReporter extends Transform {
+    constructor(options) {
+      super({ ...(options || {}), writableObjectMode: true });
+    }
+
+    _transform(event, _encoding, callback) {
+      if (event?.type === 'test:pass' || event?.type === 'test:fail') {
+        const symbol = event.type === 'test:pass' ? '✔ ' : '✖ ';
+        callback(null, `${'  '.repeat(event.data.nesting || 0)}${symbol}${event.data.name}\n`);
+      } else if (event?.type === 'test:stdout' || event?.type === 'test:stderr') {
+        callback(null, event.data.message);
+      } else {
+        callback(null);
+      }
+    }
+  }
+
+  // Node exposes spec as a callable factory, while lcov is a freshly
+  // constructed Transform instance. Returning the instance gives callers the
+  // stream surface inherited from Transform (including iterator, map, and
+  // EventEmitter methods).
+  function spec(...args) {
+    return new SpecReporter(...args);
+  }
+
+  return Object.defineProperties({}, {
+    dot: { configurable: true, enumerable: true, get: () => dot },
+    junit: { configurable: true, enumerable: true, get: () => dot },
+    spec: { configurable: true, enumerable: true, value: spec },
+    tap: { configurable: true, enumerable: true, get: () => tap },
+    lcov: { configurable: true, enumerable: true, get: () => new LcovReporter() },
+  });
+}
+
 function installProcessStdoutIterableSurface(stream, processObject) {
   if (!stream || stream.__BNH_STDOUT_ITERABLE_SURFACE__) return;
   Object.defineProperty(stream, '__BNH_STDOUT_ITERABLE_SURFACE__', {
@@ -497,7 +694,7 @@ function installProcessStdoutIterableSurface(stream, processObject) {
 
   const readable = new Readable({ read() {}, readable: false });
   const iterablePrototype = Object.create(Object.getPrototypeOf(stream));
-  for (const name of ['every', 'forEach', 'reduce', 'toArray', 'some', 'find']) {
+  for (const name of ['every', 'filter', 'flatMap', 'forEach', 'reduce', 'toArray', 'some', 'find']) {
     Object.defineProperty(iterablePrototype, name, {
       configurable: true,
       enumerable: false,
@@ -523,36 +720,6 @@ function installProcessStdoutIterableSurface(stream, processObject) {
       enumerable: true,
       writable: true,
       value: false,
-    },
-    _host: {
-      configurable: true,
-      enumerable: true,
-      writable: true,
-      value: null,
-    },
-    _isStdio: {
-      configurable: true,
-      enumerable: true,
-      writable: true,
-      value: true,
-    },
-    _parent: {
-      configurable: true,
-      enumerable: true,
-      writable: true,
-      value: null,
-    },
-    _pendingData: {
-      configurable: true,
-      enumerable: true,
-      writable: true,
-      value: null,
-    },
-    _pendingEncoding: {
-      configurable: true,
-      enumerable: true,
-      writable: true,
-      value: '',
     },
     _readableState: {
       configurable: true,
@@ -616,6 +783,18 @@ function installProcessStdoutIterableSurface(stream, processObject) {
     },
   });
   Object.defineProperties(iterablePrototype, {
+    push: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) { return readable.push(...args); },
+    },
+    read: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) { return readable.read(...args); },
+    },
     _handle: {
       configurable: false,
       enumerable: false,
@@ -689,6 +868,21 @@ function installProcessStdoutIterableSurface(stream, processObject) {
       writable: true,
       value() { return {}; },
     },
+    localAddress: {
+      configurable: false,
+      enumerable: true,
+      get: () => undefined,
+    },
+    localFamily: {
+      configurable: false,
+      enumerable: true,
+      get: () => undefined,
+    },
+    localPort: {
+      configurable: false,
+      enumerable: true,
+      get: () => undefined,
+    },
     _bytesDispatched: {
       configurable: false,
       enumerable: true,
@@ -716,11 +910,41 @@ function installProcessStdoutIterableSurface(stream, processObject) {
       writable: true,
       value() { return this; },
     },
+    ref: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
     drop: {
       configurable: true,
       enumerable: false,
       writable: true,
       value(...args) { return readable.drop(...args); },
+    },
+    isPaused: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value() { return readable.isPaused(); },
+    },
+    iterator: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.iterator(...args); },
+    },
+    map: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.map(...args); },
+    },
+    pause: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { readable.pause(); return this; },
     },
     _reset: {
       configurable: true,
@@ -768,10 +992,30 @@ function installProcessStdoutIterableSurface(stream, processObject) {
       enumerable: false,
       get: () => readable.readableDidRead,
     },
+    readableLength: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableLength,
+    },
+    readableObjectMode: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableObjectMode,
+    },
+    readableEncoding: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableEncoding,
+    },
     readableAborted: {
       configurable: false,
       enumerable: false,
       get: () => readable.readableAborted,
+    },
+    readableEnded: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableEnded,
     },
     readableHighWaterMark: {
       configurable: false,
@@ -792,10 +1036,27 @@ function installProcessStdoutIterableSurface(stream, processObject) {
         readable._readableState.flowing = value;
       },
     },
+    readyState: {
+      configurable: false,
+      enumerable: false,
+      get() {
+        if (this.connecting) return 'opening';
+        const writable = this.writable === undefined ? true : this.writable;
+        if (this.readable && writable) return 'open';
+        if (this.readable && !writable) return 'readOnly';
+        if (!this.readable && writable) return 'writeOnly';
+        return 'closed';
+      },
+    },
     readableLength: {
       configurable: false,
       enumerable: false,
       get: () => readable.readableLength,
+    },
+    pending: {
+      configurable: true,
+      enumerable: false,
+      get: () => false,
     },
     readableObjectMode: {
       configurable: false,
@@ -915,6 +1176,36 @@ function installProcessStderrSocketSurface(stream, processObject) {
   const readable = new Readable({ read() {}, readable: false });
 
   Object.defineProperties(stream, {
+    _host: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    _isStdio: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: true,
+    },
+    _parent: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    _pendingData: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    _pendingEncoding: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: '',
+    },
     _readableState: {
       configurable: true,
       enumerable: true,
@@ -939,6 +1230,12 @@ function installProcessStderrSocketSurface(stream, processObject) {
       writable: true,
       value: null,
     },
+    server: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
     _sockname: {
       configurable: true,
       enumerable: true,
@@ -950,6 +1247,24 @@ function installProcessStderrSocketSurface(stream, processObject) {
       enumerable: true,
       writable: true,
       value: 'pipe',
+    },
+    connecting: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: false,
+    },
+    destroySoon: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    fd: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: 2,
     },
     allowHalfOpen: {
       configurable: true,
@@ -1010,6 +1325,21 @@ function installProcessStderrSocketSurface(stream, processObject) {
       writable: true,
       value() { return {}; },
     },
+    remoteAddress: {
+      configurable: false,
+      enumerable: true,
+      get: () => stream._getpeername().address,
+    },
+    remoteFamily: {
+      configurable: false,
+      enumerable: true,
+      get: () => stream._getpeername().family,
+    },
+    remotePort: {
+      configurable: false,
+      enumerable: true,
+      get: () => stream._getpeername().port,
+    },
     _getsockname: {
       configurable: true,
       enumerable: true,
@@ -1021,10 +1351,21 @@ function installProcessStderrSocketSurface(stream, processObject) {
       enumerable: true,
       get: () => bytesDispatched,
     },
+    bytesRead: {
+      configurable: false,
+      enumerable: true,
+      get: () => 0,
+    },
     bytesWritten: {
       configurable: false,
       enumerable: true,
       get: () => bytesDispatched,
+    },
+    compose: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) { return readable.compose(...args); },
     },
     connect: {
       configurable: true,
@@ -1062,6 +1403,84 @@ function installProcessStderrSocketSurface(stream, processObject) {
       writable: true,
       value() { return this; },
     },
+    resetAndDestroy: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    resume: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { readable.resume(); return this; },
+    },
+    pause: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { readable.pause(); return this; },
+    },
+    isPaused: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return readable.isPaused(); },
+    },
+    iterator: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) { return readable.iterator(...args); },
+    },
+    forEach: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.forEach(...args); },
+    },
+    drop: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.drop(...args); },
+    },
+    every: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.every(...args); },
+    },
+    filter: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.filter(...args); },
+    },
+    find: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.find(...args); },
+    },
+    flatMap: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.flatMap(...args); },
+    },
+    map: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.map(...args); },
+    },
+    setEncoding: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) { readable.setEncoding(...args); return this; },
+    },
     _connecting: {
       configurable: false,
       enumerable: false,
@@ -1071,6 +1490,17 @@ function installProcessStderrSocketSurface(stream, processObject) {
       configurable: false,
       enumerable: false,
       get: () => null,
+    },
+    _read: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() {},
+    },
+    pending: {
+      configurable: true,
+      enumerable: false,
+      get: () => false,
     },
     bufferSize: {
       configurable: false,
@@ -1098,6 +1528,16 @@ function installProcessStderrSocketSurface(stream, processObject) {
       enumerable: false,
       get: () => readable.readableDidRead,
     },
+    readableLength: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableLength,
+    },
+    readableObjectMode: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableObjectMode,
+    },
     readableEncoding: {
       configurable: false,
       enumerable: false,
@@ -1107,6 +1547,143 @@ function installProcessStderrSocketSurface(stream, processObject) {
       configurable: false,
       enumerable: false,
       get: () => readable.readableEnded,
+    },
+    readableFlowing: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableFlowing,
+      set(value) {
+        if (value === null) {
+          readable._flowing = null;
+          readable._readableState.flowing = null;
+          readable._readableState.paused = false;
+        } else if (value) readable.resume();
+        else readable.pause();
+      },
+    },
+    readableHighWaterMark: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableHighWaterMark,
+    },
+    some: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.some(...args); },
+    },
+    reduce: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.reduce(...args); },
+    },
+    toArray: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.toArray(...args); },
+    },
+    unpipe: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(destination) { readable.unpipe(destination); return this; },
+    },
+    unref: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    unshift: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) { return readable.unshift(...args); },
+    },
+    wrap: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(source) { readable.wrap(source); return this; },
+    },
+    take: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.take(...args); },
+    },
+    readyState: {
+      configurable: false,
+      enumerable: false,
+      get() {
+        if (this.connecting) return 'opening';
+        if (this.readable && this.writable) return 'open';
+        if (this.readable && !this.writable) return 'readOnly';
+        if (!this.readable && this.writable) return 'writeOnly';
+        return 'closed';
+      },
+    },
+    setTimeout: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(milliseconds, callback) {
+        if (typeof milliseconds !== 'number') {
+          const error = new TypeError('The "msecs" argument must be of type number');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        if (!Number.isFinite(milliseconds) || milliseconds < 0) {
+          const error = new RangeError(`The value of "msecs" is out of range. It must be >= 0 && <= ${Number.MAX_SAFE_INTEGER}. Received ${milliseconds}`);
+          error.code = 'ERR_OUT_OF_RANGE';
+          throw error;
+        }
+        if (callback !== undefined && typeof callback !== 'function') {
+          const error = new TypeError('The "callback" argument must be of type function');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        this.timeout = milliseconds;
+        if (this._timeout) processObject?._bnhClearTimer?.(this._timeout);
+        this._timeout = null;
+        if (milliseconds === 0) {
+          if (callback) this.removeListener?.('timeout', callback);
+          return this;
+        }
+        if (callback) this.once?.('timeout', callback);
+        this._timeout = processObject?._bnhSetTimer?.(
+          () => { this._timeout = null; this._onTimeout(); },
+          milliseconds,
+          false,
+          'Timeout',
+        );
+        this._timeout?.unref?.();
+        return this;
+      },
+    },
+    _onTimeout: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { processObject?.emit?.('timeout'); },
+    },
+    setNoDelay: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(enable = true) { this._noDelay = Boolean(enable); return this; },
+    },
+    setKeepAlive: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(enable = false, initialDelayMsecs = 0) {
+        this._keepAlive = Boolean(enable);
+        this._keepAliveInitialDelay = ~~(initialDelayMsecs / 1000);
+        return this;
+      },
     },
   });
   Object.setPrototypeOf(stream, socketPrototype);
@@ -1121,6 +1698,11 @@ function installProcessStdinSurface(stream) {
   });
   if (!('fd' in stream)) stream.fd = 0;
   Object.defineProperties(stream, {
+    bytesRead: {
+      configurable: true,
+      enumerable: true,
+      get: () => 0,
+    },
     autoClose: {
       configurable: true,
       enumerable: false,
@@ -1830,15 +2412,52 @@ function rejectNativeAddon(pathname, processObject) {
 }
 
 function createConsole(stdout, stderr, nativeConsole) {
-  const write = (sink, values) => sink(values.map((value) => typeof value === 'string' ? value : String(value)).join(' ') + '\n');
-  return {
-    ...nativeConsole,
-    log: (...values) => write(stdout, values),
-    info: (...values) => write(stdout, values),
-    warn: (...values) => write(stderr, values),
-    error: (...values) => write(stderr, values),
-    debug: (...values) => write(stdout, values),
+  const write = (instance, fallback, values) => {
+    const indentation = ' '.repeat(instance._groupIndent * instance._groupIndentation);
+    const output = `${indentation}${values.map((value) => typeof value === 'string' ? value : String(value)).join(' ').replaceAll('\n', `\n${indentation}`)}\n`;
+    const stream = instance._stdout;
+    if (stream && typeof stream.write === 'function') {
+      stream.write(output);
+      return;
+    }
+    fallback(output);
   };
+  const writeError = (instance, fallback, values) => {
+    const indentation = ' '.repeat(instance._groupIndent * instance._groupIndentation);
+    const output = `${indentation}${values.map((value) => typeof value === 'string' ? value : String(value)).join(' ').replaceAll('\n', `\n${indentation}`)}\n`;
+    const stream = instance._stderr;
+    if (stream && typeof stream.write === 'function') {
+      stream.write(output);
+      return;
+    }
+    fallback(output);
+  };
+  const consoleObject = {
+    ...nativeConsole,
+    _stdout: { write: (value) => stdout(value) },
+    _stderr: { write: (value) => stderr(value) },
+    log: (...values) => write(consoleObject, stdout, values),
+    info: (...values) => write(consoleObject, stdout, values),
+    warn: (...values) => writeError(consoleObject, stderr, values),
+    error: (...values) => writeError(consoleObject, stderr, values),
+    debug: (...values) => write(consoleObject, stdout, values),
+    dirxml: (...values) => write(consoleObject, stdout, values),
+    group(...values) {
+      if (values.length) consoleObject.log(...values);
+      consoleObject._groupIndent += 1;
+    },
+    groupCollapsed(...values) { consoleObject.group(...values); },
+    groupEnd() { consoleObject._groupIndent = Math.max(0, consoleObject._groupIndent - 1); },
+    _groupIndentation: 2,
+    _groupIndent: 0,
+  };
+  Object.defineProperty(consoleObject, Symbol.toStringTag, {
+    configurable: true,
+    enumerable: false,
+    value: 'console',
+    writable: false,
+  });
+  return consoleObject;
 }
 
 // These values describe the browser runtime, not the machine running the
@@ -1860,9 +2479,17 @@ const BROWSER_PROCESS_CONFIG = Object.freeze({
 });
 
 const BROWSER_PROCESS_FEATURES = Object.freeze({
-  inspector: false,
+  inspector: true,
   debug: false,
   uv: false,
+  ipv6: true,
+  openssl_is_boringssl: false,
+  tls_alpn: true,
+  tls_sni: true,
+  tls_ocsp: true,
+  tls: true,
+  cached_builtins: false,
+  require_module: false,
   typescript: false,
 });
 
@@ -1956,7 +2583,9 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       if (!handled) {
         stderr(`${error?.stack || error}\n`);
         if (options.abortOnUncaughtException) terminateBySignal('SIGABRT');
-        else exitCode ||= 1;
+        else {
+          exitCode ||= 1;
+        }
         return false;
       }
       return true;
@@ -2292,6 +2921,8 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       isTTY: false,
       write: (value) => { stdout(normalizeOutputChunk(value)); return true; },
       end: () => {},
+      ref() { return this; },
+      unref() { return this; },
       on(...args) { processObject.on(...args); return this; },
       once(...args) { processObject.once(...args); return this; },
       removeListener(...args) { processObject.removeListener(...args); return this; },
@@ -2301,6 +2932,8 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       isTTY: false,
       write: (value) => { stderr(normalizeOutputChunk(value)); return true; },
       end: () => {},
+      ref() { return this; },
+      unref() { return this; },
       on(...args) { processObject.on(...args); return this; },
       once(...args) { processObject.once(...args); return this; },
       removeListener(...args) { processObject.removeListener(...args); return this; },
@@ -2482,7 +3115,9 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     configurable: true,
     enumerable: true,
     get: () => exitCode,
-    set: (value) => { exitCode = Number(value) || 0; },
+    set: (value) => {
+      exitCode = Number(value) || 0;
+    },
   });
   installProcessFinalization(processObject);
   return { processObject, setTimer, clearTimer };
@@ -2680,6 +3315,7 @@ function createCryptoShim(scope, Buffer, processObject) {
     ECDH: (() => {
       function ECDH(curve) { return createECDH(curve, scope); }
       ECDH.prototype = BrowserECDH.prototype;
+      ECDH.convertKey = BrowserECDH.convertKey;
       return ECDH;
     })(),
     diffieHellman: (options) => diffieHellman(options, scope),
@@ -3158,6 +3794,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
   let capabilities = null;
   let runSpec = null;
   let virtualNetwork = getSharedVirtualNetwork(scope);
+  let esmExecutionTail = Promise.resolve();
   let dnsModule = createBrowserDns();
   let proxyCapability = createProxyCapability();
   const virtualProcessLiveness = new Map();
@@ -3245,6 +3882,19 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     if (entryPath.endsWith('.mjs')) return true;
     if (entryPath.endsWith('.cjs') || entryPath.endsWith('.json') || entryPath.endsWith('.node')) return false;
     if (entryPath.startsWith('/node/lib/')) return false;
+    for (let index = 0; index < execArgv.length; index += 1) {
+      const argument = String(execArgv[index]);
+      if (argument === '--input-type') {
+        const inputType = String(execArgv[index + 1] || '');
+        if (inputType === 'module') return true;
+        if (inputType === 'commonjs') return false;
+      }
+      if (argument.startsWith('--input-type=')) {
+        const inputType = argument.slice('--input-type='.length);
+        if (inputType === 'module') return true;
+        if (inputType === 'commonjs') return false;
+      }
+    }
     if (runtimePackageType(entryPath) === 'module') return true;
     if (entryPath.includes('/node_modules/')) return false;
     return execArgv.some((argument) => String(argument) === '--experimental-default-type=module');
@@ -3351,7 +4001,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       error.code = 'ERR_INVALID_ARG_TYPE';
       return error;
     };
-    const utilTypes = createUtilTypes(scope);
+    const resolveKeyObject = () => runtimeRequire('internal/crypto/keys').KeyObject;
+    const utilTypes = createUtilTypes(scope, resolveKeyObject);
     fs.constants ||= constants;
     fs.promises.constants = fs.constants;
     class BrowserChildProcess extends EventEmitter {
@@ -3463,6 +4114,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       else statWatchers.delete(path);
     };
     const platform = createPlatformContract({ variant: runtimeOptions.variant || 'browser', env: processObject.env });
+    installCryptoKeyMaterialTracking(scope);
     const nodeCrypto = createCryptoShim(scope, Buffer, processObject);
     nodeCrypto.createPublicKey = (...args) => runtimeRequire('internal/crypto/keys').createPublicKey(...args);
     nodeCrypto.createPrivateKey = (...args) => runtimeRequire('internal/crypto/keys').createPrivateKey(...args);
@@ -4073,6 +4725,14 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     };
     callableReadable.prototype = Readable.prototype;
     Object.setPrototypeOf(callableReadable, Readable);
+    Object.defineProperty(callableReadable, 'from', {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: Readable.from,
+    });
+    callableReadable.ReadableState = Readable.ReadableState;
+    callableReadable._fromList = Readable._fromList;
     callableReadable.fromWeb = (readableStream, options) => runtimeRequire('internal/webstreams/adapters')
       .newStreamReadableFromReadableStream(readableStream, options);
     callableReadable.toWeb = (readable, options) => runtimeRequire('internal/webstreams/adapters')
@@ -4108,7 +4768,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       .newStreamDuplexFromReadableWritablePair(pair, options);
     Duplex.toWeb = (duplex) => runtimeRequire('internal/webstreams/adapters')
       .newReadableWritablePairFromDuplex(duplex);
-    const streamWebApi = createNodeWebStreamModule(runtimeRequire);
+    const streamWebApi = createNodeWebStreamModule(runtimeRequire, scope);
     const streamConsumers = createStreamConsumers(scope, Buffer);
     const streamPromisePipeline = (...args) => new Promise((resolve, reject) => {
       pipeline(...args, (error) => error ? reject(error) : resolve());
@@ -4216,6 +4876,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       globalObject: scope,
       constants: createBaseConstants(),
       network: virtualNetwork,
+      trackTask,
+      clusterGroupId: runtimeOptions.clusterGroupId,
       onWorkerMessage: (message) => {
         if (!options.workerThread || typeof processObject?.send !== 'function') return;
         processObject.send({ __bnhInternalWorkerMessage: message?.type });
@@ -4469,6 +5131,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       maxChildren: capabilities?.manifest?.workers?.maxChildren,
       stdout,
       stderr,
+      dgram,
+      trackTask,
       isWorker: Boolean(runtimeOptions.clusterWorker),
       id: runtimeOptions.clusterWorkerId,
       clusterGroupId: runtimeOptions.clusterGroupId,
@@ -4491,6 +5155,14 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       },
     });
     const v8 = createBrowserV8Module(processObject, scope);
+    const traceEvents = createTraceEventsModule(internalBindingContract.bindings.trace_events, {
+      process: processObject,
+      unavailable: Boolean(runtimeOptions.workerThread)
+        || String(runtimeOptions.entry || '').startsWith('/node/.bnh-worker-eval-'),
+    });
+    const sea = createSeaModule({ Blob, TextDecoder: scope.TextDecoder });
+    const inspector = createInspectorModule({ processObject, isWorker: Boolean(runtimeOptions.workerThread), scope });
+    const inspectorPromises = createInspectorPromisesModule(inspector);
     const internalTestBindingBase = createInternalTestBinding(processObject);
     const internalTestBinding = {
       // Keep internal/test/binding and the public internalBinding hook on the
@@ -4642,7 +5314,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           };
         },
       },
-      path: nodePath, 'path/posix': path.posix, 'path/win32': path.win32, process: processObject, querystring: createQuerystring(),
+      path: nodePath, 'path/posix': path.posix, 'path/win32': path.win32, process: processObject, querystring: createQuerystring(Buffer),
       stream: streamApi, 'stream/consumers': streamConsumers, 'stream/web': streamWebApi,
       'stream/promises': streamPromises,
       timers, 'timers/promises': timerPromises, string_decoder: { StringDecoder: createStringDecoder() },
@@ -4653,7 +5325,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           Buffer,
           process: processObject,
           console: processObject._bnhConsole || scope.console,
-        }));
+        }), resolveKeyObject);
         const getCallSites = createGetCallSites();
         const getCallSite = (...args) => {
           processObject.emitWarning?.(
@@ -4683,17 +5355,18 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           aborted: createAborted(),
         };
       })(),
-      'util/types': createUtilTypes(scope),
+      'util/types': createUtilTypes(scope, resolveKeyObject),
       worker_threads: { ...createBrowserIO(scope), isMainThread: true, parentPort: null, workerData: undefined },
       zlib: createZlibShimModule(scope, Buffer), perf_hooks: performancePrimitives.perfHooks, v8,
       async_hooks: asyncHooks,
       diagnostics_channel: diagnosticsChannels,
       test: nodeTest,
       ...unsupportedBuiltins,
-      sea: Object.freeze({}),
+      sea,
       sqlite,
-      'test/reporters': Object.freeze({}),
-      net, dgram, cluster, tls,
+      'test/reporters': createTestReportersModule(processObject),
+      net, dgram, cluster, tls, inspector, 'inspector/promises': inspectorPromises,
+      trace_events: traceEvents,
       child_process: (() => {
         let childSequence = 0;
         const compileCacheSources = new Map();
@@ -4886,26 +5559,26 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           return { args: normalizedArgs, options: normalizedOptions };
         }
 
-        function prepareChild(file, args, options = {}) {
+        function prepareChild(file, args, options = {}, owner = scope.process || processObject) {
           validateChildCommand(file);
           if (args !== undefined && args !== null && !Array.isArray(args)) {
             throw childArgumentTypeError('args', 'an array', args);
           }
           validateChildOptions(options);
-          const cwdValue = options?.cwd || (processObject.cwd ? processObject.cwd() : '/node');
-          const cwd = normalizePath(normalizeChildCwd(cwdValue), processObject.cwd?.() || '/node');
+          const cwdValue = options?.cwd || (owner.cwd ? owner.cwd() : '/node');
+          const cwd = normalizePath(normalizeChildCwd(cwdValue), owner.cwd?.() || '/node');
           if (options?.argv0 !== undefined && options.argv0 !== null && typeof options.argv0 !== 'string') {
             const received = options.argv0 === null ? 'null' : options.argv0?.constructor?.name || typeof options.argv0;
             const error = new TypeError(`The "options.argv0" property must be of type string. Received ${received === 'Array' ? 'an instance of Array' : `type ${received}`}`);
             error.code = 'ERR_INVALID_ARG_TYPE';
             throw error;
           }
-          const executable = String(file || processObject.execPath || '/browser/node');
+          const executable = String(file || owner.execPath || '/browser/node');
           // This environment is copied into the in-memory browser child only.
           // The outer process.env was already assembled under the manifest, and
           // these overrides cannot reach a host subprocess or host I/O.
           const env = Object.fromEntries(
-            Object.entries({ ...processObject.env, ...(options?.env || {}) })
+            Object.entries({ ...owner.env, ...(options?.env || {}) })
               .filter(([, value]) => value !== undefined),
           );
           const nodeOptions = tokenizeShell(env.NODE_OPTIONS || '', env);
@@ -4928,6 +5601,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           let reportOnSignal = false;
           let reportOnUncaughtException = false;
           let maxHttpHeaderSize = null;
+          let experimentalLoader = null;
           let stopOptions = false;
           for (let index = 0; index < rawArgs.length; index += 1) {
             const argument = rawArgs[index];
@@ -4965,6 +5639,10 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                 ? argument.slice(argument.indexOf('=') + 1)
                 : rawArgs[++index];
               maxHttpHeaderSize = Number(value);
+              continue;
+            }
+            if (!stopOptions && (argument === '--experimental-loader' || argument === '--loader')) {
+              experimentalLoader = rawArgs[++index];
               continue;
             }
             if (!stopOptions && argument === '-pe') {
@@ -5053,6 +5731,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             reportOnSignal,
             reportOnUncaughtException,
             maxHttpHeaderSize,
+            experimentalLoader,
             stdinPath: options?.stdinPath || null,
             stdin: options?.input,
             afterScript,
@@ -5064,6 +5743,10 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           const stream = new Readable({ read() {} });
           stream.write = (value, encoding, callback) => {
             const accepted = stream.push(value, encoding);
+            if (stream.readableFlowing && stream.readableLength > 0) {
+              const pending = stream.read(stream.readableHighWaterMark);
+              if (pending !== null) stream.emit('data', pending);
+            }
             callback?.();
             return accepted;
           };
@@ -5080,6 +5763,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           const stdoutStream = outputStream();
           const stderrStream = outputStream();
           const child = new BrowserChildProcess();
+          const ownerProcess = scope.process || processObject;
           const emitChildMessage = (value, handle) => {
             const event = value && typeof value === 'object'
               && typeof value.cmd === 'string'
@@ -5088,15 +5772,15 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               : 'message';
             child.emit(event, value, handle);
           };
-          const prepared = prepareChild(file, args, options);
+          const prepared = prepareChild(file, args, options, ownerProcess);
           const processResource = new AsyncResource('PROCESSWRAP');
           const pipeResources = [
             new AsyncResource('PIPEWRAP'),
             new AsyncResource('PIPEWRAP'),
             new AsyncResource('PIPEWRAP'),
           ];
-          if (!processObject.env?.TEST_THREAD_ID && processObject._bnhSignalTriggerAsyncId === undefined) {
-            processObject._bnhSignalTriggerAsyncId = pipeResources[1].asyncId();
+          if (!ownerProcess.env?.TEST_THREAD_ID && ownerProcess._bnhSignalTriggerAsyncId === undefined) {
+            ownerProcess._bnhSignalTriggerAsyncId = pipeResources[1].asyncId();
           }
           const ipc = options?.ipc ? {
             process: null,
@@ -5134,13 +5818,30 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           let stdout = '';
           let stderr = '';
           let stdoutEmitted = false;
+          let stderrEmitted = false;
+          const stdioEntry = (index) => Array.isArray(options?.stdio) ? options.stdio[index] : options?.stdio;
+          const stdioIgnored = (index) => stdioEntry(index) === 'ignore';
+          const stdioInherited = (index) => stdioEntry(index) === 'inherit';
           const stdoutDestination = Array.isArray(options?.stdio) && options.stdio[1]
-            && typeof options.stdio[1].write === 'function' ? options.stdio[1] : null;
+            && typeof options.stdio[1].write === 'function'
+            ? options.stdio[1]
+            : stdioInherited(1) ? ownerProcess.stdout : null;
+          const stderrDestination = Array.isArray(options?.stdio) && options.stdio[2]
+            && typeof options.stdio[2].write === 'function'
+            ? options.stdio[2]
+            : stdioInherited(2) ? ownerProcess.stderr : null;
           const writeStdout = (value) => {
             const chunk = normalizeOutputChunk(value);
             stdoutEmitted = true;
             if (stdoutDestination) stdoutDestination.write(chunk);
             else stdoutStream.write(chunk);
+          };
+          const writeStderr = (value) => {
+            const chunk = normalizeOutputChunk(value);
+            if (!chunk) return;
+            stderrEmitted = true;
+            if (stderrDestination) stderrDestination.write(chunk);
+            else stderrStream.write(chunk);
           };
           const runInOwnerContext = (callback) => {
             const previous = {
@@ -5153,8 +5854,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               clearImmediate: scope.clearImmediate,
               queueMicrotask: scope.queueMicrotask,
             };
-            scope.process = processObject;
-            if (processObject._bnhTimerContext) Object.assign(scope, processObject._bnhTimerContext);
+            scope.process = ownerProcess;
+            if (ownerProcess._bnhTimerContext) Object.assign(scope, ownerProcess._bnhTimerContext);
             try {
               return callback();
             } finally {
@@ -5244,11 +5945,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             return wrapped;
           };
           child.pid = 10000 + childSequence;
-          const stdioEntry = (index) => Array.isArray(options?.stdio) ? options.stdio[index] : options?.stdio;
-          const stdioIgnored = (index) => stdioEntry(index) === 'ignore';
-          child.stdout = stdioIgnored(1) ? null : stdoutStream;
-          child.stderr = stdioIgnored(2) ? null : stderrStream;
-          child.stdin = stdioIgnored(0) ? null : { write() { return true; }, end() {} };
+          const childInput = stdioIgnored(0) ? null : outputStream();
+          const stdinSource = stdioInherited(0) ? ownerProcess.stdin : childInput;
+          child.stdout = stdioIgnored(1) || stdioInherited(1) ? null : stdoutStream;
+          child.stderr = stdioIgnored(2) || stdioInherited(2) ? null : stderrStream;
+          child.stdin = stdioIgnored(0) || stdioInherited(0) ? null : childInput;
           if (prepared.interactive && prepared.scriptPath === null && prepared.evalCode === null) {
             let input = '';
             child.stdin = {
@@ -5311,7 +6012,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               scheduleIpcDrain();
             }
             if (ipc.process) {
-              runInChildContext(() => ipc.process.emit('message', value, childHandle));
+              const channel = ipc.process[Symbol.for('bnh.internal.child_process.channel')];
+              if (channel?.reading === false) channel.pending.push({ value, handle: childHandle });
+              else runInChildContext(() => ipc.process.emit('message', value, childHandle));
             }
             else ipc.queued.push({ value, sendHandle: childHandle, sendOptions, sendCallback });
             if (!ipc.processHandle) sendCallback?.(null);
@@ -5372,7 +6075,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                 if (stdout && !stdoutEmitted) pipeResources[1].runInAsyncScope(() => writeStdout(stdout));
                 else pipeResources[1].runInAsyncScope(() => {});
                 pipeResources[2].runInAsyncScope(() => {});
-                if (stderr) pipeResources[2].runInAsyncScope(stderrStream.write, stderrStream, stderr);
+                if (stderr && !stderrEmitted) pipeResources[2].runInAsyncScope(stderrStream.write, stderrStream, stderr);
                 else pipeResources[2].runInAsyncScope(() => {});
                 stdoutStream.end();
                 stderrStream.end();
@@ -5433,7 +6136,21 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           }
           if (prepared.command === 'cat') {
             const stdinStream = outputStream();
-            child.stdin = stdinStream;
+            child.stdin = stdioIgnored(0) || stdioInherited(0) ? null : stdinStream;
+            if (stdinSource) {
+              const forwardStdin = (value) => stdinStream.write(value);
+              let bufferedInput;
+              while ((bufferedInput = stdinSource.read?.()) !== null && bufferedInput !== undefined) {
+                forwardStdin(bufferedInput);
+              }
+              if (stdinSource.readableEnded) stdinStream.end();
+              else {
+                stdinSource.on('data', forwardStdin);
+                stdinSource.once('end', () => stdinStream.end());
+              }
+            } else {
+              stdinStream.end();
+            }
             stdinStream.on('data', (value) => {
               stdout += normalizeOutputChunk(value);
               writeStdout(value);
@@ -5441,6 +6158,36 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             stdinStream.once('end', () => finish(0, null));
             releaseChildTask?.();
             releaseChildTask = null;
+            return child;
+          }
+          const commandName = prepared.command.split('/').pop();
+          if (commandName === 'grep' || commandName === 'sed') {
+            const stdinStream = outputStream();
+            child.stdin = stdinStream;
+            let pending = '';
+            const emitLine = (line, ending = '\n') => {
+              if (commandName === 'grep') {
+                const pattern = prepared.commandArgs.find((value) => !String(value).startsWith('-')) || '';
+                if (!line.includes(pattern)) return;
+                stdoutStream.write(`${line}${ending}`);
+                return;
+              }
+              const expression = prepared.commandArgs.find((value) => String(value).startsWith('s/'));
+              const match = /^s\/(.*)\/([^/]*)\/$/.exec(String(expression || ''));
+              const transformed = match ? line.replace(match[1], match[2]) : line;
+              stdoutStream.write(`${transformed}${ending}`);
+            };
+            stdinStream.on('data', (value) => {
+              pending += normalizeOutputChunk(value);
+              const lines = pending.split('\n');
+              pending = lines.pop() || '';
+              for (const line of lines) emitLine(line);
+            });
+            stdinStream.once('end', () => {
+              if (pending) emitLine(pending, '');
+              stdoutStream.end();
+              finish(0, null);
+            });
             return child;
           }
           scope.queueMicrotask(() => {
@@ -5451,20 +6198,30 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                 : null;
               if (signalCommand) {
                 const signal = signalCommand.startsWith('SIG') ? signalCommand : `SIG${signalCommand}`;
-                if (Number(args[1]) === Number(processObject.pid)) processObject.emit(signal);
+                if (Number(args[1]) === Number(ownerProcess.pid)) ownerProcess.emit(signal);
                 finish(0, null);
                 return;
               }
               const childOptions = ipc
                 ? { ...options, ipc, asyncLifecycle: true, onSignal: (signal) => finish(null, signal) }
                 : { ...options, asyncLifecycle: true, onSignal: (signal) => finish(null, signal) };
-              if (prepared.entryPath.endsWith('.mjs') || prepared.moduleInput
-                || isRuntimeEsmModule(prepared.entryPath, prepared.executionArgv)) {
+              if (prepared.scriptPath === null && prepared.evalCode === null && !prepared.interactive && childInput) {
+                let input = '';
+                let chunk;
+                while ((chunk = childInput.read?.()) !== null && chunk !== undefined) {
+                  input += normalizeOutputChunk(chunk);
+                }
+                prepared.source = input;
+              }
+              const useEsm = prepared.entryPath.endsWith('.mjs') || prepared.moduleInput
+                || isRuntimeEsmModule(prepared.entryPath, prepared.executionArgv);
+              if (useEsm) {
                 const processHandle = runPreparedESM(prepared, childOptions, (value) => {
                   stdout += normalizeOutputChunk(value);
                   writeStdout(value);
                 }, (value) => {
                   stderr += normalizeOutputChunk(value);
+                  writeStderr(value);
                 });
                 if (ipc) {
                   ipc.processHandle = processHandle;
@@ -5485,7 +6242,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                 }, (error) => finish(1, null, error));
                 return;
               }
-              const result = runPreparedSync(prepared, childOptions);
+              const result = runPreparedSync(prepared, { ...childOptions, stdinSource });
               const terminalSignal = result.signal
                 || (prepared.abortOnUncaughtException && result.status !== 0
                   ? 'SIGABRT'
@@ -5495,6 +6252,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               child.spawn({ processHandle: childProcess, file, args });
               stdout = result.stdout?.toString?.() || String(result.stdout || '');
               stderr = result.stderr?.toString?.() || String(result.stderr || '');
+              if (stdout) writeStdout(stdout);
+              if (stderr) writeStderr(stderr);
               if (ipc) {
                 ipc.process = result.process;
                 for (const message of ipc.pendingIncoming.splice(0)) {
@@ -5507,16 +6266,21 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                   finish(terminalCode, terminalSignal);
                 }
               } else if (!result.pending) {
-                scope.setTimeout(() => {
-                  stdout = result.stdoutChunks?.join('') ?? stdout;
-                  stderr = result.stderrChunks?.join('') ?? stderr;
-                  finish(terminalCode, terminalSignal);
-                }, 0);
+                const scheduleFinish = scope.__BNH_NATIVE_TIMERS__?.setTimeout || scope.setTimeout;
+                scheduleFinish(() => {
+                  if (result.stdoutChunks?.length) stdout = result.stdoutChunks.join('');
+                  if (result.stderrChunks?.length) stderr = result.stderrChunks.join('');
+                  if (stdout && !stdoutEmitted) writeStdout(stdout);
+                  if (stderr && !stderrEmitted) writeStderr(stderr);
+                  scope.queueMicrotask(() => finish(terminalCode, terminalSignal));
+                });
               } else if (result.process) {
                 result.process.once?.('exit', (code, signal) => {
-                  stdout = result.stdoutChunks?.join('') ?? stdout;
-                  stderr = result.stderrChunks?.join('') ?? stderr;
-                  finish(signal ? null : code, signal || null);
+                  if (result.stdoutChunks?.length) stdout = result.stdoutChunks.join('');
+                  if (result.stderrChunks?.length) stderr = result.stderrChunks.join('');
+                  if (stdout && !stdoutEmitted) writeStdout(stdout);
+                  if (stderr && !stderrEmitted) writeStderr(stderr);
+                  scope.queueMicrotask(() => finish(signal ? null : code, signal || null));
                 });
               }
             } catch (error) {
@@ -5782,12 +6546,23 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           moduleState.cache.set(entryPath, moduleRecord);
           if (isMain) moduleState.main = moduleRecord;
           const requireFn = (name) => {
+            if (name === 'internal/child_process' || name === 'node:internal/child_process') {
+              const kChannelHandle = Symbol.for('bnh.internal.child_process.channel');
+              processObj[kChannelHandle] ||= {
+                readStart() { return 0; },
+                readStop() { return 0; },
+              };
+              return { kChannelHandle };
+            }
             const builtin = builtinName(name);
+            if (builtin === 'trace_events' && processObj._bnhTraceEventsUnavailable) {
+              throw traceEventsUnavailableError();
+            }
             if (BUILTIN_NAMES.includes(builtin)) {
               if (builtin === 'stream/web' && syncStreamWebApi) return syncStreamWebApi;
               if (builtin === 'repl') {
                 const resolved = resolveFileSync(name, entryPath, processObj);
-                return loadModuleSync(resolved, entryPath, processObj, scopeObj, bufferClass, stderrArr, undefined, moduleState, false, compileCacheState, text.includes('eval('), syncStreamWebApi);
+                return ensureReplDispose(loadModuleSync(resolved, entryPath, processObj, scopeObj, bufferClass, stderrArr, undefined, moduleState, false, compileCacheState, text.includes('eval('), syncStreamWebApi));
               }
               if (builtin === 'module') return createModuleApi(processObj, (value) => stderrArr.push(value));
               if (builtin === 'process') return processObj;
@@ -5795,7 +6570,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               if (builtin === 'dns') return dns;
               if (builtin === 'dns/promises') return dnsPromises;
               if (builtin === 'v8') return createBrowserV8Module(processObj, scopeObj);
-              return runtimeRequire(name);
+              if (builtin === 'dgram' && processObj?._bnhDgram) return processObj._bnhDgram;
+              const value = runtimeRequire(name);
+              return value;
             }
             const resolved = resolveFileSync(name, entryPath, processObj);
             return loadModuleSync(resolved, entryPath, processObj, scopeObj, bufferClass, stderrArr, undefined, moduleState, false, compileCacheState, text.includes('eval('), syncStreamWebApi);
@@ -5893,6 +6670,31 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                 onSignal: options.onSignal,
                 synchronousWarnings: true,
                 }, (value) => stdoutArr.push(value), (value) => stderrArr.push(value), () => () => {});
+            if (options.stdinSource && childProc.processObject.stdin?.push) {
+              const forwardStdin = (value) => {
+                const stdin = childProc.processObject.stdin;
+                stdin.push(value);
+                if (stdin.readableFlowing && stdin.readableLength > 0) {
+                  const pending = stdin.read(stdin.readableHighWaterMark);
+                  if (pending !== null) childProc.processObject._bnhRunInContext?.(() => stdin.emit('data', pending));
+                }
+                const channel = childProc.processObject[Symbol.for('bnh.internal.child_process.channel')];
+                if (channel?.reading === false && channel.pending?.length) {
+                  nativeQueueMicrotask(() => {
+                    if (channel.reading === false && channel.pending.length) channel.readStart();
+                  });
+                }
+              };
+              let bufferedInput;
+              while ((bufferedInput = options.stdinSource.read?.()) !== null && bufferedInput !== undefined) {
+                forwardStdin(bufferedInput);
+              }
+              if (options.stdinSource.readableEnded) childProc.processObject.stdin.push(null);
+              else {
+                options.stdinSource.on?.('data', forwardStdin);
+                options.stdinSource.once?.('end', () => childProc.processObject.stdin.push(null));
+              }
+            }
             childHttpModule = runtimeRequire('http');
             previousHttpMaxHeaderSize = childHttpModule.maxHeaderSize;
             if (prepared.maxHttpHeaderSize !== null) {
@@ -5944,7 +6746,12 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                     || childProc.processObject._timers?.size
                     || childProc.processObject._bnhHasPendingTasks?.()
                     || childProc.processObject._bnhHasPendingAbortWorker?.()) return;
-                  if (['message', 'disconnect'].some((name) => childProc.processObject.listenerCount(name) > 0)) return;
+                  const hasIpcListeners = childProc.processObject.connected
+                    && ['message', 'disconnect'].some((name) => (
+                      childProc.processObject.listeners?.(name)?.some((listener) => !listener._bnhInternal)
+                      ?? childProc.processObject.listenerCount(name) > 0
+                    ));
+                  if (hasIpcListeners) return;
                   childProc.processObject._emitBeforeExit?.();
                   childProc.processObject._markExited?.();
                 });
@@ -5964,7 +6771,20 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               return releaseChildTask;
             };
             childProc.processObject._bnhTaskTracker = childTrackTask;
+            childProc.processObject._bnhDgram = createBrowserDgram({
+              network: virtualNetwork,
+              BufferClass: Buffer,
+              trackTask: childTrackTask,
+              processOwner: childProc.processObject,
+              runInProcessContext: (owner, callback) => {
+                const previousProcess = scope.process;
+                scope.process = owner;
+                try { return callback(); }
+                finally { scope.process = previousProcess; }
+              },
+            });
             childProc.processObject._bnhHasPendingTasks = () => childTaskReleases.size > 0;
+            childProc.processObject._bnhTryExit = () => childProc.processObject.exit?.(0);
             childProc.processObject._bnhRunInContext = (callback) => {
               const previousProcess = scope.process;
               const previousConsole = scope.console;
@@ -6008,6 +6828,24 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             };
             childProc.processObject._bnhHasPendingAbortWorker = () => abortOnUncaughtException && pendingAbortWorkers > 0;
             if (options.ipc) {
+              const channelKey = Symbol.for('bnh.internal.child_process.channel');
+              const channel = childProc.processObject[channelKey] || {
+                reading: true,
+                pending: [],
+                readStart() {
+                  this.reading = true;
+                  const messages = this.pending.splice(0);
+                  for (const message of messages) {
+                    childProc.processObject._bnhRunInContext?.(() => childProc.processObject.emit('message', message.value, message.handle));
+                  }
+                  return 0;
+                },
+                readStop() {
+                  this.reading = false;
+                  return 0;
+                },
+              };
+              childProc.processObject[channelKey] = channel;
               childProc.processObject.connected = true;
               childProc.processObject.channel = options.ipc;
               childProc.processObject.send = (value, sendHandle, sendOptions, sendCallback) => {
@@ -6099,31 +6937,54 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                 false,
                 compileCacheState,
               );
-              const syncReadable = loadSyncInternal('internal/webstreams/readablestream');
-              const syncWritable = loadSyncInternal('internal/webstreams/writablestream');
-              const syncTransform = loadSyncInternal('internal/webstreams/transformstream');
-              const syncQueuing = loadSyncInternal('internal/webstreams/queuingstrategies');
-              const syncEncoding = loadSyncInternal('internal/webstreams/encoding');
-              const syncCompression = loadSyncInternal('internal/webstreams/compression');
-              syncStreamWebApi = {
-                ReadableStream: syncReadable.ReadableStream,
-                ReadableStreamDefaultReader: syncReadable.ReadableStreamDefaultReader,
-                ReadableStreamBYOBReader: syncReadable.ReadableStreamBYOBReader,
-                ReadableStreamBYOBRequest: syncReadable.ReadableStreamBYOBRequest,
-                ReadableByteStreamController: syncReadable.ReadableByteStreamController,
-                ReadableStreamDefaultController: syncReadable.ReadableStreamDefaultController,
-                WritableStream: syncWritable.WritableStream,
-                WritableStreamDefaultWriter: syncWritable.WritableStreamDefaultWriter,
-                WritableStreamDefaultController: syncWritable.WritableStreamDefaultController,
-                TransformStream: syncTransform.TransformStream,
-                TransformStreamDefaultController: syncTransform.TransformStreamDefaultController,
-                ByteLengthQueuingStrategy: syncQueuing.ByteLengthQueuingStrategy,
-                CountQueuingStrategy: syncQueuing.CountQueuingStrategy,
-                TextEncoderStream: syncEncoding.TextEncoderStream,
-                TextDecoderStream: syncEncoding.TextDecoderStream,
-                CompressionStream: syncCompression.CompressionStream,
-                DecompressionStream: syncCompression.DecompressionStream,
-              };
+              const nativeStreamWebApi = [
+                'ReadableStream', 'ReadableStreamDefaultReader', 'ReadableStreamBYOBReader',
+                'ReadableStreamBYOBRequest', 'ReadableByteStreamController',
+                'ReadableStreamDefaultController', 'WritableStream', 'WritableStreamDefaultWriter',
+                'WritableStreamDefaultController', 'TransformStream',
+                'TransformStreamDefaultController', 'ByteLengthQueuingStrategy',
+                'CountQueuingStrategy', 'TextEncoderStream', 'TextDecoderStream',
+                'CompressionStream', 'DecompressionStream',
+              ].every((name) => typeof scope[name] === 'function')
+                ? Object.fromEntries([
+                  'ReadableStream', 'ReadableStreamDefaultReader', 'ReadableStreamBYOBReader',
+                  'ReadableStreamBYOBRequest', 'ReadableByteStreamController',
+                  'ReadableStreamDefaultController', 'WritableStream', 'WritableStreamDefaultWriter',
+                  'WritableStreamDefaultController', 'TransformStream',
+                  'TransformStreamDefaultController', 'ByteLengthQueuingStrategy',
+                  'CountQueuingStrategy', 'TextEncoderStream', 'TextDecoderStream',
+                  'CompressionStream', 'DecompressionStream',
+                ].map((name) => [name, scope[name]]))
+                : null;
+              if (nativeStreamWebApi) {
+                syncStreamWebApi = nativeStreamWebApi;
+              } else {
+                const syncReadable = loadSyncInternal('internal/webstreams/readablestream');
+                const syncWritable = loadSyncInternal('internal/webstreams/writablestream');
+                const syncTransform = loadSyncInternal('internal/webstreams/transformstream');
+                const syncQueuing = loadSyncInternal('internal/webstreams/queuingstrategies');
+                const syncEncoding = loadSyncInternal('internal/webstreams/encoding');
+                const syncCompression = loadSyncInternal('internal/webstreams/compression');
+                syncStreamWebApi = {
+                  ReadableStream: syncReadable.ReadableStream,
+                  ReadableStreamDefaultReader: syncReadable.ReadableStreamDefaultReader,
+                  ReadableStreamBYOBReader: syncReadable.ReadableStreamBYOBReader,
+                  ReadableStreamBYOBRequest: syncReadable.ReadableStreamBYOBRequest,
+                  ReadableByteStreamController: syncReadable.ReadableByteStreamController,
+                  ReadableStreamDefaultController: syncReadable.ReadableStreamDefaultController,
+                  WritableStream: syncWritable.WritableStream,
+                  WritableStreamDefaultWriter: syncWritable.WritableStreamDefaultWriter,
+                  WritableStreamDefaultController: syncWritable.WritableStreamDefaultController,
+                  TransformStream: syncTransform.TransformStream,
+                  TransformStreamDefaultController: syncTransform.TransformStreamDefaultController,
+                  ByteLengthQueuingStrategy: syncQueuing.ByteLengthQueuingStrategy,
+                  CountQueuingStrategy: syncQueuing.CountQueuingStrategy,
+                  TextEncoderStream: syncEncoding.TextEncoderStream,
+                  TextDecoderStream: syncEncoding.TextDecoderStream,
+                  CompressionStream: syncCompression.CompressionStream,
+                  DecompressionStream: syncCompression.DecompressionStream,
+                };
+              }
               // Node exposes its internal Web Streams classes globally. The
               // browser's native classes have different private brands, so
               // Node's internal adapters reject them even though their public
@@ -6147,11 +7008,23 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               scope.TextDecoderStream = syncStreamWebApi.TextDecoderStream;
               scope.CompressionStream = syncStreamWebApi.CompressionStream;
               scope.DecompressionStream = syncStreamWebApi.DecompressionStream;
+              installTextEncoderInspect(scope);
               if (prepared.snapshotBlobPath && !prepared.buildSnapshot && !prepared.scriptPath) {
                 const snapshot = JSON.parse(String(fs.readFileSync(prepared.snapshotBlobPath, 'utf8')));
                 entryPath = normalizePath(snapshot.entry, cwd);
               }
               const commandName = prepared.command.split('/').pop();
+              if (prepared.experimentalLoader) {
+                const loaderPath = resolveFileSync(prepared.experimentalLoader, entryPath, childProc.processObject);
+                try {
+                  readSource(loaderPath);
+                } catch {
+                  const error = new Error(`Cannot find package '${prepared.experimentalLoader}' imported from ${entryPath}`);
+                  error.code = 'ERR_MODULE_NOT_FOUND';
+                  error.name = 'Error [ERR_MODULE_NOT_FOUND]';
+                  throw error;
+                }
+              }
               if (commandName === 'echo') {
                 childProc.processObject.stdout.write(`${prepared.commandArgs.join(' ')}\n`);
               } else if (commandName === 'pwd') {
@@ -6183,7 +7056,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               }
               hasPendingTimers = Boolean(options.asyncLifecycle && childProc.processObject._timers?.size);
               const hasIpcListeners = Boolean(options.ipc)
-                && ['message', 'disconnect'].some((name) => childProc.processObject.listenerCount(name) > 0);
+                && ['message', 'disconnect'].some((name) => childProc.processObject.listeners?.(name)
+                  ?.some((listener) => !listener?._bnhInternal && !listener?.__bnhInternalClusterListener));
               hasPendingTasks = childProc.processObject._bnhHasPendingTasks?.() === true;
               if (!childProc.processObject._exitRequested?.()
                 && !hasPendingTimers
@@ -6302,6 +7176,29 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             }
           }
           const childProxy = proxyCapability.adapter ? proxyCapability : capabilities.manifest.proxy;
+          const esmDescriptor = {
+            capabilities: capabilities.manifest,
+            files,
+            entry: prepared.entryPath,
+            execArgv: childExecArgv,
+            proxy: childProxy,
+            virtualNetwork: {
+              shared: true,
+              network: virtualNetwork,
+            },
+          };
+          const run = async (context) => {
+            const previous = esmExecutionTail;
+            let release;
+            esmExecutionTail = new Promise((resolve) => { release = resolve; });
+            await previous;
+            try {
+              const { runProcessEntry } = await import('./runtime/process-entry.js');
+              return await runProcessEntry({ ...context, vfs: esmDescriptor });
+            } finally {
+              release();
+            }
+          };
           return createVirtualProcess({
             scope,
             runId: runSpec?.runId,
@@ -6314,17 +7211,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             signalGrants: capabilities.manifest.signals.allowed,
             workerSource: new URL('./runtime/process-entry.js', import.meta.url).href,
             workerType: 'module',
-            vfs: {
-              capabilities: capabilities.manifest,
-              files,
-              entry: prepared.entryPath,
-              execArgv: childExecArgv,
-              proxy: childProxy,
-              virtualNetwork: {
-                shared: true,
-                network: virtualNetwork,
-              },
-            },
+            vfs: esmDescriptor,
+            run,
             // Child processes may create a server after they start. Keep them
             // in this realm so later siblings can share the live registry.
             forceFallback: true,
@@ -6562,7 +7450,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     };
     const hasReferencedIpc = () => {
       const channel = processObject?.channel;
-      return Boolean(processObject?.connected && channel && channel.hasRef?.() !== false);
+      const hasUserIpcListener = ['message', 'disconnect'].some((name) => processObject?.listeners?.(name)
+        ?.some((listener) => !listener?._bnhInternal && !listener?.__bnhInternalClusterListener));
+      return Boolean(processObject?.connected && channel && channel.hasRef?.() !== false && hasUserIpcListener);
     };
     const hasReferencedWorkerParentPort = () => {
       if (!options.workerThread || !workerThreadParentPort) return false;
@@ -6619,7 +7509,33 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           };
           processObject.channel = injectedProcess.channel || processObject.channel;
           if (typeof injectedProcess.on === 'function') {
-            injectedProcess.on('message', (message, handle) => processObject.emit('message', message, handle));
+            // Queue browser IPC until the runtime's user-facing process listeners are installed.
+            const pendingInjectedMessages = [];
+            let injectedMessageFlushQueued = false;
+            const isInternalMessageListener = (listener) => listener?._bnhInternal
+              || listener?.__bnhInternalClusterListener
+              || listener?.listener?._bnhInternal
+              || listener?.listener?.__bnhInternalClusterListener;
+            const hasUserMessageListener = () => processObject.listeners?.('message')
+              ?.some((listener) => !isInternalMessageListener(listener));
+            const flushInjectedMessages = () => {
+              injectedMessageFlushQueued = false;
+              if (!hasUserMessageListener()) return;
+              for (const [message, handle] of pendingInjectedMessages.splice(0)) processObject.emit('message', message, handle);
+            };
+            processObject.on('newListener', (name) => {
+              if (name !== 'message' || injectedMessageFlushQueued) return;
+              injectedMessageFlushQueued = true;
+              queueMicrotask(flushInjectedMessages);
+            });
+            const onInjectedMessage = (message, handle) => {
+              if (hasUserMessageListener()) processObject.emit('message', message, handle);
+              else pendingInjectedMessages.push([message, handle]);
+            };
+            onInjectedMessage._bnhInternal = true;
+            injectedProcess.on('message', (message, handle) => {
+              onInjectedMessage(message, handle);
+            });
             injectedProcess.on('disconnect', () => {
               processObject.connected = false;
               processObject.emit('disconnect');
@@ -6638,6 +7554,12 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         })()
       : fullProcessData;
     const processObject = processData.processObject;
+    Object.defineProperty(processObject, '_bnhTraceEventsUnavailable', {
+      configurable: true,
+      enumerable: false,
+      value: Boolean(options.workerThread)
+        || String(options.entry || '').startsWith('/node/.bnh-worker-eval-'),
+    });
     processObject._bnhShouldRunUnref = () => pending > 0
       || hasReferencedTimers(processObject._timers || timerHandles)
       || hasLiveVirtualProcess()
@@ -6688,6 +7610,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               ports: [],
             });
           };
+          onMessage._bnhInternal = true;
           processObject.on('message', onMessage);
           parentPort.postMessage = (value, transferList) => processObject.send(value, transferList);
           parentPort.start = () => parentPort;
@@ -6705,10 +7628,12 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           return parentPort;
         })()
       : null;
-    processObject.on('message', (message) => {
+    const onWorkerMessage = (message) => {
       if (!message?.__bnhThreadMessage) return;
       processObject.emit('workerMessage', message.value, Number(message.source));
-    });
+    };
+    onWorkerMessage._bnhInternal = true;
+    processObject.on('message', onWorkerMessage);
     const createBrowserWorker = (source, workerOptions, threadId, ownerProcess) => {
       if (workerOptions.env !== undefined
         && workerOptions.env !== browserIO.SHARE_ENV
@@ -7191,6 +8116,13 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       (pathname) => vfs.read(pathname),
       entry,
     );
+    if (options.workerThread || String(options.entry || '').startsWith('/node/.bnh-worker-eval-')) {
+      Object.defineProperty(builtins, 'trace_events', {
+        configurable: true,
+        enumerable: true,
+        get() { throw traceEventsUnavailableError(); },
+      });
+    }
     builtins.sys = builtins.util;
     processObject.getBuiltinModule = function getBuiltinModule(id) {
       if (typeof id !== 'string') throw moduleArgumentTypeError('id', 'of type string', id);
@@ -7206,6 +8138,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     builtins.module._load = (name, parent) => {
       const builtin = builtinName(name);
       const importer = typeof parent === 'string' ? parent : parent?.filename || entry;
+      if (builtin === 'trace_events' && processObject._bnhTraceEventsUnavailable) {
+        throw traceEventsUnavailableError();
+      }
       return BUILTIN_NAMES.includes(builtin) ? builtins[builtin] ?? {} : loadModule(name, importer);
     };
     const streamWebApi = builtins['stream/web'];
@@ -7273,7 +8208,6 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       newHandle: () => ({ close() {} }),
     };
     const nativeFetch = browserIO.fetch;
-    let virtualFetchDepth = 0;
     const responseFromNodeResponse = (response, url) => new Promise((resolve, reject) => {
       const chunks = [];
       response.on('data', (chunk) => chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)));
@@ -7285,17 +8219,21 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           body.set(chunk, offset);
           offset += chunk.byteLength;
         }
-        resolve(new scope.Response(body, {
+        const result = new scope.Response(body, {
           status: response.statusCode,
           statusText: response.statusMessage,
           headers: response.headers,
-        }));
+        });
+        Object.defineProperty(result, '__bnhURL', { configurable: true, value: url });
+        if (response._response?.body?._bnhTerminated === true) {
+          Object.defineProperty(result, '__bnhTerminated', { configurable: true, value: true });
+        }
+        resolve(result);
       });
     });
     const virtualHttpFetch = (input, init = {}) => {
       const url = String(input?.url || input);
-      if (virtualFetchDepth || !/^https?:/i.test(url)) return nativeFetch(input, init);
-      virtualFetchDepth += 1;
+      if (!/^https?:/i.test(url)) return nativeFetch(input, init);
       const headers = init.headers && typeof init.headers.entries === 'function'
         ? Object.fromEntries(init.headers.entries())
         : init.headers;
@@ -7310,7 +8248,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         });
         request.once('error', reject);
         request.end(init.body);
-      }).finally(() => { virtualFetchDepth -= 1; });
+      });
     };
     const virtualProxyFetch = (input, init, proxyUrl) => {
       const target = new scope.URL(String(input?.url || input));
@@ -7416,7 +8354,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       const proxyUrl = targetIsHttps
         ? (env.https_proxy || env.HTTPS_PROXY)
         : (env.http_proxy || env.HTTP_PROXY);
-      if (useEnvProxy && proxyUrl && /^https?:/i.test(target) && !virtualFetchDepth) {
+      if (useEnvProxy && proxyUrl && /^https?:/i.test(target)) {
         return virtualProxyFetch(input, init, proxyUrl);
       }
       return virtualHttpFetch(input, init);
@@ -7487,7 +8425,13 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       return error;
     };
     const loadModule = (specifier, importer = entry, skipResolve = false) => {
+      const shimPath = String(specifier).startsWith('file:') ? fileURLToPath(specifier) : specifier;
+      if (shimPath === '/node/lib/dgram.js') return builtins.dgram;
+      if (shimPath === '/node/lib/cluster.js') return builtins.cluster;
       const name = builtinName(specifier);
+      if (name === 'trace_events' && processObject._bnhTraceEventsUnavailable) {
+        throw traceEventsUnavailableError();
+      }
       if (name === 'sys' && !sysWarningEmitted) {
         sysWarningEmitted = true;
         processObject.emitWarning?.('sys is deprecated. Use util instead.', {
@@ -7495,7 +8439,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           type: 'DeprecationWarning',
         });
       }
-      if (name === 'repl') return loadModule('/node/lib/repl.js', importer);
+      if (name === 'repl') return ensureReplDispose(loadModule('/node/lib/repl.js', importer));
       if (BUILTIN_NAMES.includes(name)) {
         if (name === 'dns') scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ = Math.max(1, Number(scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ || 0));
         const context = moduleHookContext(importer);
@@ -7619,7 +8563,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     Object.defineProperty(builtins, 'repl', {
       configurable: true,
       enumerable: true,
-      get: () => loadModule('/node/lib/repl.js', entry),
+      get: () => ensureReplDispose(loadModule('/node/lib/repl.js', entry)),
     });
     const esmLoader = createModuleLoader({
       files: {
@@ -7795,10 +8739,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       internalBinding: internalBindings.internalBinding,
       getInternalBinding: internalBindings.internalBinding,
     });
-    const internalWebCrypto = loadModule('internal/crypto/webcrypto', entry);
-    if (internalWebCrypto?.CryptoKey && scope.CryptoKey?.prototype) {
-      Object.setPrototypeOf(scope.CryptoKey.prototype, internalWebCrypto.CryptoKey.prototype);
-    }
+    const internalWebCrypto = scope.Crypto && scope.CryptoKey && scope.SubtleCrypto
+      ? null
+      : loadModule('internal/crypto/webcrypto', entry);
     if (internalWebCrypto?.Crypto) scope.Crypto = internalWebCrypto.Crypto;
     if (internalWebCrypto?.CryptoKey) scope.CryptoKey = internalWebCrypto.CryptoKey;
     if (internalWebCrypto?.SubtleCrypto) scope.SubtleCrypto = internalWebCrypto.SubtleCrypto;
@@ -7820,7 +8763,12 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       TextDecoderStream: streamWebApi.TextDecoderStream,
       CompressionStream: streamWebApi.CompressionStream,
       DecompressionStream: streamWebApi.DecompressionStream,
-      WebAssembly: createWasmContract(scope),
+    });
+    Object.defineProperty(scope, 'WebAssembly', {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: createWasmContract(scope),
     });
     vfs.mkdir('/node/deps/corepack', { recursive: true });
     vfs.writeFile('/node/deps/corepack/package.json', JSON.stringify({ version: '0.34.6' }));
@@ -7851,14 +8799,16 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         await new Promise((resolve) => nativeSetTimeout(resolve, 0));
       }
       if (options.isCancelled?.() || options.signal?.aborted) return null;
-      return processObject.getCode();
+      const naturalCode = processObject.getCode();
+      return naturalCode;
     } catch (error) {
       stderr(`${error?.stack || error}\n`);
       processObject.exitCode = 1;
       if (injectedProcess && typeof injectedProcess.exit === 'function') {
         try { injectedProcess.exit(1); } catch { /* ignore */ }
       }
-      if (String(error?.code || '').startsWith('ERR_UNSUPPORTED_')) throw error;
+      if (String(error?.code || '').startsWith('ERR_UNSUPPORTED_')
+        || error?.code === 'ERR_TRACE_EVENTS_UNAVAILABLE') throw error;
       return 1;
     } finally {
       for (const handle of timerHandles) clearTimer?.(handle);

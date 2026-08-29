@@ -1,5 +1,5 @@
 import { EventEmitter } from './events.js';
-import { Writable, ensureOutputStream } from './streams.js';
+import { Readable, Writable, ensureOutputStream } from './streams.js';
 import { adaptMessagePort, adaptWorker, createIpcError, createMessageChannel, createScopedIpcEndpoint, createWorkerFactory } from './messaging.js';
 import { createProcessWorkerSource } from './process-worker.js';
 import { browserCryptoVersion } from './crypto.js';
@@ -138,7 +138,20 @@ const PROCESS_CONFIG = Object.freeze({
   target_defaults: Object.freeze({ default_configuration: 'Release' }),
 });
 
-const PROCESS_FEATURES = Object.freeze({ inspector: false, debug: false });
+const PROCESS_FEATURES = Object.freeze({
+  inspector: true,
+  debug: false,
+  uv: false,
+  ipv6: true,
+  openssl_is_boringssl: false,
+  tls_alpn: true,
+  tls_sni: true,
+  tls_ocsp: true,
+  tls: true,
+  cached_builtins: false,
+  require_module: false,
+  typescript: false,
+});
 
 function processVersions(scope = globalThis) {
   const versions = { node: '22.0.0', v8: '12.0.0' };
@@ -228,6 +241,7 @@ export function installProcessContract(process, { uid = 1000, gid = 1000, umask 
   };
   if (process.stdout) process.stdout = ensureOutputStream(process.stdout);
   if (process.stderr) process.stderr = ensureOutputStream(process.stderr);
+  installProcessStderrSurface(process.stderr, process);
   if (process.stdout) process.stdout.isTTY = false;
   if (process.stderr) process.stderr.isTTY = false;
   return process;
@@ -245,6 +259,173 @@ function makeWritableEndpoint(endpoint) {
   if (endpoint && typeof endpoint.write === 'function') return ensureOutputStream(endpoint);
   if (Array.isArray(endpoint)) return new Writable({ write(chunk, _encoding, callback) { endpoint.push(typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk)); callback(); } });
   return new Writable({ write(chunk, _encoding, callback) { outputWrite(endpoint, chunk); callback(); } });
+}
+
+function installProcessStderrSurface(stream, processObject) {
+  if (!stream || stream.__BNH_PROCESS_STDERR_SURFACE__) return;
+  Object.defineProperty(stream, '__BNH_PROCESS_STDERR_SURFACE__', {
+    configurable: false,
+    enumerable: false,
+    value: true,
+  });
+  const readable = new (class extends EventEmitter {
+    constructor() {
+      super();
+      this.readable = false;
+      this.readableEnded = true;
+      this.readableEncoding = null;
+    }
+    resume() { return this; }
+    setEncoding(encoding = 'utf8') {
+      if (typeof encoding !== 'string') {
+        const error = new TypeError(`Unknown encoding: ${encoding}`);
+        error.code = 'ERR_UNKNOWN_ENCODING';
+        throw error;
+      }
+      this.readableEncoding = encoding;
+      return this;
+    }
+    async some() { return false; }
+  })();
+  const emptyReadable = () => new Readable({ read() {}, readable: false });
+  const socketPrototype = Object.create(Object.getPrototypeOf(stream));
+  Object.defineProperties(stream, {
+    server: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    connecting: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: false,
+    },
+    destroySoon: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    fd: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: 2,
+    },
+  });
+  Object.defineProperties(socketPrototype, {
+    resetAndDestroy: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    resume: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { readable.resume(); return this; },
+    },
+    setEncoding: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) { readable.setEncoding(...args); return this; },
+    },
+    setKeepAlive: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(enable = false, initialDelayMsecs = 0) {
+        this._keepAlive = Boolean(enable);
+        this._keepAliveInitialDelay = ~~(initialDelayMsecs / 1000);
+        return this;
+      },
+    },
+    setNoDelay: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(enable = true) {
+        this._noDelay = Boolean(enable);
+        return this;
+      },
+    },
+    setTimeout: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(milliseconds, callback) {
+        if (typeof milliseconds !== 'number') {
+          const error = new TypeError('The "msecs" argument must be of type number');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        if (!Number.isFinite(milliseconds) || milliseconds < 0) {
+          const error = new RangeError(`The value of "msecs" is out of range. It must be >= 0 && <= ${Number.MAX_SAFE_INTEGER}. Received ${milliseconds}`);
+          error.code = 'ERR_OUT_OF_RANGE';
+          throw error;
+        }
+        if (callback !== undefined && typeof callback !== 'function') {
+          const error = new TypeError('The "callback" argument must be of type function');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        this.timeout = milliseconds;
+        if (this._timeout) processObject?._bnhClearTimer?.(this._timeout);
+        this._timeout = null;
+        if (milliseconds === 0) return this;
+        if (callback) this.once?.('timeout', callback);
+        this._timeout = processObject?._bnhSetTimer?.(
+          () => { this._timeout = null; this.emit?.('timeout'); },
+          milliseconds,
+          false,
+          'Timeout',
+        );
+        this._timeout?.unref?.();
+        return this;
+      },
+    },
+    some: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.some(...args); },
+    },
+    drop: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return emptyReadable().drop(...args); },
+    },
+    every: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return emptyReadable().every(...args); },
+    },
+    filter: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return emptyReadable().filter(...args); },
+    },
+    find: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return emptyReadable().find(...args); },
+    },
+    flatMap: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return emptyReadable().flatMap(...args); },
+    },
+  });
+  Object.setPrototypeOf(stream, socketPrototype);
 }
 
 function transition(state, next) {

@@ -160,6 +160,7 @@ enabled = true
 items = [
   "stdout-stderr",
   "vfs",
+  "shell",
   "network",
   "ipc",
   "streams",

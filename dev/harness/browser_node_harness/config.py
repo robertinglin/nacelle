@@ -64,6 +64,7 @@ _DEFAULT_CORE_FEATURES = (
 _DEFAULT_PRIMITIVES = (
     "stdout-stderr",
     "vfs",
+    "shell",
     "network",
     "ipc",
     "streams",

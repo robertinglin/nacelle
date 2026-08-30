@@ -52,6 +52,8 @@
     "examples": "node examples/examples-server.mjs",
     "examples:vite-react": "node examples/examples-server.mjs --vite-react",
     "examples:wasm": "node examples/examples-server.mjs --wasm",
+    "examples:bash": "node examples/examples-server.mjs --bash",
+    "examples:typescript": "node examples/examples-server.mjs --typescript",
     "publish:release": "node scripts/publish-release.mjs",
     "publish:n22": "node scripts/publish-release.mjs --channel=n22 --set-latest",
     "publish:v22": "node scripts/publish-release.mjs --channel=n22 --set-latest"

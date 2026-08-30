@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nacelle — TypeScript Compile Demo</title>
+  <style>
+    :root { color-scheme: dark; --bg: #08111f; --panel: #122139; --card: #0c1729; --border: #29415f; --text: #e6f0ff; --muted: #9bb0ca; --accent: #a5b4fc; --ok: #86efac; --error: #fda4af; }
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; margin: 0; }
+    body { background: radial-gradient(circle at top right, #312e81, var(--bg) 48%); color: var(--text); font: 15px/1.5 system-ui, sans-serif; }
+    header { min-height: 60px; padding: 0 22px; display: flex; align-items: center; justify-content: space-between; background: #122139e8; border-bottom: 1px solid var(--border); }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; }
+    .badge { padding: 3px 9px; border-radius: 999px; background: #3730a3; color: #e0e7ff; font-size: .72rem; }
+    .nav-wrap { position: relative; }
+    .hamburger { border: 1px solid var(--border); border-radius: 6px; padding: 5px 9px; background: transparent; color: var(--text); cursor: pointer; font-size: 1.1rem; }
+    .nav { position: absolute; top: 42px; left: 0; z-index: 2; display: none; min-width: 240px; padding: 6px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); box-shadow: 0 16px 35px #0008; }
+    .nav.open { display: grid; gap: 3px; }
+    .nav a { padding: 8px 10px; border-radius: 5px; color: var(--text); text-decoration: none; font-size: .85rem; }
+    .nav a:hover, .nav a.active { background: #312e81; color: var(--accent); }
+    main { width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: 28px 0 40px; display: grid; gap: 18px; }
+    .intro, .panel { border: 1px solid var(--border); border-radius: 12px; background: #122139e8; }
+    .intro { padding: 22px; }
+    h1 { margin: 0 0 6px; font-size: 1.45rem; }
+    p { margin: 0; color: var(--muted); }
+    button { border: 0; border-radius: 6px; padding: 8px 13px; background: var(--accent); color: #1e1b4b; font-weight: 750; cursor: pointer; }
+    .toolbar { display: flex; align-items: center; gap: 10px; margin-top: 16px; }
+    .status { color: var(--muted); font: .8rem ui-monospace, monospace; }
+    .status.ok { color: var(--ok); }
+    .status.error { color: var(--error); }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .panel { min-width: 0; overflow: hidden; }
+    .panel h2 { margin: 0; padding: 13px 16px; border-bottom: 1px solid var(--border); font-size: .9rem; }
+    pre { min-height: 220px; margin: 0; padding: 16px; overflow: auto; white-space: pre-wrap; background: var(--card); color: var(--text); font: .84rem/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .caption { padding: 10px 16px; border-top: 1px solid var(--border); color: var(--muted); font-size: .8rem; }
+    code { color: var(--accent); }
+    @media (max-width: 760px) { header { padding: 0 14px; } .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="nav-wrap">
+      <button class="hamburger" id="menu-button" title="Switch example">☰</button>
+      <nav class="nav" id="menu">
+        <a href="/express.html">🚀 Express.js Server</a>
+        <a href="/vite-react.html">⚛️ Vite + React IDE</a>
+        <a href="/wasm.html">🧩 Native WASM Addons</a>
+        <a href="/bash.html">⌘ Inline Bash Shell</a>
+        <a href="/typescript.html" class="active">📘 TypeScript Compile</a>
+      </nav>
+    </div>
+    <div class="brand">⚡ nacelle <span class="badge">TypeScript Demo</span></div>
+    <span id="status" class="status">ready</span>
+  </header>
+
+  <main>
+    <section class="intro">
+      <h1>Compile and run TypeScript in the browser</h1>
+      <p>The build script calls <code>module.stripTypeScriptTypes()</code>, writes JavaScript into the virtual filesystem, and runs that output through <code>node.bash()</code>.</p>
+      <div class="toolbar"><button id="run-button">Run TypeScript build</button><span id="exit-status" class="status">not run</span></div>
+    </section>
+
+    <section class="grid">
+      <div class="panel">
+        <h2>src/main.ts</h2>
+        <pre id="source"></pre>
+        <div class="caption">Type annotations and an interface are removed while source line positions remain stable.</div>
+      </div>
+      <div class="panel">
+        <h2>dist/main.js</h2>
+        <pre id="compiled">Run the build to inspect the emitted JavaScript.</pre>
+        <div class="caption" id="result">The compiled program will write its result to the VFS.</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Inline build command</h2>
+      <pre id="command"></pre>
+    </section>
+  </main>
+
+  <script type="module">
+    import { Nacelle } from '/index.js';
+
+    const typescriptSource = `interface User {
+  name: string;
+}
+
+const user: User = { name: 'Ada' };
+const greeting: string = 'Hello ' + user.name + ' from TypeScript';
+require('node:fs').writeFileSync('dist/result.txt', greeting);
+`;
+    const buildCommand = "mkdir -p dist && node -e \"const fs = require('node:fs'); const { stripTypeScriptTypes } = require('node:module'); const source = fs.readFileSync('src/main.ts', 'utf8'); const compiled = stripTypeScriptTypes(source, { mode: 'transform' }); fs.writeFileSync('dist/main.js', compiled);\" && node dist/main.js && cat dist/result.txt";
+    const source = document.getElementById('source');
+    const command = document.getElementById('command');
+    const compiled = document.getElementById('compiled');
+    const result = document.getElementById('result');
+    const status = document.getElementById('status');
+    const exitStatus = document.getElementById('exit-status');
+    source.textContent = typescriptSource;
+    command.textContent = buildCommand;
+
+    function setStatus(element, text, kind = '') {
+      element.textContent = text;
+      element.className = `status ${kind}`;
+    }
+
+    async function runDemo() {
+      setStatus(status, 'compiling');
+      setStatus(exitStatus, 'running');
+      const node = await Nacelle.create({
+        gateway: false,
+        globalObject: window,
+        files: {
+          '/node/package.json': JSON.stringify({
+            name: 'typescript-demo',
+            version: '1.0.0',
+            scripts: { build: buildCommand },
+          }),
+          '/node/src/main.ts': typescriptSource,
+        },
+      });
+      try {
+        const child = await node.bash('npm run build');
+        const code = await child.exit;
+        const generated = String(await node.fs.readFile('/node/dist/main.js'));
+        const generatedResult = String(await node.fs.readFile('/node/dist/result.txt'));
+        compiled.textContent = generated;
+        result.textContent = `Program result: ${generatedResult}`;
+        setStatus(exitStatus, `exit ${code}`, code === 0 ? 'ok' : 'error');
+        setStatus(status, code === 0 ? 'compiled and ran' : 'failed', code === 0 ? 'ok' : 'error');
+      } catch (error) {
+        compiled.textContent = error.stack || error.message;
+        setStatus(exitStatus, 'error', 'error');
+        setStatus(status, 'failed', 'error');
+      }
+    }
+
+    document.getElementById('run-button').addEventListener('click', runDemo);
+    document.getElementById('menu-button').addEventListener('click', (event) => {
+      event.stopPropagation();
+      document.getElementById('menu').classList.toggle('open');
+    });
+    document.addEventListener('click', () => document.getElementById('menu').classList.remove('open'));
+    if (new URLSearchParams(location.search).has('autorun')) runDemo();
+  </script>
+</body>
+</html>

@@ -1,11 +1,23 @@
 import { createRuntime, runtime as defaultRuntime } from './runtime.js';
 import { BrowserNpm, BrowserNpmCache, parseScriptCommand } from './runtime/npm.js';
+import { createShellProcess } from './runtime/shell.js';
+import { parseShellScript, tokenizeShellScript } from './runtime/shell-parser.js';
 import { installGatewayBridge } from './runtime/gateway-bridge.js';
 import { watchFrameAddress } from './runtime/frame-address.js';
 import { createBrowserNet } from './runtime/net.js';
 import { createBufferClass } from './runtime/buffer.js';
 
-export { createRuntime, defaultRuntime as runtime, BrowserNpm, BrowserNpmCache, createBrowserNet, createBufferClass, parseScriptCommand };
+export {
+  createRuntime,
+  defaultRuntime as runtime,
+  BrowserNpm,
+  BrowserNpmCache,
+  createBrowserNet,
+  createBufferClass,
+  parseScriptCommand,
+  parseShellScript,
+  tokenizeShellScript,
+};
 
 /**
  * High-level In-Browser Node.js Execution Engine
@@ -259,43 +271,6 @@ export class Nacelle {
           throw new Error(`Missing script: "${scriptName}"`);
         }
 
-        const parsed = parseScriptCommand(scriptCmd);
-        const extraArgs = options.args || [];
-        const combinedArgs = [...parsed.args, ...extraArgs];
-
-        let entry = '';
-        let argv = [];
-
-        if (parsed.binary === 'node' || parsed.binary === 'nodejs') {
-          const scriptFile = combinedArgs[0];
-          if (!scriptFile) {
-            throw new Error(`Invalid node script command: "${scriptCmd}"`);
-          }
-          entry = scriptFile.startsWith('/') ? scriptFile : `${targetCwd.replace(/\/+$/, '')}/${scriptFile}`;
-          argv = combinedArgs.slice(1);
-        } else {
-          // Check if it's a binary in node_modules/.bin/<bin> or a local file
-          const binPath = `${targetCwd.replace(/\/+$/, '')}/node_modules/.bin/${parsed.binary}`;
-          const binExists = await this.fs.exists(binPath);
-          if (binExists) {
-            entry = binPath;
-            argv = combinedArgs;
-          } else {
-            // Check direct script file
-            const localPath = parsed.binary.startsWith('/')
-              ? parsed.binary
-              : `${targetCwd.replace(/\/+$/, '')}/${parsed.binary}`;
-            const localExists = await this.fs.exists(localPath);
-            if (localExists) {
-              entry = localPath;
-              argv = combinedArgs;
-            } else {
-              entry = localPath;
-              argv = combinedArgs;
-            }
-          }
-        }
-
         const scriptEnv = {
           ...this._env,
           npm_lifecycle_event: scriptName,
@@ -303,19 +278,14 @@ export class Nacelle {
           npm_package_name: pkg.name || '',
           npm_package_version: pkg.version || '',
           PATH: `${targetCwd}/node_modules/.bin:/node/node_modules/.bin:${this._env.PATH || ''}`,
-          ...parsed.env,
           ...options.env,
         };
 
-        return this.run({
-          entry,
-          argv,
-          env: scriptEnv,
+        return this._createShellProcess(scriptCmd, {
+          ...options,
           cwd: targetCwd,
-          timeout: options.timeout,
-          onStdout: options.onStdout,
-          onStderr: options.onStderr,
-          signal: options.signal,
+          env: scriptEnv,
+          npmRun: (name, nestedOptions) => this.npm.run(name, nestedOptions),
         });
       },
 
@@ -329,6 +299,15 @@ export class Nacelle {
    */
   async runScript(scriptName, options = {}) {
     return this.npm.run(scriptName, options);
+  }
+
+  /**
+   * Execute shell lines directly inside the virtual filesystem.
+   * @param {string} command Shell command or command list
+   * @param {Object} [options]
+   */
+  async bash(command, options = {}) {
+    return this._createShellProcess(command, options);
   }
 
   /**
@@ -448,6 +427,7 @@ export class Nacelle {
    * @param {string[]} [runOptions.argv=[]] Command-line arguments
    * @param {Record<string, string>} [runOptions.env] Environment variables
    * @param {string} [runOptions.cwd] Working directory
+   * @param {string|Uint8Array} [runOptions.stdin] Initial standard input
    * @param {number} [runOptions.timeout=30000] Timeout in milliseconds
    * @param {Function} [runOptions.onStdout] Callback for stdout chunks: (chunk: string) => void
    * @param {Function} [runOptions.onStderr] Callback for stderr chunks: (chunk: string) => void
@@ -461,6 +441,7 @@ export class Nacelle {
     timeout = 30000,
     onStdout,
     onStderr,
+    stdin,
     signal,
   }) {
     // Ensure the entry file is mounted in the runtime
@@ -490,6 +471,7 @@ export class Nacelle {
         argv: ['node', entry, ...argv],
         env: { ...this._env, ...env },
         timeout,
+        stdin,
         signal,
       },
       handleStdout,
@@ -527,6 +509,84 @@ export class Nacelle {
     const tempFile = `/node/eval-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.js`;
     await this.fs.writeFile(tempFile, code);
     return this.run({ entry: tempFile, ...options });
+  }
+
+  _createShellProcess(command, options = {}) {
+    const targetCwd = options.cwd || this._cwd;
+    const shellEnv = {
+      ...this._env,
+      PATH: `${targetCwd}/node_modules/.bin:/node/node_modules/.bin:${this._env.PATH || ''}`,
+      ...options.env,
+    };
+    const runCommand = async ({ entry, argv, env, cwd, stdin, signal, timeout }) => {
+      const stdout = [];
+      const stderr = [];
+      const child = await this.run({
+        entry,
+        argv,
+        env,
+        cwd,
+        stdin,
+        timeout,
+        signal,
+        onStdout: (chunk) => stdout.push(String(chunk)),
+        onStderr: (chunk) => stderr.push(String(chunk)),
+      });
+      const code = await child.exit;
+      return { code: code ?? 1, stdout: stdout.join(''), stderr: stderr.join('') };
+    };
+    const runInline = async ({ source, argv, env, cwd, stdin, signal, timeout }) => {
+      const stdout = [];
+      const stderr = [];
+      const child = await this.execute(source, {
+        argv,
+        env,
+        cwd,
+        stdin,
+        timeout,
+        signal,
+        onStdout: (chunk) => stdout.push(String(chunk)),
+        onStderr: (chunk) => stderr.push(String(chunk)),
+      });
+      const code = await child.exit;
+      return { code: code ?? 1, stdout: stdout.join(''), stderr: stderr.join('') };
+    };
+    const shellFs = {
+      exists: this.fs.exists,
+      stat: this.fs.stat,
+      readFile: this.fs.readFile,
+      writeFile: this.fs.writeFile,
+      mkdir: this.fs.mkdir,
+      readdir: this.fs.readdir,
+      remove: (pathname, removeOptions) => this._runtime.vfs.fs.rmSync(pathname, removeOptions),
+      copy: (source, destination, copyOptions) => this._runtime.vfs.fs.cpSync(source, destination, copyOptions),
+      rename: (source, destination) => this._runtime.vfs.fs.renameSync(source, destination),
+      glob: async (pattern, cwd) => this._runtime.vfs.fs.globSync(pattern, { cwd }),
+    };
+    return createShellProcess(command, {
+      args: options.args,
+      cwd: targetCwd,
+      env: shellEnv,
+      stdin: options.stdin,
+      fs: shellFs,
+      npmRun: options.npmRun || ((name, nestedOptions) => this.npm.run(name, nestedOptions)),
+      runCommand,
+      runNode: (nodeOptions) => runInline({
+        source: nodeOptions.print
+          ? `process.stdout.write(String(eval(${JSON.stringify(nodeOptions.code)})) + '\\n');`
+          : nodeOptions.code,
+        argv: nodeOptions.args,
+        env: nodeOptions.env,
+        cwd: nodeOptions.cwd,
+        stdin: nodeOptions.input,
+        signal: nodeOptions.signal,
+        timeout: nodeOptions.timeout,
+      }),
+      signal: options.signal,
+      timeout: options.timeout,
+      onStdout: options.onStdout,
+      onStderr: options.onStderr,
+    });
   }
 
   /** Event Subscription */

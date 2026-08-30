@@ -2304,15 +2304,18 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
             });
             schedule(scope, () => {
               try {
+                const beginFn = request.begin || VirtualServerRequest.prototype.begin;
+                if (typeof beginFn === 'function') beginFn.call(request);
                 binding.server._runInOwnerContext(() => binding.server.emit('request', request, response));
-                request.begin();
               } catch (error) {
+                globalThis.__bnhGatewayLogs?.push?.({ type: 'drain-emit-error', message: error?.message, stack: error?.stack });
                 reject(error);
               }
             });
           });
         }
       } catch (error) {
+        globalThis.__bnhGatewayLogs?.push?.({ type: 'drain-catch-error', message: error?.message, stack: error?.stack });
         socket.destroy(error);
       } finally {
         processing = false;
@@ -2325,10 +2328,12 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
     socket.on('data', (chunk) => {
       if (tunnelStarted) return;
       try {
+        globalThis.__bnhGatewayLogs?.push?.({ type: 'http-raw-socket-data', len: chunk.byteLength });
         input = appendBytes(input, toBytes(chunk, scope));
         while (true) {
           const request = rawRequestFromBytes(input, binding);
           if (!request) break;
+          globalThis.__bnhGatewayLogs?.push?.({ type: 'http-raw-request-parsed', url: request.url, method: request.method });
           input = input.slice(request.consumed);
           if (request.connect) {
             request.head = input;
@@ -2339,6 +2344,7 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
         }
         void drain();
       } catch (error) {
+        globalThis.__bnhGatewayLogs?.push?.({ type: 'http-raw-socket-error', message: error.message, stack: error.stack });
         binding.server.emit('clientError', error, socket);
         if (!socket.destroyed) socket.destroy();
       }
@@ -4619,6 +4625,9 @@ export function createHttpCompatibility(scope = globalThis, {
   const HttpsServer = createServerClass(DEFAULT_HTTPS_PROTOCOL, scope, virtualNetwork, BufferClass, trackTask, ownerProcess);
   Object.setPrototypeOf(VirtualServerRequest.prototype, IncomingMessage.prototype);
   Object.setPrototypeOf(VirtualServerResponse.prototype, OutgoingMessage.prototype);
+  IncomingMessage.prototype.begin = VirtualServerRequest.prototype.begin;
+  IncomingMessage.prototype._ensureAsyncResource = VirtualServerRequest.prototype._ensureAsyncResource;
+  IncomingMessage.prototype._runInAsyncScope = VirtualServerRequest.prototype._runInAsyncScope;
   const HttpAgent = class Agent extends BrowserAgent {
     constructor(options = {}) {
       super(options, DEFAULT_HTTP_PROTOCOL, (connectionOptions) => net.createConnection(connectionOptions));

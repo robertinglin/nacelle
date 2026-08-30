@@ -1,6 +1,7 @@
 import { posix } from './path.js';
 import { fileURLToPath } from './vfs.js';
 import { unsupportedNativeAddon } from './errors.js';
+import { loadWasmAddon, isWasmModuleBytes } from './addon-napi.js';
 
 const RESERVED_EXPORT_NAMES = new Set([
   'await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default',
@@ -1043,7 +1044,20 @@ export function createModuleLoader({
       throw error;
     }
     if (resolved.startsWith('data:')) return dataModuleSource(resolved);
-    if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) return nativeAddonModuleSource(resolved);
+    if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) {
+      const fileBytes = readFile(resolved);
+      const rawBytes = fileBytes instanceof Uint8Array
+        ? fileBytes
+        : fileBytes instanceof ArrayBuffer
+          ? new Uint8Array(fileBytes)
+          : (fileBytes && fileBytes.buffer)
+            ? new Uint8Array(fileBytes.buffer, fileBytes.byteOffset || 0, fileBytes.byteLength)
+            : new TextEncoder().encode(String(fileBytes || ''));
+      if (isWasmModuleBytes(rawBytes)) {
+        return wasmModuleSource(rawBytes, resolved);
+      }
+      return nativeAddonModuleSource(resolved);
+    }
     let value;
     try {
       value = read(resolved, resolved).value;
@@ -1080,7 +1094,22 @@ export function createModuleLoader({
       throw error;
     }
     if (resolved.startsWith('data:')) return importData(resolved);
-    if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) unsupportedNativeAddon(resolved);
+    if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) {
+      const fileBytes = readFile(resolved);
+      const rawBytes = fileBytes instanceof Uint8Array
+        ? fileBytes
+        : fileBytes instanceof ArrayBuffer
+          ? new Uint8Array(fileBytes)
+          : (fileBytes && fileBytes.buffer)
+            ? new Uint8Array(fileBytes.buffer, fileBytes.byteOffset || 0, fileBytes.byteLength)
+            : new TextEncoder().encode(String(fileBytes || ''));
+      if (isWasmModuleBytes(rawBytes)) {
+        const exports = loadWasmAddon(rawBytes, { name: posix.basename(resolved, NATIVE_ADDON_EXTENSION) });
+        cache.set(resolved, { exports, id: resolved, filename: resolved, loaded: true });
+        return exports;
+      }
+      unsupportedNativeAddon(resolved);
+    }
     if (cache.has(resolved)) return cache.get(resolved).exports;
     if (evaluateCommonJS && moduleFormat(resolved) !== 'module' && !resolved.endsWith('.json')) {
       const exports = evaluateCommonJS(resolved, importer);

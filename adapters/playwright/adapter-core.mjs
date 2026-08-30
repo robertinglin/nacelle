@@ -151,19 +151,25 @@ const runtimeExternalAssets = [
 // so they are registered directly against their virtual .node paths.
 async function loadAddonManifest(request) {
   const explicit = process.env.BNH_ADDON_MANIFEST;
-  const candidate = explicit
-    ? path.resolve(explicit)
-    : path.resolve(request.paths.state_dir || '.', 'addon-manifest.json');
-  let raw;
-  try {
-    raw = await readFile(candidate, 'utf8');
-  } catch (error) {
-    if (error?.code === 'ENOENT') return null;
-    throw error;
+  const candidates = [
+    explicit ? path.resolve(explicit) : null,
+    request?.paths?.state_dir ? path.resolve(request.paths.state_dir, 'addon-manifest.json') : null,
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'runtime/addons/addon-manifest.json'),
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'addon-manifest.json'),
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    try {
+      const raw = await readFile(candidate, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (parsed && Number(parsed.version) === 1 && Array.isArray(parsed.artifacts)) {
+        return parsed;
+      }
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
   }
-  const parsed = JSON.parse(raw);
-  if (!parsed || Number(parsed.version) !== 1 || !Array.isArray(parsed.artifacts)) return null;
-  return parsed;
+  return null;
 }
 
 export async function collectBundle(request) {

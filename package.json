@@ -1,0 +1,13 @@
+{
+  "name": "browser-node-harness",
+  "version": "1.0.0",
+  "description": "Deterministic browser test harness and compatibility layer for Node.js standard libraries and npm packages",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev-express.mjs",
+    "test:express": "npm --prefix adapters/playwright run test:express",
+    "test:npm": "npm --prefix adapters/playwright run test:npm",
+    "test:fast": "node adapters/playwright/node_modules/playwright/cli.js test --config adapters/playwright/tests tests/npm-install.spec.mjs tests/express-iframe.spec.mjs --workers=1",
+    "test:all": "node adapters/playwright/tests/run-browser-tests.mjs"
+  }
+}

@@ -601,27 +601,46 @@ export class Socket extends Duplex {
   }
 
   _flushPendingWrite() {
-    if (!this._pendingWrite) return;
-    const { bytes, callback } = this._pendingWrite;
-    this._pendingWrite = null;
-    this._send(bytes, callback);
+    if (this._pendingWrite) {
+      const { bytes, callback } = this._pendingWrite;
+      this._pendingWrite = null;
+      this._send(bytes, callback);
+    }
+    if (this._pendingWrites?.length) {
+      const writes = this._pendingWrites.splice(0);
+      for (const { bytes, callback } of writes) {
+        this._send(bytes, callback);
+      }
+    }
   }
 
   _writeGeneric(writev, data, _encoding, callback) {
-    let bytes = data;
+    let bytes;
     if (writev) {
       const chunks = data.map(({ chunk }) => chunk instanceof Uint8Array
         ? chunk
-        : typeof chunk === 'string' ? new TextEncoder().encode(chunk) : new Uint8Array(chunk));
+        : typeof chunk === 'string' ? new TextEncoder().encode(chunk) : new Uint8Array(chunk || 0));
       bytes = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.byteLength, 0));
       let offset = 0;
       for (const chunk of chunks) {
         bytes.set(chunk, offset);
         offset += chunk.byteLength;
       }
+    } else if (typeof data === 'string') {
+      bytes = new TextEncoder().encode(data);
+    } else if (data instanceof Uint8Array) {
+      bytes = data;
+    } else if (data && typeof data.byteLength === 'number') {
+      bytes = new Uint8Array(data.buffer || data, data.byteOffset || 0, data.byteLength);
+    } else {
+      bytes = new Uint8Array(0);
     }
+
     if (this._peer || this._transportPeer) this._send(bytes, callback);
-    else if (this.connecting) this._pendingWrite = { bytes, callback };
+    else if (this.connecting) {
+      if (!this._pendingWrites) this._pendingWrites = [];
+      this._pendingWrites.push({ bytes, callback });
+    }
     else callback(socketError('EPIPE', 'write', this.remoteAddress || 'socket', this.remotePort || 0));
   }
 
@@ -661,6 +680,7 @@ export class Socket extends Duplex {
         this._bytesWritten += bytes.byteLength;
         this._writeDispatched = true;
         peer._bytesRead += bytes.byteLength;
+        globalThis.__bnhGatewayLogs?.push?.({ type: 'net-send', len: bytes.byteLength, sample: new TextDecoder().decode(bytes).slice(0, 50) });
         peer._runTcpResource?.(() => peer.push(nodeBytes(bytes, peer._bufferClass)));
         callback();
         return;
@@ -699,6 +719,7 @@ export class Socket extends Duplex {
   }
 
   _finishTransport(callback) {
+    globalThis.__bnhGatewayLogs?.push?.({ type: 'net-finish-transport', stack: new Error().stack, bytesWritten: this._bytesWritten });
     if (!this.destroyed && this.readyState === 'open') this._readyState = 'readOnly';
     const shutdownParent = this._pipeResource || this._tcpResource;
     const shutdownResource = shutdownParent ? this._createPipeResource('SHUTDOWNWRAP', shutdownParent) : null;

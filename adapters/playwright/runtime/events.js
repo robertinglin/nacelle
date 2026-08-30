@@ -229,8 +229,15 @@ export class BrowserEventEmitter {
     defaultMaxListeners = validateMaxListeners(value, 'defaultMaxListeners');
   }
 
+  _ensureState() {
+    if (!this._listeners) this._listeners = new Map();
+    if (!this._onceListeners) this._onceListeners = new Map();
+    if (!this._warned) this._warned = new Set();
+  }
+
   on(name, listener) {
     validateFunction(listener, 'listener');
+    this._ensureState();
     if (name !== 'newListener') this.emit('newListener', name, listener.listener || listener);
     const listeners = this._listeners.get(name) || new ListenerList();
     listeners.add(listener);
@@ -246,6 +253,7 @@ export class BrowserEventEmitter {
 
   prependListener(name, listener) {
     validateFunction(listener, 'listener');
+    this._ensureState();
     if (name !== 'newListener') this.emit('newListener', name, listener.listener || listener);
     const listeners = this._listeners.get(name) || new ListenerList();
     this._listeners.set(name, new ListenerList(listener, ...listeners));
@@ -272,6 +280,7 @@ export class BrowserEventEmitter {
 
   once(name, listener) {
     validateFunction(listener, 'listener');
+    this._ensureState();
     const onceListener = function onceListener(...args) {
       this.off(name, onceListener);
       listener.apply(this, args);
@@ -285,6 +294,7 @@ export class BrowserEventEmitter {
 
   prependOnceListener(name, listener) {
     validateFunction(listener, 'listener');
+    this._ensureState();
     const onceListener = (...args) => {
       this.off(name, onceListener);
       listener.apply(this, args);
@@ -298,6 +308,7 @@ export class BrowserEventEmitter {
 
   off(name, listener) {
     validateFunction(listener, 'listener');
+    this._ensureState();
     const listeners = this._listeners.get(name);
     if (!listeners) return this;
     let index = listeners.length - 1;
@@ -321,6 +332,7 @@ export class BrowserEventEmitter {
   }
 
   removeAllListeners(name = undefined) {
+    this._ensureState();
     if (name === undefined) {
       this._listeners.clear();
       this._onceListeners.clear();
@@ -335,6 +347,7 @@ export class BrowserEventEmitter {
   }
 
   emit(name, ...args) {
+    this._ensureState();
     if (name === 'error') {
       const monitors = this._listeners.get(errorMonitor);
       if (monitors?.size) {
@@ -414,22 +427,26 @@ export class BrowserEventEmitter {
   }
 
   listenerCount(name) {
+    this._ensureState();
     return this._listeners.get(name)?.size || 0;
   }
 
   listeners(name) {
+    this._ensureState();
     const listeners = this._listeners.get(name);
     if (!listeners || listeners.size === 0) return [];
     return [...listeners].map((listener) => listener.listener || listener);
   }
 
   rawListeners(name) {
+    this._ensureState();
     const listeners = this._listeners.get(name);
     if (!listeners || listeners.size === 0) return [];
     return [...listeners];
   }
 
   eventNames() {
+    this._ensureState();
     return this._eventsCount > 0 ? Reflect.ownKeys(this._events) : [];
   }
 }

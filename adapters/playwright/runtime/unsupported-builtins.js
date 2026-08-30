@@ -4,6 +4,7 @@ import { createBrowserDns } from './dns.js';
 import { createBrowserNet } from './net.js';
 import { createCluster } from './cluster.js';
 import { createTlsModule } from './tls.js';
+import { createTtyModule } from './tty.js';
 import { createVirtualNetwork } from './virtual-network.js';
 
 function unsupportedMethod(moduleName, memberName, boundary = 'raw-host-networking') {
@@ -48,16 +49,19 @@ export function createUnsupportedBuiltins({
   BufferClass,
   cluster: clusterOverride,
   tls: tlsOverride,
+  tty: ttyOverride,
 } = {}) {
   const net = createBrowserNet({ network, dns, BufferClass });
   const dgram = createBrowserDgram({ network, BufferClass });
   const cluster = clusterOverride || createCluster();
   const tls = tlsOverride || createTlsModule(globalThis, { net, BufferClass, proxy });
+  const tty = ttyOverride || createTtyModule(globalThis, { net });
   return Object.freeze({
     child_process: childProcessOverride || createVirtualChildProcessFallback(),
     net,
     cluster,
     tls,
     dgram,
+    tty,
   });
 }

@@ -8,7 +8,13 @@
   "scripts": {
     "test": "playwright test tests/structural.spec.mjs --workers=1",
     "test:structural": "playwright test tests/structural.spec.mjs --workers=1",
-    "test:browser": "node tests/run-browser-tests.mjs"
+    "test:express": "playwright test tests/express-iframe.spec.mjs --workers=1",
+    "test:npm": "playwright test tests/npm-install.spec.mjs --workers=1",
+    "test:real-npm": "playwright test tests/express-real-npm.spec.mjs --workers=1",
+    "test:browser": "node tests/run-browser-tests.mjs",
+    "test:wasm": "playwright test tests/wasm-demo.spec.mjs --workers=1",
+    "dev": "node ../../scripts/dev-express.mjs",
+    "build:wasm": "node ../../scripts/build-wasm-release.mjs"
   },
   "dependencies": {
     "playwright": ">=1.50.0 <2"

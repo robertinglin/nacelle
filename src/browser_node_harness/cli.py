@@ -192,6 +192,14 @@ def build_parser() -> argparse.ArgumentParser:
     reference = adapter_sub.add_parser("reference-node", help="execute one request with host Node.js")
     reference.add_argument("request", nargs="?", help="request JSON path; defaults to BNH_REQUEST_FILE")
 
+    npm_cmd = sub.add_parser("npm", help="install and manage npm packages for browser runtime")
+    npm_sub = npm_cmd.add_subparsers(dest="npm_command", required=True)
+    npm_install = npm_sub.add_parser("install", help="install npm package(s) into worktree")
+    npm_install.add_argument("packages", nargs="+", help="package specs (e.g. express@4.19.2)")
+    npm_install.add_argument("--worktree", default=None, help="target worktree directory")
+
+    dev = sub.add_parser("dev", help="launch the interactive in-browser Express live demo and preview")
+
     return parser
 
 
@@ -636,6 +644,22 @@ def command_test(harness: Harness, args: argparse.Namespace) -> int:
     return 0 if all(result.status == "pass" for result in results) else 1
 
 
+def command_npm(harness: Harness, args: argparse.Namespace) -> int:
+    from .npm_bundler import stage_npm_package
+    target_dir = Path(args.worktree) if args.worktree else harness.integration_worktree
+    cache_dir = harness.state_dir / "cache" / "npm"
+    for pkg in args.packages:
+        res = stage_npm_package(pkg, target_dir, cache_dir=cache_dir)
+        print(f"installed {res['name']}@{res['version']} to {res['path']}")
+    return 0
+
+
+def command_dev(harness: Harness, args: argparse.Namespace) -> int:
+    import subprocess
+    script_path = Path(__file__).resolve().parent.parent.parent / "scripts" / "dev-express.mjs"
+    return subprocess.call(["node", str(script_path)])
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -676,6 +700,10 @@ def main(argv: list[str] | None = None) -> int:
             return command_prune(harness, args)
         if args.command == "addon-build":
             return command_addon_build(harness, args)
+        if args.command == "npm":
+            return command_npm(harness, args)
+        if args.command == "dev":
+            return command_dev(harness, args)
         if args.command == "report":
             output = harness.write_report(Path(args.output).expanduser().resolve())
             print(output)

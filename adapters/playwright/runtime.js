@@ -2816,6 +2816,8 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
   const nativeClearTimeout = nativeTimers?.clearTimeout || scope.clearTimeout.bind(scope);
   const nativeSetInterval = nativeTimers?.setInterval || scope.setInterval.bind(scope);
   const nativeClearInterval = nativeTimers?.clearInterval || scope.clearInterval.bind(scope);
+  const immediateQueue = new Map();
+  let nextImmediateId = 0;
   let exitCode = 0;
   let exitSignal = null;
   let umask = 0o022;
@@ -2871,6 +2873,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     else dispatch();
   };
   const setTimer = (callback, delay, repeat = false, type = repeat ? 'Timeout' : 'Timeout') => {
+    const useImmediateChannel = type === 'Immediate';
     const resource = new AsyncResource(type);
     const handle = {
       id: null,
@@ -2879,6 +2882,8 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       _idleStart: Date.now(),
       _onTimeout: callback,
       _refed: true,
+      _run: null,
+      _immediateChannel: Boolean(useImmediateChannel),
       resource,
       ref() { this._refed = true; return this; },
       unref() { this._refed = false; return this; },
@@ -2915,6 +2920,20 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
         resource.emitDestroy();
         return;
       }
+      if (useImmediateChannel) {
+        try {
+          resource.runInAsyncScope(() => {
+            try { callback.call(handle); } catch (error) {
+              dispatchUncaughtException(error);
+            }
+          });
+        } finally {
+          resource.emitDestroy();
+        }
+        timers.delete(handle);
+        timerHandles.delete(String(handle.id));
+        return;
+      }
       const previousProcess = scope.process;
       const previousTimers = {
         setTimeout: scope.setTimeout,
@@ -2946,7 +2965,19 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
         timerHandles.delete(String(handle.id));
       }
     };
-    handle.id = repeat ? nativeSetInterval(run, delay) : nativeSetTimeout(run, delay);
+    handle._run = run;
+    if (useImmediateChannel) {
+      handle.id = ++nextImmediateId;
+      immediateQueue.set(handle.id, handle);
+      queueMicrotask(() => {
+        const queued = immediateQueue.get(handle.id);
+        if (!queued) return;
+        immediateQueue.delete(handle.id);
+        queued._run?.();
+      });
+    } else {
+      handle.id = repeat ? nativeSetInterval(run, delay) : nativeSetTimeout(run, delay);
+    }
     timers.add(handle);
     timerHandles.set(String(handle.id), handle);
     return handle;
@@ -2956,6 +2987,13 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       ? handle
       : timerHandles.get(String(handle));
     if (!resolved) return;
+    if (resolved._immediateChannel) {
+      immediateQueue.delete(resolved.id);
+      timers.delete(resolved);
+      timerHandles.delete(String(resolved.id));
+      resolved.resource?.emitDestroy?.();
+      return;
+    }
     if (resolved.repeat) nativeClearInterval(resolved.id);
     else nativeClearTimeout(resolved.id);
     timers.delete(resolved);
@@ -9313,12 +9351,19 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       event.preventDefault?.();
     };
     if (typeof scope.addEventListener === 'function') scope.addEventListener('unhandledrejection', onUnhandledRejection);
-    if (processObject.execArgv?.some((argument) => String(argument) === '--expose-gc')) {
-      scope.gc = () => {
-        scope[Symbol.for('bnh.abort-signal-compatibility')]?.gc?.();
+    const exposeGc = processObject.execArgv?.some((argument) => {
+      const flag = String(argument);
+      return flag === '--expose-gc' || flag === '--expose_gc';
+    });
+    if (exposeGc) {
+      scope.gc = (options = undefined) => {
+        const abortSignalState = scope[Symbol.for('bnh.abort-signal-compatibility')];
+        if (abortSignalState?.gc) abortSignalState.gc();
+        else if (abortSignalState) abortSignalState.gcGeneration += 1;
         collectAsyncResources();
         vfs.collectGarbage?.();
         performancePrimitives.recordGC?.();
+        if (options?.execution === 'async') return Promise.resolve();
       };
     } else {
       delete scope.gc;
@@ -9357,7 +9402,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       clearInterval: clearTimer,
       setImmediate: (callback, ...args) => setTimer(function immediateCallback() {
         return callback.apply(this, args);
-      }, 1, false, 'Immediate'),
+      }, 0, false, 'Immediate'),
       clearImmediate: clearTimer,
       fetch: runtimeFetch,
       primordials: createPrimordials(scope),

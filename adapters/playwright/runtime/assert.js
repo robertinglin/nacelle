@@ -1288,12 +1288,13 @@ function comparisonFor(error, expected, keys) {
   };
 }
 
-function validateErrorExpectation(expected) {
+function validateErrorExpectation(expected, allowEmptyObject = false) {
   if (expected == null) return;
   if (typeof expected !== 'function' && typeof expected !== 'object') {
     throw invalidArgumentType('error', expected, 'function or an instance of Error, RegExp, or Object');
   }
-  if (Object.prototype.toString.call(expected) === '[object Object]' && Object.keys(expected).length === 0) {
+  if (!allowEmptyObject
+    && Object.prototype.toString.call(expected) === '[object Object]' && Object.keys(expected).length === 0) {
     throw invalidArgumentValue('error', expected, 'may not be an empty object');
   }
 }
@@ -1384,10 +1385,15 @@ function invalidReturnValue(name, value, modernMessage = false) {
   return error;
 }
 
-async function waitForActual(promiseOrFn, modernInvalidReturn = false) {
+async function waitForActual(promiseOrFn, modernInvalidReturn = false, captureSyncThrow = false) {
   let promise;
   if (typeof promiseOrFn === 'function') {
-    promise = promiseOrFn();
+    try {
+      promise = promiseOrFn();
+    } catch (error) {
+      if (captureSyncThrow) return { value: error, synchronousThrow: true };
+      throw error;
+    }
     if (!isPromiseLike(promise)) throw invalidReturnValue('promiseFn', promise, modernInvalidReturn);
   } else if (isPromiseLike(promiseOrFn)) {
     promise = promiseOrFn;
@@ -1397,9 +1403,9 @@ async function waitForActual(promiseOrFn, modernInvalidReturn = false) {
   try {
     await promise;
   } catch (error) {
-    return error;
+    return captureSyncThrow ? { value: error, synchronousThrow: false } : error;
   }
-  return noRejection;
+  return captureSyncThrow ? { value: noRejection, synchronousThrow: false } : noRejection;
 }
 
 function missingArguments() {
@@ -1564,9 +1570,11 @@ export function createAssert({ strict = false, readSource, sourcePath, process: 
     const normalized = normalizeErrorArguments(expected, message, arguments.length);
     expected = normalized.expected;
     message = normalized.message;
-    validateErrorExpectation(expected);
-    const result = await waitForActual(promiseOrFn);
+    const actual = await waitForActual(promiseOrFn, false, true);
+    const result = actual.value;
     if (result === noRejection) fail(message, undefined, expected, 'rejects', missingException(expected, message, true));
+    if (actual.synchronousThrow) throw result;
+    validateErrorExpectation(expected, actual.synchronousThrow);
     const match = expected == null ? { matched: true } : matcherResult(result, expected);
     if (!match.matched) {
       const failureMessage = mismatchMessage(result, expected, message, match);

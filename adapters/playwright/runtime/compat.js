@@ -2366,6 +2366,42 @@ function installAbortSignalCompatibility(scope) {
 
   const state = { gcGeneration: 0, signals: new WeakMap() };
   Object.defineProperty(scope, abortSignalCompatibilityKey, { configurable: true, value: state });
+  const dependantSignalsKey = Symbol('kDependantSignals');
+  const NativeWeakRef = scope.WeakRef;
+
+  class DependantSignalsSet {
+    constructor() {
+      this.entries = new Set();
+      this.entriesBySignal = new WeakMap();
+    }
+
+    add(signal) {
+      const existing = this.entriesBySignal.get(signal);
+      if (existing && existing.ref.deref() === signal) return this;
+      if (existing) this.entries.delete(existing);
+      const entry = { ref: new NativeWeakRef(signal), signalState: state.signals.get(signal) };
+      this.entries.add(entry);
+      this.entriesBySignal.set(signal, entry);
+      return this;
+    }
+
+    prune() {
+      for (const entry of this.entries) {
+        const signal = entry.ref.deref();
+        const observedAsWeak = entry.signalState?.weakObserved === true
+          && state.gcGeneration > entry.signalState.weakObservedGeneration;
+        if (signal === undefined || observedAsWeak) {
+          this.entries.delete(entry);
+          if (signal !== undefined) this.entriesBySignal.delete(signal);
+        }
+      }
+    }
+
+    get size() {
+      this.prune();
+      return this.entries.size;
+    }
+  }
 
   const trackSignal = (signal) => {
     if (!signal || state.signals.has(signal)) return state.signals.get(signal);
@@ -2373,9 +2409,35 @@ function installAbortSignalCompatibility(scope) {
       createdGeneration: state.gcGeneration,
       strongListeners: new Set(),
       weakListeners: new Set(),
+      dependantSignals: new DependantSignalsSet(),
+      weakObserved: false,
+      weakObservedGeneration: -1,
+      sourceSignals: [],
     };
     state.signals.set(signal, signalState);
     return signalState;
+  };
+  const dependantSignals = (signal) => {
+    const signalState = trackSignal(signal);
+    try {
+      Object.defineProperty(signal, dependantSignalsKey, {
+        configurable: true,
+        enumerable: false,
+        value: signalState.dependantSignals,
+      });
+    } catch {
+      // Browser AbortSignal implementations are allowed to be non-extensible.
+    }
+    return signalState.dependantSignals;
+  };
+  const addDependantSignal = (source, signal, seen = new Set()) => {
+    if (seen.has(source)) return;
+    seen.add(source);
+    dependantSignals(source).add(signal);
+    for (const ancestorRef of state.signals.get(source)?.sourceSignals || []) {
+      const ancestor = ancestorRef.deref();
+      if (ancestor) addDependantSignal(ancestor, signal, seen);
+    }
   };
   const nativeAddEventListener = AbortSignalClass.prototype.addEventListener;
   const nativeRemoveEventListener = AbortSignalClass.prototype.removeEventListener;
@@ -2445,7 +2507,11 @@ function installAbortSignalCompatibility(scope) {
         }
       }
       const signal = nativeAny(values);
-      trackSignal(signal);
+      const signalState = trackSignal(signal);
+      if (typeof NativeWeakRef === 'function') {
+        signalState.sourceSignals = values.map((source) => new NativeWeakRef(source));
+        for (const source of values) addDependantSignal(source, signal);
+      }
       return signal;
     };
     try { AbortSignalClass.any = any; } catch { /* native method is immutable */ }
@@ -2474,21 +2540,27 @@ function installAbortSignalCompatibility(scope) {
     } catch { /* browser prototype is immutable */ }
   }
 
-  const NativeWeakRef = scope.WeakRef;
   if (typeof NativeWeakRef === 'function') {
     class CompatibleWeakRef {
       constructor(value) {
-        const signalState = state.signals.get(value);
+        const signalState = value instanceof AbortSignalClass ? trackSignal(value) : undefined;
         this.signalState = signalState;
-        this.value = signalState ? value : undefined;
-        this.native = signalState ? null : new NativeWeakRef(value);
+        this.native = new NativeWeakRef(value);
+        this.createdGeneration = state.gcGeneration;
+        if (signalState) {
+          signalState.weakObserved = true;
+          signalState.weakObservedGeneration = state.gcGeneration;
+        }
       }
 
       deref() {
         if (!this.signalState) return this.native.deref();
-        if (state.gcGeneration > this.signalState.createdGeneration
-            && this.signalState.strongListeners.size === 0) this.value = undefined;
-        return this.value;
+        if (state.gcGeneration > this.createdGeneration
+            && (this.signalState.strongListeners.size === 0
+              || this.signalState.sourceSignals.length > 0)) {
+          return undefined;
+        }
+        return this.native.deref();
       }
     }
     scope.WeakRef = CompatibleWeakRef;

@@ -15,7 +15,7 @@ test.describe('browser runtime test contracts', () => {
     expect(contract).toContain('schemaVersion: 1');
     expect(contract).toContain("mode: 'playwright-binding'");
     expect(contract).toContain("readBinding: '__bnhReadFile'");
-    expect(contract).toContain('run(request: BrowserNodeHarnessRequest)');
+    expect(contract).toContain('run(request: NacelleHarnessRequest)');
     expect(contract).toContain('exitCode: number | null');
     expect(contract).toContain('timedOut?: boolean');
     expect(contract).toContain('expected?:');

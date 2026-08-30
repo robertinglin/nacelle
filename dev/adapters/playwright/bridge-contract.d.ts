@@ -1,15 +1,15 @@
-export interface BrowserNodeHarnessManifestEntry {
+export interface NacelleHarnessManifestEntry {
   path: string;
   bytes: number;
 }
 
-export interface BrowserNodeHarnessFiles {
+export interface NacelleHarnessFiles {
   mode: 'playwright-binding';
   readBinding: '__bnhReadFile';
-  manifest: BrowserNodeHarnessManifestEntry[];
+  manifest: NacelleHarnessManifestEntry[];
 }
 
-export interface BrowserNodeHarnessProxySelection {
+export interface NacelleHarnessProxySelection {
   mode?: 'virtual' | 'proxy';
   enabled?: boolean;
   optIn?: boolean;
@@ -19,10 +19,10 @@ export interface BrowserNodeHarnessProxySelection {
   adapter?: unknown;
 }
 
-export interface BrowserNodeHarnessRequest {
+export interface NacelleHarnessRequest {
   schemaVersion: 1;
   entry: string;
-  files: BrowserNodeHarnessFiles;
+  files: NacelleHarnessFiles;
   flags: string[];
   expected?: {
     suite: 'message' | 'pseudo-tty';
@@ -35,7 +35,7 @@ export interface BrowserNodeHarnessRequest {
   } | null;
   env: Record<string, string>;
   timeoutMs: number;
-  proxy?: BrowserNodeHarnessProxySelection;
+  proxy?: NacelleHarnessProxySelection;
   variant?: string;
   context?: {
     phase?: string;
@@ -54,16 +54,16 @@ export interface BrowserNodeHarnessRequest {
   };
 }
 
-export interface BrowserNodeHarnessRuntimeContext {
+export interface NacelleHarnessRuntimeContext {
   env: Record<string, string>;
   variant?: string;
-  metadata: BrowserNodeHarnessRequest['metadata'];
+  metadata: NacelleHarnessRequest['metadata'];
   signal: AbortSignal;
   capabilities?: Record<string, unknown>;
-  proxy?: BrowserNodeHarnessProxySelection;
+  proxy?: NacelleHarnessProxySelection;
 }
 
-export interface BrowserNodeHarnessChild {
+export interface NacelleHarnessChild {
   exit: Promise<number | null>;
   stdoutText(): Promise<string>;
   stderrText(): Promise<string>;
@@ -71,20 +71,20 @@ export interface BrowserNodeHarnessChild {
 }
 
 /** API exported by the shared browser-native runtime imported by the example bridge. */
-export interface BrowserNodeHarnessRuntime {
+export interface NacelleHarnessRuntime {
   readonly version?: string;
-  reset(context?: BrowserNodeHarnessRuntimeContext): Promise<void>;
+  reset(context?: NacelleHarnessRuntimeContext): Promise<void>;
   mount(
     files: Record<string, Uint8Array>,
-    context?: BrowserNodeHarnessRuntimeContext,
+    context?: NacelleHarnessRuntimeContext,
   ): Promise<void>;
   spawn(
     argv: string[],
-    options: BrowserNodeHarnessRuntimeContext & { cwd: string },
-  ): Promise<BrowserNodeHarnessChild>;
+    options: NacelleHarnessRuntimeContext & { cwd: string },
+  ): Promise<NacelleHarnessChild>;
 }
 
-export interface BrowserNodeHarnessResult {
+export interface NacelleHarnessResult {
   exitCode: number | null;
   stdout?: string;
   stderr?: string;
@@ -96,6 +96,6 @@ export interface BrowserNodeHarnessResult {
 declare global {
   function __bnhReadFile(path: string): Promise<{ encoding: 'base64'; data: string }>;
   var __BROWSER_NODE_HARNESS__: {
-    run(request: BrowserNodeHarnessRequest): Promise<BrowserNodeHarnessResult>;
+    run(request: NacelleHarnessRequest): Promise<NacelleHarnessResult>;
   };
 }

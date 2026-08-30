@@ -646,6 +646,18 @@ const server = app.listen(3000, () => {
       if (!node) {
         node = await BrowserNode.create({
           cwd: '/node',
+          files: {
+            '/node/package.json': JSON.stringify({
+              name: 'in-browser-express',
+              version: '1.0.0',
+              scripts: {
+                start: 'node app.js',
+              },
+              dependencies: {
+                express: '^4.19.2',
+              },
+            }, null, 2),
+          },
           globalObject: window,
         });
 
@@ -656,9 +668,9 @@ const server = app.listen(3000, () => {
           onNavigate: (cleanAddress) => { urlInput.value = cleanAddress; },
         });
 
-        // Preinstall express
-        npmStatus.textContent = 'Resolving express@4.19.2...';
-        await node.npm.install('express@4.19.2', {
+        // Auto-install dependencies from package.json
+        npmStatus.textContent = 'Resolving dependencies from package.json...';
+        await node.npm.install({
           onProgress: (ev) => {
             if (ev.phase === 'cache-hit-tarball') {
               logNetwork(`⚡ Cache HIT: ${ev.name}@${ev.version}`, 'npm');
@@ -675,7 +687,7 @@ const server = app.listen(3000, () => {
       const code = document.getElementById('code-editor').value;
       await node.fs.writeFile('/node/app.js', code);
 
-      logTerminal('Executing /node/app.js in isolated Web Worker...', 'system');
+      logTerminal('Executing "npm run start" in isolated Web Worker...', 'system');
 
       let booted = false;
       const onServerListening = () => {
@@ -685,8 +697,7 @@ const server = app.listen(3000, () => {
         node.connectIframe(iframe, { port: 3000, path: urlInput.value || '/' });
       };
 
-      activeServerProcess = await node.run({
-        entry: '/node/app.js',
+      activeServerProcess = await node.npm.run('start', {
         signal,
         onStdout: (chunk) => {
           logTerminal(chunk, 'stdout');

@@ -1,11 +1,11 @@
 import { createRuntime, runtime as defaultRuntime } from './runtime.js';
-import { BrowserNpm, BrowserNpmCache } from './runtime/npm.js';
+import { BrowserNpm, BrowserNpmCache, parseScriptCommand } from './runtime/npm.js';
 import { installGatewayBridge } from './runtime/gateway-bridge.js';
 import { watchFrameAddress } from './runtime/frame-address.js';
 import { createBrowserNet } from './runtime/net.js';
 import { createBufferClass } from './runtime/buffer.js';
 
-export { createRuntime, defaultRuntime as runtime, BrowserNpm, BrowserNpmCache, createBrowserNet, createBufferClass };
+export { createRuntime, defaultRuntime as runtime, BrowserNpm, BrowserNpmCache, createBrowserNet, createBufferClass, parseScriptCommand };
 
 /**
  * High-level Browser Node.js Runtime Platform
@@ -166,8 +166,15 @@ export class BrowserNode {
         }
         return bytes;
       },
-      writeFile: async (filePath, data) => {
-        return vfs.fs.promises.writeFile(filePath, data);
+      writeFile: async (filePath, data, opts) => {
+        const lastSlash = filePath.lastIndexOf('/');
+        if (lastSlash > 0) {
+          const dir = filePath.slice(0, lastSlash);
+          try {
+            await vfs.fs.promises.mkdir(dir, { recursive: true });
+          } catch {}
+        }
+        return vfs.fs.promises.writeFile(filePath, data, opts);
       },
       mkdir: async (dirPath, opts) => vfs.fs.promises.mkdir(dirPath, opts),
       readdir: async (dirPath) => vfs.fs.promises.readdir(dirPath),
@@ -180,7 +187,7 @@ export class BrowserNode {
   }
 
   /**
-   * In-Browser NPM package manager
+   * In-Browser NPM package manager & script runner
    */
   get npm() {
     const npmClient = new BrowserNpm({
@@ -191,22 +198,137 @@ export class BrowserNode {
 
     return {
       /**
-       * Install npm packages directly into the browser VFS
-       * @param {string|string[]} packages Package specifiers (e.g. 'express@4.19.2', ['cors', 'ms'])
+       * Install npm packages directly into the browser VFS.
+       * If packages is omitted, installs dependencies from package.json in cwd.
+       * @param {string|string[]|Object} [packages] Package specifier(s) or options object
        * @param {Object} [options]
        * @param {string} [options.cwd] Target directory (defaults to instance cwd)
        * @param {Function} [options.onProgress] Callback for install progress events
        */
       install: async (packages, options = {}) => {
-        const pkgList = Array.isArray(packages) ? packages : [packages];
+        let actualPackages = packages;
+        let actualOpts = options;
+        if (packages && typeof packages === 'object' && !Array.isArray(packages)) {
+          actualOpts = packages;
+          actualPackages = null;
+        }
+        const pkgList = actualPackages ? (Array.isArray(actualPackages) ? actualPackages : [actualPackages]) : null;
         return npmClient.install(pkgList, {
-          cwd: options.cwd || this._cwd,
-          onProgress: options.onProgress,
+          cwd: actualOpts.cwd || this._cwd,
+          onProgress: actualOpts.onProgress,
         });
       },
+
+      /**
+       * Get parsed package.json object from working directory
+       * @param {string} [cwd]
+       */
+      getPackageJson: async (cwd = this._cwd) => {
+        return npmClient.readPackageJson(cwd);
+      },
+
+      /**
+       * Get available scripts from package.json
+       * @param {string} [cwd]
+       */
+      getScripts: async (cwd = this._cwd) => {
+        const pkg = await npmClient.readPackageJson(cwd);
+        return pkg?.scripts || {};
+      },
+
+      /**
+       * Execute an npm script defined in package.json
+       * @param {string} scriptName Name of the script (e.g. 'start', 'dev', 'build')
+       * @param {Object} [options]
+       * @param {string[]} [options.args=[]] Additional CLI arguments to pass to the script
+       * @param {Record<string, string>} [options.env={}] Additional environment variables
+       * @param {string} [options.cwd] Target directory
+       * @param {Function} [options.onStdout]
+       * @param {Function} [options.onStderr]
+       * @param {AbortSignal} [options.signal]
+       */
+      run: async (scriptName, options = {}) => {
+        const targetCwd = options.cwd || this._cwd;
+        const pkg = await npmClient.readPackageJson(targetCwd);
+        if (!pkg) {
+          throw new Error(`ENOENT: package.json not found in ${targetCwd}`);
+        }
+        const scripts = pkg.scripts || {};
+        const scriptCmd = scripts[scriptName];
+        if (!scriptCmd) {
+          throw new Error(`Missing script: "${scriptName}"`);
+        }
+
+        const parsed = parseScriptCommand(scriptCmd);
+        const extraArgs = options.args || [];
+        const combinedArgs = [...parsed.args, ...extraArgs];
+
+        let entry = '';
+        let argv = [];
+
+        if (parsed.binary === 'node' || parsed.binary === 'nodejs') {
+          const scriptFile = combinedArgs[0];
+          if (!scriptFile) {
+            throw new Error(`Invalid node script command: "${scriptCmd}"`);
+          }
+          entry = scriptFile.startsWith('/') ? scriptFile : `${targetCwd.replace(/\/+$/, '')}/${scriptFile}`;
+          argv = combinedArgs.slice(1);
+        } else {
+          // Check if it's a binary in node_modules/.bin/<bin> or a local file
+          const binPath = `${targetCwd.replace(/\/+$/, '')}/node_modules/.bin/${parsed.binary}`;
+          const binExists = await this.fs.exists(binPath);
+          if (binExists) {
+            entry = binPath;
+            argv = combinedArgs;
+          } else {
+            // Check direct script file
+            const localPath = parsed.binary.startsWith('/')
+              ? parsed.binary
+              : `${targetCwd.replace(/\/+$/, '')}/${parsed.binary}`;
+            const localExists = await this.fs.exists(localPath);
+            if (localExists) {
+              entry = localPath;
+              argv = combinedArgs;
+            } else {
+              entry = localPath;
+              argv = combinedArgs;
+            }
+          }
+        }
+
+        const scriptEnv = {
+          ...this._env,
+          npm_lifecycle_event: scriptName,
+          npm_lifecycle_script: scriptCmd,
+          npm_package_name: pkg.name || '',
+          npm_package_version: pkg.version || '',
+          PATH: `${targetCwd}/node_modules/.bin:/node/node_modules/.bin:${this._env.PATH || ''}`,
+          ...parsed.env,
+          ...options.env,
+        };
+
+        return this.run({
+          entry,
+          argv,
+          env: scriptEnv,
+          cwd: targetCwd,
+          timeout: options.timeout,
+          onStdout: options.onStdout,
+          onStderr: options.onStderr,
+          signal: options.signal,
+        });
+      },
+
       getCacheStats: () => this._npmCache.getStats(),
       clearCache: () => this._npmCache.clear(),
     };
+  }
+
+  /**
+   * Convenience alias for node.npm.run(scriptName, options)
+   */
+  async runScript(scriptName, options = {}) {
+    return this.npm.run(scriptName, options);
   }
 
   /**

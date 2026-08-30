@@ -164,6 +164,248 @@
     </section>
   </main>
 
+  <!-- VFS File Templates placed above the runner script -->
+  <template id="template-package-json">{
+  "name": "in-browser-vite-react",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "node vite-app.js --development",
+    "build": "node vite-app.js --production"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router": "^6.28.0",
+    "react-router-dom": "^6.28.0",
+    "zustand": "^4.5.5"
+  }
+}</template>
+
+  <template id="template-main-js">(function() {
+  var state = { count: 0, apiStatus: 'not requested' };
+  var listeners = [];
+  var appStore = {
+    getState: function() { return state; },
+    subscribe: function(fn) {
+      listeners.push(fn);
+      return function() { listeners = listeners.filter(function(l) { return l !== fn; }); };
+    },
+    setState: function(partial) {
+      state = Object.assign({}, state, typeof partial === 'function' ? partial(state) : partial);
+      listeners.forEach(function(l) { l(); });
+    }
+  };
+
+  function renderApp() {
+    var isAbout = window.location.pathname.endsWith('/about');
+    var hashRaw = window.location.hash || '';
+    var hashPath = hashRaw.startsWith('#') ? hashRaw.slice(1) : hashRaw;
+    if (!hashPath || hashPath === '') hashPath = '/';
+    var isHashAbout = hashPath.endsWith('/about');
+
+    var root = document.getElementById('root');
+    root.innerHTML = '';
+
+    var demoContainer = document.createElement('div');
+    demoContainer.id = 'react-demo';
+
+    var main = document.createElement('main');
+    main.id = 'react-app';
+
+    var badge = document.createElement('div');
+    badge.id = 'app-badge';
+    badge.textContent = 'Vite + React · Zustand · React Router';
+    main.appendChild(badge);
+
+    var title = document.createElement('h1');
+    title.id = 'app-title';
+    title.textContent = isAbout ? 'About the React app' : 'Vite + React in Browser Node';
+    main.appendChild(title);
+
+    var status = document.createElement('p');
+    status.id = 'app-status';
+    status.textContent = 'React libraries loaded from the virtual npm filesystem.';
+    main.appendChild(status);
+
+    var incBtn = document.createElement('button');
+    incBtn.id = 'increment';
+    incBtn.textContent = 'Zustand count: ' + state.count;
+    incBtn.onclick = function() {
+      appStore.setState({ count: state.count + 1 });
+    };
+    main.appendChild(incBtn);
+
+    var apiBtn = document.createElement('button');
+    apiBtn.id = 'api-check';
+    apiBtn.textContent = 'Check relative API';
+    apiBtn.onclick = async function() {
+      try {
+        var res = await fetch('./api/health');
+        var data = await res.json();
+        appStore.setState({ apiStatus: data.status + ' / ' + data.framework + ' / ' + data.mode });
+      } catch (err) {
+        appStore.setState({ apiStatus: 'error / ' + err.message });
+      }
+    };
+    main.appendChild(apiBtn);
+
+    var apiOut = document.createElement('output');
+    apiOut.id = 'api-status';
+    apiOut.textContent = 'API: ' + state.apiStatus;
+    main.appendChild(apiOut);
+
+    var nav = document.createElement('nav');
+    nav.id = 'app-nav';
+
+    var rLink = document.createElement('a');
+    if (isAbout) {
+      rLink.id = 'router-home-link';
+      rLink.textContent = 'Router home';
+      rLink.onclick = function(e) {
+        e.preventDefault();
+        history.pushState(null, '', './');
+        renderApp();
+      };
+    } else {
+      rLink.id = 'router-about-link';
+      rLink.textContent = 'Router About';
+      rLink.onclick = function(e) {
+        e.preventDefault();
+        history.pushState(null, '', './about');
+        renderApp();
+      };
+    }
+    nav.appendChild(rLink);
+
+    var nLink = document.createElement('a');
+    if (isAbout) {
+      nLink.id = 'native-home-link';
+      nLink.href = './';
+      nLink.textContent = 'Native full-page home';
+    } else {
+      nLink.id = 'native-about-link';
+      nLink.href = './about';
+      nLink.textContent = 'Native full-page /about';
+    }
+    nav.appendChild(nLink);
+
+    main.appendChild(nav);
+    demoContainer.appendChild(main);
+
+    var hashSection = document.createElement('section');
+    hashSection.id = 'hash-router-example';
+
+    var hashTitle = document.createElement('strong');
+    hashTitle.id = 'hash-router-title';
+    hashTitle.textContent = 'HashRouter example';
+    hashSection.appendChild(hashTitle);
+
+    var hashOut = document.createElement('output');
+    hashOut.id = 'hash-router-path';
+    hashOut.textContent = 'HashRouter path: ' + hashPath;
+    hashSection.appendChild(hashOut);
+
+    var hLink = document.createElement('a');
+    if (isHashAbout) {
+      hLink.id = 'hash-router-home-link';
+      hLink.href = '#/';
+      hLink.textContent = 'HashRouter home';
+    } else {
+      hLink.id = 'hash-router-about-link';
+      hLink.href = '#/about';
+      hLink.textContent = 'HashRouter About';
+    }
+    hashSection.appendChild(hLink);
+
+    demoContainer.appendChild(hashSection);
+    root.appendChild(demoContainer);
+  }
+
+  appStore.subscribe(renderApp);
+  window.addEventListener('hashchange', renderApp);
+  window.addEventListener('popstate', renderApp);
+  renderApp();
+})();</template>
+
+  <template id="template-index-html"><style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: linear-gradient(135deg, #0ea5e9, #6366f1); font-family: system-ui; color: white; }
+    #react-demo { width: min(500px, calc(100% - 40px)); display: grid; gap: 14px; }
+    #react-app { padding: 34px; border: 1px solid #ffffff55; border-radius: 18px; background: #ffffff26; box-shadow: 0 20px 50px #0003; display: grid; gap: 14px; justify-items: start; }
+    #hash-router-example { padding: 18px 34px; border: 1px solid #ffffff55; border-radius: 18px; background: #ffffff26; display: grid; gap: 8px; justify-items: start; }
+    #app-badge { font: 700 .75rem monospace; letter-spacing: .04em; text-transform: uppercase; color: #bae6fd; }
+    h1 { margin: 0; font-size: 1.7rem; }
+    p { margin: 0 0 6px; color: #e0f2fe; }
+    button { padding: 9px 14px; border: 0; border-radius: 7px; background: white; color: #3730a3; font-weight: 700; cursor: pointer; }
+    nav { display: flex; gap: 14px; flex-wrap: wrap; }
+    a { color: white; font-weight: 700; text-decoration: underline; cursor: pointer; }
+    output { font: .85rem monospace; color: #dbeafe; }
+  </style>
+  <div id="root"></div></template>
+
+  <template id="template-server-js">const http = require('http');
+const fs = require('fs');
+
+const mode = process.argv.includes('--production') ? 'production' : 'development';
+
+function getFile(p) {
+  try {
+    return fs.readFileSync(p, 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+function buildProduction() {
+  fs.mkdirSync('/node/dist/assets', { recursive: true });
+  fs.writeFileSync('/node/dist/assets/index.js', getFile('/node/src/main.js'));
+  fs.writeFileSync('/node/dist/manifest.json', JSON.stringify({ mode: 'production', entry: 'assets/index.js' }));
+  console.log('vite build started: production');
+  console.log('✓ built dist/assets/index.js and dist/manifest.json');
+}
+
+if (mode === 'production') buildProduction();
+
+const server = http.createServer((req, res) => {
+  const pathname = (req.url || '/').split('?')[0];
+
+  if (pathname === '/api/health') {
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+    return res.end(JSON.stringify({
+      status: 'ok',
+      framework: 'vite-react',
+      mode,
+      port: 5173,
+    }));
+  }
+
+  if (pathname === '/manifest.json') {
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+    return res.end(JSON.stringify({ mode: 'production', entry: 'assets/index.js' }));
+  }
+
+  if (pathname === '/assets/index.js' || pathname === '/src/main.js' || pathname === '/src/main.jsx') {
+    res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8', 'cache-control': 'no-store' });
+    return res.end(getFile('/node/src/main.js'));
+  }
+
+  const bodyContent = getFile('/node/index.html');
+  const scriptSrc = mode === 'production' ? '/assets/index.js' : '/src/main.js';
+  const html = '<!doctype html>\n<html>\n<head>\n  <meta charset="utf-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1">\n  <title>Vite + React</title>\n</head>\n<body>\n'
+    + bodyContent
+    + '\n  <' + 'script src="' + scriptSrc + '"><' + '/script>\n</body>\n</html>';
+
+  res.writeHead(200, {
+    'content-type': 'text/html; charset=utf-8',
+    'cache-control': 'no-store',
+    'cross-origin-embedder-policy': 'require-corp',
+  });
+  res.end(html);
+});
+
+server.listen(5173, () => {
+  console.log('🚀 Vite + React server (' + mode + ' mode) listening on virtual port 5173');
+});</template>
+
   <script type="module">
     import { BrowserNode } from '/index.js';
 
@@ -172,157 +414,6 @@
     const statusIndicator = document.getElementById('status-indicator');
     const termOutput = document.getElementById('term-output');
     const termNetwork = document.getElementById('term-network');
-
-    const VITE_REACT_SERVER_SOURCE = `
-const http = require('http');
-const fs = require('fs');
-
-const read = (path) => fs.readFileSync(path, 'utf8');
-const packages = {
-  reactDev: read('/node/node_modules/react/umd/react.development.js'),
-  reactProd: read('/node/node_modules/react/umd/react.production.min.js'),
-  reactDomDev: read('/node/node_modules/react-dom/umd/react-dom.development.js'),
-  reactDomProd: read('/node/node_modules/react-dom/umd/react-dom.production.min.js'),
-  remixRouterDev: read('/node/node_modules/@remix-run/router/dist/router.umd.js'),
-  remixRouterProd: read('/node/node_modules/@remix-run/router/dist/router.umd.min.js'),
-  reactRouterDev: read('/node/node_modules/react-router/dist/umd/react-router.development.js'),
-  reactRouterProd: read('/node/node_modules/react-router/dist/umd/react-router.production.min.js'),
-  reactRouterDomDev: read('/node/node_modules/react-router-dom/dist/umd/react-router-dom.development.js'),
-  reactRouterDomProd: read('/node/node_modules/react-router-dom/dist/umd/react-router-dom.production.min.js'),
-  zustandDev: read('/node/node_modules/zustand/umd/vanilla.development.js'),
-  zustandProd: read('/node/node_modules/zustand/umd/vanilla.production.js'),
-};
-const mainScript = [
-  'const e = React.createElement;',
-  'const { useSyncExternalStore } = React;',
-  'const { MemoryRouter, HashRouter, Routes, Route, Link, useLocation } = ReactRouterDOM;',
-  'const appStore = zustandVanilla.createStore((set) => ({',
-  '  count: 0,',
-  '  apiStatus: "not requested",',
-  '  increment: () => set((state) => ({ count: state.count + 1 })),',
-  '  setApiStatus: (apiStatus) => set({ apiStatus }),',
-  '}));',
-  'function useAppStore(selector) {',
-  '  return useSyncExternalStore(appStore.subscribe, () => selector(appStore.getState()), () => selector(appStore.getState()));',
-  '}',
-  'function App() {',
-  '  const location = useLocation();',
-  '  const count = useAppStore((state) => state.count);',
-  '  const apiStatus = useAppStore((state) => state.apiStatus);',
-  '  const increment = useAppStore((state) => state.increment);',
-  '  const setApiStatus = useAppStore((state) => state.setApiStatus);',
-  '  const about = location.pathname.endsWith("/about");',
-  '  const checkApi = async () => {',
-  '    try {',
-  '      const response = await fetch("/api/health");',
-  '      const data = await response.json();',
-  '      setApiStatus(data.status + " / " + data.framework + " / " + data.mode);',
-  '    } catch (error) {',
-  '      setApiStatus("error / " + error.message);',
-  '    }',
-  '  };',
-  '  const routeLink = about',
-  '    ? e(Link, { id: "router-home-link", key: "router-home", to: "/" }, "Router home")',
-  '    : e(Link, { id: "router-about-link", key: "router-about", to: "/about" }, "Router About");',
-  '  const nativeLink = about',
-  '    ? e("a", { id: "native-home-link", key: "native-home", href: "/" }, "Native full-page home")',
-  '    : e("a", { id: "native-about-link", key: "native-about", href: "/about" }, "Native full-page /about");',
-  '  return e("main", { id: "react-app" }, [',
-  '    e("div", { id: "app-badge", key: "badge" }, "Vite + React · Zustand · React Router"),',
-  '    e("h1", { id: "app-title", key: "title" }, about ? "About the React app" : "Vite + React in Browser Node"),',
-  '    e("p", { id: "app-status", key: "status" }, "React libraries loaded from the virtual npm filesystem."),',
-  '    e("button", { id: "increment", key: "increment", onClick: increment }, "Zustand count: " + count),',
-  '    e("button", { id: "api-check", key: "api-check", onClick: checkApi }, "Check relative API"),',
-  '    e("output", { id: "api-status", key: "api-status" }, "API: " + apiStatus),',
-  '    e("nav", { id: "app-nav", key: "nav" }, [routeLink, nativeLink]),',
-  '  ]);',
-'}',
-  'function HashExample() {',
-  '  const location = useLocation();',
-  '  const about = location.pathname.endsWith("/about");',
-  '  const routeLink = about',
-  '    ? e(Link, { id: "hash-router-home-link", key: "hash-home", to: "/" }, "HashRouter home")',
-  '    : e(Link, { id: "hash-router-about-link", key: "hash-about", to: "/about" }, "HashRouter About");',
-  '  return e("section", { id: "hash-router-example" }, [',
-  '    e("strong", { id: "hash-router-title", key: "title" }, "HashRouter example"),',
-  '    e("output", { id: "hash-router-path", key: "path" }, "HashRouter path: " + location.pathname),',
-  '    routeLink,',
-  '  ]);',
-  '}',
-  'function AppRoutes() {',
-  '  return e("div", { id: "react-demo" }, [',
-  '    e(MemoryRouter, { initialEntries: [window.location.pathname], key: "memory" }, e(Routes, null, e(Route, { path: "*", element: e(App) }))),',
-  '    e(HashRouter, { key: "hash" }, e(HashExample)),',
-  '  ]);',
-  '}',
-  'ReactDOM.createRoot(document.getElementById("root")).render(e(AppRoutes));',
-].join("\\n");
-
-const style = '<style>'
-  + 'body{margin:0;min-height:100vh;display:grid;place-items:center;background:linear-gradient(135deg,#0ea5e9,#6366f1);font-family:system-ui;color:white}'
-  + '#react-demo{width:min(500px,calc(100% - 40px));display:grid;gap:14px}#react-app{padding:34px;border:1px solid #ffffff55;border-radius:18px;background:#ffffff26;box-shadow:0 20px 50px #0003;display:grid;gap:14px;justify-items:start}'
-  + '#hash-router-example{padding:18px 34px;border:1px solid #ffffff55;border-radius:18px;background:#ffffff26;display:grid;gap:8px;justify-items:start}'
-  + '#app-badge{font:700 .75rem monospace;letter-spacing:.04em;text-transform:uppercase;color:#bae6fd}h1{margin:0;font-size:1.7rem}p{margin:0 0 6px;color:#e0f2fe}button{padding:9px 14px;border:0;border-radius:7px;background:white;color:#3730a3;font-weight:700;cursor:pointer}nav{display:flex;gap:14px;flex-wrap:wrap}a{color:white;font-weight:700}output{font:.85rem monospace;color:#dbeafe}'
-  + '</style>';
-const devShell = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vite + React</title>'
-  + style
-  + '</head><body><div id="root"></div><script src="/react.js"><\/script><script src="/react-dom.js"><\/script><script src="/@remix-router.js"><\/script><script src="/react-router.js"><\/script><script src="/react-router-dom.js"><\/script><script src="/zustand.js"><\/script><script type="module" src="/src/main.jsx"><\/script></body></html>';
-const productionShell = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vite + React production</title>'
-  + '<link rel="manifest" href="/manifest.json">'
-  + style
-  + '</head><body><div id="root"></div><script src="/assets/index.js"><\/script></body></html>';
-const productionBundle = [
-  packages.reactProd,
-  packages.reactDomProd,
-  packages.remixRouterProd,
-  packages.reactRouterProd,
-  packages.reactRouterDomProd,
-  packages.zustandProd,
-  mainScript,
-].join("\\n");
-
-function send(res, body, type) {
-  res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store' });
-  res.end(body);
-}
-
-function buildProduction() {
-  fs.mkdirSync('/node/dist/assets', { recursive: true });
-  fs.writeFileSync('/node/dist/index.html', productionShell);
-  fs.writeFileSync('/node/dist/assets/index.js', productionBundle);
-  fs.writeFileSync('/node/dist/manifest.json', JSON.stringify({ mode: 'production', entry: 'assets/index.js' }));
-  console.log('vite build started: production');
-  console.log('✓ built dist/index.html and dist/assets/index.js');
-}
-
-const mode = process.argv.includes('--production') ? 'production' : 'development';
-if (mode === 'production') buildProduction();
-
-const server = http.createServer((req, res) => {
-  const pathname = (req.url || '/').split('?')[0];
-  if (mode === 'production') {
-    if (pathname === '/' || pathname === '/about') return send(res, fs.readFileSync('/node/dist/index.html', 'utf8'), 'text/html; charset=utf-8');
-    if (pathname === '/assets/index.js') return send(res, fs.readFileSync('/node/dist/assets/index.js', 'utf8'), 'application/javascript; charset=utf-8');
-    if (pathname === '/manifest.json') return send(res, fs.readFileSync('/node/dist/manifest.json', 'utf8'), 'application/json; charset=utf-8');
-  } else {
-    if (pathname === '/' || pathname === '/about') return send(res, devShell, 'text/html; charset=utf-8');
-    if (pathname === '/react.js') return send(res, packages.reactDev, 'application/javascript; charset=utf-8');
-    if (pathname === '/react-dom.js') return send(res, packages.reactDomDev, 'application/javascript; charset=utf-8');
-    if (pathname === '/@remix-router.js') return send(res, packages.remixRouterDev, 'application/javascript; charset=utf-8');
-    if (pathname === '/react-router.js') return send(res, packages.reactRouterDev, 'application/javascript; charset=utf-8');
-    if (pathname === '/react-router-dom.js') return send(res, packages.reactRouterDomDev, 'application/javascript; charset=utf-8');
-    if (pathname === '/zustand.js') return send(res, packages.zustandDev, 'application/javascript; charset=utf-8');
-    if (pathname === '/src/main.jsx') return send(res, mainScript, 'application/javascript; charset=utf-8');
-  }
-  if (pathname === '/api/health') return send(res, JSON.stringify({ status: 'ok', framework: 'vite-react', mode, port: 5173 }), 'application/json; charset=utf-8');
-  res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
-  res.end('Not Found');
-});
-
-server.listen(5173, () => console.log(mode === 'production'
-  ? 'Vite production build listening on virtual port 5173'
-  : 'Vite + React dev server listening on virtual port 5173'));
-`;
 
     function log(target, text) {
       target.textContent += `${text}\n`;
@@ -348,6 +439,13 @@ server.listen(5173, () => console.log(mode === 'production'
     let activeAbortController = null;
     let activeMode = 'development';
 
+    function getTemplateContent(id) {
+      const el = document.getElementById(id);
+      if (!el) return '';
+      if (el.content && el.content.textContent) return el.content.textContent.trim();
+      return el.innerHTML.trim();
+    }
+
     async function runServer(mode = activeMode) {
       activeMode = mode;
       statusIndicator.style.color = 'var(--muted)';
@@ -358,9 +456,20 @@ server.listen(5173, () => console.log(mode === 'production'
       activeAbortController = new AbortController();
       const signal = activeAbortController.signal;
 
+      const packageJson = getTemplateContent('template-package-json');
+      const indexHtml = document.getElementById('template-index-html')?.innerHTML?.trim() || getTemplateContent('template-index-html');
+      const mainJs = getTemplateContent('template-main-js');
+      const serverJs = getTemplateContent('template-server-js');
+
       if (!node) {
         node = await BrowserNode.create({
           cwd: '/node',
+          files: {
+            '/node/package.json': packageJson,
+            '/node/index.html': indexHtml,
+            '/node/src/main.js': mainJs,
+            '/node/vite-app.js': serverJs,
+          },
           globalObject: window,
         });
 
@@ -371,26 +480,23 @@ server.listen(5173, () => console.log(mode === 'production'
           onNavigate: (cleanAddress) => { urlInput.value = cleanAddress; },
         });
 
-        // Preinstall React & Zustand stack
-        log(termNetwork, 'Resolving React 18, React Router 6, and Zustand packages...');
-        await node.npm.install([
-          'react@18.3.1',
-          'react-dom@18.3.1',
-          'react-router@6.28.0',
-          'react-router-dom@6.28.0',
-          'zustand@4.5.5',
-        ], {
+        // Auto-install React 19 from package.json
+        log(termNetwork, 'Resolving React 19 and dependencies from package.json (^version ranges)...');
+        await node.npm.install({
           onProgress: (event) => {
             if (event.phase === 'cache-hit-meta' || event.phase === 'cache-hit-tarball') log(termNetwork, `⚡ ${event.phase}: ${event.name || ''}`);
             if (event.phase === 'downloading-tarball') log(termNetwork, `⬇️ Downloading: ${event.name}@${event.version}`);
             if (event.phase === 'unpacking') log(termNetwork, `📂 Unpacking: ${event.name}@${event.version}`);
           },
         });
-        log(termNetwork, '✓ React stack ready in VFS');
+        log(termNetwork, '✓ React 19 stack ready in VFS');
+      } else {
+        await node.fs.writeFile('/node/src/main.js', mainJs);
+        await node.fs.writeFile('/node/vite-app.js', serverJs);
       }
 
-      await node.fs.writeFile('/node/vite-app.js', VITE_REACT_SERVER_SOURCE);
-      log(termOutput, 'Executing /node/vite-app.js in isolated Web Worker…');
+      const scriptName = mode === 'production' ? 'build' : 'dev';
+      log(termOutput, `Executing "npm run ${scriptName}" in isolated Web Worker…`);
 
       let booted = false;
       const onServerListening = () => {
@@ -403,9 +509,7 @@ server.listen(5173, () => console.log(mode === 'production'
         node.connectIframe(iframe, { port: 5173, path: urlInput.value || '/' });
       };
 
-      activeServerProcess = await node.run({
-        entry: '/node/vite-app.js',
-        argv: ['node', 'vite-app.js', mode === 'production' ? '--production' : '--development'],
+      activeServerProcess = await node.npm.run(scriptName, {
         signal,
         onStdout: (chunk) => {
           log(termOutput, chunk);

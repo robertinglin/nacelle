@@ -482,8 +482,35 @@ export class BrowserNpm {
     return bytes;
   }
 
+  async readPackageJson(cwd = '/node') {
+    const pkgJsonPath = `${cwd.replace(/\/+$/, '')}/package.json`;
+    try {
+      const bytes = await this.vfs.fs.promises.readFile(pkgJsonPath);
+      const text = (typeof bytes === 'string' ? bytes : new TextDecoder().decode(bytes)).trim();
+      if (!text) return null;
+      return JSON.parse(text);
+    } catch (err) {
+      if (err.code === 'ENOENT') return null;
+      throw err;
+    }
+  }
+
+  async readPackageDependencies(cwd = '/node') {
+    const pkg = await this.readPackageJson(cwd);
+    if (!pkg) return [];
+    const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+    return Object.entries(deps).map(([name, range]) => `${name}@${range}`);
+  }
+
   async install(packageSpecs, { cwd = '/node', nodeModulesDir = null, onProgress = null, concurrency = 8 } = {}) {
-    const specs = Array.isArray(packageSpecs) ? packageSpecs : [packageSpecs];
+    let rawSpecs = packageSpecs;
+    if (!rawSpecs || (Array.isArray(rawSpecs) && rawSpecs.length === 0)) {
+      rawSpecs = await this.readPackageDependencies(cwd);
+      if (rawSpecs.length === 0) {
+        return { packages: [], totalFiles: 0, files: {} };
+      }
+    }
+    const specs = Array.isArray(rawSpecs) ? rawSpecs : [rawSpecs];
     const targetNodeModules = nodeModulesDir || (cwd.endsWith('/') ? `${cwd}node_modules` : `${cwd}/node_modules`);
     const queue = specs.map((spec) => parsePackageSpec(spec));
     const results = [];
@@ -522,12 +549,36 @@ export class BrowserNpm {
 
       let pkgFilesCount = 0;
       let pkgTotalBytes = 0;
+      let parsedPkgJson = null;
 
       for (const entry of entries) {
         if (entry.type === 'file' && entry.data) {
           filesToMount[entry.path] = entry.data;
           pkgFilesCount += 1;
           pkgTotalBytes += entry.data.byteLength;
+
+          if (entry.path === `${pkgDir}/package.json` || entry.path.endsWith('/package.json')) {
+            try {
+              const raw = typeof entry.data === 'string' ? entry.data : new TextDecoder().decode(entry.data);
+              parsedPkgJson = JSON.parse(raw);
+            } catch { /* ignore */ }
+          }
+        }
+      }
+
+      // Link package "bin" scripts into node_modules/.bin/
+      if (parsedPkgJson && parsedPkgJson.bin) {
+        const binEntries = typeof parsedPkgJson.bin === 'string'
+          ? [[parsedPkgJson.name || name, parsedPkgJson.bin]]
+          : Object.entries(parsedPkgJson.bin);
+
+        for (const [binName, binRel] of binEntries) {
+          const binPath = `${targetNodeModules}/.bin/${binName}`;
+          const cleanRel = String(binRel).replace(/^\.\//, '');
+          const targetFile = `${pkgDir}/${cleanRel}`;
+          filesToMount[binPath] = new TextEncoder().encode(
+            `#!/usr/bin/env node\nrequire('${targetFile}');\n`
+          );
         }
       }
 
@@ -535,21 +586,7 @@ export class BrowserNpm {
       results.push({ name, version, filesCount: pkgFilesCount, bytes: pkgTotalBytes });
 
       // Enqueue dependencies from versionDoc or unpacked package.json
-      let deps = versionDoc?.dependencies;
-      if (!deps) {
-        const pkgJsonEntry = entries.find((e) => e.path === `${pkgDir}/package.json` || e.path.endsWith('/package.json'));
-        if (pkgJsonEntry?.data) {
-          try {
-            const raw = typeof pkgJsonEntry.data === 'string' ? pkgJsonEntry.data : new TextDecoder().decode(pkgJsonEntry.data);
-            const parsed = JSON.parse(raw);
-            deps = parsed.dependencies || {};
-            if (parsed.version && !versionDoc) version = parsed.version;
-          } catch {
-            deps = {};
-          }
-        }
-      }
-      deps = deps || {};
+      let deps = versionDoc?.dependencies || parsedPkgJson?.dependencies || {};
       for (const [depName, depRange] of Object.entries(deps)) {
         if (!this.installed.has(depName)) {
           queue.push({ name: depName, range: depRange });
@@ -573,4 +610,35 @@ export class BrowserNpm {
       files: filesToMount,
     };
   }
+}
+
+/**
+ * Parses an npm script command string into executable, arguments, and inline environment variables.
+ * Handles tokens, quotes, and leading KEY=VAL assignments.
+ */
+export function parseScriptCommand(cmdString) {
+  const env = {};
+  const tokens = [];
+  const regex = /(?:[^\s"']+|"[^"]*"|'[^']*')+/g;
+  let match;
+  while ((match = regex.exec(cmdString)) !== null) {
+    let token = match[0];
+    if ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))) {
+      token = token.slice(1, -1);
+    }
+    tokens.push(token);
+  }
+
+  // Extract leading FOO=BAR environment variables
+  while (tokens.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0])) {
+    const assign = tokens.shift();
+    const eqIdx = assign.indexOf('=');
+    const key = assign.slice(0, eqIdx);
+    const val = assign.slice(eqIdx + 1);
+    env[key] = val;
+  }
+
+  const binary = tokens[0] || '';
+  const args = tokens.slice(1);
+  return { binary, args, env, tokens };
 }

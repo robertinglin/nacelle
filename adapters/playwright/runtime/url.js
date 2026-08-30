@@ -45,10 +45,62 @@ function parseQueryStringValue(value) {
 const legacyProtocolPattern = /^[a-z0-9.+-]+:/i;
 const legacySlashedProtocols = new Set(['http:', 'https:', 'ftp:', 'gopher:', 'file:', 'ws:', 'wss:']);
 const legacyHostlessProtocols = new Set(['javascript:']);
+const normalizedForbiddenHostChars = /[#%/:?@[\\\]^|]/;
+const warnedInvalidPorts = new WeakSet();
+
+function invalidLegacyUrl(input) {
+  const error = new TypeError(`Invalid URL: ${input}`);
+  error.code = 'ERR_INVALID_URL';
+  error.input = input;
+  return error;
+}
+
+function validateLegacyHost(scope, host, input) {
+  const bracketMatch = /^\[([^\]]*)\](?::[0-9]*)?$/.exec(host);
+  const hostname = bracketMatch ? bracketMatch[1] : (/:([0-9]*)$/.test(host) ? host.replace(/:[0-9]*$/, '') : host);
+  if (hostname.includes('\0')) throw invalidLegacyUrl(input);
+  const normalized = hostname.normalize('NFKD');
+  if (normalized !== hostname && normalizedForbiddenHostChars.test(normalized)) {
+    throw invalidLegacyUrl(input);
+  }
+  // WHATWG URL drops this IDNA-ignored character from the hostname, but
+  // Node's legacy parser rejects the resulting empty ASCII hostname.
+  if (/^\u00AD+$/.test(hostname)) throw invalidLegacyUrl(input);
+  if (hostname) {
+    try {
+      if (!new scope.URL(`http://${hostname}`).hostname) throw invalidLegacyUrl(input);
+    } catch (error) {
+      if (error?.code === 'ERR_INVALID_URL') throw error;
+    }
+  }
+}
+
+function warnInvalidLegacyPort(scope, input, host) {
+  if (!host || /^\[[^\]]*\](?::[0-9]*)?$/.test(host)) return;
+  const port = /:([^:]*)$/.exec(host)?.[1];
+  if (port === undefined || /^\d*$/.test(port)) return;
+  const process = scope.process;
+  if (!process || warnedInvalidPorts.has(process)) return;
+  warnedInvalidPorts.add(process);
+  process.emitWarning?.(
+    `The URL ${input} is invalid. Future versions of Node.js will throw an error.`,
+    { code: 'DEP0170', type: 'DeprecationWarning' },
+  );
+}
 
 function legacyString(value, name) {
   if (typeof value !== 'string') {
-    const error = new TypeError(`The "${name}" argument must be of type string. Received ${value === null ? 'null' : typeof value}`);
+    let received;
+    if (value === null || value === undefined) {
+      received = `Received ${value}`;
+    } else if (typeof value === 'function') {
+      received = `Received function ${value.name || ''}`;
+    } else if (typeof value === 'object') {
+      received = `Received an instance of ${value.constructor?.name || 'Object'}`;
+    } else {
+      received = `Received type ${typeof value} (${nodeInspect(value, { colors: false })})`;
+    }
+    const error = new TypeError(`The "${name}" argument must be of type string. ${received}`);
     error.code = 'ERR_INVALID_ARG_TYPE';
     throw error;
   }
@@ -133,6 +185,8 @@ function legacyParseUrl(scope, input, parseQueryString = false, slashesDenoteHos
       result.auth = decodeURIComponent(authorityText.slice(0, at));
       hostText = authorityText.slice(at + 1);
     }
+    warnInvalidLegacyPort(scope, url, hostText);
+    validateLegacyHost(scope, hostText, url);
     const normalized = legacyNormalizeHost(scope, hostText);
     result.host = normalized.host;
     result.hostname = normalized.hostname;

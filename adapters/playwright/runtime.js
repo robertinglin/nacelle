@@ -6956,6 +6956,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               require: scope.require,
               http: scope.http,
               hasHttp: Object.hasOwn(scope, 'http'),
+              url: scope.url,
+              hasUrl: Object.hasOwn(scope, 'url'),
               console: scope.console,
               global: scope.global,
               Buffer: scope.Buffer,
@@ -7487,6 +7489,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               scope.queueMicrotask = previousState.queueMicrotask;
               if (previousState.hasHttp) scope.http = previousState.http;
               else delete scope.http;
+              if (previousState.hasUrl) scope.url = previousState.url;
+              else delete scope.url;
               if (typeof originalReadFileSync === 'function') fs.readFileSync = originalReadFileSync;
               if (childHttpModule) childHttpModule.maxHeaderSize = previousHttpMaxHeaderSize;
             }
@@ -9148,6 +9152,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     Object.assign(scope, {
       process: processObject,
       require: loadModule,
+      url: builtins.url,
       Buffer,
       File,
       atob: Buffer.atob,

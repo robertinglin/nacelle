@@ -3767,9 +3767,19 @@ export function pathToFileURL(path) {
 }
 
 export function fileURLToPath(value) {
+  if (typeof value !== 'string' && !isFileUrl(value)) {
+    throw invalidArgumentType('path', value, 'string or an instance of URL');
+  }
   const url = isFileUrl(value) ? value : new URL(value);
-  if (url.protocol !== 'file:' || (url.hostname && url.hostname !== 'localhost')) {
-    throw invalidPath('file URL host is not supported');
+  if (url.protocol !== 'file:') {
+    const error = new TypeError('The URL must be of scheme file');
+    error.code = 'ERR_INVALID_URL_SCHEME';
+    throw error;
+  }
+  if (url.hostname && url.hostname !== 'localhost') {
+    const error = new TypeError('File URL host must be "localhost" or empty on linux');
+    error.code = 'ERR_INVALID_FILE_URL_HOST';
+    throw error;
   }
   try {
     return decodeURIComponent(url.pathname);

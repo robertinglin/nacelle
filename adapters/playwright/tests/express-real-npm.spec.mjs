@@ -207,6 +207,50 @@ test.describe('Real Live NPM Express In-Browser Full Test', () => {
     await expect(statusIndicator).toHaveClass(/online/, { timeout: 20000 });
     const reloadedIframe = page.frameLocator('#app-preview');
     await expect(reloadedIframe.locator('#greeting')).toHaveText('Hello from Browser Express!', { timeout: 15000 });
+
+    const linkNavigation = page.waitForResponse(
+      (response) => response.url().endsWith('/__vhost__/3000/api/info')
+        && response.request().resourceType() === 'document',
+      { timeout: 5000 },
+    );
+    await page.evaluate(() => document.getElementById('app-preview').contentDocument.querySelector('a[href]').click());
+    const linkResponse = await linkNavigation;
+    expect(linkResponse.status()).toBe(200);
+    expect(linkResponse.headers()['cache-control']).toBe('no-store');
+    await expect.poll(() => page.locator('#app-preview').evaluate((frame) => frame.contentWindow.location.pathname))
+      .toBe('/__vhost__/3000/api/info');
+
+    const homeNavigation = page.waitForResponse(
+      (response) => response.url().endsWith('/__vhost__/3000/')
+        && response.request().resourceType() === 'document'
+        && response.status() === 200,
+      { timeout: 5000 },
+    );
+    await page.getByRole('button', { name: '/', exact: true }).click();
+    await homeNavigation;
+    await expect(reloadedIframe.locator('#greeting')).toHaveText('Hello from Browser Express!', { timeout: 15000 });
+
+    await page.getByRole('button', { name: 'Restart Server' }).click();
+    await expect(statusIndicator).toHaveClass(/online/, { timeout: 20000 });
+    await expect(page.frameLocator('#app-preview').locator('#greeting'))
+      .toHaveText('Hello from Browser Express!', { timeout: 15000 });
+
+    const publicLinkRedirect = page.waitForResponse(
+      (response) => response.url().endsWith('/api/info')
+        && response.request().resourceType() === 'document'
+        && response.status() === 307,
+      { timeout: 5000 },
+    );
+    const virtualLinkResponse = page.waitForResponse(
+      (response) => response.url().endsWith('/__vhost__/3000/api/info')
+        && response.request().resourceType() === 'document',
+      { timeout: 5000 },
+    );
+    await page.evaluate(() => document.getElementById('app-preview').contentDocument.querySelector('a[href]').click());
+    const [redirectResponse, restartedLinkResponse] = await Promise.all([publicLinkRedirect, virtualLinkResponse]);
+    expect(redirectResponse.headers().location).toMatch(/\/__vhost__\/3000\/api\/info$/);
+    expect(restartedLinkResponse.status()).toBe(200);
+    expect(restartedLinkResponse.headers()['cache-control']).toBe('no-store');
     expect(pageErrors).toEqual([]);
   });
 });

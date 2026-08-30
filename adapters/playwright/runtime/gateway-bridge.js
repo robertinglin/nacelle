@@ -231,6 +231,7 @@ export function installGatewayBridge({ net, globalObject = globalThis } = {}) {
 
       socket.on('close', (hadError) => {
         globalObject.__bnhGatewayLogs.push({ type: 'socket-close', hadError });
+        if (!ended && headersParsed) finishResponse();
       });
 
       socket.on('error', (err) => {

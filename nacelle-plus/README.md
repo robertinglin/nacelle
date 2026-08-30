@@ -16,6 +16,8 @@ explicitly granted HTTP transport when a page request is rejected by CORS.
 - bounded request/response bodies and credentials omitted by default
 - inspectable/revocable persistent grants in the extension popup
 - private-network origins require a separate explicit grant
+- page-controlled backpressure with one acknowledged chunk in flight
+- eight active requests per page and fifty across the extension
 
 The protocol reserves `connect`, `send`, `resolve`, and credential operations,
 but this first companion release implements streamed HTTP requests only. Raw
@@ -31,7 +33,27 @@ granted origin and is removed when a redirect crosses origins. Response
 The service worker is kept active during long transfers by a content-script
 heartbeat and one-chunk-at-a-time acknowledgements. If Chrome or Firefox still
 disconnects the port, the in-flight request is cancelled rather than replayed;
-the page may issue a new request, avoiding duplicate POSTs.
+the page receives `ERR_NACELLE_PLUS_TRANSPORT_LOST` and may issue a new request,
+avoiding duplicate POSTs. Revoking a grant aborts matching active requests
+with `ERR_NACELLE_PLUS_GRANT_REVOKED`; removing an optional host permission in
+the browser UI also removes the corresponding Nacelle+ grant.
+
+Nacelle+ is disabled for private/incognito tabs. This avoids sharing persistent
+grant state between normal and private browsing contexts while the companion
+has a single cross-browser storage model.
+
+The companion intentionally exposes streamed HTTP(S) only. It does not claim
+to provide WebSockets, raw TCP, CONNECT, DNS resolution, or native messaging.
+Fetch does not expose the resolved address to an extension, so the policy
+rejects private-looking hostnames and IP literals but cannot prove that a
+public hostname will never DNS-rebind to a private address. Treat access to a
+public hostname as access to that hostname's possible destinations and use a
+separate private-network grant for known local services.
+
+Response headers are normalized to a single lower-case value per name, as
+provided by the browser `Headers` API. `Set-Cookie` is never exposed and fetch
+trailers are not part of this contract; binary response bodies and status
+metadata are streamed faithfully within the documented limits.
 
 ## Install for development
 

@@ -5,6 +5,7 @@ const EXTENSION_RESPONSE_SOURCE = 'nacelle-plus-extension';
 const PAGE_ORIGIN = '*';
 const MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+const MAX_RESPONSE_HEADER_VALUE_BYTES = 64 * 1024;
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const METHODS = new Set(['DELETE', 'GET', 'HEAD', 'OPTIONS', 'PATCH', 'POST', 'PUT']);
 const FORBIDDEN_HEADERS = new Set(['connection', 'content-length', 'cookie', 'host', 'origin', 'referer', 'set-cookie', 'transfer-encoding', 'upgrade']);
@@ -76,19 +77,34 @@ function validateResponseMetadata(metadata) {
   if (!metadata.headers || typeof metadata.headers !== 'object' || Array.isArray(metadata.headers)) {
     throw transportError('ERR_NACELLE_PLUS_PROTOCOL', 'Nacelle+ returned invalid response headers');
   }
+  if (metadata.statusText !== undefined && typeof metadata.statusText !== 'string') {
+    throw transportError('ERR_NACELLE_PLUS_PROTOCOL', 'Nacelle+ returned an invalid response status text');
+  }
   if (Object.keys(metadata.headers).length > 128) throw transportError('ERR_NACELLE_PLUS_PROTOCOL', 'Nacelle+ returned too many headers');
   for (const [name, value] of Object.entries(metadata.headers)) {
-    if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name) || /[\r\n]/.test(String(value))) {
+    if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name) || /[\r\n]/.test(String(value))
+      || new TextEncoder().encode(String(value)).byteLength > MAX_RESPONSE_HEADER_VALUE_BYTES) {
       throw transportError('ERR_NACELLE_PLUS_PROTOCOL', `Nacelle+ returned an invalid header: ${name}`);
     }
   }
   return metadata;
 }
 
-function makeResponse(metadata, onCancel) {
+function makeResponse(metadata, onCancel, onChunkAck) {
   let streamController;
+  let pendingSequence = null;
+  const acknowledgePendingChunk = () => {
+    if (pendingSequence === null) return;
+    const sequence = pendingSequence;
+    pendingSequence = null;
+    onChunkAck(sequence);
+  };
   const body = typeof ReadableStream === 'function'
-    ? new ReadableStream({ start(controller) { streamController = controller; }, cancel: onCancel })
+    ? new ReadableStream({
+      start(controller) { streamController = controller; },
+      pull() { acknowledgePendingChunk(); },
+      cancel: onCancel,
+    })
     : null;
   const buffered = [];
   const response = {
@@ -119,10 +135,16 @@ function makeResponse(metadata, onCancel) {
   };
   return {
     response,
-    push(bodyChunk) {
+    push(bodyChunk, sequence) {
       const chunk = bodyChunk instanceof Uint8Array ? bodyChunk : new Uint8Array(bodyChunk);
-      if (streamController) streamController.enqueue(chunk);
-      else buffered.push(chunk);
+      if (!streamController) {
+        buffered.push(chunk);
+        onChunkAck(sequence);
+        return;
+      }
+      streamController.enqueue(chunk);
+      pendingSequence = sequence;
+      if (streamController.desiredSize > 0) acknowledgePendingChunk();
     },
     end() { streamController?.close(); },
     fail(error) { streamController?.error(error); },
@@ -140,7 +162,7 @@ export function createNacellePlusAdapter({ globalObject = globalThis, extensionI
   let sequence = 0;
   const expire = (requestId, request) => {
     if (!pending.has(requestId)) return;
-    postMessage(globalObject, { source: PAGE_REQUEST_SOURCE, type: 'cancel', requestId });
+    postMessage(globalObject, { source: PAGE_REQUEST_SOURCE, type: 'cancel', version: 1, requestId });
     request.signal?.removeEventListener?.('abort', request.onAbort);
     pending.delete(requestId);
     const error = transportError('ETIMEDOUT', `Nacelle+ stream timed out after ${timeout}ms`);
@@ -164,7 +186,7 @@ export function createNacellePlusAdapter({ globalObject = globalThis, extensionI
       let metadata;
       try { metadata = validateResponseMetadata(message.response); } catch (error) {
         clearTimeout(request.timer);
-        postMessage(globalObject, { source: PAGE_REQUEST_SOURCE, type: 'cancel', requestId: message.requestId });
+        postMessage(globalObject, { source: PAGE_REQUEST_SOURCE, type: 'cancel', version: 1, requestId: message.requestId });
         pending.delete(message.requestId);
         request.reject(error);
         return;
@@ -172,27 +194,28 @@ export function createNacellePlusAdapter({ globalObject = globalThis, extensionI
       request.started = true;
       clearTimeout(request.timer);
       request.stream = makeResponse(metadata, () => {
-        postMessage(globalObject, { source: PAGE_REQUEST_SOURCE, type: 'cancel', requestId: message.requestId });
+        postMessage(globalObject, { source: PAGE_REQUEST_SOURCE, type: 'cancel', version: 1, requestId: message.requestId });
+      }, (sequence) => {
+        postMessage(globalObject, {
+          source: PAGE_REQUEST_SOURCE, type: 'chunk-ack', version: 1, requestId: message.requestId, sequence,
+        });
       });
       armTimeout(message.requestId, request);
       request.resolve(request.stream.response);
       return;
     }
     if (message.type === 'response-chunk') {
-      if (request.stream && message.body instanceof ArrayBuffer) {
+      if (request.stream && message.body instanceof ArrayBuffer && Number.isInteger(message.sequence) && message.sequence > 0) {
         request.total += message.body.byteLength;
         if (request.total > MAX_RESPONSE_BYTES) {
-          postMessage(globalObject, { source: PAGE_REQUEST_SOURCE, type: 'cancel', requestId: message.requestId });
+          postMessage(globalObject, { source: PAGE_REQUEST_SOURCE, type: 'cancel', version: 1, requestId: message.requestId });
           clearTimeout(request.timer);
           pending.delete(message.requestId);
           request.stream.fail(transportError('ERR_NACELLE_PLUS_RESPONSE_TOO_LARGE', 'Nacelle+ response exceeds the 16 MiB limit'));
           return;
         }
-        request.stream.push(message.body);
+        request.stream.push(message.body, message.sequence);
         armTimeout(message.requestId, request);
-        postMessage(globalObject, {
-          source: PAGE_REQUEST_SOURCE, type: 'chunk-ack', requestId: message.requestId, sequence: message.sequence,
-        });
       }
       return;
     }
@@ -238,7 +261,7 @@ export function createNacellePlusAdapter({ globalObject = globalThis, extensionI
           return;
         }
         const onAbort = () => {
-          postMessage(globalObject, { source: PAGE_REQUEST_SOURCE, type: 'cancel', requestId });
+          postMessage(globalObject, { source: PAGE_REQUEST_SOURCE, type: 'cancel', version: 1, requestId });
           clearTimeout(record.timer);
           pending.delete(requestId);
           const error = transportError('ABORT_ERR', 'Nacelle+ request was aborted');
@@ -256,7 +279,7 @@ export function createNacellePlusAdapter({ globalObject = globalThis, extensionI
       for (const [requestId, request] of pending) {
         clearTimeout(request.timer);
         request.signal?.removeEventListener?.('abort', request.onAbort);
-        postMessage(globalObject, { source: PAGE_REQUEST_SOURCE, type: 'cancel', requestId });
+        postMessage(globalObject, { source: PAGE_REQUEST_SOURCE, type: 'cancel', version: 1, requestId });
         const error = transportError('ERR_NACELLE_PLUS_CLOSED', 'Nacelle+ adapter closed');
         if (request.started) request.stream?.fail(error);
         else request.reject(error);

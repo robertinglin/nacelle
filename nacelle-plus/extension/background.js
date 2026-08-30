@@ -7,6 +7,19 @@ const PORT_NAME = 'nacelle-plus-transport-v1';
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 const MAX_REDIRECTS = 10;
 const MAX_ACK_WAIT = 30_000;
+const MAX_ACTIVE_PER_PAGE = 8;
+const MAX_ACTIVE_GLOBAL = 50;
+const MAX_CHUNK_BYTES = 256 * 1024;
+const MAX_PAGE_BUFFER_BYTES = 2 * 1024 * 1024;
+const MAX_GLOBAL_BUFFER_BYTES = 16 * 1024 * 1024;
+const MAX_RESPONSE_HEADER_COUNT = 128;
+const MAX_RESPONSE_HEADER_VALUE_BYTES = 64 * 1024;
+
+// The page/content-script bridge acknowledges one chunk only after the page
+// has accepted it. Keeping the active request set here gives revoke and
+// permission-change events a way to cancel work that is already in flight.
+const activeRequests = new Set();
+let globalInFlightBytes = 0;
 
 function call(target, method, ...args) {
   if (isFirefox) return Promise.resolve(target[method](...args));
@@ -21,6 +34,10 @@ function call(target, method, ...args) {
 
 function failure(code, message, details = {}) {
   return { ok: false, error: { code, message, details } };
+}
+
+function controllerErrorCode(controller) {
+  return controller.reasonCode || (controller.timedOut ? 'ETIMEDOUT' : controller.signal.aborted ? 'ABORT_ERR' : 'ERR_NACELLE_PLUS_REQUEST');
 }
 
 function originFrom(value) {
@@ -41,7 +58,7 @@ function senderIdentity(sender) {
   if (sender?.id && sender.id !== api.runtime.id) return null;
   if (!Number.isInteger(sender?.tab?.id) || sender.tab.id < 0 || sender?.frameId !== 0) return null;
   if (!pageOrigin || (senderOrigin && senderOrigin !== pageOrigin)) return null;
-  return { pageOrigin, tabId: sender.tab.id };
+  return { pageOrigin, tabId: sender.tab.id, incognito: sender.tab.incognito === true };
 }
 
 function extensionSender(sender) {
@@ -85,6 +102,7 @@ async function saveGrant(pageOrigin, targetOrigin, allowPrivate) {
 }
 
 async function revokeGrant(pageOrigin, targetOrigin) {
+  abortActiveGrant(pageOrigin, targetOrigin, 'ERR_NACELLE_PLUS_GRANT_REVOKED');
   const current = await grants();
   const existing = current[pageOrigin];
   const targets = Array.isArray(existing)
@@ -97,6 +115,47 @@ async function revokeGrant(pageOrigin, targetOrigin) {
 
   const stillUsed = grantSnapshot(current).some((grant) => grant.targets.some((target) => target.targetOrigin === targetOrigin));
   if (!stillUsed) await call(api.permissions, 'remove', { origins: [permissionPattern(targetOrigin)] });
+}
+
+function activeCount(pageOrigin) {
+  let count = 0;
+  for (const request of activeRequests) if (request.pageOrigin === pageOrigin) count += 1;
+  return count;
+}
+
+function abortActiveGrant(pageOrigin, targetOrigin, code) {
+  for (const request of activeRequests) {
+    if ((pageOrigin === null || request.pageOrigin === pageOrigin) && request.targetOrigins.has(targetOrigin)) {
+      request.reasonCode = code;
+      request.controller.reasonCode = code;
+      request.controller.abort();
+    }
+  }
+}
+
+function originFromPermissionPattern(pattern) {
+  if (typeof pattern !== 'string' || !pattern.endsWith('/*')) return null;
+  return originFrom(pattern.slice(0, -1));
+}
+
+async function reconcileRemovedPermissions(permissionSet) {
+  const removedOrigins = new Set((permissionSet?.origins || []).map(originFromPermissionPattern).filter(Boolean));
+  if (!removedOrigins.size) return;
+  for (const targetOrigin of removedOrigins) abortActiveGrant(null, targetOrigin, 'ERR_NACELLE_PLUS_GRANT_REVOKED');
+  const current = await grants();
+  let changed = false;
+  for (const [pageOrigin, entry] of Object.entries(current)) {
+    const targets = Array.isArray(entry)
+      ? entry.filter((targetOrigin) => !removedOrigins.has(targetOrigin))
+      : Object.fromEntries(Object.entries(entry?.targets || {}).filter(([targetOrigin]) => !removedOrigins.has(targetOrigin)));
+    const originalCount = Array.isArray(entry) ? entry.length : Object.keys(entry?.targets || {}).length;
+    const remainingCount = Array.isArray(targets) ? targets.length : Object.keys(targets).length;
+    if (remainingCount === originalCount) continue;
+    changed = true;
+    if (!remainingCount) delete current[pageOrigin];
+    else current[pageOrigin] = Array.isArray(targets) ? targets : { targets };
+  }
+  if (changed) await call(api.storage.local, 'set', { [GRANTS_KEY]: current });
 }
 
 async function grantState(pageOrigin, targetOrigin) {
@@ -121,6 +180,7 @@ function validateSenderRequest(message, sender) {
   }
   const identity = senderIdentity(sender);
   if (!identity) return failure('ERR_NACELLE_PLUS_SENDER', 'only top-level HTTP(S) tabs may use Nacelle+');
+  if (identity.incognito) return failure('ERR_NACELLE_PLUS_INCOGNITO_DISABLED', 'Nacelle+ is disabled in private browsing');
   const requestError = NacellePlusPolicy.validateRequest(message.request);
   if (requestError) return requestError;
   return identity;
@@ -146,12 +206,16 @@ function responseHeaders(headers) {
   for (const [name, value] of headers.entries()) {
     const lower = name.toLowerCase();
     if (lower === 'set-cookie' || lower === 'set-cookie2') continue;
+    if (Object.keys(output).length >= MAX_RESPONSE_HEADER_COUNT
+      || new TextEncoder().encode(String(value)).byteLength > MAX_RESPONSE_HEADER_VALUE_BYTES) {
+      return failure('ERR_NACELLE_PLUS_RESPONSE_METADATA_TOO_LARGE', 'Nacelle+ response metadata exceeds its limit');
+    }
     output[lower] = value;
   }
   return output;
 }
 
-async function fetchRedirectChain(request, pageOrigin, controller) {
+async function fetchRedirectChain(request, pageOrigin, controller, activeRequest) {
   let current = {
     target: request.target,
     method: request.method,
@@ -160,6 +224,7 @@ async function fetchRedirectChain(request, pageOrigin, controller) {
   };
   for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
     const targetOrigin = originFrom(current.target);
+    activeRequest.targetOrigins.add(targetOrigin);
     const state = await grantState(pageOrigin, targetOrigin);
     if (!state.granted) {
       return failure(
@@ -179,7 +244,7 @@ async function fetchRedirectChain(request, pageOrigin, controller) {
         signal: controller.signal,
       });
     } catch (error) {
-      return failure(controller.timedOut ? 'ETIMEDOUT' : controller.signal.aborted ? 'ABORT_ERR' : 'ERR_NACELLE_PLUS_REQUEST', error.message);
+      return failure(controllerErrorCode(controller), error.message);
     }
     if (response.type === 'opaqueredirect' || response.status === 0) {
       return failure('ERR_NACELLE_PLUS_REDIRECT_UNAVAILABLE', 'Nacelle+ could not inspect a redirect response safely');
@@ -194,13 +259,19 @@ async function fetchRedirectChain(request, pageOrigin, controller) {
   return failure('ERR_NACELLE_PLUS_TOO_MANY_REDIRECTS', 'Nacelle+ redirect limit exceeded');
 }
 
-function waitForChunkAck(acknowledgements, requestId, sequence, controller) {
+function waitForChunkAck(acknowledgements, requestId, sequence, controller, activeRequest, byteLength) {
+  if (activeRequest.inFlightBytes + byteLength > MAX_PAGE_BUFFER_BYTES
+    || globalInFlightBytes + byteLength > MAX_GLOBAL_BUFFER_BYTES) return null;
+  activeRequest.inFlightBytes += byteLength;
+  globalInFlightBytes += byteLength;
   return new Promise((resolve) => {
     const pending = acknowledgements.get(requestId) || new Map();
     const finish = (delivered) => {
       controller.signal.removeEventListener('abort', onAbort);
       clearTimeout(timer);
       pending.delete(sequence);
+      activeRequest.inFlightBytes -= byteLength;
+      globalInFlightBytes -= byteLength;
       resolve(delivered);
     };
     const onAbort = () => finish(false);
@@ -212,8 +283,8 @@ function waitForChunkAck(acknowledgements, requestId, sequence, controller) {
   });
 }
 
-async function streamTarget(request, pageOrigin, port, controller, acknowledgements) {
-  const response = await fetchRedirectChain(request, pageOrigin, controller);
+async function streamTarget(request, pageOrigin, port, controller, acknowledgements, activeRequest) {
+  const response = await fetchRedirectChain(request, pageOrigin, controller, activeRequest);
   if (response?.ok === false && response.error) {
     sendPort(port, { type: 'response-error', requestId: request.requestId, response });
     return;
@@ -227,10 +298,16 @@ async function streamTarget(request, pageOrigin, port, controller, acknowledgeme
     controller.abort();
     return;
   }
+  const headers = responseHeaders(response.headers);
+  if (headers?.ok === false && headers.error) {
+    sendPort(port, { type: 'response-error', requestId: request.requestId, response: headers });
+    controller.abort();
+    return;
+  }
   if (!sendPort(port, {
     type: 'response-start',
     requestId: request.requestId,
-    response: { status: response.status, statusText: response.statusText, headers: responseHeaders(response.headers) },
+    response: { status: response.status, statusText: response.statusText, headers },
   })) return;
 
   let total = 0;
@@ -251,14 +328,36 @@ async function streamTarget(request, pageOrigin, port, controller, acknowledgeme
           controller.abort();
           return;
         }
-        const chunkBytes = new Uint8Array(chunk.byteLength);
-        chunkBytes.set(chunk);
-        const chunkSequence = sequence += 1;
-        const acknowledged = waitForChunkAck(acknowledgements, request.requestId, chunkSequence, controller);
-        if (!sendPort(port, {
-          type: 'response-chunk', requestId: request.requestId, sequence: chunkSequence, body: chunkBytes.buffer,
-        })) return;
-        if (!(await acknowledged)) { controller.abort(); return; }
+        for (let offset = 0; ; offset += MAX_CHUNK_BYTES) {
+          const end = Math.min(offset + MAX_CHUNK_BYTES, chunk.byteLength);
+          const chunkBytes = chunk.slice(offset, end);
+          const chunkSequence = sequence += 1;
+          const acknowledged = waitForChunkAck(
+            acknowledgements, request.requestId, chunkSequence, controller, activeRequest, chunkBytes.byteLength,
+          );
+          if (acknowledged === null) {
+            sendPort(port, {
+              type: 'response-error', requestId: request.requestId,
+              response: failure('ERR_NACELLE_PLUS_BUFFER_LIMIT', 'Nacelle+ buffered-byte budget exceeded'),
+            });
+            controller.abort();
+            return;
+          }
+          if (!sendPort(port, {
+            type: 'response-chunk', requestId: request.requestId, sequence: chunkSequence, body: chunkBytes.buffer,
+          })) return;
+          if (!(await acknowledged)) {
+            if (!controller.signal.aborted) {
+              sendPort(port, {
+                type: 'response-error', requestId: request.requestId,
+                response: failure('ERR_NACELLE_PLUS_BACKPRESSURE_TIMEOUT', 'Nacelle+ stopped reading because the page did not acknowledge a response chunk'),
+              });
+            }
+            controller.abort();
+            return;
+          }
+          if (end >= chunk.byteLength) break;
+        }
       }
     } else if (response.body) {
       sendPort(port, {
@@ -271,7 +370,7 @@ async function streamTarget(request, pageOrigin, port, controller, acknowledgeme
   } catch (error) {
     sendPort(port, {
       type: 'response-error', requestId: request.requestId,
-      response: failure(controller.timedOut ? 'ETIMEDOUT' : controller.signal.aborted ? 'ABORT_ERR' : 'ERR_NACELLE_PLUS_REQUEST', error.message),
+      response: failure(controllerErrorCode(controller), error.message),
     });
   }
 }
@@ -311,12 +410,21 @@ api.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
+// Optional host permissions can be removed outside the popup. Storage is not
+// authoritative in that case: remove the matching grants and abort streams
+// before a later request can observe stale authorization.
+api.permissions?.onRemoved?.addListener((permissionSet) => {
+  void reconcileRemovedPermissions(permissionSet).catch((error) => {
+    console.error('Nacelle+ permission reconciliation failed', error);
+  });
+});
+
 api.runtime.onConnect.addListener((port) => {
   if (port.name !== PORT_NAME) return;
   const identity = senderIdentity(port.sender);
   const controllers = new Map();
   const acknowledgements = new Map();
-  if (!identity) {
+  if (!identity || identity.incognito) {
     port.disconnect();
     return;
   }
@@ -326,6 +434,7 @@ api.runtime.onConnect.addListener((port) => {
       return;
     }
     if (message.type === 'chunk-ack') {
+      if (!NacellePlusPolicy.isRequestId(message.requestId) || !Number.isInteger(message.sequence) || message.sequence <= 0) return;
       const pending = acknowledgements.get(message.requestId);
       const resolve = pending?.get(message.sequence);
       if (resolve) {
@@ -350,7 +459,29 @@ api.runtime.onConnect.addListener((port) => {
       });
       return;
     }
+    if (activeRequests.size >= MAX_ACTIVE_GLOBAL) {
+      sendPort(port, {
+        type: 'response-error', requestId: message.requestId,
+        response: failure('ERR_NACELLE_PLUS_CONCURRENCY_LIMIT', 'Nacelle+ global request limit exceeded'),
+      });
+      return;
+    }
+    if (activeCount(validated.pageOrigin) >= MAX_ACTIVE_PER_PAGE) {
+      sendPort(port, {
+        type: 'response-error', requestId: message.requestId,
+        response: failure('ERR_NACELLE_PLUS_CONCURRENCY_LIMIT', 'Nacelle+ per-page request limit exceeded'),
+      });
+      return;
+    }
     const controller = new AbortController();
+    const activeRequest = {
+      controller,
+      pageOrigin: validated.pageOrigin,
+      targetOrigins: new Set(),
+      inFlightBytes: 0,
+      reasonCode: null,
+    };
+    activeRequests.add(activeRequest);
     controllers.set(message.requestId, controller);
     let timeout;
     try {
@@ -358,16 +489,20 @@ api.runtime.onConnect.addListener((port) => {
       if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
         timeout = setTimeout(() => { controller.timedOut = true; controller.abort(); }, timeoutMs);
       }
-      await streamTarget({ ...message.request, requestId: message.requestId }, validated.pageOrigin, port, controller, acknowledgements);
+      await streamTarget({ ...message.request, requestId: message.requestId }, validated.pageOrigin, port, controller, acknowledgements, activeRequest);
     } finally {
       if (timeout) clearTimeout(timeout);
       controllers.delete(message.requestId);
+      activeRequests.delete(activeRequest);
       for (const resolve of acknowledgements.get(message.requestId)?.values() || []) resolve(false);
       acknowledgements.delete(message.requestId);
     }
   });
   port.onDisconnect.addListener(() => {
-    for (const controller of controllers.values()) controller.abort();
+    for (const controller of controllers.values()) {
+      controller.reasonCode = 'ERR_NACELLE_PLUS_TRANSPORT_LOST';
+      controller.abort();
+    }
     controllers.clear();
     for (const pending of acknowledgements.values()) {
       for (const resolve of pending.values()) resolve(false);

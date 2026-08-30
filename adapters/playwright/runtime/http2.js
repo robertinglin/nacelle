@@ -748,6 +748,7 @@ class VirtualHttp2Stream extends Duplex {
     this._responseComplete = false;
     this._responseFile = null;
     this._peer = null;
+    this._inputEnded = false;
     this._compatRequest = null;
     this._compatSocket = null;
     this._writable._write = (chunk, encoding, callback) => {
@@ -763,6 +764,10 @@ class VirtualHttp2Stream extends Duplex {
         if (this._role === 'client') {
           this._publishBodyDiagnostics();
           this.session._dispatch(this);
+          if (!this._inputEnded) {
+            this._inputEnded = true;
+            this._peer?.push(null);
+          }
         } else this._finishResponse();
       });
       callback();
@@ -794,8 +799,11 @@ class VirtualHttp2Stream extends Duplex {
   // request.end() works for streams created from a duplexPair() connection.
   _write(chunk, _encoding, callback) {
     try {
-      this._body.push(bytesFor(chunk, this._scope));
-      callback();
+      const bytes = bytesFor(chunk, this._scope);
+      this._body.push(bytes);
+      if (this._role === 'client' && this._peer?._acceptingInput) this._peer.push(bytes);
+      if (this._role === 'client' && this._peer?._acceptingInput) setTimeout(callback, 0);
+      else callback();
     } catch (error) {
       callback(error);
     }
@@ -878,7 +886,7 @@ class VirtualHttp2Stream extends Duplex {
       this.closed = true;
       this.push(null);
       this._publishCloseDiagnostics();
-      schedule(() => this.emit('close'));
+      schedule(() => this._emitClose());
     }
   }
 
@@ -892,11 +900,20 @@ class VirtualHttp2Stream extends Duplex {
     if (!this.sentHeaders[':status']) this.sentHeaders[':status'] = 200;
     this.headersSent = true;
     if (this._role === 'server') this._publishFinishDiagnostics(this.sentHeaders);
+    const status = Number(this.sentHeaders[':status']);
+    const endStream = Boolean(options.endStream)
+      || status === 204 || status === 205 || status === 304;
     const wireHeaders = { ...this.sentHeaders };
     for (const [name, value] of Object.entries(wireHeaders)) {
       if (Array.isArray(value) && name !== 'set-cookie') wireHeaders[name] = value.join(', ');
     }
-    schedule(() => this._peer?._receiveResponse(wireHeaders, null, Boolean(options.endStream)));
+    schedule(() => this._peer?._receiveResponse(wireHeaders, null, endStream));
+    if (endStream && this._role === 'server') {
+      this.closed = true;
+      this.destroyed = true;
+      this._publishCloseDiagnostics();
+      schedule(() => this._emitClose());
+    }
     return this;
   }
 
@@ -1016,21 +1033,21 @@ class VirtualHttp2Stream extends Duplex {
 
   _sendResponseChunk(bytes) {
     if (!this.headersSent) this.respond({ ':status': 200 });
-    schedule(() => this._peer?._receiveResponse(null, bytes, false));
+    setTimeout(() => this._peer?._receiveResponse(null, bytes, false), 0);
   }
 
   _finishResponse() {
     if (!this.headersSent) this.respond({ ':status': 200 });
     this.closed = true;
+    this.destroyed = true;
     const body = this._bodyBytes();
-    schedule(() => {
+    setTimeout(() => {
       this._peer?._receiveResponse(null, body, true);
       this._responseComplete = true;
       this._compatResponse?._finishResponse?.();
-    });
+    }, 0);
     this._releaseResponseFile();
     this._publishCloseDiagnostics();
-    schedule(() => this.emit('close'));
   }
 
   write(chunk, encoding, callback) {
@@ -1071,13 +1088,20 @@ class VirtualHttp2Stream extends Duplex {
   }
 
   close(code = constants.NGHTTP2_NO_ERROR, callback) {
+    if (typeof callback === 'function') this.once('close', callback);
+    if (code !== constants.NGHTTP2_NO_ERROR) {
+      return this.destroy(http2Error(
+        'ERR_HTTP2_STREAM_ERROR',
+        `Stream closed with error code ${code}`,
+      ));
+    }
     this.rstCode = code;
     this.aborted = code !== constants.NGHTTP2_NO_ERROR;
     this.closed = true;
     this._releaseResponseFile();
     this._peer?._receiveResponse(null, null, true);
     this._publishCloseDiagnostics();
-    schedule(() => { this.emit('close'); callback?.(); });
+    schedule(() => this._emitClose());
     return this;
   }
 
@@ -1158,7 +1182,6 @@ class VirtualHttp2Stream extends Duplex {
       }
     }
     if (!error) this._publishCloseDiagnostics();
-    schedule(() => this.emit('close'));
     return super.destroy(error);
   }
 }
@@ -1179,7 +1202,9 @@ export class Http2ServerRequest extends Readable {
     stream._compatRequest = this;
 
     stream.on('end', () => this.push(null));
-    stream.on('error', () => {});
+    stream.on('error', (error) => {
+      if (!this.destroyed) this.destroy(error);
+    });
     stream.on('aborted', () => {
       if (!this._compatState.closed) {
         this._aborted = true;
@@ -1322,6 +1347,15 @@ export class Http2ServerResponse extends Stream {
     };
     this._finishResponse = finishResponse;
     if (stream) stream._compatResponse = this;
+    stream?.on('error', (error) => {
+      if (!this._state.destroyed) this.destroy(error);
+    });
+    stream?.on('close', () => {
+      if (!this._state.closed) {
+        this._state.closed = true;
+        this.emit('close');
+      }
+    });
   }
 
   get _header() {
@@ -1642,6 +1676,7 @@ export class ClientHttp2Session extends EventEmitter {
     this.timeout = 0;
     this.localSettings = { ...DEFAULT_SETTINGS };
     this.remoteSettings = { ...DEFAULT_SETTINGS, ...(this._server?._options?.settings || {}) };
+    this._localWindowSize = this.localSettings.initialWindowSize;
     this.socket = this._connection || Object.freeze({ encrypted: true, alpnProtocol: 'h2', authorized: true });
     if (this._serverHandshake) {
       this._connected = true;
@@ -1665,6 +1700,24 @@ export class ClientHttp2Session extends EventEmitter {
 
   async _connect() {
     try {
+      const lookup = this._options?.lookup;
+      if (typeof lookup === 'function') {
+        await new Promise((resolve, reject) => {
+          let settled = false;
+          const done = (error) => {
+            if (settled) return;
+            settled = true;
+            if (error) reject(error);
+            else resolve();
+          };
+          try {
+            const result = lookup(this._authority.host, {}, done);
+            if (result?.then) result.then(() => done(), done);
+          } catch (error) {
+            done(error);
+          }
+        });
+      }
       if (this._proxy) {
         const result = await this._proxy.connect({
           target: `${this._authority.host}:${this._authority.port}`,
@@ -1689,11 +1742,12 @@ export class ClientHttp2Session extends EventEmitter {
       }
       this._connected = true;
       this.connecting = false;
-      this.emit('connect');
+      this.emit('connect', this);
       this.emit('remoteSettings', { ...this.remoteSettings });
       this.emit('localSettings', { ...this.localSettings });
       if (this._server) this._server._acceptSession(this);
       for (const stream of this._pendingRequests.splice(0)) this._dispatch(stream);
+      this._releaseIdleTask();
     } catch (error) {
       this.destroy(error);
     }
@@ -1747,6 +1801,7 @@ export class ClientHttp2Session extends EventEmitter {
       const serverStream = new VirtualHttp2Stream(server, { id: stream.id, role: 'server', headers: stream._headers });
       stream._peer = serverStream;
       serverStream._peer = stream;
+      serverStream._acceptingInput = true;
       serverStream._publishCreatedDiagnostics(stream._headers);
       serverStream._publishStartDiagnostics(stream._headers);
       server.emit('stream', serverStream, { ...stream._headers }, 0);
@@ -1755,7 +1810,10 @@ export class ClientHttp2Session extends EventEmitter {
       }
       const body = stream._bodyBytes();
       if (body.byteLength) serverStream.push(body);
-      serverStream.push(null);
+      if (stream._inputEnded) {
+        serverStream._acceptingInput = false;
+        serverStream.push(null);
+      }
       if (server.listenerCount('stream') === 0 && server.listenerCount('request') === 0) {
         schedule(() => {
           if (!serverStream.headersSent) serverStream.respond({ ':status': 200, 'x-bnh-virtual': '1' });
@@ -1764,13 +1822,19 @@ export class ClientHttp2Session extends EventEmitter {
       }
       return;
     }
-    schedule(() => stream._receiveResponse({ ':status': 200, 'x-bnh-virtual': '1' }, null, true));
+    if (stream._ending || stream._writableState?.ending) {
+      schedule(() => stream._receiveResponse({ ':status': 200, 'x-bnh-virtual': '1' }, null, true));
+    }
   }
 
   settings(settings = {}) {
     if (!isRecord(settings)) throw new TypeError('HTTP/2 settings must be an object');
     this.localSettings = { ...this.localSettings, ...settings };
-    schedule(() => this.emit('localSettings', { ...this.localSettings }));
+    this._retainTask();
+    schedule(() => {
+      this.emit('localSettings', { ...this.localSettings });
+      this._releaseIdleTask();
+    });
     return this;
   }
 
@@ -1779,8 +1843,20 @@ export class ClientHttp2Session extends EventEmitter {
     return nextStreamId;
   }
 
-  setLocalWindowSize() {
+  get state() {
+    return {
+      effectiveLocalWindowSize: this._localWindowSize,
+      localWindowSize: this._localWindowSize,
+      remoteWindowSize: this.remoteSettings.initialWindowSize,
+    };
+  }
+
+  setLocalWindowSize(windowSize) {
     if (this.closed || this.destroyed) throw http2Error('ERR_HTTP2_INVALID_SESSION', 'The session has been destroyed');
+    if (!Number.isInteger(windowSize) || windowSize < 0 || windowSize > constants.MAX_INITIAL_WINDOW_SIZE) {
+      throw http2Error('ERR_HTTP2_INVALID_SETTING_VALUE', 'Invalid local window size');
+    }
+    this._localWindowSize = windowSize;
     return this;
   }
 
@@ -1812,7 +1888,17 @@ export class ClientHttp2Session extends EventEmitter {
     this.connecting = false;
     this._taskRelease?.();
     this._taskRelease = null;
-    for (const stream of this._streams) stream.close(constants.NGHTTP2_CANCEL);
+    for (const stream of [...this._streams]) {
+      stream.destroy();
+      if (!stream._closeEmitted) {
+        stream._publishCloseDiagnostics();
+        stream._emitClose();
+      }
+      if (!stream._closeEmitted) schedule(() => {
+        stream._publishCloseDiagnostics();
+        stream._emitClose();
+      });
+    }
     schedule(() => this.emit('close'));
     return this;
   }
@@ -1825,6 +1911,16 @@ export class ClientHttp2Session extends EventEmitter {
     this.connecting = false;
     this._taskRelease?.();
     this._taskRelease = null;
+    for (const stream of [...this._streams]) {
+      const streamError = error || (!stream.writableFinished
+        ? http2Error('ERR_HTTP2_SESSION_ERROR', 'The HTTP/2 session has been destroyed')
+        : undefined);
+      stream.destroy(streamError);
+      if (!stream._closeEmitted) schedule(() => {
+        stream._publishCloseDiagnostics();
+        stream._emitClose();
+      });
+    }
     if (error) this.emit('error', error);
     schedule(() => this.emit('close'));
     return this;
@@ -1847,7 +1943,16 @@ export class Http2Server extends EventEmitter {
     this._port = null;
     this.listening = false;
     this._sessions = new Set();
-    this.timeout = 0;
+    this._timeoutMilliseconds = 0;
+    Object.defineProperty(this, 'timeout', {
+      configurable: true,
+      enumerable: true,
+      get: () => this._timeoutMilliseconds,
+      set: (milliseconds) => {
+        this._timeoutMilliseconds = Number(milliseconds) || 0;
+        for (const session of this._sessions) this._armSessionTimeout(session);
+      },
+    });
     this.maxConnections = undefined;
     if (typeof listener === 'function') this.on('request', listener);
   }
@@ -1875,8 +1980,27 @@ export class Http2Server extends EventEmitter {
 
   _acceptSession(session) {
     this._sessions.add(session);
-    session.once('close', () => this._sessions.delete(session));
+    this._armSessionTimeout(session);
+    session.once('close', () => {
+      if (session._serverTimeout) clearTimeout(session._serverTimeout);
+      session._serverTimeout = null;
+      this._sessions.delete(session);
+    });
     this.emit('session', session);
+  }
+
+  _armSessionTimeout(session) {
+    if (session._serverTimeout) clearTimeout(session._serverTimeout);
+    session._serverTimeout = null;
+    if (this._timeoutMilliseconds > 0 && !session.closed && !session.destroyed) {
+      session._serverTimeout = setTimeout(() => {
+      session._serverTimeout = null;
+        if (!session.closed && !session.destroyed) {
+          const handled = this.emit('timeout', session);
+          if (!handled && !session.closed && !session.destroyed) session.close();
+        }
+      }, this._timeoutMilliseconds);
+    }
   }
 
   _emitRequest(stream, headers) {
@@ -1907,10 +2031,8 @@ export class Http2Server extends EventEmitter {
     return this;
   }
   setTimeout(milliseconds, callback) {
-    this.timeout = Number(milliseconds) || 0;
+    this.timeout = milliseconds;
     if (callback) this.once('timeout', callback);
-    if (this._timeout) clearTimeout(this._timeout);
-    if (this.timeout > 0) this._timeout = setTimeout(() => this.emit('timeout'), this.timeout);
     return this;
   }
   getConnections(callback) { schedule(() => callback?.(null, this._sessions.size)); return this; }
@@ -1952,6 +2074,19 @@ export function createHttp2Module(scope = globalThis, options = {}) {
     if (typeof listener === 'function') session.once('connect', listener);
     return session;
   }
+
+  Object.defineProperty(connect, Symbol.for('nodejs.util.promisify.custom'), {
+    configurable: true,
+    value: function promisifiedConnect(authority, connectOptions) {
+      return new Promise((resolve, reject) => {
+        const session = connect(authority, connectOptions, () => {
+          session.removeListener('error', reject);
+          resolve(session);
+        });
+        session.once('error', reject);
+      });
+    },
+  });
 
   function createServer(serverOptions, listener) {
     return new Http2Server(serverOptions, listener, {

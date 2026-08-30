@@ -257,6 +257,20 @@ function streamError(code, message) {
   return error;
 }
 
+function emitStreamError(stream, error) {
+  if (stream._errorEmitted) return;
+  stream._errorEmitted = true;
+  stream._readableState && (stream._readableState.errorEmitted = true);
+  stream._writableState && (stream._writableState.errorEmitted = true);
+  const handled = stream.emit('error', error);
+  const listeners = stream.listeners?.('error') || [];
+  const hasUserListener = listeners.some((listener) => !listener._bnhInternal);
+  if (!handled || !hasUserListener) {
+    const processObject = globalThis.process;
+    if (typeof processObject?.emit === 'function') processObject.emit('uncaughtException', error);
+  }
+}
+
 function streamReceivedValue(value) {
   if (value === null) return 'null';
   if (value === undefined) return 'undefined';
@@ -446,6 +460,7 @@ Stream.prototype.pipe = function pipe(destination) {
   });
   this.on('end', () => destination.end?.());
   destination.on?.('drain', () => this.resume?.());
+  destination.emit?.('pipe', this);
   this.resume?.();
   return destination;
 };
@@ -903,6 +918,7 @@ export class Readable extends EventEmitter {
   }
 
   setEncoding(encoding = 'utf8') {
+    encoding ??= 'utf8';
     if (typeof encoding !== 'string' || !resolveEncodingOps(encoding)) {
       throw streamError('ERR_UNKNOWN_ENCODING', `Unknown encoding: ${encoding}`);
     }
@@ -926,20 +942,16 @@ export class Readable extends EventEmitter {
       if (!this._ended && !this._destroyed) this._readOnce();
       return null;
     }
-    const chunks = size === undefined && !this.readableObjectMode
-      ? this._buffer.splice(0)
-      : [this._buffer.shift()];
-    let chunk = chunks.length === 1
-      ? chunks[0]
-      : typeof chunks[0] === 'string'
-        ? chunks.join('')
-        : toBytes(chunks.reduce((all, next) => appendBytes(all, toBytes(next)), new Uint8Array()));
+    let chunk;
+    if (this.readableObjectMode) {
+      chunk = this._buffer.shift();
+      this._bufferedBytes -= 1;
+    } else {
+      chunk = readableFromList(size, this._readableState);
+      this._bufferedBytes = Math.max(0, this._readableState.length);
+    }
     if (chunk !== null) {
       this._readableState.dataEmitted = true;
-      this._bufferedBytes -= chunks.reduce(
-        (total, value) => total + (this.readableObjectMode ? 1 : typeof value === 'string' ? value.length : value.byteLength),
-        0,
-      );
       this._readableState.length = this._bufferedBytes;
     }
     if (chunk === null && !this._ended && !this._destroyed) this._readOnce();
@@ -1063,7 +1075,7 @@ export class Readable extends EventEmitter {
     this._flowDrainScheduled = true;
     queueMicrotask(() => {
       this._flowDrainScheduled = false;
-      if (!this._flowing || this._destroyed) return;
+      if (!this._flowing || (this._destroyed && !this._error)) return;
       while (this._flowing && this._buffer.length) {
         this.emit('data', this.read(this.readableHighWaterMark));
       }
@@ -1217,9 +1229,11 @@ export class Readable extends EventEmitter {
     this._readableState.readable = false;
     this._readableState.destroyed = true;
     this._readableState.errored = error || null;
-    this._buffer.length = 0;
-    this._bufferedBytes = 0;
-    this._readableState.length = 0;
+    if (!error || !this._flowing) {
+      this._buffer.length = 0;
+      this._bufferedBytes = 0;
+      this._readableState.length = 0;
+    }
     this._error = error || null;
     this._resolveSourceWaiter();
     this._resolvePending?.();
@@ -1229,9 +1243,7 @@ export class Readable extends EventEmitter {
     const finalize = (destroyError = error) => {
       const finalError = destroyError || error;
       if (finalError && !this._errorEmitted) {
-        this._errorEmitted = true;
-        this._readableState.errorEmitted = true;
-        this.emit('error', finalError);
+        emitStreamError(this, finalError);
       }
       this._emitClose();
     };
@@ -2093,9 +2105,7 @@ class WritableImpl extends EventEmitter {
         } finally {
           queueMicrotask(() => {
             if (this._errorEmitted) return;
-            this._errorEmitted = true;
-            this._writableState.errorEmitted = true;
-            this.emit('error', error);
+            emitStreamError(this, error);
           });
         }
       } else {
@@ -2220,9 +2230,7 @@ class WritableImpl extends EventEmitter {
     const finalize = (destroyError = error) => {
       const finalError = destroyError || error;
       if (finalError && !this._errorEmitted) {
-        this._errorEmitted = true;
-        this._writableState.errorEmitted = true;
-        this.emit('error', finalError);
+        emitStreamError(this, finalError);
       }
       this._emitClose();
     };
@@ -2277,10 +2285,10 @@ class WritableImpl extends EventEmitter {
           return;
         }
         for (const item of requests) item.callback();
-        if (this._needDrain && this._pendingBytes < this.writableHighWaterMark) {
+        if (this._needDrain && this._pendingBytes === 0) {
           this._needDrain = false;
           this._writableState.needDrain = false;
-          this.emit('drain');
+          if (!this._ending && !this._ended) this.emit('drain');
         }
         queueMicrotask(() => this._processNext());
       };
@@ -2339,10 +2347,10 @@ class WritableImpl extends EventEmitter {
       return;
     }
     request.callback();
-    if (this._needDrain && this._pendingBytes < this.writableHighWaterMark) {
+    if (this._needDrain && this._pendingBytes === 0) {
       this._needDrain = false;
       this._writableState.needDrain = false;
-      this.emit('drain');
+      if (!this._ending && !this._ended) this.emit('drain');
     }
     if (continueProcessing) queueMicrotask(() => this._processNext());
   }
@@ -3367,7 +3375,23 @@ export function pipeline(...streams) {
     }
   });
   streams.at(-1)?.once?.('finish', () => {
-    if (!failed) finish();
+    if (failed) return;
+    queueMicrotask(() => {
+      if (completed || failed) return;
+      const readablePending = streams.some((stream) => (
+        stream._readableState
+        && stream._readableState.readable !== false
+        && !stream._readableState.endEmitted
+      ));
+      if (!readablePending) {
+        finish();
+        return;
+      }
+      const error = streamError('ERR_STREAM_PREMATURE_CLOSE', 'Premature close');
+      failed = true;
+      for (const stream of streams) stream.destroy?.(error);
+      finish(error);
+    });
   });
   return streams.at(-1);
 }

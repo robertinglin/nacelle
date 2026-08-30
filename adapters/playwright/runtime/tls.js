@@ -75,6 +75,13 @@ function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+function receivedArgument(value) {
+  if (value === null) return 'null';
+  if (typeof value === 'function') return 'function';
+  if (typeof value === 'object') return `an instance of ${value.constructor?.name || 'Object'}`;
+  return `type ${typeof value} (${String(value)})`;
+}
+
 function clone(value) {
   if (!isRecord(value)) return value;
   const result = {};
@@ -1679,10 +1686,16 @@ export function createTlsModule(scope = globalThis, options = {}) {
   }
 
   function getCACertificates(type = 'default') {
+    if (typeof type !== 'string') {
+      throw tlsError(
+        'ERR_INVALID_ARG_TYPE',
+        `The \"type\" argument must be of type string. Received ${receivedArgument(type)}`,
+      );
+    }
     if (type === 'default') return [...defaultCaCertificates];
     if (type === 'bundled') return [...DEFAULT_ROOT_CERTIFICATES];
     if (type === 'system') return [];
-    throw tlsError('ERR_INVALID_ARG_VALUE', `Unknown certificate type: ${type}`);
+    throw tlsError('ERR_INVALID_ARG_VALUE', `The argument 'type' is invalid. Received '${type}'`);
   }
 
   function createSecureContext(contextOptions = {}) {

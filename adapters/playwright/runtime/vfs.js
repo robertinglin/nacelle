@@ -136,6 +136,17 @@ function closedHandle() {
   return vfsError('EBADF', undefined, undefined, 'file handle is closed');
 }
 
+function emptyBufferArgument(value) {
+  const name = value?.constructor?.name || 'Uint8Array';
+  const length = value?.byteLength ?? 0;
+  const contents = Array.from(value || []).join(', ');
+  const error = new TypeError(
+    `The argument 'buffer' is empty and cannot be written. Received ${name}(${length}) [${contents}]`,
+  );
+  error.code = 'ERR_INVALID_ARG_VALUE';
+  return error;
+}
+
 function outOfRange(name, value, minimum, maximum) {
   const error = new RangeError(
     minimum === undefined
@@ -289,7 +300,11 @@ function validateDirectoryOptions(options) {
   }
   if (options.encoding !== undefined && options.encoding !== null
     && options.encoding !== 'buffer' && !resolveEncodingOps(options.encoding)) {
-    throw invalidArgumentValue('options.encoding', options.encoding, 'must be a valid encoding');
+    const error = new TypeError(
+      `The argument 'encoding' is invalid encoding. Received '${options.encoding}'`,
+    );
+    error.code = 'ERR_INVALID_ARG_VALUE';
+    throw error;
   }
 }
 
@@ -315,7 +330,8 @@ function modeValue(value) {
 
 function ownerId(value, name) {
   if (typeof value !== 'number') throw invalidArgumentType(name, value, 'number');
-  if (!Number.isInteger(value) || value < -1 || value > 0xffffffff) throw outOfRange(name, value, -1, 0xffffffff);
+  if (!Number.isInteger(value)) throw outOfRange(name, value);
+  if (value < -1 || value > 0xffffffff) throw outOfRange(name, value, -1, 0xffffffff);
   return value;
 }
 
@@ -1233,9 +1249,8 @@ export function createVfs(options = {}) {
 
   function descriptorId(value) {
     if (typeof value !== 'number') throw invalidArgumentType('fd', value, 'number');
-    if (!Number.isInteger(value) || value < 0 || value > 0x7fffffff) {
-      throw outOfRange('fd', value, 0, 0x7fffffff);
-    }
+    if (!Number.isInteger(value)) throw outOfRange('fd', value);
+    if (value < 0 || value > 0x7fffffff) throw outOfRange('fd', value, 0, 0x7fffffff);
     return value;
   }
 
@@ -1724,7 +1739,9 @@ export function createVfs(options = {}) {
       ...optionsValue,
     };
     for (const name of ['dereference', 'errorOnExist', 'force', 'preserveTimestamps', 'recursive', 'verbatimSymlinks']) {
-      if (typeof options[name] !== 'boolean') throw new TypeError(`The "options.${name}" argument must be of type boolean`);
+      if (typeof options[name] !== 'boolean') {
+        throw invalidArgumentType(`options.${name}`, options[name], 'boolean');
+      }
     }
     if (options.dereference && options.verbatimSymlinks) {
       throw new TypeError('The "dereference" and "verbatimSymlinks" options cannot be used together');
@@ -1875,6 +1892,8 @@ export function createVfs(options = {}) {
   }
 
   function rename(sourceValue, destinationValue) {
+    validatePathArgument(sourceValue, 'oldPath');
+    validatePathArgument(destinationValue, 'newPath');
     const source = resolvePath(resolve(sourceValue), false);
     const destination = resolvePath(resolve(destinationValue), false);
     const sourceMount = access(source, 'rename', true);
@@ -1957,7 +1976,25 @@ export function createVfs(options = {}) {
     descriptors.delete(record.fd);
   }
 
-  function readDescriptor(value, buffer, offset = 0, length = buffer.length - offset, position) {
+  function validateReadBuffer(buffer, offset = 0, length) {
+    if (!ArrayBuffer.isView(buffer)) {
+      throw invalidArgumentType('buffer', buffer, 'an instance of Buffer, TypedArray, or DataView');
+    }
+    if (length === undefined) length = buffer.byteLength - offset;
+    if (length === 0) return;
+    if (buffer.byteLength === 0) throw emptyBufferArgument(buffer);
+  }
+
+  function validateWriteData(data) {
+    if (typeof data !== 'string' && !ArrayBuffer.isView(data)) {
+      throw invalidArgumentType('buffer', data, 'string or an instance of Buffer, TypedArray, or DataView');
+    }
+  }
+
+  function readDescriptor(value, buffer, offset = 0, length, position) {
+    validateReadBuffer(buffer, offset, length);
+    if (length === undefined) length = buffer.byteLength - offset;
+    if (length === 0) return { bytesRead: 0, buffer };
     const record = descriptor(value);
     const source = readBytes(record.path, 'read');
     const at = position === null || position === undefined ? record.position : position;
@@ -2053,6 +2090,7 @@ export function createVfs(options = {}) {
   }
 
   function writeDescriptor(value, data, offset = 0, length, position) {
+    validateWriteData(data);
     const record = descriptor(value);
     assertWritable(record);
     if (!Number.isInteger(offset) || offset < 0) throw outOfRange('offset', offset);
@@ -2404,8 +2442,14 @@ export function createVfs(options = {}) {
   }
 
   function validateReadStreamOptions(options) {
+    if (options.start !== undefined && typeof options.start !== 'number') {
+      throw invalidArgumentType('start', options.start, 'number');
+    }
     if (options.start !== undefined && (!Number.isSafeInteger(options.start) || options.start < 0)) {
       throw outOfRange('start', options.start);
+    }
+    if (options.end !== undefined && options.end !== Infinity && typeof options.end !== 'number') {
+      throw invalidArgumentType('end', options.end, 'number');
     }
     if (options.end !== undefined && options.end !== Infinity
       && (!Number.isSafeInteger(options.end) || options.end < 0)) {
@@ -2791,6 +2835,9 @@ export function createVfs(options = {}) {
   });
 
   function validateWriteStreamOptions(options) {
+    if (options.start !== undefined && typeof options.start !== 'number') {
+      throw invalidArgumentType('start', options.start, 'number');
+    }
     if (options.start !== undefined && (!Number.isSafeInteger(options.start) || options.start < 0)) {
       throw outOfRange('start', options.start);
     }
@@ -3181,7 +3228,7 @@ export function createVfs(options = {}) {
   }
 
   function asyncFsOperation(callback, operation) {
-    if (typeof callback !== 'function') throw invalidPath('callback is required');
+    validateCallback(callback);
     const releaseRequest = activeRequestTracker?.('FSReqCallback');
     scheduleFsCallback(() => {
       let released = false;
@@ -3214,6 +3261,9 @@ export function createVfs(options = {}) {
   }
 
   function close(handle, callback) {
+    descriptorId(handle);
+    if (callback === undefined) callback = (error) => { if (error) throw error; };
+    else validateCallback(callback);
     asyncFsOperation(callback, () => closeDescriptor(handle));
   }
 
@@ -3278,6 +3328,8 @@ export function createVfs(options = {}) {
   }
 
   function renameAsync(sourceValue, destinationValue, callback) {
+    validatePathArgument(sourceValue, 'oldPath');
+    validatePathArgument(destinationValue, 'newPath');
     resolve(sourceValue);
     resolve(destinationValue);
     asyncFsOperation(callback, () => rename(sourceValue, destinationValue));
@@ -3466,7 +3518,7 @@ export function createVfs(options = {}) {
     symlink,
     openSync(pathValue, flags = 'r') { return openDescriptor(pathValue, flags); },
     open,
-    closeSync(handle) { closeDescriptor(handle); },
+    closeSync(handle) { descriptorId(handle); closeDescriptor(handle); },
     close,
     readSync(handle, buffer, offset, length, position) {
       return readDescriptor(handle, buffer, offset, length, position).bytesRead;
@@ -3495,7 +3547,8 @@ export function createVfs(options = {}) {
       }
       const done = typeof position === 'function' ? position : callback;
       const at = typeof position === 'function' ? null : position;
-      if (typeof done !== 'function') throw invalidPath('callback is required');
+      validateReadBuffer(buffer, offset, length);
+      validateCallback(done);
       scheduleFsCallback(() => {
         try {
           const result = readDescriptor(handle, buffer, offset, length, at);

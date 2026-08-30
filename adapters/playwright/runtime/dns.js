@@ -409,6 +409,12 @@ function caresFailure(code, syscall, hostname) {
   return error;
 }
 
+const QUERY_SYSCALLS = Object.freeze({ A: 'queryA', AAAA: 'queryAaaa', ANY: 'queryAny', TXT: 'queryTxt' });
+
+function badDnsResponse(type, hostname) {
+  return caresFailure('EBADRESP', QUERY_SYSCALLS[type] || `query${type}`, hostname);
+}
+
 function synchronousThenable(work) {
   let state = 'fulfilled';
   let value;
@@ -459,7 +465,7 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
   let defaultResolverHandle;
   let nextQueryId = 1;
 
-  const queryTypes = Object.freeze({ A: 1, NS: 2, CNAME: 5, SOA: 6, PTR: 12, MX: 15, TXT: 16, AAAA: 28, ANY: 255 });
+  const queryTypes = Object.freeze({ A: 1, NS: 2, CNAME: 5, SOA: 6, PTR: 12, MX: 15, TXT: 16, AAAA: 28, ANY: 255, CAA: 257 });
 
   function writeDnsName(name) {
     const labels = String(name).split('.');
@@ -516,20 +522,25 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
   }
 
   function parseDnsResponse(bytes, type) {
+    if (!(bytes instanceof Uint8Array) || bytes.length < 12) throw badDnsResponse(type, undefined);
     const count = readU16(bytes, 4);
     const answers = readU16(bytes, 6);
     let offset = 12;
     for (let index = 0; index < count; index += 1) {
       offset = readDnsName(bytes, offset).next + 4;
+      if (offset > bytes.length) throw badDnsResponse(type, undefined);
     }
     const records = [];
     for (let index = 0; index < answers; index += 1) {
+      if (offset >= bytes.length) throw badDnsResponse(type, undefined);
       const domain = readDnsName(bytes, offset);
       offset = domain.next;
+      if (offset + 10 > bytes.length) throw badDnsResponse(type, undefined);
       const answerType = readU16(bytes, offset);
       const dataLength = readU16(bytes, offset + 8);
       const ttl = readU32(bytes, offset + 4);
       const dataOffset = offset + 10;
+      if (dataOffset + dataLength > bytes.length) throw badDnsResponse(type, undefined);
       offset = dataOffset + dataLength;
       const record = { type: Object.keys(queryTypes).find((key) => queryTypes[key] === answerType), ttl };
       if (answerType === queryTypes.A && dataLength === 4) {
@@ -541,6 +552,24 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
       } else if (answerType === queryTypes.MX) {
         record.priority = readU16(bytes, dataOffset);
         record.exchange = readDnsName(bytes, dataOffset + 2).name;
+      } else if (answerType === queryTypes.TXT) {
+        record.entries = [];
+        let txtOffset = dataOffset;
+        while (txtOffset < offset) {
+          const txtLength = bytes[txtOffset++];
+          if (txtOffset + txtLength > offset) throw badDnsResponse(type, undefined);
+          record.entries.push(new TextDecoder().decode(bytes.slice(txtOffset, txtOffset + txtLength)));
+          txtOffset += txtLength;
+        }
+        if (txtOffset !== offset) throw badDnsResponse(type, undefined);
+      } else if (answerType === queryTypes.CAA) {
+        if (dataLength < 2) throw badDnsResponse(type, undefined);
+        const tagLength = bytes[dataOffset + 1];
+        if (2 + tagLength > dataLength) throw badDnsResponse(type, undefined);
+        const tag = new TextDecoder().decode(bytes.slice(dataOffset + 2, dataOffset + 2 + tagLength));
+        const value = new TextDecoder().decode(bytes.slice(dataOffset + 2 + tagLength, offset));
+        record.critical = bytes[dataOffset];
+        record[tag] = value;
       } else if (answerType === queryTypes.SOA) {
         const nsname = readDnsName(bytes, dataOffset);
         const hostmaster = readDnsName(bytes, dataOffset + nsname.next - dataOffset);
@@ -558,8 +587,12 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     return type === 'ANY' ? records : records.filter((record) => record.type === type);
   }
 
-  function queryDnsServer(hostname, type, callback) {
-    const server = servers[0];
+  function queryDnsServer(hostname, type, callback, {
+    request,
+    resolverHandle,
+    syscall = QUERY_SYSCALLS[type] || `query${type}`,
+  } = {}) {
+    const server = resolverHandle?._bnhServers?.[0] || servers[0];
     if (hasLocalRecord(customRecords, hostname)
       || customQueryRecords.get(hostname)?.[type] !== undefined
       || BUILTIN_DNS_RECORDS[hostname]?.[type] !== undefined) return false;
@@ -568,32 +601,67 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     if (!match) return false;
     const address = match[1].replace(/^\[|\]$/g, '');
     const port = Number(match[2] || 53);
+    let settled = false;
+    let timer;
+    let attempt = 0;
+    const timeout = Number.isFinite(resolverHandle?._timeout) && resolverHandle._timeout > 0
+      ? resolverHandle._timeout : 5000;
+    const tries = Number.isInteger(resolverHandle?._tries) && resolverHandle._tries > 0
+      ? resolverHandle._tries : 4;
+    const maxTimeout = Number.isFinite(resolverHandle?._maxTimeout) && resolverHandle._maxTimeout > 0
+      ? resolverHandle._maxTimeout : Infinity;
+    let cancel;
+    const finish = (error, records) => {
+      if (settled) return;
+      if (error?.code === 'EBADRESP') {
+        error.syscall = syscall;
+        error.hostname = String(hostname);
+      }
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (resolverHandle?._bnhPendingQueries) resolverHandle._bnhPendingQueries.delete(cancel);
+      if (!client._closed) {
+        client._closed = true;
+        network.unbindUdp(client);
+      }
+      callback(error, records);
+    };
+    cancel = () => finish(caresFailure('ECANCELLED', syscall, hostname));
+    resolverHandle?._bnhPendingQueries?.add(cancel);
     const client = {
       boundAddress: address.includes(':') ? '::1' : '127.0.0.1',
       boundPort: 0,
       _closed: false,
       _receiveDatagram(bytes) {
-        if (this._closed) return;
-        this._closed = true;
-        network.unbindUdp(client);
-        try { callback(null, parseDnsResponse(new Uint8Array(bytes), type)); }
-        catch (error) { callback(error); }
+        if (this._closed || settled) return;
+        try { finish(null, parseDnsResponse(new Uint8Array(bytes), type)); }
+        catch (error) { finish(error); }
       },
     };
-    let binding;
-    try {
-      binding = network.bindUdp(client, client.boundAddress, 0, {});
-      client.boundPort = binding.port;
+    const sendAttempt = () => {
+      if (settled) return;
+      attempt += 1;
       const id = nextQueryId++ & 0xffff;
       const packet = new Uint8Array([
         id >> 8, id & 0xff, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0,
         ...writeDnsName(hostname), queryTypes[type] >> 8, queryTypes[type] & 0xff, 0, 1,
       ]);
-      network.sendUdp({ source: client, address, port, bytes: packet });
+      try { network.sendUdp({ source: client, address, port, bytes: packet }); }
+      catch (error) { finish(error); return; }
+      const delay = Math.min(maxTimeout, timeout * (2 ** (attempt - 1)));
+      timer = setTimeout(() => {
+        if (attempt < tries) sendAttempt();
+        else finish(caresFailure('ETIMEOUT', syscall, hostname));
+      }, delay);
+    };
+    let binding;
+    try {
+      binding = network.bindUdp(client, client.boundAddress, 0, {});
+      client.boundPort = binding.port;
+      sendAttempt();
     } catch (error) {
-      client._closed = true;
       if (binding) network.unbindUdp(client);
-      callback(error);
+      finish(error);
     }
     return true;
   }
@@ -813,7 +881,7 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     return request;
   }
 
-  function resolveFamily(hostname, family, options, callback) {
+  function resolveFamily(hostname, family, options, callback, resolverHandle) {
     if (typeof options === 'function') {
       callback = options;
       options = undefined;
@@ -830,7 +898,7 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
       else completeCallback(null, records.map((record) => includeTtl
         ? { address: record.address, ttl: record.ttl }
         : record.address));
-    })) return request;
+    }, { request, resolverHandle, syscall: family === 4 ? 'queryA' : 'queryAaaa' })) return request;
     if (proxyIsActive(proxy) && !hasLocalRecord(customRecords, String(hostname))) {
       Promise.resolve(proxy.resolve({ hostname: String(hostname), family, all: true }))
         .then((result) => completeCallback(null, normalizeProxyRecords(result, hostname, family).map((record) => includeTtl
@@ -922,8 +990,9 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     if (queryDnsServer(hostname, type, (error, records) => {
       if (error) completeCallback(error);
       else if (type === 'ANY') completeCallback(null, records);
+      else if (type === 'TXT') completeCallback(null, records.map((record) => record.entries));
       else completeCallback(null, records.map((record) => record.address));
-    })) return request;
+    }, { request, resolverHandle, syscall: queryName })) return request;
     const channel = queryChannel(resolverHandle);
     if (queryName && typeof channel?.[queryName] === 'function') {
       let caresResult;
@@ -958,12 +1027,12 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     return request;
   }
 
-  function resolveAny(hostname, callback) {
-    return resolve(hostname, 'ANY', callback);
+  function resolveAny(hostname, callback, resolverHandle) {
+    return resolve(hostname, 'ANY', callback, resolverHandle);
   }
 
-  function resolveTxt(hostname, callback) {
-    return resolve(hostname, 'TXT', callback);
+  function resolveTxt(hostname, callback, resolverHandle) {
+    return resolve(hostname, 'TXT', callback, resolverHandle);
   }
 
   function validateResolverQuery(hostname, callback) {
@@ -1250,6 +1319,14 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
       this._handle.getServers = () => [...this._servers];
       this._timeout = options.timeout;
       this._tries = options.tries;
+      this._maxTimeout = options.maxTimeout;
+      this._bnhServers = this._servers;
+      this._bnhPendingQueries = new Set();
+      this._handle._bnhServers = this._bnhServers;
+      this._handle._bnhPendingQueries = this._bnhPendingQueries;
+      this._handle._timeout = this._timeout;
+      this._handle._tries = this._tries;
+      this._handle._maxTimeout = this._maxTimeout;
     }
 
     getServers() {
@@ -1259,6 +1336,8 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
 
     setServers(values) {
       this._servers = validateDnsServers(values);
+      this._bnhServers = this._servers;
+      this._handle._bnhServers = this._bnhServers;
       this._handle.setServers?.(this._servers);
     }
 
@@ -1280,13 +1359,16 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
       this._handle.setLocalAddress?.(ipv4, ipv6);
     }
 
-    cancel() { this._handle.cancel?.(); }
+    cancel() {
+      for (const pending of [...this._bnhPendingQueries]) pending();
+      this._handle.cancel?.();
+    }
     lookup(...args) { return lookup(...args); }
     resolve(hostname, rrtype, callback) { return resolve(hostname, rrtype, callback, this._handle); }
-    resolve4(...args) { return resolveFamily(args[0], 4, args[1], args[2]); }
-    resolve6(...args) { return resolveFamily(args[0], 6, args[1], args[2]); }
-    resolveAny(...args) { return resolveAny(...args); }
-    resolveTxt(...args) { return resolveTxt(...args); }
+    resolve4(...args) { return resolveFamily(args[0], 4, args[1], args[2], this._handle); }
+    resolve6(...args) { return resolveFamily(args[0], 6, args[1], args[2], this._handle); }
+    resolveAny(...args) { return resolveAny(...args, this._handle); }
+    resolveTxt(...args) { return resolveTxt(...args, this._handle); }
     resolveCaa(hostname, callback) {
       const options = arguments.length > 2 ? callback : undefined;
       const actualCallback = arguments.length > 2 ? arguments[2] : callback;
@@ -1335,10 +1417,34 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
       if (RESOLVER_TYPES[type]) return queryPromise(hostname, type, this._handle);
       return new Promise((resolveValue, reject) => resolve(hostname, type, (error, value) => error ? reject(error) : resolveValue(value), this._handle));
     }
-    resolve4(hostname, options) { return promises.resolve4(hostname, options); }
-    resolve6(hostname, options) { return promises.resolve6(hostname, options); }
-    resolveAny(hostname) { return promises.resolveAny(hostname); }
-    resolveTxt(hostname) { return promises.resolveTxt(hostname); }
+    resolve4(hostname, options) {
+      return new Promise((resolveValue, reject) => resolveFamily(
+        hostname, 4, options,
+        (error, value) => error ? reject(error) : resolveValue(value),
+        this._handle,
+      ));
+    }
+    resolve6(hostname, options) {
+      return new Promise((resolveValue, reject) => resolveFamily(
+        hostname, 6, options,
+        (error, value) => error ? reject(error) : resolveValue(value),
+        this._handle,
+      ));
+    }
+    resolveAny(hostname) {
+      return new Promise((resolveValue, reject) => resolveAny(
+        hostname,
+        (error, value) => error ? reject(error) : resolveValue(value),
+        this._handle,
+      ));
+    }
+    resolveTxt(hostname) {
+      return new Promise((resolveValue, reject) => resolveTxt(
+        hostname,
+        (error, value) => error ? reject(error) : resolveValue(value),
+        this._handle,
+      ));
+    }
     resolveCaa(hostname, options) { return queryPromise(hostname, 'CAA', this._handle, options); }
     resolveCname(hostname, options) { return queryPromise(hostname, 'CNAME', this._handle, options); }
     resolveMx(hostname) { return queryPromise(hostname, 'MX', this._handle); }

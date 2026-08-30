@@ -3,6 +3,7 @@ import { BrowserNpm, BrowserNpmCache, parseScriptCommand } from './runtime/npm.j
 import { createShellProcess } from './runtime/shell.js';
 import { parseShellScript, tokenizeShellScript } from './runtime/shell-parser.js';
 import { createNacellePlusAdapter, createNacellePlusTransport } from './runtime/nacelle-plus.js';
+import { createProxyConfig } from './runtime/proxy-config.js';
 import { createNegotiatedTransport, isBrowserFetchFailure } from './runtime/transport.js';
 import { installGatewayBridge } from './runtime/gateway-bridge.js';
 import { watchFrameAddress } from './runtime/frame-address.js';
@@ -21,6 +22,7 @@ export {
   tokenizeShellScript,
   createNacellePlusAdapter,
   createNacellePlusTransport,
+  createProxyConfig,
   createNegotiatedTransport,
   isBrowserFetchFailure,
 };
@@ -76,9 +78,11 @@ export class Nacelle {
   static async create(options = {}) {
     const cwd = options.cwd || '/node';
     const globalObject = options.globalObject || globalThis;
+    const proxyConfig = options.proxy ? createProxyConfig(options.proxy, globalObject) : null;
     const env = {
       NODE_ENV: 'development',
       PATH: '/usr/local/bin:/usr/bin:/bin',
+      ...(proxyConfig?.env || {}),
       ...options.env,
     };
 
@@ -121,8 +125,8 @@ export class Nacelle {
     const transport = nacellePlusOptions
       ? createNacellePlusTransport({ ...nacellePlusOptions, globalObject })
       : null;
-    const proxy = options.proxy
-      ? { ...options.proxy, ...(transport && !options.proxy.adapter ? { adapter: transport.adapter } : {}) }
+    const proxy = proxyConfig
+      ? { ...proxyConfig, ...(transport && !proxyConfig.adapter ? { adapter: transport.adapter } : {}) }
       : { mode: 'virtual', enabled: false };
 
     // Reset runtime state with default grants

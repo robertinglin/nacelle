@@ -55,6 +55,34 @@ provided by the browser `Headers` API. `Set-Cookie` is never exposed and fetch
 trailers are not part of this contract; binary response bodies and status
 metadata are streamed faithfully within the documented limits.
 
+## Opt-in diagnostics
+
+Pass `debug` to the page adapter or `nacellePlus` options to receive structured,
+secret-free request lifecycle events:
+
+```js
+const node = await Nacelle.create({
+  nacellePlus: {
+    debug: (event) => console.debug(event),
+  },
+  proxy: { mode: 'proxy', enabled: true, capability: { proxy: true } },
+});
+```
+
+Events contain `transport`, `request_id`, `origin`, `target`,
+`fallback_reason`, `grant`, `stream`, `bytes_in`, `duration_ms`, and
+`termination`. Query strings and fragments are removed from targets, and
+request bodies and authentication headers are never emitted. `debug: true`
+uses `console.debug` when available.
+
+The deterministic conformance matrix compares native fetch and the negotiated
+transport for redirects, headers, binary and streaming bodies, SSE, aborts,
+empty responses, compression metadata, malformed responses, and large payloads:
+
+```sh
+node --input-type=module -e "await import('./dev/tests/runtime/runtime/transport-conformance.mjs')"
+```
+
 ## Install for development
 
 Build the loadable browser-specific directories first:

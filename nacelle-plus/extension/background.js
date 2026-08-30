@@ -250,6 +250,8 @@ async function fetchRedirectChain(request, pageOrigin, controller, activeRequest
       return failure('ERR_NACELLE_PLUS_REDIRECT_UNAVAILABLE', 'Nacelle+ could not inspect a redirect response safely');
     }
     if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+    if (request.redirect === 'manual') return response;
+    if (request.redirect === 'error') return failure('ERR_NACELLE_PLUS_REDIRECT', 'Nacelle+ request encountered a redirect');
     if (redirect === MAX_REDIRECTS) return failure('ERR_NACELLE_PLUS_TOO_MANY_REDIRECTS', 'Nacelle+ redirect limit exceeded');
     const next = NacellePlusPolicy.redirectTarget(current.target, response, current);
     if (!next) return response;

@@ -354,6 +354,7 @@ export { createVirtualNetwork, sharedVirtualNetwork } from './virtual-network.js
 export { createCluster, createWorkerCluster, Worker as ClusterWorker } from './cluster.js';
 export { createVirtualProcess, createInMemoryProcess } from './virtual-process.js';
 export { createProxyCapability, callProxy, normalizeProxyError, normalizeProxyResult } from './proxy.js';
+export { createProxyConfig } from './proxy-config.js';
 export { normalizeProxySelection, normalizeProxyOperation } from './proxy-contract.js';
 export { createPerformancePrimitives } from './perf.js';
 export {

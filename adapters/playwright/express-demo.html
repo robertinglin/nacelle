@@ -478,6 +478,7 @@ const server = app.listen(3000, () => {
     import { createBrowserNet } from '/runtime/net.js';
     import { installGatewayBridge } from '/runtime/gateway-bridge.js';
     import { createBufferClass } from '/runtime/buffer.js';
+    import { watchFrameAddress } from '/runtime/frame-address.js';
 
     window.Buffer = createBufferClass(window);
 
@@ -525,15 +526,8 @@ const server = app.listen(3000, () => {
       logNetwork(`Navigate -> ${targetUrl}`);
     };
 
-    iframe.addEventListener('load', () => {
-      try {
-        const loc = iframe.contentWindow?.location;
-        if (loc && loc.pathname && loc.pathname !== '/blank' && loc.pathname !== 'about:blank') {
-          urlInput.value = loc.pathname + loc.search;
-        }
-      } catch {
-        // ignore
-      }
+    watchFrameAddress(iframe, (address) => {
+      urlInput.value = address;
     });
 
     document.getElementById('btn-go').addEventListener('click', (e) => {
@@ -725,9 +719,11 @@ const server = app.listen(3000, () => {
         statusIndicator.className = 'status-dot online';
         const val = (urlInput.value || '').trim();
         const pathPart = val.startsWith('/__vhost__/')
-          ? val.split('?')[0]
-          : (val.startsWith('/') ? `/__vhost__/3000${val.split('?')[0]}` : '/__vhost__/3000/');
-        iframe.src = `${pathPart}?_t=${Date.now()}`;
+          ? val
+          : (val.startsWith('/') ? `/__vhost__/3000${val}` : '/__vhost__/3000/');
+        const target = new URL(pathPart, window.location.href);
+        target.searchParams.set('_t', Date.now());
+        iframe.src = target.pathname + target.search + target.hash;
       };
 
       await new Promise((resolve) => {

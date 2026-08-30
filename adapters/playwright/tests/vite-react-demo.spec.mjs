@@ -104,7 +104,7 @@ test.describe('Vite + React browser demo', () => {
     if (localServer) await new Promise((resolve) => localServer.close(resolve));
   });
 
-  test('renders React, serves Vite-style assets, and keeps relative navigation virtual', async ({ page }) => {
+  test('runs React libraries in dev and production modes with virtual and hash navigation', async ({ page }) => {
     test.setTimeout(60000);
     const pageErrors = [];
     const consoleErrors = [];
@@ -115,17 +115,33 @@ test.describe('Vite + React browser demo', () => {
 
     await page.goto(serverUrl);
     const status = page.locator('#status-indicator');
-    await expect(status).toHaveText(/Online/, { timeout: 30000 });
+    await expect(status).toHaveText(/Online — virtual Vite \+ React dev server/, { timeout: 30000 });
 
     const app = page.frameLocator('#app-preview');
     await expect(app.locator('#app-title')).toHaveText('Vite + React in Browser Node');
-    await expect(app.locator('#app-status')).toContainText('React 18');
-    await expect(app.locator('#increment')).toHaveText('Count: 0');
+    await expect(app.locator('#app-badge')).toContainText('Zustand');
+    await expect(app.locator('#app-badge')).toContainText('React Router');
+    await expect(app.locator('#app-status')).toContainText('virtual npm filesystem');
+    await expect(app.locator('#increment')).toHaveText('Zustand count: 0');
     await app.locator('#increment').click();
-    await expect(app.locator('#increment')).toHaveText('Count: 1');
+    await expect(app.locator('#increment')).toHaveText('Zustand count: 1');
 
     await app.locator('#api-check').click();
-    await expect(app.locator('#api-status')).toHaveText('API: ok / vite-react');
+    await expect(app.locator('#api-status')).toHaveText('API: ok / vite-react / development');
+
+    await app.locator('#router-about-link').click();
+    await expect(app.locator('#app-title')).toHaveText('About the React app');
+    await app.locator('#router-home-link').click();
+    await expect(app.locator('#app-title')).toHaveText('Vite + React in Browser Node');
+
+    await expect(app.locator('#hash-router-path')).toHaveText('HashRouter path: /');
+    await app.locator('#hash-router-about-link').click();
+    await expect(app.locator('#hash-router-path')).toHaveText('HashRouter path: /about');
+    await expect(page.locator('#url-input')).toHaveValue('/__vhost__/5173/#/about');
+    expect(await page.locator('#app-preview').evaluate((frame) => frame.contentWindow.location.hash)).toBe('#/about');
+    await app.locator('#hash-router-home-link').click();
+    await expect(app.locator('#hash-router-path')).toHaveText('HashRouter path: /');
+    await expect(page.locator('#url-input')).toHaveValue('/__vhost__/5173/#/');
 
     const publicAbout = page.waitForResponse(
       (response) => response.url().endsWith('/about')
@@ -138,7 +154,7 @@ test.describe('Vite + React browser demo', () => {
         && response.request().resourceType() === 'document',
       { timeout: 5000 },
     );
-    await page.evaluate(() => document.getElementById('app-preview').contentDocument.getElementById('about-link').click());
+    await page.evaluate(() => document.getElementById('app-preview').contentDocument.getElementById('native-about-link').click());
     const [aboutRedirect, aboutResponse] = await Promise.all([publicAbout, virtualAbout]);
     expect(aboutRedirect.headers().location).toMatch(/\/__vhost__\/5173\/about$/);
     expect(aboutResponse.status()).toBe(200);
@@ -151,20 +167,51 @@ test.describe('Vite + React browser demo', () => {
         && response.request().resourceType() === 'document',
       { timeout: 5000 },
     );
-    await page.evaluate(() => document.getElementById('app-preview').contentDocument.getElementById('home-link').click());
+    await page.evaluate(() => document.getElementById('app-preview').contentDocument.getElementById('native-home-link').click());
     await homeResponse;
     await expect(app.locator('#app-title')).toHaveText('Vite + React in Browser Node');
 
-    await page.getByRole('button', { name: 'Restart Vite Server' }).click();
-    await expect(status).toHaveText(/Online/, { timeout: 20000 });
-    await expect(app.locator('#app-title')).toHaveText('Vite + React in Browser Node', { timeout: 15000 });
+    const productionBundle = page.waitForResponse(
+      (response) => response.url().endsWith('/assets/index.js'),
+      { timeout: 10000 },
+    );
+    await page.getByRole('button', { name: 'Build Production' }).click();
+    await expect(status).toHaveText(/Online — Vite \+ React production build/, { timeout: 30000 });
+    expect((await productionBundle).status()).toBe(200);
+    const productionManifest = await page.evaluate(async () => {
+      const response = await document.getElementById('app-preview').contentWindow.fetch('/manifest.json');
+      return { status: response.status, body: await response.json() };
+    });
+    expect(productionManifest).toEqual({ status: 200, body: { mode: 'production', entry: 'assets/index.js' } });
+    await expect(app.locator('#app-title')).toHaveText('Vite + React in Browser Node');
+    await expect(app.locator('#increment')).toHaveText('Zustand count: 0');
+    await app.locator('#increment').click();
+    await expect(app.locator('#increment')).toHaveText('Zustand count: 1');
+    await app.locator('#api-check').click();
+    await expect(app.locator('#api-status')).toHaveText('API: ok / vite-react / production');
 
-    const restartedAbout = page.waitForResponse(
+    const productionAbout = page.waitForResponse(
       (response) => response.url().endsWith('/__vhost__/5173/about')
         && response.request().resourceType() === 'document',
       { timeout: 5000 },
     );
-    await page.evaluate(() => document.getElementById('app-preview').contentDocument.getElementById('about-link').click());
+    await page.evaluate(() => document.getElementById('app-preview').contentDocument.getElementById('native-about-link').click());
+    expect((await productionAbout).status()).toBe(200);
+    await expect(app.locator('#app-title')).toHaveText('About the React app');
+
+    await page.evaluate(() => document.getElementById('app-preview').contentDocument.getElementById('native-home-link').click());
+    await expect(app.locator('#app-title')).toHaveText('Vite + React in Browser Node');
+
+    await page.getByRole('button', { name: 'Restart Current Mode' }).click();
+    await expect(status).toHaveText(/Online — Vite \+ React production build/, { timeout: 20000 });
+    await expect(app.locator('#app-title')).toHaveText('Vite + React in Browser Node', { timeout: 15000 });
+
+    const restartedAbout = page.waitForResponse(
+      (response) => response.url().endsWith('/__vhost__/5173/about')
+      && response.request().resourceType() === 'document',
+      { timeout: 5000 },
+    );
+    await page.evaluate(() => document.getElementById('app-preview').contentDocument.getElementById('native-about-link').click());
     expect((await restartedAbout).status()).toBe(200);
     await expect(app.locator('#app-title')).toHaveText('About the React app');
 

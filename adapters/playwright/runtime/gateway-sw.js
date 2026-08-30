@@ -44,6 +44,7 @@ function parseVhostUrl(urlString, referrerString) {
     if (directMatch) {
       const port = parseInt(directMatch[1], 10);
       const subPath = directMatch[2] || '/';
+      // Fragments stay in the browser document location and never belong in an HTTP request.
       return { port, targetUrl: subPath + urlObj.search, source: 'direct' };
     }
 

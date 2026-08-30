@@ -467,7 +467,7 @@ app.get('/api/info', (req, res) => {
   res.json({
     status: 'ok',
     framework: 'express',
-    runtime: 'browser-node-harness',
+    runtime: 'browser-node',
     uptimeSeconds: Math.floor(process.uptime()),
     timestamp: new Date().toISOString(),
   });

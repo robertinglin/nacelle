@@ -122,6 +122,36 @@ function encodeBase64(bytes, urlSafe) {
 }
 
 const inspectCustomSymbol = Symbol.for('nodejs.util.inspect.custom');
+const blobClonePartsSymbol = Symbol.for('bnh.blobCloneParts');
+const blobBytesSymbol = Symbol.for('bnh.blobBytes');
+let blobStreamClass;
+
+export function installBlobStreamClass(StreamClass) {
+  if (typeof StreamClass === 'function') blobStreamClass = StreamClass;
+}
+
+function storedBlobBytes(parts) {
+  if (!Array.isArray(parts)) return null;
+  const pieces = [];
+  let length = 0;
+  for (const part of parts) {
+    let bytes;
+    if (typeof part === 'string') bytes = new TextEncoder().encode(part);
+    else if (part instanceof ArrayBuffer) bytes = new Uint8Array(part);
+    else if (ArrayBuffer.isView(part)) bytes = new Uint8Array(part.buffer, part.byteOffset, part.byteLength);
+    else if (part?.[blobClonePartsSymbol]) bytes = storedBlobBytes(part[blobClonePartsSymbol]);
+    else return null;
+    pieces.push(bytes);
+    length += bytes.byteLength;
+  }
+  const result = new Uint8Array(length);
+  let offset = 0;
+  for (const bytes of pieces) {
+    result.set(bytes, offset);
+    offset += bytes.byteLength;
+  }
+  return result;
+}
 
 function inspectBlobProperties(properties, options) {
   if (options.depth !== null && options.depth < 0) return '[Object]';
@@ -476,16 +506,196 @@ export function createTranscode(BufferClass) {
 
 export function installBlobCompatibility(BlobClass) {
   if (typeof BlobClass !== 'function') return BlobClass;
-  installBlobInspection(BlobClass);
-  if (typeof BlobClass.prototype?.bytes === 'function') return BlobClass;
-  Object.defineProperty(BlobClass.prototype, 'bytes', {
+  class Blob extends BlobClass {
+    constructor(parts, options) {
+      if (parts !== undefined && !Array.isArray(parts)) {
+        throw invalidArgumentTypeError('sources', ['Array'], parts);
+      }
+      if (options !== undefined && options !== null
+          && typeof options !== 'object' && typeof options !== 'function') {
+        throw invalidArgumentTypeError('options', ['Object'], options);
+      }
+      if (options?.endings !== undefined
+          && options.endings !== 'transparent' && options.endings !== 'native') {
+        throw invalidArgumentValueError('options.endings', options.endings);
+      }
+      if (arguments.length === 0) super();
+      else if (arguments.length === 1) super(parts);
+      else super(parts, options);
+      Object.defineProperty(this, blobClonePartsSymbol, {
+        configurable: true,
+        value: parts === undefined ? [] : Array.from(parts),
+      });
+      const bytes = storedBlobBytes(this[blobClonePartsSymbol]);
+      if (bytes) Object.defineProperty(this, blobBytesSymbol, { configurable: true, value: bytes });
+    }
+  }
+  const isBlobReceiver = (value) => value instanceof BlobClass
+    && value !== Blob.prototype && value !== BlobClass.prototype;
+  installBlobInspection(Blob);
+  Object.defineProperty(Blob.prototype, Symbol.toStringTag, {
     configurable: true,
-    writable: true,
-    value() {
-      return this.arrayBuffer().then((buffer) => new Uint8Array(buffer));
-    },
+    enumerable: false,
+    value: 'Blob',
+    writable: false,
   });
-  return BlobClass;
+  for (const name of ['size', 'type', 'slice', 'stream', 'text', 'arrayBuffer']) {
+    const descriptor = Object.getOwnPropertyDescriptor(BlobClass.prototype, name);
+    if (!descriptor) continue;
+    if (descriptor.get) {
+      const getter = descriptor.get;
+      descriptor.get = function getBlobProperty() {
+        if (!isBlobReceiver(this)) {
+          const error = new TypeError('Illegal invocation');
+          error.code = 'ERR_INVALID_THIS';
+          throw error;
+        }
+        return getter.call(this);
+      };
+    } else if (typeof descriptor.value === 'function') {
+      const method = descriptor.value;
+      descriptor.value = function blobMethod(...args) {
+        if (!isBlobReceiver(this)) {
+          const error = new TypeError('Illegal invocation');
+          error.code = 'ERR_INVALID_THIS';
+          if (name === 'arrayBuffer' || name === 'text') return Promise.reject(error);
+          throw error;
+        }
+        return method.apply(this, args);
+      };
+    }
+    Object.defineProperty(Blob.prototype, name, { ...descriptor, enumerable: true });
+  }
+  Object.defineProperty(Blob.prototype, 'bytes', {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: typeof BlobClass.prototype.bytes === 'function'
+      ? function bytes(...args) {
+          if (!isBlobReceiver(this)) {
+            const error = new TypeError('Illegal invocation');
+            error.code = 'ERR_INVALID_THIS';
+            return Promise.reject(error);
+          }
+          return BlobClass.prototype.bytes.apply(this, args);
+        }
+      : function bytes() {
+          if (!isBlobReceiver(this)) {
+            const error = new TypeError('Illegal invocation');
+            error.code = 'ERR_INVALID_THIS';
+            return Promise.reject(error);
+          }
+          return this.arrayBuffer().then((buffer) => new Uint8Array(buffer));
+        },
+  });
+  for (const name of ['slice', 'stream', 'text', 'arrayBuffer']) {
+    const method = Object.getOwnPropertyDescriptor(BlobClass.prototype, name)?.value;
+    if (typeof method !== 'function') continue;
+    Object.defineProperty(Blob.prototype, name, {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) {
+        if (!isBlobReceiver(this)) {
+          const error = new TypeError('Illegal invocation');
+          error.code = 'ERR_INVALID_THIS';
+          if (name === 'text' || name === 'arrayBuffer') return Promise.reject(error);
+          throw error;
+        }
+        if (name === 'stream' && typeof (blobStreamClass || globalThis.ReadableStream) === 'function') {
+          const StreamClass = typeof blobStreamClass === 'function'
+            ? blobStreamClass()
+            : globalThis.ReadableStream;
+          let bytesPromise;
+          let offset = 0;
+          let pumping = false;
+          let canceled = false;
+          let byobRequestSize;
+          const stream = new StreamClass({
+            type: 'bytes',
+            pull: (controller) => {
+              bytesPromise ||= (() => {
+                const stored = this[blobBytesSymbol];
+                if (stored) return Promise.resolve(stored);
+                return Object.getOwnPropertyDescriptor(BlobClass.prototype, 'arrayBuffer')
+                  .value.call(this).then((buffer) => new Uint8Array(buffer));
+              })();
+              return bytesPromise.then((bytes) => {
+                if (pumping || canceled) return;
+                pumping = true;
+                byobRequestSize ??= controller.byobRequest?.view?.byteLength;
+                const eager = byobRequestSize === undefined || byobRequestSize >= 100;
+                const pump = () => {
+                  if (canceled) {
+                    pumping = false;
+                    return;
+                  }
+                  if (offset >= bytes.byteLength) {
+                    pumping = false;
+                    try {
+                      controller.close();
+                      controller.byobRequest?.respond(0);
+                    } catch {}
+                    return;
+                  }
+                  const end = Math.min(offset + 5, bytes.byteLength);
+                  // Byte-stream enqueue transfers the supplied ArrayBuffer;
+                  // keep the complete Blob copy alive for subsequent chunks.
+                  try {
+                    const request = byobRequestSize >= 100 ? controller.byobRequest : undefined;
+                    if (request) {
+                      const written = Math.min(end - offset, request.view.byteLength);
+                      request.view.set(bytes.subarray(offset, offset + written));
+                      request.respond(written);
+                    } else {
+                      controller.enqueue(bytes.slice(offset, end));
+                    }
+                  } catch {
+                    pumping = false;
+                    return;
+                  }
+                  offset = end;
+                  if (!eager && controller.desiredSize < 0) {
+                    pumping = false;
+                    return;
+                  }
+                  setTimeout(pump, 0);
+                };
+                pump();
+              });
+            },
+            cancel() {
+              canceled = true;
+              return new Promise((resolve) => setTimeout(resolve, 0));
+            },
+          });
+          const getReader = stream.getReader;
+          stream.getReader = function getBlobReader(...args) {
+            const reader = getReader.apply(this, args);
+            const cancel = reader.cancel;
+            reader.cancel = function cancelBlobReader(...cancelArgs) {
+              const result = cancel.apply(this, cancelArgs);
+              Object.defineProperty(this, 'closed', {
+                configurable: true,
+                enumerable: true,
+                value: Promise.resolve(),
+              });
+              return result;
+            };
+            return reader;
+          };
+          return stream;
+        }
+        const result = method.apply(this, args);
+        if (name === 'slice' && result instanceof BlobClass
+            && !(result instanceof Blob)) {
+          Object.setPrototypeOf(result, Blob.prototype);
+        }
+        return result;
+      },
+    });
+  }
+  return Blob;
 }
 
 function missingArgumentError(name) {

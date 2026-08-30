@@ -49,6 +49,21 @@ function regexpGetters(primordials) {
 }
 
 export function createPrimordials(globalObject = globalThis) {
+  const detachedArrayBuffers = new WeakSet();
+  const arrayBufferTransfer = uncurry(ArrayBuffer.prototype.transfer)
+    || (typeof globalObject?.structuredClone === 'function'
+      ? uncurry(function transfer(newLength = this.byteLength) {
+          const source = this;
+          const moved = globalObject.structuredClone(source, { transfer: [source] });
+          detachedArrayBuffers.add(source);
+          if (newLength === moved.byteLength) return moved;
+          const resized = new ArrayBuffer(newLength);
+          new Uint8Array(resized).set(new Uint8Array(moved).subarray(0, newLength));
+          return resized;
+        })
+      : undefined);
+  const arrayBufferDetached = getter(ArrayBuffer.prototype, 'detached')
+    || uncurry(function detached() { return detachedArrayBuffers.has(this); });
   const primordials = {
     Array, ArrayBuffer, ArrayBufferIsView: ArrayBuffer.isView, Boolean, DataView, Date, Error, EvalError,
     FinalizationRegistry, Float32Array, Float64Array, Function, Int8Array, Int16Array,
@@ -56,6 +71,8 @@ export function createPrimordials(globalObject = globalThis) {
     RegExp, Set, SharedArrayBuffer, String, Symbol, SyntaxError, TypeError, URIError,
     Uint8Array, Uint8ClampedArray, Uint16Array, Uint32Array, WeakMap, WeakRef, WeakSet,
     AggregateError, BigInt, BigInt64Array, BigUint64Array, JSON, Math, WebAssembly,
+    ArrayBufferPrototypeTransfer: arrayBufferTransfer,
+    ArrayBufferPrototypeGetDetached: arrayBufferDetached,
     globalThis: globalObject,
     ObjectPrototype: Object.prototype,
     FunctionPrototype: Function.prototype,

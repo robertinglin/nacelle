@@ -94,28 +94,60 @@ export function hasWebCrypto(globalObject = globalThis) {
 
 export function installCryptoKeyMaterialTracking(globalObject = globalThis) {
   const subtle = globalObject?.crypto?.subtle;
-  if (!subtle || typeof subtle.importKey !== 'function' || subtle[cryptoKeyTrackerMarker]) return;
-  const importKey = subtle.importKey.bind(subtle);
-  const wrappedImportKey = function wrappedImportKey(...args) {
-    const result = importKey(...args);
-    if (args[0] !== 'raw') return result;
-    const material = new Uint8Array(toCryptoBytes(args[1], globalObject.TextEncoder));
-    return Promise.resolve(result).then((key) => {
-      try {
-        Object.defineProperty(key, cryptoKeyMaterialMarker, {
-          configurable: true,
-          value: material,
-        });
-      } catch { /* Some native key objects may be sealed. */ }
-      return key;
+  if (!subtle) return;
+  if (typeof subtle.importKey === 'function' && !subtle[cryptoKeyTrackerMarker]) {
+    const importKey = subtle.importKey.bind(subtle);
+    const wrappedImportKey = function wrappedImportKey(...args) {
+      const result = importKey(...args);
+      if (args[0] !== 'raw') return result;
+      const material = new Uint8Array(toCryptoBytes(args[1], globalObject.TextEncoder));
+      return Promise.resolve(result).then((key) => {
+        try {
+          Object.defineProperty(key, cryptoKeyMaterialMarker, {
+            configurable: true,
+            value: material,
+          });
+        } catch { /* Some native key objects may be sealed. */ }
+        return key;
+      });
+    };
+    try {
+      Object.defineProperty(subtle, 'importKey', {
+        configurable: true,
+        value: wrappedImportKey,
+      });
+      Object.defineProperty(subtle, cryptoKeyTrackerMarker, {
+        configurable: true,
+        value: true,
+      });
+    } catch { /* Native SubtleCrypto implementations may be immutable. */ }
+  }
+  if (typeof subtle.digest !== 'function' || subtle[Symbol.for('bnh.cryptoDigestCompatibility')]) return;
+  const nativeDigest = subtle.digest.bind(subtle);
+  const wrappedDigest = function wrappedDigest(algorithm, value) {
+    let input;
+    try {
+      input = toCryptoBytes(value, globalObject.TextEncoder);
+    } catch {
+      return Promise.reject(invalidCryptoInput('data', value));
+    }
+    return Promise.resolve(nativeDigest(algorithm, input)).catch((error) => {
+      if (error?.name !== 'NotSupportedError') throw error;
+      const DOMExceptionClass = globalObject.DOMException || globalThis.DOMException;
+      if (typeof DOMExceptionClass === 'function') {
+        throw new DOMExceptionClass('Unrecognized algorithm name', 'NotSupportedError');
+      }
+      const translated = new Error('Unrecognized algorithm name');
+      translated.name = 'NotSupportedError';
+      throw translated;
     });
   };
   try {
-    Object.defineProperty(subtle, 'importKey', {
+    Object.defineProperty(subtle, 'digest', {
       configurable: true,
-      value: wrappedImportKey,
+      value: wrappedDigest,
     });
-    Object.defineProperty(subtle, cryptoKeyTrackerMarker, {
+    Object.defineProperty(subtle, Symbol.for('bnh.cryptoDigestCompatibility'), {
       configurable: true,
       value: true,
     });
@@ -133,7 +165,24 @@ function toCryptoBytes(value, encoder = globalThis.TextEncoder) {
     return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
   }
   if (isArrayBuffer(value)) return new Uint8Array(value);
+  if (value?.type === 'secret' && value.key) return toCryptoBytes(value.key, encoder);
   throw new TypeError('crypto input must be a string or byte array');
+}
+
+function receivedType(value) {
+  if (value === undefined) return 'undefined';
+  if (value === null) return 'null';
+  if (typeof value === 'object') return `an instance of ${value.constructor?.name || 'Object'}`;
+  if (typeof value === 'string') return `type string ('${value}')`;
+  return `type ${typeof value} (${String(value)})`;
+}
+
+function invalidCryptoInput(name, value) {
+  const error = new TypeError(
+    `The "${name}" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received ${receivedType(value)}`,
+  );
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
 }
 
 const SHA256_K = Object.freeze([
@@ -933,7 +982,7 @@ export function pbkdf2Sync(password, salt, iterations, keyLength, digest = 'sha2
 
 function hkdfInputBytes(value, name, encoder) {
   try {
-    return toCryptoBytes(value, encoder);
+    return new Uint8Array(toCryptoBytes(value, encoder));
   } catch {
     const error = new TypeError(
       `The "${name}" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView`,
@@ -945,21 +994,23 @@ function hkdfInputBytes(value, name, encoder) {
 
 function validateHkdfParameters(hash, key, salt, info, keyLength, encoder = globalThis.TextEncoder) {
   if (typeof hash !== 'string') {
-    const error = new TypeError(`The "digest" argument must be of type string. Received ${hash}`);
+    const error = new TypeError(`The "digest" argument must be of type string. Received ${receivedType(hash)}`);
     error.code = 'ERR_INVALID_ARG_TYPE';
     throw error;
   }
-  const normalizedHash = normalizeHash(hash);
   const keyBytes = hkdfInputBytes(key, 'ikm', encoder);
   const saltBytes = hkdfInputBytes(salt, 'salt', encoder);
   const infoBytes = hkdfInputBytes(info, 'info', encoder);
-  if (!Number.isSafeInteger(keyLength)) {
-    const error = new TypeError(`The "length" argument must be of type number. Received ${keyLength}`);
+  if (typeof keyLength !== 'number') {
+    const error = new TypeError(`The "length" argument must be of type number. Received ${receivedType(keyLength)}`);
     error.code = 'ERR_INVALID_ARG_TYPE';
     throw error;
   }
-  if (keyLength < 0) {
-    const error = new RangeError(`The value of "length" is out of range. Received ${keyLength}`);
+  if (!Number.isFinite(keyLength) || !Number.isInteger(keyLength)
+      || !Number.isSafeInteger(keyLength) || keyLength < 0) {
+    const error = new RangeError(
+      `The value of "length" is out of range. It must be an integer. Received ${keyLength}`,
+    );
     error.code = 'ERR_OUT_OF_RANGE';
     throw error;
   }
@@ -968,6 +1019,14 @@ function validateHkdfParameters(hash, key, salt, info, keyLength, encoder = glob
       `The value of "info" is out of range. It must not contain more than 1024 bytes. Received ${infoBytes.byteLength}`,
     );
     error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  let normalizedHash;
+  try {
+    normalizedHash = normalizeHash(hash);
+  } catch {
+    const error = new Error(`Invalid digest: ${hash}`);
+    error.code = 'ERR_CRYPTO_INVALID_DIGEST';
     throw error;
   }
   const digestLength = { 'SHA-1': 20, 'SHA-256': 32, 'SHA-384': 48, 'SHA-512': 64 }[normalizedHash];
@@ -981,32 +1040,22 @@ function validateHkdfParameters(hash, key, salt, info, keyLength, encoder = glob
 
 async function hkdfForGlobal(hash, key, salt, info, keyLength, globalObject = globalThis) {
   const parameters = validateHkdfParameters(hash, key, salt, info, keyLength, globalObject.TextEncoder);
-  const subtle = requireSubtle(globalObject, 'crypto HKDF');
-  if (typeof subtle.deriveBits !== 'function') {
-    throw new UnsupportedWebCapabilityError(
-      'crypto HKDF',
-      'SubtleCrypto.deriveBits is not available in this context',
-    );
+  void globalObject;
+  const algorithm = HMAC_ALGORITHMS[parameters.hash.toLowerCase().replaceAll('-', '')];
+  const output = new Uint8Array(parameters.keyLength);
+  let previous = new Uint8Array(0);
+  let offset = 0;
+  for (let counter = 1; offset < output.length; counter += 1) {
+    const input = new Uint8Array(previous.length + parameters.info.length + 1);
+    input.set(previous);
+    input.set(parameters.info, previous.length);
+    input[input.length - 1] = counter;
+    previous = hmacDigest(algorithm, parameters.salt, input);
+    const count = Math.min(previous.length, output.length - offset);
+    output.set(previous.subarray(0, count), offset);
+    offset += count;
   }
-  if (parameters.keyLength === 0) return new Uint8Array();
-  const cryptoKey = await subtle.importKey(
-    'raw',
-    parameters.key,
-    { name: 'HKDF' },
-    false,
-    ['deriveBits'],
-  );
-  const result = await subtle.deriveBits(
-    {
-      name: 'HKDF',
-      hash: parameters.hash,
-      salt: parameters.salt,
-      info: parameters.info,
-    },
-    cryptoKey,
-    parameters.keyLength * 8,
-  );
-  return new Uint8Array(result);
+  return output.buffer;
 }
 
 export function hkdf(hash, key, salt, info, keyLength, callback, globalObject = globalThis) {
@@ -1032,11 +1081,22 @@ export function hkdf(hash, key, salt, info, keyLength, callback, globalObject = 
 }
 
 export function hkdfSync(hash, key, salt, info, keyLength, globalObject = globalThis) {
-  validateHkdfParameters(hash, key, salt, info, keyLength, globalObject.TextEncoder);
-  throw new UnsupportedWebCapabilityError(
-    'crypto.hkdfSync',
-    'Web Crypto exposes HKDF only through asynchronous SubtleCrypto operations',
-  );
+  const parameters = validateHkdfParameters(hash, key, salt, info, keyLength, globalObject.TextEncoder);
+  const algorithm = HMAC_ALGORITHMS[parameters.hash.toLowerCase().replaceAll('-', '')];
+  const output = new Uint8Array(parameters.keyLength);
+  let previous = new Uint8Array(0);
+  let offset = 0;
+  for (let counter = 1; offset < output.length; counter += 1) {
+    const input = new Uint8Array(previous.length + parameters.info.length + 1);
+    input.set(previous);
+    input.set(parameters.info, previous.length);
+    input[input.length - 1] = counter;
+    previous = hmacDigest(algorithm, parameters.salt, input);
+    const count = Math.min(previous.length, output.length - offset);
+    output.set(previous.subarray(0, count), offset);
+    offset += count;
+  }
+  return output.buffer;
 }
 
 const AES_GCM_TAG_LENGTHS = new Set([32, 64, 96, 104, 112, 120, 128]);
@@ -1826,8 +1886,19 @@ function unsupportedCertificateOperation(name, operation) {
 }
 
 export function randomBytes(length, globalObject = globalThis) {
-  assertByteLength(length, 'length');
-  const bytes = new Uint8Array(length);
+  if (typeof length !== 'number') {
+    const error = new TypeError(`The "size" argument must be of type number. Received ${receivedType(length)}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (!Number.isFinite(length) || length < 0 || length > 0x7fffffff) {
+    const error = new RangeError(
+      `The value of "size" is out of range. It must be >= 0 && <= 2147483647. Received ${length}`,
+    );
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  const bytes = new Uint8Array(Math.floor(length));
   const crypto = requireCrypto(globalObject);
   // Web Crypto limits each getRandomValues call to 65,536 bytes.
   for (let offset = 0; offset < bytes.length; offset += 65536) {
@@ -1846,25 +1917,48 @@ function randomFillTarget(buffer, offset = 0, size, globalObject = globalThis) {
     error.code = 'ERR_INVALID_ARG_TYPE';
     throw error;
   }
-  if (!Number.isInteger(offset) || offset < 0 || offset > buffer.byteLength) {
-    const error = new RangeError(`The value of "offset" is out of range. Received ${offset}`);
-    error.code = 'ERR_OUT_OF_RANGE';
-    throw error;
-  }
+  validateRandomFillRange(buffer, offset, size);
   const fillSize = size === undefined ? buffer.byteLength - offset : size;
-  if (!Number.isInteger(fillSize) || fillSize < 0 || offset + fillSize > buffer.byteLength) {
-    const error = new RangeError(`The value of "size" is out of range. Received ${fillSize}`);
-    error.code = 'ERR_OUT_OF_RANGE';
-    throw error;
-  }
   const target = isArrayBuffer(buffer)
     ? new Uint8Array(buffer, offset, fillSize)
     : new Uint8Array(buffer.buffer, buffer.byteOffset + offset, fillSize);
   const crypto = requireCrypto(globalObject);
   for (let start = 0; start < target.length; start += 65536) {
-    crypto.getRandomValues(target.subarray(start, Math.min(start + 65536, target.length)));
+    const count = Math.min(65536, target.length - start);
+    const random = new Uint8Array(count);
+    crypto.getRandomValues(random);
+    target.set(random, start);
   }
   return buffer;
+}
+
+function validateRandomFillRange(buffer, offset, size) {
+  if (typeof offset !== 'number') {
+    const error = new TypeError(`The "offset" argument must be of type number. Received ${receivedType(offset)}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (!Number.isInteger(offset) || offset < 0 || offset > buffer.byteLength) {
+    const error = new RangeError(`The value of "offset" is out of range. It must be >= 0 && <= ${buffer.byteLength}. Received ${offset}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  if (size !== undefined && typeof size !== 'number') {
+    const error = new TypeError(`The "size" argument must be of type number. Received ${receivedType(size)}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  const fillSize = size === undefined ? buffer.byteLength - offset : size;
+  if (!Number.isInteger(fillSize) || fillSize < 0 || fillSize > 0x7fffffff) {
+    const error = new RangeError(`The value of "size" is out of range. It must be >= 0 && <= 2147483647. Received ${fillSize}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  if (offset + fillSize > buffer.byteLength) {
+    const error = new RangeError(`The value of "size + offset" is out of range. It must be <= ${buffer.byteLength}. Received ${offset + fillSize}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
 }
 
 export function randomFillSync(buffer, offset = 0, size, globalObject = globalThis) {
@@ -1888,6 +1982,12 @@ export function randomFill(buffer, offset, size, callback, globalObject = global
     error.code = 'ERR_INVALID_ARG_TYPE';
     throw error;
   }
+  if (!isArrayBuffer(buffer) && !isArrayBufferView(buffer)) {
+    const error = new TypeError('The "buf" argument must be an instance of ArrayBuffer or ArrayBufferView');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  validateRandomFillRange(buffer, actualOffset ?? 0, actualSize);
   Promise.resolve().then(() => randomFillTarget(
     buffer,
     actualOffset ?? 0,
@@ -1901,6 +2001,10 @@ export function randomFill(buffer, offset, size, callback, globalObject = global
 
 const RANDOM_INT_MAX = 0xffffffffffff;
 
+function formatRandomIntNumber(value) {
+  return value === RANDOM_INT_MAX + 1 ? '281_474_976_710_656' : String(value);
+}
+
 function randomIntArguments(min, max, callback) {
   const minNotSpecified = max === undefined || typeof max === 'function';
   if (minNotSpecified) {
@@ -1909,12 +2013,12 @@ function randomIntArguments(min, max, callback) {
     min = 0;
   }
   if (!Number.isSafeInteger(min)) {
-    const error = new TypeError(`The "min" argument must be a safe integer. Received ${min}`);
+    const error = new TypeError(`The "min" argument must be a safe integer. Received ${receivedType(min)}`);
     error.code = 'ERR_INVALID_ARG_TYPE';
     throw error;
   }
   if (!Number.isSafeInteger(max)) {
-    const error = new TypeError(`The "max" argument must be a safe integer. Received ${max}`);
+    const error = new TypeError(`The "max" argument must be a safe integer. Received ${receivedType(max)}`);
     error.code = 'ERR_INVALID_ARG_TYPE';
     throw error;
   }
@@ -1925,7 +2029,7 @@ function randomIntArguments(min, max, callback) {
   }
   const range = max - min;
   if (range > RANDOM_INT_MAX) {
-    const error = new RangeError(`The value of "${minNotSpecified ? 'max' : 'max - min'}" is out of range. It must be <= ${RANDOM_INT_MAX}. Received ${range}`);
+    const error = new RangeError(`The value of "${minNotSpecified ? 'max' : 'max - min'}" is out of range. It must be <= ${RANDOM_INT_MAX}. Received ${formatRandomIntNumber(range)}`);
     error.code = 'ERR_OUT_OF_RANGE';
     throw error;
   }
@@ -2696,8 +2800,27 @@ export function randomUUID(globalObject = globalThis, options) {
 
 export async function digest(algorithm, value, globalObject = globalThis) {
   const crypto = requireCrypto(globalObject);
-  const result = await crypto.subtle.digest(algorithm, toCryptoBytes(value, globalObject.TextEncoder));
-  return new Uint8Array(result);
+  let input;
+  try {
+    input = toCryptoBytes(value, globalObject.TextEncoder);
+  } catch {
+    throw invalidCryptoInput('data', value);
+  }
+  try {
+    const result = await crypto.subtle.digest(algorithm, input);
+    return new Uint8Array(result);
+  } catch (error) {
+    if (error?.name === 'NotSupportedError') {
+      const DOMExceptionClass = globalObject.DOMException || globalThis.DOMException;
+      if (typeof DOMExceptionClass === 'function') {
+        throw new DOMExceptionClass('Unrecognized algorithm name', 'NotSupportedError');
+      }
+      const translated = new Error('Unrecognized algorithm name');
+      translated.name = 'NotSupportedError';
+      throw translated;
+    }
+    throw error;
+  }
 }
 
 export async function hmac(value, key, { hash = 'SHA-256', globalObject = globalThis } = {}) {

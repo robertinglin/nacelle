@@ -4,6 +4,7 @@ import {
   createTranscode,
   createFileClass,
   installBlobCompatibility,
+  installBlobStreamClass,
   isAscii,
   isUtf8,
 } from './runtime/buffer.js';
@@ -532,7 +533,66 @@ function createNodeWebStreamModule(runtimeRequire, scope = globalThis) {
     ['DecompressionStream', 'internal/webstreams/compression'],
   ];
   const cache = new Map();
+  const readableStreamWrappers = new WeakMap();
   const inspectCustom = Symbol.for('nodejs.util.inspect.custom');
+  const wrapReadableStream = (NativeReadableStream) => {
+    if (typeof NativeReadableStream !== 'function') return NativeReadableStream;
+    const existing = readableStreamWrappers.get(NativeReadableStream);
+    if (existing) return existing;
+    class NodeReadableStream extends NativeReadableStream {
+      constructor(source, strategy) {
+        if (source !== undefined && (source === null || typeof source !== 'object')) {
+          const error = new TypeError('The "source" argument must be of type object');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        if (strategy !== undefined && strategy !== null && typeof strategy !== 'object') {
+          const error = new TypeError('The "strategy" argument must be of type object');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        if (strategy && strategy.size !== undefined && typeof strategy.size !== 'function') {
+          const error = new TypeError('The "strategy.size" property must be of type function');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        if (strategy && strategy.highWaterMark !== undefined
+            && (typeof strategy.highWaterMark !== 'number'
+              || Number.isNaN(strategy.highWaterMark) || strategy.highWaterMark < 0)) {
+          const error = new TypeError('The property "strategy.highWaterMark" is invalid');
+          error.code = 'ERR_INVALID_ARG_VALUE';
+          throw error;
+        }
+        super(source, Array.isArray(strategy) || strategy === null ? undefined : strategy);
+      }
+      getReader(options) {
+        if (options !== undefined) {
+          if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+            const error = new TypeError('The "options" argument must be of type object');
+            error.code = 'ERR_INVALID_ARG_TYPE';
+            throw error;
+          }
+          if (options.mode !== undefined && options.mode !== 'byob') {
+            const error = new TypeError(`The property 'options.mode' is invalid. Received ${options.mode}`);
+            error.code = 'ERR_INVALID_ARG_VALUE';
+            throw error;
+          }
+        }
+        return super.getReader(options);
+      }
+      tee() {
+        const branches = super.tee();
+        for (const branch of branches) {
+          if (!(branch instanceof NodeReadableStream)) {
+            Object.setPrototypeOf(branch, NodeReadableStream.prototype);
+          }
+        }
+        return branches;
+      }
+    }
+    readableStreamWrappers.set(NativeReadableStream, NodeReadableStream);
+    return NodeReadableStream;
+  };
   const patchCompressionInspect = (StreamClass, name) => {
     if (typeof StreamClass !== 'function' || !StreamClass.prototype
       || typeof StreamClass.prototype[inspectCustom] === 'function') return;
@@ -542,15 +602,115 @@ function createNodeWebStreamModule(runtimeRequire, scope = globalThis) {
     });
   };
   const load = (path, name) => {
+    if (path.startsWith('internal/webstreams/')) {
+      if (!cache.has(path)) cache.set(path, runtimeRequire(path));
+      const value = cache.get(path);
+      if (name === 'ReadableStream' && typeof value[name] === 'function') {
+        const prototype = value[name].prototype;
+        const originalTee = prototype.tee;
+        if (typeof originalTee === 'function'
+            && !prototype[Symbol.for('bnh.streamTeeCompatibility')]) {
+          Object.defineProperty(prototype, 'tee', {
+            configurable: true,
+            enumerable: false,
+            writable: true,
+            value() {
+              const branches = originalTee.call(this);
+              for (const branch of branches) {
+                if (!(branch instanceof value[name])) {
+                  Object.setPrototypeOf(branch, value[name].prototype);
+                }
+              }
+              return branches;
+            },
+          });
+          Object.defineProperty(prototype, Symbol.for('bnh.streamTeeCompatibility'), {
+            configurable: true,
+            value: true,
+          });
+        }
+        const original = prototype[inspectCustom];
+        if (typeof original === 'function' && !prototype[Symbol.for('bnh.streamInspectCompatibility')]) {
+          Object.defineProperty(prototype, inspectCustom, {
+            configurable: true,
+            value(depth, options) {
+              const result = original.call(this, depth, options);
+              return typeof result === 'string' && result.includes('\n')
+                ? result.replace(/\s*\n\s*/g, ' ')
+                : result;
+            },
+          });
+          Object.defineProperty(prototype, Symbol.for('bnh.streamInspectCompatibility'), {
+            configurable: true,
+            value: true,
+          });
+        }
+        const originalValues = prototype.values;
+        if (typeof originalValues === 'function'
+            && !prototype[Symbol.for('bnh.streamValuesCompatibility')]) {
+          Object.defineProperty(prototype, 'values', {
+            configurable: true,
+            enumerable: false,
+            writable: true,
+            value(options) {
+              const iterator = originalValues.call(this, options);
+              if (options?.preventCancel !== true || typeof iterator?.return !== 'function') {
+                return iterator;
+              }
+              const stream = this;
+              const originalReturn = iterator.return;
+              iterator.return = function returnWithoutCancel(value) {
+                return Promise.resolve(originalReturn.call(this, value)).then((result) => {
+                  const streamState = runtimeRequire('internal/webstreams/util')?.kState;
+                  const state = streamState ? stream[streamState] : undefined;
+                  if (state?.state === 'closed') state.state = 'readable';
+                  return result;
+                });
+              };
+              return iterator;
+            },
+          });
+          Object.defineProperty(prototype, Symbol.for('bnh.streamValuesCompatibility'), {
+            configurable: true,
+            value: true,
+          });
+        }
+      }
+      if (name.endsWith('Controller') && typeof value[name] === 'function') {
+        const prototype = value[name].prototype;
+        const original = prototype[inspectCustom];
+        if (!prototype[Symbol.for('bnh.controllerInspectCompatibility')]) {
+          Object.defineProperty(prototype, inspectCustom, {
+            configurable: true,
+            value(depth, options) {
+              if (depth === 0) return `${name} {}`;
+              if (typeof original === 'function') {
+                const result = original.call(this, depth, options);
+                return result === `${name} [Object]` ? `${name} {}` : result;
+              }
+              return `${name} {}`;
+            },
+          });
+          Object.defineProperty(prototype, Symbol.for('bnh.controllerInspectCompatibility'), {
+            configurable: true,
+            value: true,
+          });
+        }
+      }
+      return value;
+    }
     if (typeof scope[name] === 'function') {
-      const value = scope[name];
+      const value = name === 'ReadableStream' ? wrapReadableStream(scope[name]) : scope[name];
       if (name === 'CompressionStream' || name === 'DecompressionStream') {
         patchCompressionInspect(value, name);
       }
       return { [name]: value };
     }
     if (!cache.has(path)) cache.set(path, runtimeRequire(path));
-    return cache.get(path);
+    const value = cache.get(path);
+    return name === 'ReadableStream'
+      ? { ...value, [name]: wrapReadableStream(value[name]) }
+      : value;
   };
   for (const [name, path] of exports) {
     Object.defineProperty(module, name, {
@@ -3289,9 +3449,15 @@ function createCryptoShim(scope, Buffer, processObject) {
     if (typeof callback !== 'function') return operation.then((value) => Buffer.from(value));
     callbackOperation('PBKDF2REQUEST', operation, callback, (value) => Buffer.from(value));
   };
-  const nodeRandomBytes = (size, callback) => {
-    if (typeof callback !== 'function') return Buffer.from(createRandomBytes(size, scope));
-    const operation = Promise.resolve().then(() => createRandomBytes(size, scope));
+  const nodeRandomBytes = function nodeRandomBytes(size, callback) {
+    if (arguments.length > 1 && typeof callback !== 'function') {
+      const error = new TypeError('The "callback" argument must be of type function');
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    const generated = createRandomBytes(size, scope);
+    if (typeof callback !== 'function') return Buffer.from(generated);
+    const operation = Promise.resolve(generated);
     callbackOperation('RANDOMBYTESREQUEST', operation, callback, (value) => Buffer.from(value));
   };
   const nodeRandomFillSync = (buffer, offset = 0, size) => (
@@ -3301,6 +3467,17 @@ function createCryptoShim(scope, Buffer, processObject) {
     randomFill(buffer, offset, size, callback, scope)
   );
   const nodeRandomInt = (min, max, callback) => createRandomInt(min, max, callback, scope);
+  let pseudoRandomWarningEmitted = false;
+  const nodePseudoRandomBytes = function nodePseudoRandomBytes(size, callback) {
+    if (!pseudoRandomWarningEmitted) {
+      pseudoRandomWarningEmitted = true;
+      processObject.emitWarning?.('crypto.pseudoRandomBytes is deprecated.', {
+        code: 'DEP0115',
+        type: 'DeprecationWarning',
+      });
+    }
+    return nodeRandomBytes.apply(this, arguments);
+  };
   const nodeScrypt = (password, salt, keyLength, options, callback) => {
     const actualOptions = typeof options === 'function' ? {} : options;
     const actualCallback = typeof options === 'function' ? options : callback;
@@ -3409,7 +3586,7 @@ function createCryptoShim(scope, Buffer, processObject) {
         salt,
         info,
         keyLength,
-        (error, value) => callback(error, error ? undefined : Buffer.from(value)),
+        (error, value) => callback(error, value),
         scope,
       );
     },
@@ -3457,7 +3634,7 @@ function createCryptoShim(scope, Buffer, processObject) {
     X509Certificate: createCertificateShim(scope, 'X509Certificate'),
   };
   Object.defineProperties(nodeCrypto, {
-    pseudoRandomBytes: { configurable: true, enumerable: false, value: nodeRandomBytes, writable: true },
+    pseudoRandomBytes: { configurable: true, enumerable: false, value: nodePseudoRandomBytes, writable: true },
     prng: { configurable: true, enumerable: false, value: nodeRandomBytes, writable: true },
     rng: { configurable: true, enumerable: false, value: nodeRandomBytes, writable: true },
     fips: {
@@ -8544,6 +8721,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       return BUILTIN_NAMES.includes(builtin) ? builtins[builtin] ?? {} : loadModule(name, importer);
     };
     const streamWebApi = builtins['stream/web'];
+    installBlobStreamClass(() => streamWebApi.ReadableStream);
     const internalBindings = builtins['internal/test/binding'].__bnhContract;
     const internalUtil = {
       customInspectSymbol: Symbol.for('nodejs.util.inspect.custom'),
@@ -9183,6 +9361,15 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       internalBinding: internalBindings.internalBinding,
       getInternalBinding: internalBindings.internalBinding,
     });
+    const nativeStructuredClone = scope.structuredClone;
+    if (typeof nativeStructuredClone === 'function') {
+      scope.structuredClone = (value, options) => {
+        if (value instanceof Blob && value[Symbol.for('bnh.blobCloneParts')]) {
+          return new Blob(value[Symbol.for('bnh.blobCloneParts')], { type: value.type });
+        }
+        return nativeStructuredClone(value, options);
+      };
+    }
     const internalWebCrypto = scope.Crypto && scope.CryptoKey && scope.SubtleCrypto
       ? null
       : loadModule('internal/crypto/webcrypto', entry);

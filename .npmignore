@@ -2,6 +2,7 @@ dev/
 examples/
 docs/
 scripts/
+src/wasm/
 .bnh-state/
 .agents/
 .codex/

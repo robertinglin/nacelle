@@ -40,7 +40,9 @@
   },
   "files": [
     "dist",
-    "src",
+    "src/*.js",
+    "src/runtime",
+    "src/types.d.ts",
     "README.md",
     "LICENSE"
   ],
@@ -51,7 +53,8 @@
     "examples:vite-react": "node examples/examples-server.mjs --vite-react",
     "examples:wasm": "node examples/examples-server.mjs --wasm",
     "publish:release": "node scripts/publish-release.mjs",
-    "publish:v22": "node scripts/publish-release.mjs --channel=v22 --set-latest"
+    "publish:n22": "node scripts/publish-release.mjs --channel=n22 --set-latest",
+    "publish:v22": "node scripts/publish-release.mjs --channel=n22 --set-latest"
   },
   "engines": {
     "node": ">=18.0.0"

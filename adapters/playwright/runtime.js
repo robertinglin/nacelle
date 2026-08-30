@@ -9315,6 +9315,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     if (typeof scope.addEventListener === 'function') scope.addEventListener('unhandledrejection', onUnhandledRejection);
     if (processObject.execArgv?.some((argument) => String(argument) === '--expose-gc')) {
       scope.gc = () => {
+        scope[Symbol.for('bnh.abort-signal-compatibility')]?.gc?.();
         collectAsyncResources();
         vfs.collectGarbage?.();
         performancePrimitives.recordGC?.();

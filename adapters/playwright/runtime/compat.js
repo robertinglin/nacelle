@@ -2369,7 +2369,11 @@ function installAbortSignalCompatibility(scope) {
 
   const trackSignal = (signal) => {
     if (!signal || state.signals.has(signal)) return state.signals.get(signal);
-    const signalState = { strongListeners: new Set(), weakListeners: new Set() };
+    const signalState = {
+      createdGeneration: state.gcGeneration,
+      strongListeners: new Set(),
+      weakListeners: new Set(),
+    };
     state.signals.set(signal, signalState);
     return signalState;
   };
@@ -2482,7 +2486,8 @@ function installAbortSignalCompatibility(scope) {
 
       deref() {
         if (!this.signalState) return this.native.deref();
-        if (state.gcGeneration > 0 && this.signalState.strongListeners.size === 0) this.value = undefined;
+        if (state.gcGeneration > this.signalState.createdGeneration
+            && this.signalState.strongListeners.size === 0) this.value = undefined;
         return this.value;
       }
     }
@@ -2490,9 +2495,12 @@ function installAbortSignalCompatibility(scope) {
   }
 
   const nativeGc = typeof scope.gc === 'function' ? scope.gc.bind(scope) : null;
-  scope.gc = () => {
+  state.gc = () => {
     state.gcGeneration += 1;
     nativeGc?.();
+  };
+  scope.gc = () => {
+    state.gc();
   };
 }
 

@@ -7,6 +7,7 @@ import { installWarningContract } from './warnings.js';
 import { installProcessFinalization } from './finalization.js';
 import { unsupportedBoundary } from './errors.js';
 import { inspect as nodeInspect } from './assert.js';
+import { resolveNodeVersionProfile } from '../versions/index.js';
 
 export { PROCESS_WORKER_SOURCE } from './process-worker.js';
 
@@ -156,28 +157,12 @@ function normalizeError(value, fallbackCode) {
   return error;
 }
 
-const PROCESS_CONFIG = Object.freeze({
-  variables: Object.freeze({ v8_enable_i18n_support: 1, openssl_quic: false, asan: 0 }),
-  target_defaults: Object.freeze({ default_configuration: 'Release' }),
-});
+function selectedProfile(value) {
+  return resolveNodeVersionProfile(value?.id || value || 'lts');
+}
 
-const PROCESS_FEATURES = Object.freeze({
-  inspector: true,
-  debug: false,
-  uv: false,
-  ipv6: true,
-  openssl_is_boringssl: false,
-  tls_alpn: true,
-  tls_sni: true,
-  tls_ocsp: true,
-  tls: true,
-  cached_builtins: false,
-  require_module: false,
-  typescript: false,
-});
-
-function processVersions(scope = globalThis) {
-  const versions = { node: '22.0.0', v8: '12.0.0' };
+function processVersions(scope = globalThis, profile = selectedProfile()) {
+  const versions = { ...profile.versions };
   const openssl = browserCryptoVersion(scope);
   if (openssl) versions.openssl = openssl;
   return versions;
@@ -219,15 +204,25 @@ function normalizeCredential(value, kind, argumentName = 'id') {
 }
 
 /** Add browser-local process capabilities to an injected worker process. */
-export function installProcessContract(process, { uid = 1000, gid = 1000, umask = 0o022, scope = globalThis } = {}) {
+export function installProcessContract(process, {
+  uid = 1000,
+  gid = 1000,
+  umask = 0o022,
+  scope = globalThis,
+  nodeVersion = 'lts',
+  nodeProfile,
+} = {}) {
+  const profile = selectedProfile(nodeProfile || nodeVersion);
   let currentUid = uid;
   let currentGid = gid;
   let currentUmask = umask & 0o777;
-  process.config ||= PROCESS_CONFIG;
-  process.features ||= PROCESS_FEATURES;
+  process.version = profile.runtimeVersion;
+  process.release = profile.release;
+  process.config = profile.config;
+  process.features = profile.features;
   process.execPath ||= '/browser/node';
   process.argv0 ||= 'node';
-  process.versions ||= processVersions(scope);
+  process.versions = processVersions(scope, profile);
   if (browserCryptoVersion(scope)) process.versions.openssl ||= browserCryptoVersion(scope);
   process.umask ||= (mask) => {
     const previous = currentUmask;
@@ -522,6 +517,7 @@ function makeRunSource(options) {
 }
 
 function createIdentity(options, runId, childId) {
+  const profile = selectedProfile(options.nodeProfile || options.nodeVersion || options.vfs?.nodeVersion);
   return {
     runId,
     childId,
@@ -530,6 +526,11 @@ function createIdentity(options, runId, childId) {
     argv: (Array.isArray(options.argv) ? options.argv : ['browser-worker']).map(String),
     env: stringEnvironment(options.env),
     cwd: String(options.cwd || '/node'),
+    version: profile.runtimeVersion,
+    versions: { ...profile.versions },
+    release: { ...profile.release },
+    config: profile.config,
+    features: profile.features,
   };
 }
 
@@ -553,15 +554,33 @@ function createTerminalRecord(identity, state, frame) {
 }
 
 /** Create the compatibility process object used inside a browser realm. */
-export function createProcess({ argv, env, cwd, execArgv, output = {}, platform = 'linux', arch = 'x64', exit, pid = 1, ppid = 0, ipc, signalGrants, scope = globalThis } = {}) {
+export function createProcess({
+  argv,
+  env,
+  cwd,
+  execArgv,
+  output = {},
+  platform = 'linux',
+  arch = 'x64',
+  exit,
+  pid = 1,
+  ppid = 0,
+  ipc,
+  signalGrants,
+  scope = globalThis,
+  nodeVersion = 'lts',
+  nodeProfile,
+} = {}) {
+  const profile = selectedProfile(nodeProfile || nodeVersion);
   let logicalCwd = String(cwd || '/node');
   let exitCode = 0;
   let exited = false;
   let exitRequested = false;
   const grants = new Set(signalGrants || SIGNALS);
   const process = new EventEmitter();
-  process.version = 'v22.0.0-browser';
-  process.versions = processVersions(scope);
+  process.version = profile.runtimeVersion;
+  process.versions = processVersions(scope, profile);
+  process.release = profile.release;
   process.platform = platform;
   process.arch = arch;
   process.pid = pid;
@@ -642,7 +661,7 @@ export function createProcess({ argv, env, cwd, execArgv, output = {}, platform 
   process.stdin.isTTY = false;
   process.stdout.isTTY = false;
   process.stderr.isTTY = false;
-  installProcessContract(process, { scope });
+  installProcessContract(process, { scope, nodeProfile: profile });
   installWarningContract(process);
   installProcessFinalization(process);
   return process;

@@ -75,6 +75,7 @@ const child = spawn(process.execPath, [
   'test',
   ...testFiles,
   '--workers=1',
+  `--browser=${process.env.BNH_BROWSER || 'chromium'}`,
 ], {
   cwd: adapterRoot,
   env: { ...process.env, BNH_TEST_URL: `http://127.0.0.1:${port}/harness.html` },

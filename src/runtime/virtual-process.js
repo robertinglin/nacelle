@@ -216,6 +216,8 @@ function createInMemoryProcess(options) {
     output,
     ipc: ipcPair.child,
     signalGrants: options.signalGrants,
+    scope: options.scope || globalThis,
+    nodeVersion: options.nodeVersion || options.vfs?.nodeVersion,
     exit: () => {},
   });
   ipcPair.child.unref?.();

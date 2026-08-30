@@ -1,0 +1,52 @@
+name: Node 22 alpha
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+          cache: npm
+          cache-dependency-path: dev/adapters/playwright/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm run test:runtime
+      - run: npm run test:python
+      - run: npm run build
+      - run: npm run validate:versions
+      - run: node scripts/parity-report.mjs --node-version=v22 --require-native
+      - run: npm run test:coverage
+      - run: npm run build:nacelle-plus
+      - run: npm pack --dry-run
+
+  browsers:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+          cache: npm
+          cache-dependency-path: dev/adapters/playwright/package-lock.json
+      - run: npm ci --prefix dev/adapters/playwright
+      - run: npx playwright install --with-deps ${{ matrix.browser }}
+        working-directory: dev/adapters/playwright
+      - run: npm --prefix dev/adapters/playwright run test:browser
+        env:
+          BNH_BROWSER: ${{ matrix.browser }}
+          BNH_NODE_VERSION: v22

@@ -1,6 +1,30 @@
+export type SupportedNodeVersion = 22 | '22' | '22.23.2' | 'v22' | 'n22' | 'node22' | 'node@22' | 'latest' | 'lts';
+
+export interface NodeVersionRecord {
+  readonly id: 'v22';
+  readonly major: 22;
+  readonly nodeRef: 'v22.x';
+  readonly referenceVersion: '22.23.2';
+  readonly status: 'maintenance-lts';
+  readonly maturity: 'alpha';
+  readonly codename: 'Jod';
+  readonly endOfLife: '2027-04-30';
+  readonly npmTag: 'n22';
+  readonly wasmDirectory: 'src/wasm/v22';
+}
+
+export interface NodeVersionProfile extends NodeVersionRecord {
+  readonly runtimeVersion: 'v22.23.2';
+  readonly release: Readonly<{ name: 'node'; lts: 'Jod'; sourceUrl: string; headersUrl: string }>;
+  readonly versions: Readonly<Record<string, string>>;
+  readonly features: Readonly<Record<string, boolean | string>>;
+  readonly config: Readonly<Record<string, any>>;
+  readonly wasm: Readonly<{ directory: string; manifest: string; modules: string; napi: string }>;
+}
+
 export interface NacelleOptions {
-  /** Node.js target version (e.g. '22') */
-  version?: '22' | string;
+  /** Node.js alpha target. Node 22 is the only shipped release line. */
+  version?: SupportedNodeVersion;
   /** Working directory (default: '/node') */
   cwd?: string;
   /** Initial environment variables */
@@ -167,6 +191,8 @@ export interface ProcessRunOptions {
   stdin?: string | Uint8Array;
 }
 
+export type ExecuteOptions = Omit<ProcessRunOptions, 'entry'>;
+
 export interface ProcessHandle {
   /** Promise resolving to process exit code */
   exit: Promise<number>;
@@ -177,16 +203,47 @@ export interface ProcessHandle {
   /** Send signal to kill process */
   kill(signal?: string): Promise<void>;
   /** Structured execution result metadata */
-  structuredResult: any;
+  structuredResult?: any;
+  /** Present when the handle was created by wasm.probe(). */
+  wasmArtifact?: WasmArtifact;
+}
+
+export interface WasmArtifact {
+  module: string;
+  path: string;
+  url: string;
+  bytes: number;
+  entry: string;
+}
+
+export interface WasmArtifactManifest {
+  version: number;
+  node_version: 'v22';
+  reference_version: '22.23.2';
+  abi: Readonly<{ modules: '127'; napi: '10' }>;
+  artifact_compatibility: string;
+  artifact_set_sha256?: string;
+  artifacts: readonly Readonly<{
+    node: string;
+    wasm: string;
+    entry: string;
+    bytes?: number;
+    sha256?: string;
+  }>[];
+  failures: readonly any[];
+  skipped: readonly any[];
 }
 
 export class Nacelle {
-  static initServiceWorker(swPath?: string, scope?: string): Promise<ServiceWorkerRegistration | null>;
+  static readonly supportedVersions: readonly NodeVersionRecord[];
+  static resolveVersion(value?: SupportedNodeVersion): NodeVersionRecord;
+  static initServiceWorker(swPath?: string, scope?: string, globalObject?: any): Promise<ServiceWorkerRegistration | null>;
   static create(options?: NacelleOptions): Promise<Nacelle>;
   readonly rawRuntime: any;
   readonly vfs: any;
   readonly virtualNetwork: any;
   readonly transport: any;
+  readonly nodeProfile: NodeVersionProfile;
   readonly fs: {
     readFile(path: string, encoding?: string): Promise<string | Uint8Array>;
     writeFile(path: string, data: string | Uint8Array): Promise<void>;
@@ -216,7 +273,10 @@ export class Nacelle {
     clearCache(): Promise<void>;
   };
   readonly wasm: {
+    readonly baseUrl: string;
     list(): string[];
+    manifest(): Promise<WasmArtifactManifest>;
+    load(moduleName: string): Promise<WasmArtifact>;
     probe(moduleName: string): Promise<ProcessHandle>;
   };
   getVirtualUrl(port?: number, pathname?: string): string;
@@ -225,7 +285,7 @@ export class Nacelle {
   run(options: ProcessRunOptions): Promise<ProcessHandle>;
   runScript(scriptName: string, options?: RunScriptOptions): Promise<ProcessHandle>;
   bash(command: string, options?: BashOptions): Promise<ProcessHandle>;
-  execute(code: string, options?: ProcessRunOptions): Promise<ProcessHandle>;
+  execute(code: string, options?: ExecuteOptions): Promise<ProcessHandle>;
   on(event: string, listener: (...args: any[]) => void): this;
   off(event: string, listener: (...args: any[]) => void): this;
   emit(event: string, ...args: any[]): void;
@@ -272,6 +332,18 @@ export interface ShellPipeline {
 export function tokenizeShellScript(command: string): ShellToken[];
 export function parseShellScript(command: string): ShellPipeline[];
 
-export function createRuntime(options?: any): any;
+export function listSupportedNodeVersions(): readonly NodeVersionRecord[];
+export function listNodeVersionProfiles(): readonly NodeVersionProfile[];
+export function nodeVersionAliases(): Readonly<{ latest: 'v22'; lts: 'v22' }>;
+export function resolveNodeVersionRecord(value?: SupportedNodeVersion): NodeVersionRecord;
+export function resolveNodeVersionProfile(value?: SupportedNodeVersion): NodeVersionProfile;
+
+export function createRuntime(options?: {
+  globalObject?: any;
+  version?: SupportedNodeVersion;
+  nodeVersion?: SupportedNodeVersion;
+  nodeProfile?: NodeVersionProfile;
+  wasmBaseUrl?: string;
+}): any;
 export const runtime: any;
 export default Nacelle;

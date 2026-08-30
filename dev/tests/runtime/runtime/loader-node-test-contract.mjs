@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createModuleLoader } from '../../adapters/playwright/runtime/module-loader.js';
-import { createNodeTest } from '../../adapters/playwright/runtime/node-test.js';
+import { createModuleLoader } from '../../../../src/runtime/module-loader.js';
+import { createNodeTest } from '../../../../src/runtime/node-test.js';
 
 test('canonicalizes bare and node: builtin names without VFS fallback', () => {
   const dns = { name: 'dns' };
@@ -14,22 +14,32 @@ test('canonicalizes bare and node: builtin names without VFS fallback', () => {
   });
 
   assert.equal(loader.resolve('dns'), 'dns');
-  assert.equal(loader.resolve('node:dns'), 'dns');
+  assert.equal(loader.resolve('node:dns'), 'node:dns');
   assert.equal(loader.require('dns'), dns);
   assert.equal(loader.require('node:dns'), dns);
-  assert.throws(() => loader.require('node:missing'), { code: 'MODULE_NOT_FOUND' });
+  assert.throws(() => loader.require('node:missing'), { code: 'ERR_UNKNOWN_BUILTIN_MODULE' });
 });
 
 test('aggregates async node:test suites, hooks, and subtests', async () => {
   const output = [];
   const errors = [];
   const processObject = { exitCode: 0 };
+  const scope = {
+    process: processObject,
+    queueMicrotask,
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    Date,
+  };
   let pending = 0;
   const nodeTest = createNodeTest({
-    scope: globalThis,
+    scope,
     processObject,
     stdout: (value) => output.push(value),
     stderr: (value) => errors.push(value),
+    assert,
     trackTask: () => {
       pending += 1;
       return () => { pending -= 1; };

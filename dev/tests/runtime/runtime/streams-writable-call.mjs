@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { Writable } from '../../adapters/playwright/runtime/streams.js';
+import { Writable } from '../../../../src/runtime/streams.js';
 
 test('Writable supports legacy callable construction on an inherited object', () => {
   function LegacyWritable(options) {

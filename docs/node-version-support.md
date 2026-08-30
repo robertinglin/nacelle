@@ -1,218 +1,149 @@
-# Node version support and upgrade plan
+# Node 22 alpha support
 
-## Current audit
+## Shipped contract
 
-The runtime is a strong v22 implementation with shared browser compatibility
-modules, a virtual filesystem, workers, npm/script orchestration, browser
-networking, and the optional Nacelle+ HTTP transport. The recent compatibility
-work also has focused coverage for shell execution, TypeScript compilation,
-crossenv-style scripts, proxy routing, transport negotiation, streaming,
-revocation, and hostile redirect behavior.
+The alpha ships one runtime target: Node 22. There is no Node 24, Node 26, or
+`current` package surface in this release.
 
-The remaining versioning gap is structural:
+| Field | Alpha value |
+| --- | --- |
+| Target | `v22` |
+| Native reference snapshot | `v22.23.2` (Jod) |
+| Node module ABI | `127` |
+| Node-API | `10` |
+| Major-scoped npm channel | `n22` |
+| Package entries | `nacelle/v22`, `nacelle/latest`, `nacelle/lts` |
+| Default aliases | `latest -> v22`, `lts -> v22` |
 
-- `src/wasm/v22/` is the only checked-in versioned WASM artifact directory.
-- The build copies one selected WASM directory into a flat `dist/wasm/`, so a
-  build is target-specific but the package layout does not retain the matrix.
-- `process.version`, `process.versions`, shell `node --version`, and several
-  metadata paths are v22-centered even though `Nacelle.create({ version })`
-  accepts a string.
-- The package has a `./v22` export and v22 release scripts, but no registry of
-  supported lines, no current/non-LTS alias, and no automated parity matrix.
-- The conformance tests added for Nacelle+ are deterministic contract tests;
-  they do not replace real Chrome/Firefox lifecycle tests.
-- The full repository test command is not currently a reliable gate: some
-  contract tests import missing Playwright runtime fixtures, and runtime tests
-  that share a realm must be run as isolated processes. This needs to be fixed
-  before using the suite as a version release gate.
+`22`, `v22`, `n22`, `node22`, `node@22`, `latest`, and `lts` select the same
+frozen profile. Any other major or alias fails with
+`ERR_NACELLE_UNSUPPORTED_NODE_VERSION`; it never silently falls back to v22.
 
-These are product and release-engineering gaps, not reasons to expand Nacelle+
-beyond its fetch-only boundary. The documented DNS-rebinding limitation and
-the lack of WebSocket/raw-socket support remain intentional for this tier.
+The reference patch identifies the metadata and ABI snapshot. Nacelle remains
+a browser runtime, so feature fields that describe unavailable host facilities
+remain browser-accurate. For example, the runtime does not claim a native
+libuv event loop merely because upstream Node 22 has one.
 
-## Support policy
-
-Support is defined by Node release lines, not arbitrary patch versions. At any
-release, the support registry will contain:
-
-1. every upstream LTS line still within its supported maintenance window;
-2. the latest upstream non-LTS/current line; and
-3. a short-lived migration line when a new LTS line replaces the active one.
-
-The package aliases are:
-
-- `latest`: the default supported LTS build;
-- `lts`: the same active LTS line, as an explicit stable alias;
-- `current`: the latest non-LTS line;
-- `nXX`: an immutable Node-major channel such as `n22` or `n24`;
-- `nacelle/vXX`: the matching explicit package export when shipped in the
-  aggregate package.
-
-An upstream-EOL line may remain installable through its immutable `nXX` build
-for a documented period, but it is not part of the supported parity matrix.
-No line is promoted to an alias until its browser, npm, shell, networking,
-TypeScript, and WASM gates are green.
-
-## Implementation plan
-
-### 1. Establish a version registry
-
-Add one checked-in registry, for example `versions/support.json`, with one
-record per Node major:
-
-```json
-{
-  "v22": {
-    "status": "maintenance-lts",
-    "nodeRef": "v22.x",
-    "wasmDirectory": "src/wasm/v22",
-    "npmTag": "n22",
-    "profile": "src/versions/v22/profile.js"
-  }
-}
-```
-
-The registry is the source for build validation, package exports, CI matrix
-generation, documentation, and release aliases. A command should report the
-resolved set (`lts`, `current`, EOL lines) from this registry rather than
-scattering version constants through scripts.
-
-### 2. Separate version profiles from shared runtime code
-
-Create a small profile interface under `src/versions/`. A profile owns only
-version-sensitive facts and shims:
-
-- `process.version` and `process.versions` values;
-- Node feature flags and experimental feature availability;
-- builtin/module surface differences;
-- `node --version` and shell-visible version output;
-- `module.stripTypeScriptTypes()` behavior and its supported options;
-- WASM artifact manifest and addon ABI expectations;
-- explicit compatibility notes where browser behavior intentionally differs.
-
-The shared runtime, VFS, worker model, HTTP compatibility layer, npm client,
-shell parser, and Nacelle+ transport should consume the profile interface. Do
-not fork `runtime.js` per major. If a version genuinely needs a different
-implementation, isolate that branch behind a named profile capability and add
-an issue/test for removing it later.
-
-### 3. Make version selection real and observable
-
-At `Nacelle.create()` time:
-
-- normalize `22`, `v22`, and supported aliases to one registry record;
-- reject an unknown, EOL, or unbuilt target with a deterministic error;
-- load the matching profile and artifact base URL;
-- make `process.version`, `node --version`, `process.versions`, and build
-  metadata agree;
-- expose the selected profile in a read-only runtime diagnostic;
-- keep `version` out of capability grants so changing Node major cannot widen
-  permissions.
-
-Add a version-independent `node --version` contract test and a profile-specific
-metadata test so a release cannot accidentally report v22 while loading a
-different WASM set.
-
-### 4. Change the artifact and package layout
-
-The first implementation can continue publishing one target per `nXX` channel,
-but the build output must retain its identity:
+## Runtime and artifact flow
 
 ```text
-dist/
-  v22/
-    index.mjs
-    index.cjs
-    runtime/
-    wasm/
-    version.json
-  v24/
-    ...
+Nacelle.create({ version })
+        |
+        v
+src/versions/support.js ---- rejects unshipped selectors
+        |
+        v
+src/versions/v22/profile.js
+        |
+        +---- process.version / process.versions / process.release
+        +---- shell node --version
+        +---- worker and virtual-process descriptors
+        +---- module ABI / Node-API expectations
+        |
+        v
+dist/v22/ + dist/v22/wasm/ + dist/v22/version.json
 ```
 
-Build commands should support both:
+The shared VFS, shell, npm client, workers, module loader, networking, proxy,
+and Nacelle+ code do not fork by Node version. The profile owns only facts that
+can differ by release line.
 
-```sh
-npm run build -- --node-version=v22
-npm run build:all-supported
+## Completed alpha gaps
+
+This release work closes the structural and productization gaps that were
+present in the original v22-only implementation:
+
+- Runtime selection now changes real process, shell, child, and worker
+  metadata instead of accepting an inert version string.
+- The Node 22 profile is based on an actual native `v22.23.2` metadata snapshot,
+  rather than values inherited from the machine running the build.
+- The checked-in WASM manifest records the matching module ABI and Node-API
+  version, and the browser N-API implementation reports version 10.
+- Versioned ESM, CommonJS, type, WASM, and metadata outputs live under
+  `dist/v22/`; root, `latest`, and `lts` entries resolve to that output.
+- Build metadata carries the source revision, profile hash, and complete WASM
+  artifact-set hash without a wall-clock timestamp.
+- The Playwright adapter is connected to the checked-in runtime/profile and
+  creates the runtime selected by the request instead of merely echoing a
+  variant label.
+- Process-exit sentinels are contained when an IPC or signal callback exits a
+  worker, rather than escaping into the hosting page's event loop.
+- Package validation checks source and built manifests, exports, ABI values,
+  artifact validity, aliases, and support metadata from the same registry.
+- `wasmBaseUrl` now drives a lazy manifest/artifact loader. Artifacts are
+  validated as WebAssembly and mounted at their declared virtual paths;
+  build-provided SHA-256 values are checked when present. The option is no
+  longer diagnostic-only metadata.
+- The release command publishes the major-scoped `n22` channel first and only
+  promotes `latest` and `lts` when explicitly requested.
+
+## Alpha build and release sequence
+
+The complete v22 sequence is:
+
+1. Resolve `v22` from `src/versions/support.js`.
+2. Load the immutable profile from `src/versions/v22/profile.js`.
+3. Match the profile against `src/wasm/v22/addon-manifest.json`.
+4. Validate every declared artifact as WebAssembly and hash its bytes.
+5. Stage shared runtime code plus version-owned entries under `dist/v22/`.
+6. Write `version.json` and `support.json` from the resolved profile.
+7. Validate package exports and the staged manifest against the registry.
+8. Produce a parity report with isolated process, shell, TypeScript, npm,
+   virtual HTTP, and compression checks.
+9. Run browser workloads through the same request contract in Chromium and
+   Firefox.
+10. Publish `nacelle@n22`; update `latest` and `lts` only after the release gate
+    is accepted.
+
+The corresponding commands are:
+
+```bash
+npm run versions
+npm run build
+npm run validate:versions
+npm run parity
+npm run test:full
+npm run publish:n22 -- --dry-run
 ```
 
-`build:all-supported` validates that every registry line has its profile,
-WASM manifest, package metadata, and passing test selection. A clean build
-must be reproducible apart from an explicitly generated build timestamp; use a
-stable source revision and profile hash in `version.json`.
+The test commands are provided as release scaffolding; validation ownership
+can remain separate from implementation work.
 
-### 5. Build a parity contract before adding the next major
+## Remaining compatibility boundaries
 
-Parameterize the existing tests over the registry. Every supported profile
-must pass the same required contract for:
+These are explicit alpha boundaries, not hidden version fallbacks:
 
-- Nacelle create/run/execute and process metadata;
-- VFS, workers, signals, environment capability keys, and lifecycle;
-- npm metadata/install/script execution;
-- shell assignments, pipelines, redirects, globbing, common builtins, and
-  `cross-env` patterns;
-- TypeScript strip/compile/run behavior;
-- HTTP/HTTPS response, proxy, abort, and streaming semantics;
-- WASM addon load/probe and ABI manifest checks;
-- Nacelle+ negotiation where the browser transport is enabled.
+- Synchronous zlib/Brotli/zstd methods cannot be implemented with the
+  asynchronous browser Compression Streams API alone. Async Node-style
+  compression and streaming are supported; sync calls report the boundary.
+- ELF/native `.node` addons require a browser-safe WASM adapter. The v22 WASM
+  manifest lists the artifacts Nacelle can load; arbitrary host addons are not
+  claimed.
+- Browser extensions do not expose general raw TCP/TLS sockets. Nacelle+
+  remains a capability-gated privileged HTTP(S) fetch companion.
+- Nacelle+ cannot reliably inspect the IP chosen by the browser's DNS resolver,
+  so its documented DNS-rebinding limitation remains.
+- Host filesystem, OS process, and kernel behavior that browsers do not expose
+  must stay virtual or fail at a named unsupported boundary.
 
-Expected differences belong in a small profile exception file with a reason,
-reference behavior, and removal condition. A missing implementation is a
-failure, not an exception. Keep the 80% minimum coverage requirement per
-profile and for the shared runtime.
+These boundaries should appear as `unsupported` in compatibility reporting,
+not as a pass and not as an unrelated generic exception.
 
-For each Node major, compare the browser runtime against a native reference
-of that same major. The comparison should record `pass`, `unsupported`, or
-`semantic-drift`; it should never silently treat an unsupported API as parity.
+## Activating another release line later
 
-### 6. Add browser and release CI gates
+The alpha does not ship or advertise another line. When a later release is
+deliberately accepted, use this activation sequence rather than changing the
+default version string:
 
-The CI matrix should expand over:
+1. Add one registry record and one release-owned profile.
+2. Capture metadata from the exact native reference patch.
+3. Build or qualify that line's WASM artifacts and ABI manifest.
+4. Keep it off all aliases while compatibility differences are classified.
+5. Run the shared parity, browser, npm, TypeScript, shell, and workload gates.
+6. Publish a major-scoped channel first; package versions remain immutable.
+7. Add an LTS or non-LTS alias only after that line independently meets the
+   support contract.
+8. Keep support and removal dates in the registry so an alias change never
+   silently removes an existing supported line.
 
-```text
-node major × browser (Chrome, Firefox) × test group
-```
-
-The test groups are shared unit/contract tests, browser smoke tests, npm/script
-workloads, WASM probes, and Nacelle+ extension tests. Run isolated runtime
-processes for tests that mutate browser-global compatibility state. Before
-release, also run the workload corpus: provider SSE, npm metadata/tarballs,
-GitHub raw/API, Vite traffic, large downloads, redirects, 429 responses, slow
-endpoints, aborts, and extension restart/reconnect.
-
-The release job must build every supported line, verify package exports and
-`version.json`, run the parity report, and refuse alias updates if any required
-line is red. Publish immutable `nXX` tags first; update `latest`, `lts`, and
-`current` only after the matrix completes.
-
-### 7. Upgrade sequence
-
-For the next major upgrade:
-
-1. add the upstream Node ref, release status, profile skeleton, and artifact
-   directory to the registry;
-2. generate the new WASM/addon manifest and verify its ABI against the profile;
-3. run the shared parity suite and classify every failure against the native
-   reference;
-4. implement only version-owned differences in the new profile or a small
-   adapter module;
-5. run Chrome and Firefox smoke/lifecycle tests plus the real workload corpus;
-6. publish the immutable `nXX` channel and keep it in migration status;
-7. promote it to `latest`/`lts` only when the upstream release status and all
-   gates agree;
-8. move the prior active LTS to maintenance and remove it from aliases only
-   at upstream EOL, with a documented deprecation window.
-
-The first concrete upgrade should be selected from the registry at execution
-time, not hard-coded into this document. That prevents a stale plan from
-confusing the latest non-LTS line with the latest LTS line.
-
-## Definition of done
-
-Node-version support is complete when a contributor can run one command to
-list supported lines, one command to build all supported artifacts, and one
-command to produce a parity report. For every listed line, the selected version
-is visible and consistent in runtime metadata, the package export and WASM
-manifest match, the shared contract suite is green in Chrome and Firefox, and
-any intentional deviation is documented with a test and an owner.
+That mechanism is present, but only v22 is activated for the alpha.

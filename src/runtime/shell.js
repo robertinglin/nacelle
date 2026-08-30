@@ -4,6 +4,9 @@ import {
   parseShellScript,
   rawShellWord,
 } from './shell-parser.js';
+import { resolveNodeVersionProfile } from '../versions/index.js';
+
+const DEFAULT_NODE_VERSION = resolveNodeVersionProfile('lts').runtimeVersion;
 
 const BUILTINS = new Set([
   ':', '[', 'alias', 'basename', 'cat', 'cd', 'command', 'cp', 'cut', 'dirname', 'echo', 'env', 'export',
@@ -690,7 +693,7 @@ async function runNode(args, input, context, options) {
         signal: context.signal, timeout: context.timeout,
       });
     }
-    if (flag === '--version' || flag === '-v') return result(0, 'v22.0.0-browser\n');
+    if (flag === '--version' || flag === '-v') return result(0, `${options.nodeVersion || DEFAULT_NODE_VERSION}\n`);
     index += flag === '--input-type' ? 2 : 1;
   }
   if (args[index] === '--') index += 1;

@@ -37,16 +37,18 @@ export const test = base.extend({
     await use({
       async run(sourceOverride, options = {}) {
         const entryPath = options.entryPath || entry;
+        const variant = options.variant || process.env.BNH_NODE_VERSION || 'v22';
         files = new Map(Object.entries({ ...(options.files || {}), [entryPath]: sourceOverride }));
         const capabilities = options.capabilities || {
           ...defaultCapabilities,
           envVars: { allowed: Object.keys(options.env || {}) },
           'process.env': { allowed: Object.keys(options.env || {}) },
         };
-        return await page.evaluate(async ({ entryPath, sourceText, flags, env, timeoutMs, files, capabilities, proxy }) => {
+        return await page.evaluate(async ({ entryPath, sourceText, flags, env, timeoutMs, files, capabilities, proxy, variant }) => {
           return await globalThis.__BROWSER_NODE_HARNESS__.run({
             schemaVersion: 1,
             entry: entryPath,
+            variant,
             capabilities,
             proxy,
             files: {
@@ -76,6 +78,7 @@ export const test = base.extend({
           timeoutMs: options.timeoutMs || 10_000,
           capabilities,
           proxy: options.proxy,
+          variant,
         });
       },
     });

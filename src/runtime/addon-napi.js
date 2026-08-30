@@ -7,6 +7,7 @@
 // rebuilt when memory grows (the browser detaches views on growth).
 
 const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
+export const BROWSER_NAPI_VERSION = 10;
 
 // napi_status
 const OK = 0;
@@ -360,7 +361,7 @@ class AddonState {
       napi_get_global: (env, result) => state.result(result, globalThis),
       napi_get_boolean: (env, value, result) => state.result(result, Boolean(value)),
       napi_create_object: (env, result) => state.result(result, {}),
-      napi_get_version: (env, result) => state.writeI32(result, 8),
+      napi_get_version: (env, result) => state.writeI32(result, BROWSER_NAPI_VERSION),
       napi_get_uv_event_loop: () => OK,
 
       napi_typeof: (env, value, result) => {

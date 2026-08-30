@@ -26,9 +26,19 @@
       "require": "./dist/index.cjs"
     },
     "./v22": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.cjs"
+      "types": "./dist/v22/index.d.ts",
+      "import": "./dist/v22/index.mjs",
+      "require": "./dist/v22/index.cjs"
+    },
+    "./latest": {
+      "types": "./dist/v22/index.d.ts",
+      "import": "./dist/v22/index.mjs",
+      "require": "./dist/v22/index.cjs"
+    },
+    "./lts": {
+      "types": "./dist/v22/index.d.ts",
+      "import": "./dist/v22/index.mjs",
+      "require": "./dist/v22/index.cjs"
     },
     "./runtime": {
       "types": "./dist/index.d.ts",
@@ -36,21 +46,35 @@
     },
     "./worker": "./dist/process-worker.js",
     "./sw": "./dist/gateway-sw.js",
-    "./wasm/*": "./dist/wasm/*"
+    "./support": "./dist/support.json",
+    "./version": "./dist/version.json",
+    "./v22/version": "./dist/v22/version.json",
+    "./wasm/*": "./dist/wasm/*",
+    "./v22/wasm/*": "./dist/v22/wasm/*"
   },
   "files": [
     "dist",
-    "src/*.js",
-    "src/runtime",
     "nacelle-plus",
-    "src/types.d.ts",
     "README.md",
     "docs",
     "LICENSE"
   ],
   "scripts": {
-    "build": "node scripts/build.mjs",
+    "build": "node scripts/build.mjs --node-version=v22",
+    "build:all-supported": "node scripts/build.mjs",
     "build:v22": "node scripts/build.mjs --node-version=v22",
+    "versions": "node scripts/version-support.mjs",
+    "validate:versions": "node scripts/validate-version-support.mjs --node-version=v22",
+    "parity": "node scripts/parity-report.mjs --node-version=v22",
+    "test": "node --test --test-concurrency=1 dev/tests/runtime/runtime/*.mjs",
+    "test:runtime": "node --test --test-concurrency=1 dev/tests/runtime/runtime/*.mjs",
+    "test:coverage": "node --experimental-test-coverage --test --test-concurrency=1 --test-coverage-include='src/versions/**' --test-coverage-lines=80 --test-coverage-functions=80 --test-coverage-branches=80 dev/tests/runtime/runtime/version-support.mjs",
+    "test:python": "dev/scripts/self-test.sh",
+    "test:browser": "npm --prefix dev/adapters/playwright run test:browser",
+    "test:browser:chromium": "BNH_BROWSER=chromium npm --prefix dev/adapters/playwright run test:browser",
+    "test:browser:firefox": "BNH_BROWSER=firefox npm --prefix dev/adapters/playwright run test:browser",
+    "test:full": "node scripts/test-alpha.mjs",
+    "release:check": "node scripts/test-alpha.mjs --require-native",
     "examples": "node examples/examples-server.mjs",
     "examples:vite-react": "node examples/examples-server.mjs --vite-react",
     "examples:wasm": "node examples/examples-server.mjs --wasm",

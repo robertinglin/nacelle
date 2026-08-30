@@ -6,15 +6,20 @@ import { createPlatformContract as createAdapterContract } from '../runtime/os-p
 const integrationSource = await readFile(
   new URL('../../../.bnh-state/v22/worktrees/integration-v22/runtime/os-platform.js', import.meta.url),
   'utf8',
-);
-const { createPlatformContract: createIntegrationContract } = await import(
-  `data:text/javascript,${encodeURIComponent(integrationSource)}`,
-);
+).catch((error) => {
+  if (error?.code === 'ENOENT') return null;
+  throw error;
+});
 
 const factories = [
   ['adapter', createAdapterContract],
-  ['integration', createIntegrationContract],
 ];
+if (integrationSource !== null) {
+  const { createPlatformContract } = await import(
+    `data:text/javascript,${encodeURIComponent(integrationSource)}`,
+  );
+  factories.push(['integration', createPlatformContract]);
+}
 
 function assertOsContract(assert, createPlatformContract, label) {
   const contract = createPlatformContract();
@@ -62,7 +67,7 @@ function assertOsContract(assert, createPlatformContract, label) {
   assert.strictEqual(os.getPriority(), 10, `${label}: updated priority`);
 }
 
-test('keeps both browser OS contract copies deterministic and host-independent', () => {
+test('keeps available browser OS contract copies deterministic and host-independent', () => {
   for (const [label, createPlatformContract] of factories) {
     assertOsContract(assert, createPlatformContract, label);
   }

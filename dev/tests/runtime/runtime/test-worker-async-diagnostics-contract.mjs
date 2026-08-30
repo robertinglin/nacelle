@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
-import { createAsyncHooksModule, AsyncResource } from '../../adapters/playwright/runtime/async-hooks.js';
-import { createDiagnosticsModule } from '../../adapters/playwright/runtime/diagnostics.js';
-import { createBrowserProcess } from '../../adapters/playwright/runtime/process.js';
+import { createAsyncHooksModule, AsyncResource } from '../../../../src/runtime/async-hooks.js';
+import { createDiagnosticsModule } from '../../../../src/runtime/diagnostics.js';
+import { createBrowserProcess } from '../../../../src/runtime/process.js';
 
 class FakePort {
   constructor() { this.peer = null; this.onmessage = null; this.closed = false; }
@@ -49,6 +49,7 @@ test('async hooks propagate local storage and clean resource lifecycle', async (
   const resource = new AsyncResource('contract');
   resource.runInAsyncScope(() => assert.equal(module.executionAsyncId(), resource.asyncId()));
   resource.emitDestroy();
+  await new Promise((resolve) => setTimeout(resolve, 0));
   hook.disable();
   module.cleanup();
   assert.ok(lifecycle.some(([, , type]) => type === 'PROMISE'));

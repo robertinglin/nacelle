@@ -6,12 +6,19 @@ Powered by WebAssembly, Web Workers, Virtual Filesystems (VFS), and in-browser n
 
 ---
 
+## Node 22 Alpha
+
+The alpha ships one target: Node 22, referenced against native Node 22.23.2
+(module ABI 127, Node-API 10). `latest`, `lts`, `n22`, and the `nacelle/v22`
+subpath all select that same runtime. Other majors and the `current` alias are
+rejected instead of silently falling back.
+
 ## Installation & Release Channels
 
 Install `nacelle` using your preferred package manager and release channel:
 
 ```bash
-# Install the latest Node v22 browser runtime build
+# Install the Node 22 major channel
 npm install nacelle@n22
 
 # Or install the latest default release
@@ -32,12 +39,12 @@ You can import `nacelle` directly in browser scripts via modern CDNs:
     }
   });
 
-const proc = await node.run({ entry: '/app/index.js' });
-console.log(await proc.stdoutText());
+  const proc = await node.run({ entry: '/app/index.js' });
+  console.log(await proc.stdoutText());
 
-// Run shell lines directly in the virtual filesystem
-const shell = await node.bash('NODE_ENV=production echo "$NODE_ENV" | sed \'s/production/ready/\'');
-console.log(await shell.stdoutText());
+  // Run shell lines directly in the virtual filesystem
+  const shell = await node.bash('NODE_ENV=production echo "$NODE_ENV" | sed \'s/production/ready/\'');
+  console.log(await shell.stdoutText());
 </script>
 ```
 
@@ -99,10 +106,24 @@ await node.npm.install('express');
 
 - `nacelle` -> Main bundle (`Nacelle`, `createRuntime`, `runtime`)
 - `nacelle/v22` -> Explicit Node v22 runtime entry
+- `nacelle/latest` / `nacelle/lts` -> Alpha aliases for the v22 entry
 - `nacelle/runtime` -> Low-level runtime assembly and module loader
 - `nacelle/worker` -> Dedicated Web Worker process script
 - `nacelle/sw` -> Virtual network gateway Service Worker
 - `nacelle/wasm/*` -> Precompiled native WebAssembly modules
+- `nacelle/support` / `nacelle/version` -> Shipped aliases, profile hashes, and
+  WASM artifact-set identity
+
+WASM adapters load lazily from the selected v22 manifest. A custom CDN or
+application path can be supplied with `wasmBaseUrl`:
+
+```javascript
+const node = await Nacelle.create({
+  wasmBaseUrl: new URL('/nacelle/v22/wasm/', location.href).href,
+});
+const artifact = await node.wasm.load('bcrypt');
+console.log(artifact.path, artifact.bytes);
+```
 
 ---
 
@@ -148,6 +169,20 @@ permission handling.
 
 The supported Node release-line audit and upgrade policy are in
 [`docs/node-version-support.md`](docs/node-version-support.md).
+
+### Alpha build and release commands
+
+```bash
+npm run versions
+npm run build
+npm run validate:versions
+npm run parity
+npm run test:full
+```
+
+`npm run publish:n22 -- --dry-run` exercises the release path without
+uploading. The live command publishes the major-scoped `n22` tag first and promotes `latest` and
+`lts` only after the explicit release gate.
 
 ### Inline shell execution
 

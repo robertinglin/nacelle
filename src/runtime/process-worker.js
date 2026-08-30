@@ -190,7 +190,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       }
       return numeric;
     };
-    process.config ||= { variables: { v8_enable_i18n_support: 1, openssl_quic: false, asan: 0 }, target_defaults: { default_configuration: 'Release' } };
+    process.config ||= { variables: { v8_enable_i18n_support: 1, openssl_quic: false, asan: 0, node_module_version: 127, napi_build_version: '10', node_use_amaro: true }, target_defaults: { default_configuration: 'Release' } };
     process.features ||= {
       inspector: true,
       debug: false,
@@ -202,12 +202,14 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       tls_ocsp: true,
       tls: true,
       cached_builtins: false,
-      require_module: false,
-      typescript: false,
+      require_module: true,
+      typescript: 'strip',
     };
     process.execPath ||= '/browser/node';
     process.argv0 ||= 'node';
-    process.versions ||= { node: '22.0.0', v8: '12.0.0' };
+    process.version ||= 'v22.23.2';
+    process.release ||= { name: 'node', lts: 'Jod' };
+    process.versions ||= { node: '22.23.2', modules: '127', napi: '10', v8: '12.4.254.21-node.56' };
     process.umask ||= (value) => {
       const previous = mask;
       if (value === undefined) return previous;
@@ -280,6 +282,14 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     identity = message.identity;
     const process = makeEmitter();
     installProcessContract(process);
+    const emitProcess = (name, ...args) => {
+      try {
+        return process.emit(name, ...args);
+      } catch (error) {
+        if (error === processExitSignal) return true;
+        throw error;
+      }
+    };
     process.stdin = makeEmitter();
     process.stdin.readable = true;
     process.stdin.isTTY = false;
@@ -349,7 +359,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         disconnected = true;
         process.connected = false;
         sendControl('child-disconnect');
-        process.emit('disconnect');
+        emitProcess('disconnect');
         return true;
       },
       kill: (signal = 'SIGTERM') => { sendControl('child-signal-request', { signal }); return true; },
@@ -370,10 +380,10 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       const frame = event.data;
       if (frame?.channel !== CONTROL || frame.key !== key || frame.runId !== identity.runId || frame.childId !== identity.childId) return;
       if (frame.type === 'disconnect') {
-        if (!disconnected) { disconnected = true; process.connected = false; process.emit('disconnect'); }
+        if (!disconnected) { disconnected = true; process.connected = false; emitProcess('disconnect'); }
       } else if (frame.type === 'signal') {
         if (terminalSent) return;
-        const handled = process.emit(frame.signal);
+        const handled = emitProcess(frame.signal);
         sendControl('signal-result', { signal: frame.signal, handled });
         if (!handled) finish('signal', null, frame.signal, null);
       }
@@ -392,7 +402,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         } else if (frame.payload?.__bnhWorkerStdinEnd) {
           process.stdin.push(null);
         } else {
-          process.emit('message', frame.payload, createRemoteHandle(frame.handle));
+          emitProcess('message', frame.payload, createRemoteHandle(frame.handle));
         }
       }
     };

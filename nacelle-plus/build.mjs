@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 const sourceDir = path.dirname(fileURLToPath(import.meta.url));
 const extensionDir = path.join(sourceDir, 'extension');
 const outputDir = path.join(sourceDir, 'dist');
-const sharedFiles = ['background.js', 'content-script.js', 'popup.html', 'popup.js'];
+const sharedFiles = ['background.js', 'content-script.js', 'policy.js', 'popup.html', 'popup.js'];
 
 fs.rmSync(outputDir, { recursive: true, force: true });
 

@@ -121,9 +121,9 @@ export class Nacelle {
     const transport = nacellePlusOptions
       ? createNacellePlusTransport({ ...nacellePlusOptions, globalObject })
       : null;
-    const proxy = options.proxy || (transport
-      ? { mode: 'proxy', enabled: true, capability: { proxy: true }, adapter: transport.adapter }
-      : { mode: 'virtual', enabled: false });
+    const proxy = options.proxy
+      ? { ...options.proxy, ...(transport && !options.proxy.adapter ? { adapter: transport.adapter } : {}) }
+      : { mode: 'virtual', enabled: false };
 
     // Reset runtime state with default grants
     await runtime.reset({

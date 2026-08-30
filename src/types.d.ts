@@ -15,8 +15,14 @@ export interface NacelleOptions {
   globalObject?: any;
   /** Optional Nacelle+ privileged transport companion */
   nacellePlus?: boolean | NacellePlusOptions;
-  /** Advanced capability-gated proxy selection */
-  proxy?: any;
+  /** Explicit Nacelle capability grant for privileged transport */
+  proxy?: {
+    mode?: 'virtual' | 'proxy';
+    enabled?: boolean;
+    capability?: boolean | Record<string, boolean>;
+    capabilityKey?: string;
+    adapter?: any;
+  };
 }
 
 export interface NpmProgressEvent {

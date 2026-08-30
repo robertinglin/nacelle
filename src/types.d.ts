@@ -1,4 +1,4 @@
-export interface BrowserNodeOptions {
+export interface NacelleOptions {
   /** Node.js target version (e.g. '22') */
   version?: '22' | string;
   /** Working directory (default: '/node') */
@@ -100,9 +100,9 @@ export interface ProcessHandle {
   structuredResult: any;
 }
 
-export class BrowserNode {
+export class Nacelle {
   static initServiceWorker(swPath?: string, scope?: string): Promise<ServiceWorkerRegistration | null>;
-  static create(options?: BrowserNodeOptions): Promise<BrowserNode>;
+  static create(options?: NacelleOptions): Promise<Nacelle>;
   readonly rawRuntime: any;
   readonly vfs: any;
   readonly virtualNetwork: any;
@@ -158,4 +158,4 @@ export function parseScriptCommand(cmdString: string): {
 
 export function createRuntime(options?: any): any;
 export const runtime: any;
-export default BrowserNode;
+export default Nacelle;

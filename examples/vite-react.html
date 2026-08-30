@@ -133,7 +133,7 @@
         <a href="/vite-react.html" class="active">⚛️ Vite + React IDE</a>
         <a href="/wasm.html">🧩 Native WASM Addons</a>
       </div>
-      <div class="brand">⚡ browser-node <span class="badge">Vite + React Example</span></div>
+      <div class="brand">⚡ nacelle <span class="badge">Vite + React Example</span></div>
     </div>
     <div class="mode-controls">
       <button id="btn-dev">Run Dev Server</button>
@@ -407,7 +407,7 @@ server.listen(5173, () => {
 });</template>
 
   <script type="module">
-    import { BrowserNode } from '/index.js';
+    import { Nacelle } from '/index.js';
 
     const iframe = document.getElementById('app-preview');
     const urlInput = document.getElementById('url-input');
@@ -462,7 +462,7 @@ server.listen(5173, () => {
       const serverJs = getTemplateContent('template-server-js');
 
       if (!node) {
-        node = await BrowserNode.create({
+        node = await Nacelle.create({
           cwd: '/node',
           files: {
             '/node/package.json': packageJson,

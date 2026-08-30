@@ -38,7 +38,7 @@ if (!args.some(a => a.startsWith('--channel='))) {
 }
 
 console.log(`\n======================================================`);
-console.log(`  🚀 Publishing browser-node@${pkgJson.version}`);
+console.log(`  🚀 Publishing nacelle@${pkgJson.version}`);
 console.log(`  Target Node Version:    \x1b[36m${nodeTargetVersion}\x1b[0m`);
 console.log(`  NPM Dist-Tag:           \x1b[36m${distTag}\x1b[0m`);
 console.log(`  Set as 'latest':        \x1b[33m${setLatest}\x1b[0m`);
@@ -64,7 +64,7 @@ if (isDryRun) {
 // 3. Update 'latest' dist-tag if requested
 if (setLatest) {
   console.log(`\nStep 3: Updating 'latest' dist-tag to point to ${pkgJson.version}...`);
-  const tagArgs = ['dist-tag', 'add', `browser-node@${pkgJson.version}`, 'latest'];
+  const tagArgs = ['dist-tag', 'add', `nacelle@${pkgJson.version}`, 'latest'];
   if (isDryRun) {
     console.log(`> npm ${tagArgs.join(' ')} (dry-run skipped)`);
   } else {

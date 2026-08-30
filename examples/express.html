@@ -371,7 +371,7 @@
       </div>
       <div class="brand">
         <span class="status-dot loading" id="status-indicator"></span>
-        browser-node
+        ⚡ nacelle
         <span class="badge">Express Example</span>
       </div>
     </div>
@@ -467,7 +467,7 @@ app.get('/api/info', (req, res) => {
   res.json({
     status: 'ok',
     framework: 'express',
-    runtime: 'browser-node',
+    runtime: 'nacelle',
     uptimeSeconds: Math.floor(process.uptime()),
     timestamp: new Date().toISOString(),
   });
@@ -535,7 +535,7 @@ const server = app.listen(3000, () => {
   </main>
 
   <script type="module">
-    import { BrowserNode } from '/index.js';
+    import { Nacelle } from '/index.js';
 
     const termOutput = document.getElementById('term-output');
     const termNetwork = document.getElementById('term-network');
@@ -644,7 +644,7 @@ const server = app.listen(3000, () => {
       logTerminal('--- Booting Browser Node Runtime ---', 'system');
 
       if (!node) {
-        node = await BrowserNode.create({
+        node = await Nacelle.create({
           cwd: '/node',
           files: {
             '/node/package.json': JSON.stringify({

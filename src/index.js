@@ -8,9 +8,9 @@ import { createBufferClass } from './runtime/buffer.js';
 export { createRuntime, defaultRuntime as runtime, BrowserNpm, BrowserNpmCache, createBrowserNet, createBufferClass, parseScriptCommand };
 
 /**
- * High-level Browser Node.js Runtime Platform
+ * High-level In-Browser Node.js Execution Engine
  */
-export class BrowserNode {
+export class Nacelle {
   /**
    * Helper to register the Service Worker HTTP Gateway
    * @param {string} [swPath='/runtime/gateway-sw.js']
@@ -117,7 +117,7 @@ export class BrowserNode {
       installGatewayBridge({ net: netModule, globalObject });
     }
 
-    const instance = new BrowserNode(runtime, { cwd, env, globalObject });
+    const instance = new Nacelle(runtime, { cwd, env, globalObject });
 
     // Seed initial files if provided
     if (options.files) {
@@ -551,4 +551,4 @@ export class BrowserNode {
   }
 }
 
-export default BrowserNode;
+export default Nacelle;

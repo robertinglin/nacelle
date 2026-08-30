@@ -1,19 +1,19 @@
 {
-  "name": "browser-node",
+  "name": "nacelle",
   "version": "1.0.0",
-  "description": "Full Node.js standard library and runtime executing entirely in the browser via WebAssembly, Web Workers, and Virtual Filesystem",
+  "description": "Self-contained Node.js execution engine and virtual runtime in the browser via WebAssembly, Web Workers, and Virtual Filesystem",
   "keywords": [
-    "node",
-    "browser",
-    "nodejs",
+    "nacelle",
     "webassembly",
     "wasm",
     "vfs",
     "runtime",
     "webcontainer",
-    "in-browser"
+    "in-browser",
+    "nodejs",
+    "sandbox"
   ],
-  "author": "Browser Node Team",
+  "author": "Nacelle Contributors",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -61,6 +61,6 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/robertinglin/browser-node"
+    "url": "https://github.com/robertinglin/nacelle"
   }
 }

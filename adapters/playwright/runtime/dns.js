@@ -601,6 +601,10 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     if (!match) return false;
     const address = match[1].replace(/^\[|\]$/g, '');
     const port = Number(match[2] || 53);
+    const virtualResolver = network?._udpBindings instanceof Map
+      && [...network._udpBindings.values()].some((binding) => binding.port === port
+        && (binding.address === address || binding.address === '0.0.0.0' || binding.address === '::'));
+    if (!proxyIsActive(proxy) && !virtualResolver) return false;
     let settled = false;
     let timer;
     let attempt = 0;

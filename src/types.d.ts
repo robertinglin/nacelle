@@ -13,6 +13,10 @@ export interface NacelleOptions {
   wasmBaseUrl?: string;
   /** Global execution scope */
   globalObject?: any;
+  /** Optional Nacelle+ privileged transport companion */
+  nacellePlus?: boolean | NacellePlusOptions;
+  /** Advanced capability-gated proxy selection */
+  proxy?: any;
 }
 
 export interface NpmProgressEvent {
@@ -62,6 +66,17 @@ export interface BashOptions {
   /** Initial standard input */
   stdin?: string | Uint8Array;
   /** Timeout in milliseconds */
+  timeout?: number;
+}
+
+export interface NacellePlusOptions {
+  /** Extension identifier carried through the page bridge when multiple companions are installed */
+  extensionId?: string;
+  /** Custom request adapter for an embedding-specific privileged transport */
+  adapter?: ((request: any) => Promise<any> | any) | { request(request: any): Promise<any> | any };
+  /** Try ordinary page fetch before using the privileged adapter (default: true) */
+  fallback?: boolean;
+  /** Timeout for page/extension bridge requests in milliseconds */
   timeout?: number;
 }
 
@@ -129,6 +144,7 @@ export class Nacelle {
   readonly rawRuntime: any;
   readonly vfs: any;
   readonly virtualNetwork: any;
+  readonly transport: any;
   readonly fs: {
     readFile(path: string, encoding?: string): Promise<string | Uint8Array>;
     writeFile(path: string, data: string | Uint8Array): Promise<void>;

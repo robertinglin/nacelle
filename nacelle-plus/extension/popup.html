@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Nacelle+ permissions</title>
+    <style>
+      body { min-width: 290px; margin: 16px; font: 14px system-ui, sans-serif; }
+      label, input, button { display: block; width: 100%; box-sizing: border-box; }
+      input, button { margin-top: 6px; padding: 7px; }
+      button { cursor: pointer; }
+      #page { color: #555; overflow-wrap: anywhere; }
+      #status { margin-top: 10px; min-height: 1.2em; }
+    </style>
+  </head>
+  <body>
+    <strong>Nacelle+ transport access</strong>
+    <p id="page">Checking the current page…</p>
+    <form id="grant-form">
+      <label for="target">Target origin</label>
+      <input id="target" type="url" required placeholder="https://api.example.com">
+      <button type="submit">Allow this page and origin</button>
+    </form>
+    <div id="status" role="status"></div>
+    <script src="popup.js"></script>
+  </body>
+</html>

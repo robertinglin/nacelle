@@ -129,6 +129,15 @@ npm run examples:typescript
 
 Each example page includes a navigation menu (☰) at the top to easily switch between examples.
 
+### Optional Nacelle+ transport
+
+For APIs that reject ordinary browser requests because of CORS, the optional
+`nacelle-plus/extension` companion provides a capability-gated HTTP transport
+for Chrome and Firefox. Nacelle remains the only runtime: native page fetch is
+attempted first, and the extension is contacted only after a browser network
+failure. See [`nacelle-plus/README.md`](nacelle-plus/README.md) for setup and
+per-origin permission handling.
+
 ### Inline shell execution
 
 `node.bash(command, options)` runs the supported POSIX shell subset against the virtual filesystem and returns a normal `ProcessHandle`. It supports npm-style command lists, environment assignments, PATH lookup, pipes, redirects, globbing, and common commands including `mv`, `cp`, `ls`, `ps`, `grep`, `cat`, `find`, `cut`, `tr`, `sort`, `uniq`, `tee`, `head`, `tail`, `wc`, `mkdir`, `rm`, and `touch`:

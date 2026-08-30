@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Nacelle+",
+  "version": "0.1.0",
+  "description": "Optional privileged HTTP transport for Nacelle browser runtimes.",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Nacelle+ permissions",
+    "default_popup": "popup.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}

@@ -344,9 +344,16 @@ function hasLocalRecord(records, hostname) {
   return records.has(hostname) || Object.hasOwn(BUILTIN_RECORDS, hostname);
 }
 
+function proxySupports(proxy, operation) {
+  const adapter = proxy?.adapter;
+  return typeof adapter === 'function'
+    || typeof adapter?.[operation] === 'function'
+    || typeof adapter?.handle === 'function';
+}
+
 function proxyIsActive(proxy) {
   return proxy?.mode === 'proxy' && proxy.enabled && proxy.capabilityGranted && proxy.adapter
-    && typeof proxy.resolve === 'function';
+    && proxySupports(proxy, 'resolve');
 }
 
 function normalizeProxyRecords(result, hostname, family = 0) {

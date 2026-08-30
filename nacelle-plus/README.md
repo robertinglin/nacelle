@@ -11,12 +11,27 @@ explicitly granted HTTP transport when a page request is rejected by CORS.
 - page/content-script message bridge with no page code execution in the extension
 - per-page-origin and target-origin permission grants
 - native `fetch` first, extension fetch fallback on browser network failures
-- bounded response bodies and credentials omitted by default
+- manual redirect walking with a fresh grant check for every destination
+- long-lived port streaming with incremental response limits and cancellation
+- bounded request/response bodies and credentials omitted by default
+- inspectable/revocable persistent grants in the extension popup
+- private-network origins require a separate explicit grant
 
 The protocol reserves `connect`, `send`, `resolve`, and credential operations,
-but this first companion release implements HTTP requests only. Raw socket
-bridging and secure credential storage should be added as separately granted
-capabilities when the browser APIs and threat model are settled.
+but this first companion release implements streamed HTTP requests only. Raw
+socket bridging and secure credential storage should be added as separately
+granted capabilities when the browser APIs and threat model are settled.
+
+Request headers controlled by the browser (`Host`, `Origin`, `Referer`,
+`Cookie`, `Content-Length`, connection/proxy headers, and `Set-Cookie`) are
+rejected. `Authorization` may be supplied explicitly for the initially
+granted origin and is removed when a redirect crosses origins. Response
+`Set-Cookie` headers are never exposed.
+
+The service worker is kept active during long transfers by a content-script
+heartbeat and one-chunk-at-a-time acknowledgements. If Chrome or Firefox still
+disconnects the port, the in-flight request is cancelled rather than replayed;
+the page may issue a new request, avoiding duplicate POSTs.
 
 ## Install for development
 
@@ -44,10 +59,15 @@ const node = await Nacelle.create({
     extensionId: 'your-extension-id',
     fallback: true,
   },
+  proxy: { mode: 'proxy', enabled: true, capability: { proxy: true } },
 });
 ```
 
 When `nacellePlus` is enabled, Nacelle selects its existing capability-gated
-proxy path. The negotiated adapter tries the ordinary page fetch first and
-uses the extension only after that fetch rejects with a browser network
-failure. No extension is contacted for requests that already work normally.
+proxy path only when the Nacelle capability is explicitly granted. The
+extension's browser host permission and Nacelle's run-scoped capability are
+separate checks. The negotiated adapter tries the ordinary page fetch first and uses the
+extension only after that fetch rejects with a browser network failure. No
+extension is contacted for requests that already work normally. Grants are
+persistent until revoked from the extension popup; private-network targets
+need a separate explicit checkbox grant.

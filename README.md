@@ -135,8 +135,10 @@ For APIs that reject ordinary browser requests because of CORS, the optional
 `nacelle-plus/extension` companion provides a capability-gated HTTP transport
 for Chrome and Firefox. Nacelle remains the only runtime: native page fetch is
 attempted first, and the extension is contacted only after a browser network
-failure. See [`nacelle-plus/README.md`](nacelle-plus/README.md) for setup and
-per-origin permission handling.
+failure. The Nacelle run must explicitly grant its proxy capability; the
+extension's per-origin permission is a separate check. See
+[`nacelle-plus/README.md`](nacelle-plus/README.md) for setup, streaming, and
+permission handling.
 
 ### Inline shell execution
 

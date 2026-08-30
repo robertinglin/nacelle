@@ -18,9 +18,12 @@
     <form id="grant-form">
       <label for="target">Target origin</label>
       <input id="target" type="url" required placeholder="https://api.example.com">
+      <label><input id="allow-private" type="checkbox"> Allow private-network target</label>
       <button type="submit">Allow this page and origin</button>
     </form>
     <div id="status" role="status"></div>
+    <h3>Saved grants</h3>
+    <div id="grants">Loading…</div>
     <script src="popup.js"></script>
   </body>
 </html>

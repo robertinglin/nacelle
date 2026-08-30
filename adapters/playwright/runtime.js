@@ -152,7 +152,7 @@ const BUILTIN_NAMES = Object.freeze([
   'sea', 'sqlite', 'test/reporters', '_http_common', '_http_outgoing', 'trace_events',
   'internal/event_target', 'internal/async_context_frame', 'internal/async_hooks', 'internal/test/binding', 'internal/test/transfer',
   'internal/bootstrap/realm', 'internal/modules/cjs/loader', 'internal/modules/esm/utils', 'internal/vm/module',
-  'internal/util', 'internal/util/debuglog', 'internal/util/types', 'internal/options', 'internal/dgram',
+  'internal/util', 'internal/util/debuglog', 'internal/util/types', 'internal/options', 'internal/dgram', 'internal/crypto/x509',
 ]);
 
 function builtinName(name) {
@@ -5443,6 +5443,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     });
     const dgram = createBrowserDgram({
       network: virtualNetwork,
+      dns,
       BufferClass: Buffer,
       trackTask,
       diagnostics: () => scope.__BNH_DIAGNOSTICS__,
@@ -7197,6 +7198,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           };
           const registeredMock = moduleMockFor(entryPath);
           if (registeredMock?.active) return registeredMock.getCjsValue();
+          if (x509Module && entryPath === '/node/lib/internal/crypto/x509.js') return x509Module;
           if (entryPath.endsWith('.node')) rejectNativeAddon(entryPath, processObj);
           const env = processObj?.env || {};
           const debugNative = env.NODE_DEBUG_NATIVE || '';
@@ -8974,6 +8976,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         }
       },
     };
+    let x509Module = null;
     const builtins = makeBuiltins(
       processObject,
       (name, importer = entry) => loadModule(name, importer),
@@ -8994,6 +8997,12 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       });
     }
     builtins.sys = builtins.util;
+    x509Module = Object.freeze({
+      X509Certificate: builtins.crypto.X509Certificate,
+      InternalX509Certificate: builtins.crypto.X509Certificate,
+      isX509Certificate: (value) => value instanceof builtins.crypto.X509Certificate,
+    });
+    builtins['internal/crypto/x509'] = x509Module;
     processObject.getBuiltinModule = function getBuiltinModule(id) {
       if (typeof id !== 'string') throw moduleArgumentTypeError('id', 'of type string', id);
       const name = builtinName(id);
@@ -9329,6 +9338,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       const mock = moduleMockFor(specifier, importer);
       if (mock?.active) return mock.getCjsValue();
       const shimPath = String(specifier).startsWith('file:') ? fileURLToPath(specifier) : specifier;
+      if (x509Module && shimPath === '/node/lib/internal/crypto/x509.js') return x509Module;
       if (String(specifier).startsWith('data:text/javascript')) {
         const dataPath = String(specifier);
         const comma = dataPath.indexOf(',');

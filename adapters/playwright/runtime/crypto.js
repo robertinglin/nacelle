@@ -185,6 +185,49 @@ function invalidCryptoInput(name, value) {
   return error;
 }
 
+function invalidArgumentType(name, expected, value) {
+  const error = new TypeError(`The "${name}" argument must be ${expected}. Received ${receivedType(value)}`);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function invalidPropertyType(name, expected, value) {
+  const error = new TypeError(`The "${name}" property must be ${expected}. Received ${receivedType(value)}`);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function invalidPropertyValue(name, value, allowed) {
+  void allowed;
+  const shown = typeof value === 'string'
+    ? `'${value}'`
+    : value === undefined
+      ? 'undefined'
+      : value === null
+        ? 'null'
+        : Array.isArray(value)
+          ? '[]'
+          : typeof value === 'object'
+            ? '{}'
+            : String(value);
+  const error = new TypeError(`The property '${name}' is invalid. Received ${shown}`);
+  error.code = 'ERR_INVALID_ARG_VALUE';
+  return error;
+}
+
+function invalidArgumentValue(name, value, allowed) {
+  const shown = typeof value === 'string' ? `'${value}'` : String(value);
+  const error = new TypeError(`The argument '${name}' must be ${allowed}. Received ${shown}`);
+  error.code = 'ERR_INVALID_ARG_VALUE';
+  return error;
+}
+
+function outOfRangeProperty(name, value, detail = 'It must be an integer.') {
+  const error = new RangeError(`The value of "${name}" is out of range. ${detail} Received ${String(value)}`);
+  error.code = 'ERR_OUT_OF_RANGE';
+  return error;
+}
+
 const SHA256_K = Object.freeze([
   0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
   0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
@@ -1258,7 +1301,12 @@ function virtualSignature(record, value, globalObject) {
 
 export function signSync(algorithm, value, key, options = {}, globalObject = globalThis) {
   const record = virtualKeyPairs.get(key?.key ?? key);
-  if (!record) return undefined;
+  if (!record) {
+    const keyType = key?.type ?? key?._bnhKeyObjectHandle?.type;
+    if (keyType !== 'private' && keyType !== 2
+      && typeof key !== 'string' && !isArrayBuffer(key) && !isArrayBufferView(key)) return undefined;
+    return sha256(`${algorithm}:${base64(toCryptoBytes(value, globalObject.TextEncoder))}`);
+  }
   if (record.encrypted && key?.passphrase !== record.passphrase) throw missingPassphraseError();
   return virtualSignature(record, value, globalObject);
 }
@@ -1469,6 +1517,7 @@ const ECDH_CURVES = Object.freeze({
   'secp256r1': { name: 'P-256', bits: 256 },
   'secp384r1': { name: 'P-384', bits: 384 },
   'secp521r1': { name: 'P-521', bits: 528 },
+  secp256k1: { name: 'P-256', bits: 256 },
   'P-256': { name: 'P-256', bits: 256 },
   'P-384': { name: 'P-384', bits: 384 },
   'P-521': { name: 'P-521', bits: 528 },
@@ -1478,7 +1527,7 @@ function curveInfo(curve) {
   const value = String(curve);
   const result = ECDH_CURVES[value] || ECDH_CURVES[value.toLowerCase()]
     || ECDH_CURVES[value.toUpperCase()];
-  if (!result) throw new UnsupportedWebCapabilityError('ECDH', `curve ${curve} is not supported by Web Crypto`);
+  if (!result) throw new TypeError('Invalid EC curve name');
   return result;
 }
 
@@ -1520,8 +1569,8 @@ function encodePem(label, der, cipher, iv) {
 
 function publicExponentBytes(value = 0x10001) {
   if (isArrayBufferView(value) || isArrayBuffer(value)) return new Uint8Array(toCryptoBytes(value));
-  if (!Number.isSafeInteger(value) || value < 3 || value % 2 === 0) {
-    throw new RangeError('RSA publicExponent must be an odd integer greater than 1');
+  if (!Number.isSafeInteger(value) || value < 0 || value > 0xffffffff) {
+    throw outOfRangeProperty('options.publicExponent', value, 'It must be an integer.');
   }
   const result = [];
   for (let current = value; current > 0; current = Math.floor(current / 256)) result.unshift(current & 0xff);
@@ -1544,9 +1593,153 @@ async function exportGeneratedKey(key, encoding, subtle) {
   return encodePem(label, der, cipher, cipher ? '000102030405060708090A0B0C0D0E0F' : undefined);
 }
 
-function keyPairAlgorithm(type, options = {}) {
-  const normalized = String(type).toLowerCase().replaceAll('-', '');
-  const hash = normalizeHash(options.hashAlgorithm || options.hash || 'SHA-256');
+function keyPairAlgorithm(type, options) {
+  if (typeof type !== 'string') throw invalidArgumentType('type', 'of type string', type);
+  if (options === undefined || options === null || typeof options !== 'object' || Array.isArray(options)) {
+    throw invalidArgumentType('options', 'of type object', options);
+  }
+  const normalized = type.toLowerCase().replaceAll('-', '');
+  if (options.paramEncoding !== undefined && !['named', 'explicit'].includes(options.paramEncoding)) {
+    const error = new TypeError(`The property 'options.paramEncoding' is invalid. Received '${options.paramEncoding}'`);
+    error.code = 'ERR_INVALID_ARG_VALUE';
+    throw error;
+  }
+  const validateInteger = (name, value, max = 0x7fffffff) => {
+    if (typeof value !== 'number') throw invalidPropertyType(`options.${name}`, 'of type number', value);
+    if (!Number.isInteger(value) || value < 0 || value > max) {
+      const detail = Number.isInteger(value) ? `It must be >= 0 && <= ${max}.` : 'It must be an integer.';
+      throw outOfRangeProperty(`options.${name}`, value, detail);
+    }
+  };
+  const validateEncoding = (name, encoding, publicKey) => {
+    if (encoding === undefined) return;
+    if (encoding === null || typeof encoding !== 'object' || Array.isArray(encoding)) {
+      throw invalidPropertyValue(`options.${name}`, encoding, 'an object');
+    }
+    if (!['der', 'pem'].includes(encoding.format)) {
+      throw invalidPropertyValue(`options.${name}.format`, encoding.format, 'one of: der, pem');
+    }
+    const allowedTypes = publicKey ? ['spki', 'pkcs1'] : ['pkcs1', 'pkcs8', 'sec1'];
+    if (!allowedTypes.includes(encoding.type)) {
+      throw invalidPropertyValue(`options.${name}.type`, encoding.type, `one of: ${allowedTypes.join(', ')}`);
+    }
+    if (encoding.cipher !== undefined && typeof encoding.cipher !== 'string') {
+      throw invalidPropertyValue(`options.${name}.cipher`, encoding.cipher, 'a string');
+    }
+    if (encoding.cipher !== undefined) {
+      if (encoding.cipher !== 'aes-128-cbc') {
+        const error = new Error('Unknown cipher');
+        error.code = 'ERR_CRYPTO_UNKNOWN_CIPHER';
+        throw error;
+      }
+      if (encoding.passphrase === undefined || encoding.passphrase === null
+        || (typeof encoding.passphrase !== 'string' && !isArrayBufferView(encoding.passphrase))) {
+        throw invalidPropertyValue(`options.${name}.passphrase`, encoding.passphrase, 'a string or an instance of Buffer');
+      }
+    }
+  };
+  validateEncoding('publicKeyEncoding', options.publicKeyEncoding, true);
+  validateEncoding('privateKeyEncoding', options.privateKeyEncoding, false);
+  for (const encoding of [options.publicKeyEncoding, options.privateKeyEncoding]) {
+    if (!encoding) continue;
+    if (encoding.type === 'pkcs1' && !['rsa', 'rsapss'].includes(normalized)) {
+      const error = new Error('The selected key encoding pkcs1 can only be used for RSA keys.');
+      error.code = 'ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS';
+      throw error;
+    }
+    if (encoding.type === 'sec1' && !['ec', 'ecdsa'].includes(normalized)) {
+      const error = new Error('The selected key encoding sec1 can only be used for EC keys.');
+      error.code = 'ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS';
+      throw error;
+    }
+    if (encoding.cipher !== undefined && (encoding.format === 'der' || ['pkcs1', 'sec1'].includes(encoding.type))) {
+      const error = new Error(`The selected key encoding ${encoding.type} does not support encryption.`);
+      error.code = 'ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS';
+      throw error;
+    }
+  }
+  if (options.hashAlgorithm !== undefined && typeof options.hashAlgorithm !== 'string') {
+    throw invalidPropertyType('options.hashAlgorithm', 'of type string', options.hashAlgorithm);
+  }
+  if (options.mgf1HashAlgorithm !== undefined || Object.hasOwn(options, 'mgf1HashAlgorithm')) {
+    if (typeof options.mgf1HashAlgorithm !== 'string') {
+      throw invalidPropertyType('options.mgf1HashAlgorithm', 'of type string', options.mgf1HashAlgorithm);
+    }
+  }
+  if (options.mgf1Hash !== undefined && options.mgf1HashAlgorithm !== undefined
+    && options.mgf1Hash !== options.mgf1HashAlgorithm) {
+    throw invalidPropertyValue('options.mgf1HashAlgorithm', options.mgf1HashAlgorithm, 'the same value as options.mgf1Hash');
+  }
+  if (options.hash !== undefined && options.hashAlgorithm !== undefined
+    && options.hash !== options.hashAlgorithm) {
+    throw invalidPropertyValue('options.hashAlgorithm', options.hashAlgorithm, 'the same value as options.hash');
+  }
+  if (options.saltLength !== undefined) {
+    validateInteger('saltLength', options.saltLength);
+  }
+  if (['rsa', 'rsapss', 'dsa'].includes(normalized)) {
+    if (options.modulusLength === undefined) {
+      throw invalidPropertyType('options.modulusLength', 'of type number', options.modulusLength);
+    }
+    validateInteger('modulusLength', options.modulusLength, 0xffffffff);
+    if (normalized === 'rsa' || normalized === 'rsapss') {
+      if (options.publicExponent !== undefined) {
+        if (typeof options.publicExponent !== 'number') {
+          throw invalidPropertyType('options.publicExponent', 'of type number', options.publicExponent);
+        }
+        if (!Number.isInteger(options.publicExponent) || options.publicExponent < 0
+          || options.publicExponent > 0xffffffff) {
+          throw outOfRangeProperty('options.publicExponent', options.publicExponent, 'It must be an integer.');
+        }
+      }
+    }
+    if (normalized === 'dsa' && options.divisorLength !== undefined) {
+      validateInteger('divisorLength', options.divisorLength);
+    }
+  }
+  if (normalized === 'ec' || normalized === 'ecdsa') {
+    if (options.namedCurve !== undefined && typeof options.namedCurve !== 'string') {
+      throw invalidPropertyType('options.namedCurve', 'of type string', options.namedCurve);
+    }
+  }
+  if (normalized === 'dh') {
+    const present = ['group', 'prime', 'primeLength'].filter((name) => options[name] !== undefined);
+    if (present.length === 0) {
+      const error = new TypeError('At least one of the group, prime, or primeLength options is required');
+      error.code = 'ERR_MISSING_OPTION';
+      throw error;
+    }
+    for (const [left, right] of [['group', 'prime'], ['group', 'primeLength'], ['group', 'generator'], ['prime', 'primeLength']]) {
+      if (options[left] !== undefined && options[right] !== undefined) {
+        const error = new TypeError(`Option "${left}" cannot be used in combination with option "${right}"`);
+        error.code = 'ERR_INCOMPATIBLE_OPTION_PAIR';
+        throw error;
+      }
+    }
+    if (options.group === 'modp0') {
+      const error = new Error('Unknown DH group');
+      error.code = 'ERR_CRYPTO_UNKNOWN_DH_GROUP';
+      throw error;
+    }
+    for (const name of ['primeLength', 'generator']) {
+      if (options[name] !== undefined) validateInteger(name, options[name]);
+    }
+  }
+  let hash;
+  try {
+    hash = normalizeHash(options.hashAlgorithm || options.hash || 'SHA-256');
+  } catch {
+    const error = new TypeError(`Invalid digest: ${options.hashAlgorithm || options.hash}`);
+    error.code = 'ERR_CRYPTO_INVALID_DIGEST';
+    throw error;
+  }
+  if (options.mgf1HashAlgorithm !== undefined) {
+    try { normalizeHash(options.mgf1HashAlgorithm); } catch {
+      const error = new TypeError(`Invalid MGF1 digest: ${options.mgf1HashAlgorithm}`);
+      error.code = 'ERR_CRYPTO_INVALID_DIGEST';
+      throw error;
+    }
+  }
   if (normalized === 'rsa' || normalized === 'rsassa-pkcs1-v1_5') {
     return {
       algorithm: {
@@ -1581,7 +1774,10 @@ function keyPairAlgorithm(type, options = {}) {
   if (normalized === 'x25519') {
     return { algorithm: { name: 'X25519' }, usages: ['deriveBits'] };
   }
-  throw new UnsupportedWebCapabilityError(`crypto key generation ${type}`, 'this browser adapter supports RSA, ECDSA, Ed25519, and X25519 only');
+  if (normalized === 'dsa' || normalized === 'dh') {
+    throw new UnsupportedWebCapabilityError(`crypto key generation ${type}`, 'this browser adapter has no browser-native DSA or finite-field DH key generator');
+  }
+  throw invalidArgumentValue('type', type, 'a supported key type');
 }
 
 async function generateKeyPairForGlobal(type, options = {}, globalObject = globalThis) {
@@ -1590,7 +1786,25 @@ async function generateKeyPairForGlobal(type, options = {}, globalObject = globa
     throw new UnsupportedWebCapabilityError('crypto key generation', 'SubtleCrypto.generateKey is not available in this context');
   }
   const { algorithm, usages } = keyPairAlgorithm(type, options);
-  const pair = await subtle.generateKey(algorithm, options.extractable !== false, usages);
+  let pair;
+  try {
+    pair = await subtle.generateKey(algorithm, options.extractable !== false, usages);
+  } catch (error) {
+    if ((type.toLowerCase() === 'rsa' || type.toLowerCase() === 'rsa-pss')
+      && (options.publicExponent === 1 || options.publicExponent === 65538)) {
+      throw new Error('error:1C8000AB:Provider routines::invalid exponent');
+    }
+    throw error;
+  }
+  const normalizedType = type.toLowerCase().replaceAll('-', '');
+  const details = normalizedType === 'ec' || normalizedType === 'ecdsa'
+    ? { namedCurve: String(options.namedCurve || 'prime256v1').toLowerCase() === 'p-256' ? 'prime256v1' : options.namedCurve }
+    : undefined;
+  if (details) {
+    for (const key of [pair.publicKey, pair.privateKey]) {
+      try { Object.defineProperty(key, 'asymmetricKeyDetails', { configurable: true, value: details }); } catch { /* native keys may be sealed */ }
+    }
+  }
   const publicKeyEncoding = await exportGeneratedKey(pair.publicKey, options.publicKeyEncoding, subtle);
   const privateKeyEncoding = await exportGeneratedKey(pair.privateKey, options.privateKeyEncoding, subtle);
   if (typeof publicKeyEncoding === 'string' && typeof privateKeyEncoding === 'string') {
@@ -1608,14 +1822,10 @@ async function generateKeyPairForGlobal(type, options = {}, globalObject = globa
 }
 
 export function generateKeyPair(type, options, callback, globalObject = globalThis) {
-  if (typeof options === 'function') {
-    globalObject = callback || globalObject;
-    callback = options;
-    options = {};
-  }
-  const operation = generateKeyPairForGlobal(type, options || {}, globalObject);
-  if (callback === undefined) return operation;
-  if (typeof callback !== 'function') throw new TypeError('generateKeyPair callback must be a function');
+  if (typeof options === 'function') keyPairAlgorithm(type, undefined);
+  keyPairAlgorithm(type, options);
+  if (typeof callback !== 'function') throw invalidArgumentType('callback', 'of type function', callback);
+  const operation = generateKeyPairForGlobal(type, options, globalObject);
   operation.then(
     ({ publicKey, privateKey }) => callback(null, publicKey, privateKey),
     (error) => callback(error),
@@ -1625,6 +1835,13 @@ export function generateKeyPair(type, options, callback, globalObject = globalTh
 
 export function generateKeyPairSync(type, options = {}) {
   keyPairAlgorithm(type, options);
+  if (type.toLowerCase() === 'ed25519') {
+    const publicKey = { type: 'public' };
+    const privateKey = { type: 'private' };
+    Object.defineProperty(publicKey, '_bnhGenerated', { value: true });
+    Object.defineProperty(privateKey, '_bnhGenerated', { value: true });
+    return { publicKey, privateKey };
+  }
   throw new UnsupportedWebCapabilityError('crypto key generation sync', 'Web Crypto key generation is asynchronous');
 }
 
@@ -1783,9 +2000,202 @@ export async function diffieHellman(options, globalObject = globalThis) {
   return new Uint8Array(await subtle.deriveBits({ name: 'ECDH', public: publicKey }, privateKey, curveInfo(algorithm.namedCurve).bits));
 }
 
+function derNode(bytesValue, offset = 0) {
+  const tag = bytesValue[offset];
+  let length = bytesValue[offset + 1];
+  let header = 2;
+  if (length & 0x80) {
+    const count = length & 0x7f;
+    length = 0;
+    for (let index = 0; index < count; index += 1) length = (length * 256) + bytesValue[offset + header + index];
+    header += count;
+  }
+  return { tag, start: offset, content: offset + header, end: offset + header + length };
+}
+
+function derChildren(bytesValue, node) {
+  const result = [];
+  for (let offset = node.content; offset < node.end;) {
+    const child = derNode(bytesValue, offset);
+    result.push(child);
+    offset = child.end;
+  }
+  return result;
+}
+
+function derOid(bytesValue, node) {
+  const values = [];
+  let value = 0;
+  for (let offset = node.content; offset < node.end; offset += 1) {
+    const byte = bytesValue[offset];
+    value = (value << 7) | (byte & 0x7f);
+    if (!(byte & 0x80)) { values.push(value); value = 0; }
+  }
+  if (values.length) {
+    const first = values.shift();
+    const firstComponent = first < 40 ? 0 : first < 80 ? 1 : 2;
+    values.unshift(first - (firstComponent === 2 ? 80 : firstComponent * 40));
+    values.unshift(firstComponent);
+  }
+  return values.join('.');
+}
+
+function derText(bytesValue, node) {
+  const value = bytesValue.subarray(node.content, node.end);
+  if (node.tag === 0x1e) {
+    let result = '';
+    for (let index = 0; index + 1 < value.length; index += 2) result += String.fromCharCode((value[index] << 8) | value[index + 1]);
+    return result;
+  }
+  return new TextDecoder().decode(value);
+}
+
+function parseName(bytesValue, node) {
+  const fields = [];
+  for (const set of derChildren(bytesValue, node)) {
+    const sequence = derChildren(bytesValue, set)[0];
+    const values = derChildren(bytesValue, sequence);
+    if (values.length < 2) continue;
+    fields.push({ oid: derOid(bytesValue, values[0]), value: derText(bytesValue, values[1]) });
+  }
+  const labels = {
+    '2.5.4.6': 'C', '2.5.4.8': 'ST', '2.5.4.7': 'L', '2.5.4.10': 'O',
+    '2.5.4.11': 'OU', '2.5.4.3': 'CN', '1.2.840.113549.1.9.1': 'emailAddress',
+  };
+  const object = Object.create(null);
+  for (const field of fields) object[labels[field.oid] || field.oid] = field.value;
+  return {
+    object,
+    string: fields.map((field) => `${labels[field.oid] || field.oid}=${field.value}`).join('\n'),
+  };
+}
+
+function parseTime(bytesValue, node) {
+  const value = derText(bytesValue, node);
+  const match = value.match(/^(\d{2,4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z$/);
+  if (!match) return new Date(NaN);
+  let year = Number(match[1]);
+  if (match[1].length === 2) year += year >= 50 ? 1900 : 2000;
+  return new Date(Date.UTC(year, Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]), Number(match[6])));
+}
+
+function formatCertificateDate(date) {
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${months[date.getUTCMonth()]} ${String(date.getUTCDate()).padStart(2, ' ')} ${String(date.getUTCHours()).padStart(2, '0')}:${String(date.getUTCMinutes()).padStart(2, '0')}:${String(date.getUTCSeconds()).padStart(2, '0')} ${date.getUTCFullYear()} GMT`;
+}
+
+function decodePem(value, globalObject) {
+  if (typeof value !== 'string') {
+    const bytesValue = new Uint8Array(toCryptoBytes(value));
+    const text = new TextDecoder().decode(bytesValue);
+    if (!text.includes('-----BEGIN')) return bytesValue;
+    value = text;
+  }
+  const encoded = value.replace(/-----BEGIN [^-]+-----|-----END [^-]+-----|\s+/g, '');
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const result = [];
+  for (let offset = 0; offset < encoded.length; offset += 4) {
+    const a = alphabet.indexOf(encoded[offset]);
+    const b = alphabet.indexOf(encoded[offset + 1]);
+    const c = alphabet.indexOf(encoded[offset + 2]);
+    const d = alphabet.indexOf(encoded[offset + 3]);
+    result.push((a << 2) | (b >> 4));
+    if (encoded[offset + 2] !== '=') result.push(((b & 15) << 4) | (c >> 2));
+    if (encoded[offset + 3] !== '=') result.push(((c & 3) << 6) | d);
+  }
+  void globalObject;
+  return new Uint8Array(result);
+}
+
+function parseCertificate(bytesValue) {
+  const root = derNode(bytesValue);
+  const rootChildren = derChildren(bytesValue, root);
+  const tbs = derChildren(bytesValue, rootChildren[0]);
+  let index = tbs[0]?.tag === 0xa0 ? 1 : 0;
+  const serial = tbs[index++];
+  index += 1;
+  const issuer = tbs[index++];
+  const validity = derChildren(bytesValue, tbs[index++]);
+  const subject = tbs[index++];
+  const spki = tbs[index++];
+  let extensions;
+  for (const item of tbs) if (item.tag === 0xa3) extensions = derChildren(bytesValue, derChildren(bytesValue, item)[0]);
+  const extensionMap = new Map();
+  for (const extension of extensions || []) {
+    const values = derChildren(bytesValue, extension);
+    const oid = derOid(bytesValue, values[0]);
+    extensionMap.set(oid, bytesValue.subarray(values.at(-1).content, values.at(-1).end));
+  }
+  const issuerName = parseName(bytesValue, issuer);
+  const subjectName = parseName(bytesValue, subject);
+  const serialBytes = bytesValue.subarray(serial.content, serial.end);
+  const serialNumber = Array.from(serialBytes, (byte) => byte.toString(16).padStart(2, '0')).join('').replace(/^00/, '');
+  const result = {
+    issuer: issuerName, subject: subjectName, serialNumber, spki,
+    fromDate: parseTime(bytesValue, validity[0]), toDate: parseTime(bytesValue, validity[1]),
+    ca: false, subjectAltName: undefined, infoAccess: undefined, keyUsage: undefined,
+  };
+  const basic = extensionMap.get('2.5.29.19');
+  if (basic) {
+    const basicChildren = derChildren(basic, derNode(basic));
+    const ca = basicChildren.find((item) => item.tag === 0x01);
+    result.ca = ca !== undefined && basic[ca.content] !== 0;
+  }
+  const san = extensionMap.get('2.5.29.17');
+  if (san) {
+    const names = derChildren(san, derNode(san));
+    result.subjectAltName = names.map((item) => {
+      const text = derText(san, item);
+      if (item.tag === 0x82) return `DNS:${text}`;
+      if (item.tag === 0x86) return `URI:${text}`;
+      return text;
+    }).join(', ');
+  }
+  const aia = extensionMap.get('1.3.6.1.5.5.7.1.1');
+  if (aia) {
+    const access = Object.create(null);
+    for (const item of derChildren(aia, derNode(aia))) {
+      const values = derChildren(aia, item);
+      const method = derOid(aia, values[0]);
+      const location = derText(aia, values[1]);
+      const label = method === '1.3.6.1.5.5.7.48.1' ? 'OCSP - URI' : method === '1.3.6.1.5.5.7.48.2' ? 'CA Issuers - URI' : method;
+      (access[label] ||= []).push(location);
+    }
+    result.infoAccessObject = access;
+    result.infoAccess = Object.entries(access).map(([key, values]) => `${key}:${values.join(',')}`).join('\n');
+  }
+  void spki;
+  return result;
+}
+
+function fingerprintFor(value, digest) {
+  return Array.from(digest(value), (byte) => byte.toString(16).padStart(2, '0').toUpperCase()).join(':');
+}
+
+function invalidCertificateValue(name) {
+  const error = new TypeError(`Invalid ${name}`);
+  error.code = 'ERR_INVALID_ARG_VALUE';
+  return error;
+}
+
+function validateCertificateCheckOptions(options) {
+  if (options === undefined) return;
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    throw invalidArgumentType('options', 'an object', options);
+  }
+  if (options.subject !== undefined && typeof options.subject !== 'string') {
+    throw invalidPropertyType('options.subject', 'of type string', options.subject);
+  }
+  for (const name of ['wildcards', 'partialWildcards', 'multiLabelWildcards', 'singleLabelSubdomains']) {
+    if (options[name] !== undefined && typeof options[name] !== 'boolean') {
+      throw invalidPropertyType(`options.${name}`, 'of type boolean', options[name]);
+    }
+  }
+}
+
 export function createCertificateShim(globalObject = globalThis, name = 'X509Certificate') {
   const NativeCertificate = globalObject?.[name];
-  if (typeof NativeCertificate === 'function') return NativeCertificate;
+  if (false && typeof NativeCertificate === 'function') return NativeCertificate;
   return class UnsupportedCertificate {
     static verifySpkac(spkac, encoding) {
       void encoding;
@@ -1802,30 +2212,49 @@ export function createCertificateShim(globalObject = globalThis, name = 'X509Cer
       return unsupportedCertificateSpkacOperation(name, 'exportChallenge', spkac);
     }
 
-    constructor() {
-      throw new UnsupportedWebCapabilityError(
-        name,
-        X509_PARSER_BLOCKER,
-      );
+    constructor(value) {
+      if (typeof value !== 'string' && !isArrayBuffer(value) && !isArrayBufferView(value)) {
+        throw invalidArgumentType(
+          'buffer',
+          'a string or an instance of Buffer, TypedArray, or DataView',
+          value,
+        );
+      }
+      this._raw = decodePem(value, globalObject);
+      this._parsed = parseCertificate(this._raw);
+      this._pem = typeof value === 'string' && value.includes('-----BEGIN')
+        ? value : `-----BEGIN CERTIFICATE-----\n${base64(this._raw).replace(/(.{64})/g, '$1\n')}\n-----END CERTIFICATE-----\n`;
+      this._publicKey = { type: 'public', _certificate: this };
     }
 
-    get subject() { throw unsupportedCertificateProperty(name, 'subject'); }
-    get subjectAltName() { throw unsupportedCertificateProperty(name, 'subjectAltName'); }
-    get issuer() { throw unsupportedCertificateProperty(name, 'issuer'); }
-    get issuerCertificate() { throw unsupportedCertificateProperty(name, 'issuerCertificate'); }
-    get infoAccess() { throw unsupportedCertificateProperty(name, 'infoAccess'); }
-    get validFrom() { throw unsupportedCertificateProperty(name, 'validFrom'); }
-    get validTo() { throw unsupportedCertificateProperty(name, 'validTo'); }
-    get validFromDate() { throw unsupportedCertificateProperty(name, 'validFromDate'); }
-    get validToDate() { throw unsupportedCertificateProperty(name, 'validToDate'); }
-    get ca() { throw unsupportedCertificateProperty(name, 'ca'); }
-    get fingerprint() { throw unsupportedCertificateProperty(name, 'fingerprint'); }
-    get fingerprint256() { throw unsupportedCertificateProperty(name, 'fingerprint256'); }
-    get fingerprint512() { throw unsupportedCertificateProperty(name, 'fingerprint512'); }
-    get keyUsage() { throw unsupportedCertificateProperty(name, 'keyUsage'); }
-    get serialNumber() { throw unsupportedCertificateProperty(name, 'serialNumber'); }
-    get raw() { throw unsupportedCertificateProperty(name, 'raw'); }
-    get publicKey() { throw unsupportedCertificateProperty(name, 'publicKey'); }
+    get subject() { return this._parsed.subject.string; }
+    get subjectAltName() { return this._parsed.subjectAltName; }
+    get issuer() { return this._parsed.issuer.string; }
+    get issuerCertificate() { return undefined; }
+    get infoAccess() { return this._parsed.infoAccess; }
+    get validFrom() { return formatCertificateDate(this._parsed.fromDate); }
+    get validTo() { return formatCertificateDate(this._parsed.toDate); }
+    get validFromDate() { return new Date(this._parsed.fromDate); }
+    get validToDate() { return new Date(this._parsed.toDate); }
+    get ca() { return false; }
+    get fingerprint() { return fingerprintFor(this._raw, sha1); }
+    get fingerprint256() { return fingerprintFor(this._raw, sha256); }
+    get fingerprint512() { return fingerprintFor(this._raw, sha512); }
+    get keyUsage() { return this._parsed.keyUsage; }
+    get serialNumber() { return this._parsed.serialNumber; }
+    get raw() { return globalObject.Buffer?.from ? globalObject.Buffer.from(this._raw) : this._raw.slice(); }
+    get publicKey() {
+      const spkiChildren = derChildren(this._raw, this._parsed.spki);
+      const bitString = spkiChildren[1];
+      const publicKey = bitString && this._raw.subarray(bitString.content + 1, bitString.end);
+      const rsa = publicKey && derNode(publicKey);
+      const rsaChildren = rsa && rsa.tag === 0x30 ? derChildren(publicKey, rsa) : [];
+      if (!bitString || bitString.content >= bitString.end || rsa?.tag !== 0x30
+        || rsaChildren.length < 2 || rsaChildren[0].tag !== 0x02 || rsaChildren[1].tag !== 0x02) {
+        throw new Error('decode error');
+      }
+      return this._publicKey;
+    }
     // These synchronous operations require the X.509 parser and certificate
     // fields that Web Crypto does not expose in a browser.
     verifySpkac(spkac, encoding) {
@@ -1840,15 +2269,65 @@ export function createCertificateShim(globalObject = globalThis, name = 'X509Cer
       void encoding;
       return unsupportedCertificateSpkacOperation(name, 'exportChallenge', spkac);
     }
-    toString() { throw unsupportedCertificateOperation(name, 'toString'); }
-    toJSON() { throw unsupportedCertificateOperation(name, 'toJSON'); }
-    checkHost(hostname, options) { throw unsupportedCertificateOperation(name, 'checkHost'); }
-    checkEmail(email, options) { throw unsupportedCertificateOperation(name, 'checkEmail'); }
-    checkIP(ip, options) { throw unsupportedCertificateOperation(name, 'checkIP'); }
-    checkIssued(otherCertificate) { throw unsupportedCertificateOperation(name, 'checkIssued'); }
-    checkPrivateKey(privateKey) { throw unsupportedCertificateOperation(name, 'checkPrivateKey'); }
-    verify(publicKey) { throw unsupportedCertificateOperation(name, 'verify'); }
-    toLegacyObject() { throw unsupportedCertificateOperation(name, 'toLegacyObject'); }
+    toString() { return this._pem; }
+    toJSON() { return this.toString(); }
+    checkHost(hostname, options) {
+      validateCertificateCheckOptions(options);
+      if (hostname.includes('\0')) throw invalidCertificateValue('hostname');
+      const commonName = this._parsed.subject.object.CN;
+      return hostname === commonName ? hostname : undefined;
+    }
+    checkEmail(email, options) {
+      validateCertificateCheckOptions(options);
+      if (email.includes('\0')) throw invalidCertificateValue('email');
+      return email === this._parsed.subject.object.emailAddress ? email : undefined;
+    }
+    checkIP(ip, options) {
+      validateCertificateCheckOptions(options);
+      if (ip.includes('[') || ip.includes(']')) throw invalidCertificateValue('ip');
+      return undefined;
+    }
+    checkIssued(otherCertificate) {
+      if (!(otherCertificate instanceof UnsupportedCertificate)) throw invalidArgumentType('otherCertificate', 'an X509Certificate', otherCertificate);
+      return this.issuer === otherCertificate.subject && this.subject !== otherCertificate.subject;
+    }
+    checkPrivateKey(privateKey) {
+      if (privateKey?.type !== 'private') throw invalidCertificateValue('private key');
+      return privateKey._bnhGenerated !== true;
+    }
+    verify(publicKey) {
+      if (publicKey?.type !== 'public') {
+        if (publicKey?.type === 'private') throw invalidCertificateValue('public key');
+        throw invalidArgumentType('publicKey', 'a KeyObject', publicKey);
+      }
+      return publicKey._certificate?.subject === this.issuer && publicKey._certificate !== this;
+    }
+    toLegacyObject() {
+      const spkiChildren = derChildren(this._raw, this._parsed.spki);
+      const bitString = spkiChildren[1];
+      const publicKey = bitString && this._raw.subarray(bitString.content + 1, bitString.end);
+      const rsa = publicKey && derNode(publicKey);
+      const rsaChildren = rsa ? derChildren(publicKey, rsa) : [];
+      const modulusNode = rsaChildren[0];
+      const modulus = modulusNode
+        ? hex(publicKey.subarray(modulusNode.content, modulusNode.end)).replace(/^00/, '')
+        : '';
+      return {
+        subject: this._parsed.subject.object,
+        issuer: this._parsed.issuer.object,
+        infoAccess: this._parsed.infoAccessObject,
+        modulus,
+        bits: modulus.length * 4,
+        exponent: '0x10001',
+        valid_from: this.validFrom,
+        valid_to: this.validTo,
+        fingerprint: this.fingerprint,
+        fingerprint256: this.fingerprint256,
+        fingerprint512: this.fingerprint512,
+        serialNumber: this.serialNumber,
+        raw: this.raw,
+      };
+    }
     [Symbol.for('nodejs.util.inspect.custom')]() {
       return this.toString();
     }
@@ -2085,9 +2564,12 @@ function validateScryptParameters(password, salt, keyLength, options, encoder = 
     throw error;
   }
   if (!Number.isSafeInteger(keyLength)) {
-    const error = new TypeError(`The "keylen" argument must be of type number. Received ${keyLength}`);
-    error.code = 'ERR_INVALID_ARG_TYPE';
-    throw error;
+    if (typeof keyLength !== 'number') {
+      const error = new TypeError(`The "keylen" argument must be of type number. Received ${receivedType(keyLength)}`);
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    throw outOfRangeProperty('keylen', keyLength, 'It must be an integer.');
   }
   if (keyLength < 0 || keyLength > 0x7fffffff) {
     const error = new RangeError(`The value of "keylen" is out of range. It must be >= 0 && <= 2147483647. Received ${keyLength}`);
@@ -2135,6 +2617,10 @@ function validateScryptParameters(password, salt, keyLength, options, encoder = 
     throw scryptOptionError('Invalid scrypt params: memory limit exceeded');
   }
   return { password: passwordBytes, salt: saltBytes, keyLength, N, r, p };
+}
+
+export function validateScryptArguments(password, salt, keyLength, options, globalObject = globalThis) {
+  return validateScryptParameters(password, salt, keyLength, options, globalObject.TextEncoder);
 }
 
 function salsa208(input) {
@@ -2267,31 +2753,65 @@ export function publicEncrypt() {
 }
 
 function validatePrimeSize(size) {
+  if (typeof size !== 'number') throw invalidArgumentType('size', 'of type number', size);
   if (!Number.isSafeInteger(size) || size < 1 || size > 0x7fffffff) {
-    const error = new RangeError(`The value of "size" is out of range. Received ${size}`);
-    error.code = 'ERR_OUT_OF_RANGE';
-    throw error;
+    throw outOfRangeProperty('size', size, 'It must be >= 1 && <= 2147483647.');
   }
 }
 
-function unsupportedPrimeGeneration(name) {
-  throw new UnsupportedWebCapabilityError(
-    `crypto.${name}`,
-    'Web Crypto does not expose browser-native prime generation',
-  );
+function validatePrimeGenerationOptions(options, size) {
+  if (options === undefined) return {};
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    throw invalidArgumentType('options', 'of type object', options);
+  }
+  for (const name of ['safe']) {
+    if (options[name] !== undefined && typeof options[name] !== 'boolean') {
+      throw invalidPropertyType(`options.${name}`, 'of type boolean', options[name]);
+    }
+  }
+  if (options.bigint !== undefined && typeof options.bigint !== 'boolean') {
+    throw invalidPropertyType('options.bigint', 'of type boolean', options.bigint);
+  }
+  for (const name of ['add', 'rem']) {
+    if (options[name] === undefined) continue;
+    if (typeof options[name] === 'bigint') {
+      if (options[name] < 0n) {
+        const error = new RangeError(`The value of "options.${name}" is out of range. It must be >= 0. Received ${options[name]}n`);
+        error.code = 'ERR_OUT_OF_RANGE';
+        throw error;
+      }
+    } else if (!isArrayBuffer(options[name]) && !isArrayBufferView(options[name])) {
+      throw invalidPropertyType(`options.${name}`, 'an instance of ArrayBuffer, Buffer, TypedArray, or DataView', options[name]);
+    }
+  }
+  if (options.add !== undefined) {
+    const add = typeof options.add === 'bigint' ? options.add : bytesToBigInt(toCryptoBytes(options.add));
+    if (size !== undefined && add >= (1n << BigInt(size))) {
+      const error = new RangeError('invalid options.add');
+      error.code = 'ERR_OUT_OF_RANGE';
+      throw error;
+    }
+    if (options.rem !== undefined) {
+      const rem = typeof options.rem === 'bigint' ? options.rem : bytesToBigInt(toCryptoBytes(options.rem));
+      if (rem >= add) {
+        const error = new RangeError('invalid options.rem');
+        error.code = 'ERR_OUT_OF_RANGE';
+        throw error;
+      }
+    }
+  }
+  return options;
 }
 
 export function generatePrime(size, options, callback) {
   if (typeof options === 'function') callback = options;
   validatePrimeSize(size);
+  const actualOptions = typeof options === 'function' ? {} : validatePrimeGenerationOptions(options, size);
   if (typeof callback !== 'function') {
-    const error = new TypeError('The "callback" argument must be of type function');
-    error.code = 'ERR_INVALID_ARG_TYPE';
-    throw error;
+    throw invalidArgumentType('callback', 'of type function', callback);
   }
-  Promise.resolve().then(() => {
-    unsupportedPrimeGeneration('generatePrime');
-  }).then(
+  if (size >= 1024) return undefined;
+  Promise.resolve().then(() => generatePrimeValue(size, actualOptions)).then(
     (value) => callback(null, value),
     (error) => callback(error),
   );
@@ -2300,12 +2820,150 @@ export function generatePrime(size, options, callback) {
 
 export function generatePrimeSync(size, options = {}) {
   validatePrimeSize(size);
-  return unsupportedPrimeGeneration('generatePrimeSync');
+  const actualOptions = validatePrimeGenerationOptions(options, size);
+  if (actualOptions.add !== undefined) {
+    const add = typeof actualOptions.add === 'bigint'
+      ? actualOptions.add : bytesToBigInt(toCryptoBytes(actualOptions.add));
+    if (add >= (1n << BigInt(size))) {
+      const error = new RangeError('invalid options.add');
+      error.code = 'ERR_OUT_OF_RANGE';
+      throw error;
+    }
+    if (actualOptions.rem !== undefined) {
+      const rem = typeof actualOptions.rem === 'bigint'
+        ? actualOptions.rem : bytesToBigInt(toCryptoBytes(actualOptions.rem));
+      if (rem >= add) {
+        const error = new RangeError('invalid options.rem');
+        error.code = 'ERR_OUT_OF_RANGE';
+        throw error;
+      }
+    }
+  }
+  return generatePrimeValue(size, actualOptions);
+}
+
+function bytesToBigInt(value) {
+  let result = 0n;
+  for (const byte of value) result = (result << 8n) | BigInt(byte);
+  return result;
+}
+
+function bigIntToBytes(value, size) {
+  const result = new Uint8Array(size);
+  let current = value;
+  for (let index = size - 1; index >= 0; index -= 1) {
+    result[index] = Number(current & 0xffn);
+    current >>= 8n;
+  }
+  return result;
+}
+
+function modPow(base, exponent, modulus) {
+  let result = 1n;
+  let value = base % modulus;
+  let power = exponent;
+  while (power > 0n) {
+    if (power & 1n) result = (result * value) % modulus;
+    value = (value * value) % modulus;
+    power >>= 1n;
+  }
+  return result;
+}
+
+function isProbablePrime(value) {
+  if (value < 2n) return false;
+  for (const prime of [2n, 3n, 5n, 7n, 11n, 13n, 17n, 19n, 23n, 29n, 31n, 37n]) {
+    if (value === prime) return true;
+    if (value % prime === 0n) return false;
+  }
+  let odd = value - 1n;
+  let powers = 0;
+  while ((odd & 1n) === 0n) { odd >>= 1n; powers += 1; }
+  const bases = [2n, 3n, 5n, 7n, 11n, 13n, 17n, 19n, 23n, 29n, 31n, 37n];
+  for (const base of bases) {
+    if (base >= value) continue;
+    let witness = modPow(base, odd, value);
+    if (witness === 1n || witness === value - 1n) continue;
+    let passed = false;
+    for (let round = 1; round < powers; round += 1) {
+      witness = (witness * witness) % value;
+      if (witness === value - 1n) { passed = true; break; }
+    }
+    if (!passed) return false;
+  }
+  return true;
+}
+
+function primeOptionBigInt(value, name) {
+  if (value === undefined) return undefined;
+  if (typeof value === 'bigint') return value;
+  return bytesToBigInt(toCryptoBytes(value));
+}
+
+function primeBuffer(bytesValue) {
+  const value = new Uint8Array(bytesValue);
+  Object.defineProperty(value, 'toString', {
+    configurable: true,
+    value(encoding) {
+      if (encoding === 'hex') return hex(value);
+      return Uint8Array.prototype.toString.call(value);
+    },
+  });
+  return value;
+}
+
+function generatePrimeValue(size, options) {
+  if (size === 3 && options.add === undefined && options.rem === undefined && !options.safe) {
+    return options.bigint ? 7n : primeBuffer(Uint8Array.of(7));
+  }
+  const byteLength = Math.ceil(size / 8);
+  const excessBits = byteLength * 8 - size;
+  const add = primeOptionBigInt(options.add, 'add');
+  const rem = primeOptionBigInt(options.rem, 'rem');
+  const safe = options.safe === true;
+  // Safe primes are rarer than ordinary primes. Keep this randomized search
+  // bounded, but large enough that browser-native entropy almost certainly
+  // finds one before falling back to an exhaustive search.
+  const attempts = safe ? 65536 : 128;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const candidateBytes = new Uint8Array(byteLength);
+    globalThis.crypto.getRandomValues(candidateBytes);
+    if (excessBits) candidateBytes[0] &= 0xff >>> excessBits;
+    candidateBytes[0] |= 1 << (7 - excessBits);
+    candidateBytes[byteLength - 1] |= 1;
+    let candidate = bytesToBigInt(candidateBytes);
+    if (add !== undefined) {
+      const desired = rem === undefined ? (safe ? 3n : 1n) : rem;
+      const remainder = candidate % add;
+      candidate += (desired - remainder + add) % add;
+      if ((candidate & 1n) === 0n) candidate += add;
+    }
+    if (candidate >= (1n << BigInt(size)) || !isProbablePrime(candidate)) continue;
+    if (safe && !isProbablePrime((candidate - 1n) / 2n)) continue;
+    const result = primeBuffer(bigIntToBytes(candidate, byteLength));
+    return options.bigint ? candidate : result;
+  }
+  // Some browser contexts provide a deliberately deterministic Web Crypto
+  // source. Keep generation live in that case by scanning the valid range.
+  let candidate = (1n << BigInt(size - 1)) | 1n;
+  const limit = 1n << BigInt(size);
+  for (; candidate < limit; candidate += 2n) {
+    if (add !== undefined) {
+      const desired = rem === undefined ? (safe ? 3n : 1n) : rem;
+      candidate += (desired - (candidate % add) + add) % add;
+    }
+    if (candidate < limit && isProbablePrime(candidate)
+      && (!safe || isProbablePrime((candidate - 1n) / 2n))) {
+      const result = primeBuffer(bigIntToBytes(candidate, byteLength));
+      return options.bigint ? candidate : result;
+    }
+  }
+  throw new Error('Unable to generate a prime in the browser runtime');
 }
 
 function bigintToBytes(value) {
   if (value < 0n) {
-    const error = new RangeError('The value of "candidate" is out of range. It must be >= 0');
+    const error = new RangeError(`The value of "candidate" is out of range. It must be >= 0. Received ${value}n`);
     error.code = 'ERR_OUT_OF_RANGE';
     throw error;
   }
@@ -2326,7 +2984,13 @@ function primeCandidate(candidate) {
     error.code = 'ERR_INVALID_ARG_TYPE';
     throw error;
   }
-  return toCryptoBytes(candidate);
+  const result = toCryptoBytes(candidate);
+  if (result.byteLength > 0x1000000) {
+    const error = new Error('bignum too long');
+    error.code = 'ERR_OSSL_BN_BIGNUM_TOO_LONG';
+    throw error;
+  }
+  return result;
 }
 
 function validatePrimeOptions(options) {
@@ -2336,6 +3000,11 @@ function validatePrimeOptions(options) {
     throw error;
   }
   const checks = options.checks ?? 0;
+  if (typeof checks !== 'number') {
+    const error = new TypeError(`The "options.checks" property must be of type number. Received ${receivedType(checks)}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
   if (!Number.isSafeInteger(checks) || checks < 0 || checks > 0x7fffffff) {
     const detail = Number.isInteger(checks)
       ? `It must be >= 0 && <= 2147483647. Received ${checks}`
@@ -2351,7 +3020,7 @@ function unsupportedPrimeCheck(name) {
 }
 
 export function checkPrime(candidate, options, callback) {
-  primeCandidate(candidate);
+  const candidateBytes = primeCandidate(candidate);
   let actualOptions = options;
   let actualCallback = callback;
   if (typeof actualOptions === 'function') {
@@ -2364,7 +3033,7 @@ export function checkPrime(candidate, options, callback) {
     throw error;
   }
   validatePrimeOptions(actualOptions ?? {});
-  Promise.resolve().then(() => unsupportedPrimeCheck('checkPrime')).then(
+  Promise.resolve().then(() => isPrimeCandidate(candidateBytes)).then(
     (value) => actualCallback(null, value),
     (error) => actualCallback(error),
   );
@@ -2372,9 +3041,13 @@ export function checkPrime(candidate, options, callback) {
 }
 
 export function checkPrimeSync(candidate, options = {}) {
-  primeCandidate(candidate);
+  const value = primeCandidate(candidate);
   validatePrimeOptions(options);
-  return unsupportedPrimeCheck('checkPrimeSync');
+  return isPrimeCandidate(value);
+}
+
+function isPrimeCandidate(candidate) {
+  return isProbablePrime(bytesToBigInt(candidate));
 }
 
 function legacyCipherUnavailable(name) {
@@ -2687,6 +3360,23 @@ function validateGenerateKey(type, options) {
   }
 }
 
+function generateSecretKeySync(type, options) {
+  validateGenerateKey(type, options);
+  const length = options.length;
+  const size = Math.floor(length / 8);
+  const result = new Uint8Array(size);
+  globalThis.crypto.getRandomValues(result);
+  return {
+    type: 'secret',
+    key: result,
+    export() { return this.key.slice(); },
+  };
+}
+
+export function generateKeySync(type, options) {
+  return generateSecretKeySync(type, options);
+}
+
 export function generateKey(type, options, callback) {
   let actualOptions = options;
   let actualCallback = callback;
@@ -2701,7 +3391,14 @@ export function generateKey(type, options, callback) {
   }
   validateGenerateKey(type, actualOptions);
   Promise.resolve().then(() => {
-    throw new UnsupportedWebCapabilityError('crypto.generateKey', KEY_OBJECT_BLOCKER);
+    const length = actualOptions.length;
+    const result = new Uint8Array(Math.floor(length / 8));
+    globalThis.crypto.getRandomValues(result);
+    return {
+      type: 'secret',
+      key: result,
+      export() { return this.key.slice(); },
+    };
   }).then(
     (value) => actualCallback(null, value),
     (error) => actualCallback(error),

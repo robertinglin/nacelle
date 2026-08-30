@@ -27,11 +27,43 @@ export interface NpmInstallOptions {
   onProgress?: (event: NpmProgressEvent) => void;
 }
 
+export interface RunScriptOptions {
+  /** Additional command-line arguments to pass to the script */
+  args?: string[];
+  /** Additional environment variables */
+  env?: Record<string, string>;
+  /** Target working directory containing package.json (defaults to instance cwd) */
+  cwd?: string;
+  /** Callback for stdout stream chunks */
+  onStdout?: (chunk: string) => void;
+  /** Callback for stderr stream chunks */
+  onStderr?: (chunk: string) => void;
+  /** Abort signal to cancel or terminate execution */
+  signal?: AbortSignal;
+  /** Timeout in milliseconds */
+  timeout?: number;
+}
+
+export interface PackageJson {
+  name?: string;
+  version?: string;
+  main?: string;
+  module?: string;
+  type?: 'module' | 'commonjs';
+  scripts?: Record<string, string>;
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+  bin?: string | Record<string, string>;
+  [key: string]: any;
+}
+
 export interface ConnectIframeOptions {
   /** Virtual port to connect (default: 3000) */
   port?: number;
   /** Initial path (default: '/') */
   path?: string;
+  /** Automatically navigate iframe src on connect (default: true) */
+  autoLoad?: boolean;
   /** Callback on iframe URL change: (cleanAddress, rawAddress) => void */
   onNavigate?: (cleanAddress: string, rawAddress: string) => void;
 }
@@ -86,8 +118,20 @@ export class BrowserNode {
     mount(snapshot: any): Promise<void>;
   };
   readonly npm: {
-    install(packages: string | string[], options?: NpmInstallOptions): Promise<any>;
+    /**
+     * Install npm packages directly into VFS.
+     * If packages is omitted, dependencies from package.json in cwd are automatically installed.
+     */
+    install(packages?: string | string[] | NpmInstallOptions, options?: NpmInstallOptions): Promise<any>;
+    /** Read parsed package.json in cwd */
+    getPackageJson(cwd?: string): Promise<PackageJson | null>;
+    /** Get dictionary of scripts from package.json */
+    getScripts(cwd?: string): Promise<Record<string, string>>;
+    /** Execute a named script from package.json */
+    run(scriptName: string, options?: RunScriptOptions): Promise<ProcessHandle>;
+    /** Get IndexedDB tarball cache statistics */
     getCacheStats(): Promise<{ count: number; totalBytes: number }>;
+    /** Clear IndexedDB tarball cache */
     clearCache(): Promise<void>;
   };
   readonly wasm: {
@@ -98,11 +142,19 @@ export class BrowserNode {
   connectIframe(iframe: HTMLIFrameElement, options?: ConnectIframeOptions): () => void;
   fetch(url: string, options?: RequestInit): Promise<Response>;
   run(options: ProcessRunOptions): Promise<ProcessHandle>;
+  runScript(scriptName: string, options?: RunScriptOptions): Promise<ProcessHandle>;
   execute(code: string, options?: ProcessRunOptions): Promise<ProcessHandle>;
   on(event: string, listener: (...args: any[]) => void): this;
   off(event: string, listener: (...args: any[]) => void): this;
   emit(event: string, ...args: any[]): void;
 }
+
+export function parseScriptCommand(cmdString: string): {
+  binary: string;
+  args: string[];
+  env: Record<string, string>;
+  tokens: string[];
+};
 
 export function createRuntime(options?: any): any;
 export const runtime: any;

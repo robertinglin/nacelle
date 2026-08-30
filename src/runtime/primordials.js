@@ -68,7 +68,7 @@ export function createPrimordials(globalObject = globalThis) {
     Array, ArrayBuffer, ArrayBufferIsView: ArrayBuffer.isView, Boolean, DataView, Date, Error, EvalError,
     FinalizationRegistry, Float32Array, Float64Array, Function, Int8Array, Int16Array,
     Int32Array, Map, Number, Object, Promise, Proxy, RangeError, ReferenceError, Reflect,
-    RegExp, Set, SharedArrayBuffer, String, Symbol, SyntaxError, TypeError, URIError,
+    RegExp, Set, SharedArrayBuffer: globalObject.SharedArrayBuffer, String, Symbol, SyntaxError, TypeError, URIError,
     Uint8Array, Uint8ClampedArray, Uint16Array, Uint32Array, WeakMap, WeakRef, WeakSet,
     AggregateError, BigInt, BigInt64Array, BigUint64Array, JSON, Math, WebAssembly,
     ArrayBufferPrototypeTransfer: arrayBufferTransfer,

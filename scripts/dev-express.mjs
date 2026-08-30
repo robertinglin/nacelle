@@ -30,6 +30,7 @@ const mimeTypes = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
   '.mjs': 'application/javascript; charset=utf-8',
+  '.jsx': 'application/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml',
@@ -126,12 +127,18 @@ await new Promise((resolve, reject) => {
 const port = server.address().port;
 const demoUrl = `http://127.0.0.1:${port}/express-demo.html`;
 const wasmDemoUrl = `http://127.0.0.1:${port}/wasm-demo.html`;
-const targetUrl = process.argv.includes('--wasm') ? wasmDemoUrl : demoUrl;
+const viteReactDemoUrl = `http://127.0.0.1:${port}/vite-react-demo.html`;
+const targetUrl = process.argv.includes('--wasm')
+  ? wasmDemoUrl
+  : (process.argv.includes('--vite-react') || process.argv.includes('--vite'))
+    ? viteReactDemoUrl
+    : demoUrl;
 
 console.log('\n======================================================');
 console.log('  🚀 Browser Node Harness Dev Server');
 console.log('======================================================');
 console.log(`\n  Express Demo:  \x1b[36m${demoUrl}\x1b[0m`);
+console.log(`  Vite + React:  \x1b[36m${viteReactDemoUrl}\x1b[0m`);
 console.log(`  WASM Demo:     \x1b[36m${wasmDemoUrl}\x1b[0m\n`);
 console.log(`  Launching browser at ${targetUrl}...\n`);
 

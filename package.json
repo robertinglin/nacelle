@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev-express.mjs",
+    "dev:vite-react": "node scripts/dev-express.mjs --vite-react",
     "test:express": "npm --prefix adapters/playwright run test:express",
+    "test:vite-react": "npm --prefix adapters/playwright run test:vite-react",
     "test:npm": "npm --prefix adapters/playwright run test:npm",
     "test:fast": "node adapters/playwright/node_modules/playwright/cli.js test --config adapters/playwright/tests tests/npm-install.spec.mjs tests/express-iframe.spec.mjs --workers=1",
     "test:all": "node adapters/playwright/tests/run-browser-tests.mjs"

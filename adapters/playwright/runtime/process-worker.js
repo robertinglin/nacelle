@@ -355,7 +355,15 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       kill: (signal = 'SIGTERM') => { sendControl('child-signal-request', { signal }); return true; },
       exit(code = 0) { exitCode = Number(code) || 0; process.exitCode = exitCode; process.emit('exit', exitCode); finish('exit', exitCode); throw processExitSignal; },
     });
-    process.stdout = { isTTY: false, write(value) { sendControl('output', { stream: 'stdout', value: outputText(value) }); return true; } };
+    process.stdout = {
+      isTTY: false,
+      _host: null,
+      _isStdio: true,
+      _parent: null,
+      _pendingData: null,
+      _pendingEncoding: '',
+      write(value) { sendControl('output', { stream: 'stdout', value: outputText(value) }); return true; },
+    };
     process.stderr = { isTTY: false, write(value) { sendControl('output', { stream: 'stderr', value: outputText(value) }); return true; } };
 
     control.onmessage = (event) => {

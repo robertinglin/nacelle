@@ -273,6 +273,26 @@ function makeWritableEndpoint(endpoint) {
   return new Writable({ write(chunk, _encoding, callback) { outputWrite(endpoint, chunk); callback(); } });
 }
 
+function installProcessStdoutSurface(stream) {
+  if (!stream) return;
+  const fields = {
+    _host: null,
+    _isStdio: true,
+    _parent: null,
+    _pendingData: null,
+    _pendingEncoding: '',
+  };
+  for (const [name, value] of Object.entries(fields)) {
+    if (Object.hasOwn(stream, name)) continue;
+    Object.defineProperty(stream, name, {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value,
+    });
+  }
+}
+
 function installProcessStderrSurface(stream, processObject) {
   if (!stream || stream.__BNH_PROCESS_STDERR_SURFACE__) return;
   Object.defineProperty(stream, '__BNH_PROCESS_STDERR_SURFACE__', {
@@ -585,6 +605,7 @@ export function createProcess({ argv, env, cwd, execArgv, output = {}, platform 
   };
   process.stdout = makeWritableEndpoint(output.stdout);
   process.stderr = makeWritableEndpoint(output.stderr);
+  installProcessStdoutSurface(process.stdout);
   Object.defineProperty(process, 'exitCode', { configurable: true, enumerable: true, get: () => exitCode, set: (value) => { exitCode = Number(value) || 0; } });
   process.getCode = () => exitCode;
   process._exitRequested = () => exitRequested;

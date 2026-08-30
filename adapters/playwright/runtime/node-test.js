@@ -374,6 +374,7 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
   let testCount = 0;
   let passCount = 0;
   let failCount = 0;
+  let testApiUsed = false;
   function recordResult(result) {
     testCount += 1;
     if (result.status === 'fail') failCount += 1;
@@ -461,6 +462,7 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
     return suite.completion;
   }
   function register(name, options, callback, parent = suiteStack.at(-1), ownerNode = null) {
+    testApiUsed = true;
     const task = splitDefinition(name, options, callback); const label = String(task.name ?? '(unnamed test)'); const testOptions = task.options; const fullName = ownerNode?.fullName ? `${ownerNode.fullName} > ${label}` : parent === root ? label : `${parent.fullName} > ${label}`;
     const result = new Promise((resolve) => {
       const node = { children: [], fullName, before: [], after: [], beforeEach: [], afterEach: [], beforeReady: null, context: null, mock: null };
@@ -493,6 +495,10 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
   const summaryRelease = trackTask();
   schedule(async () => {
     await testTail;
+    if (!testApiUsed) {
+      summaryRelease?.();
+      return;
+    }
     try { writeSnapshotFiles(); } catch (error) { failCount += 1; processObject.exitCode ||= 1; stderr(`${formatError(error)}\n`); }
     stdout(`# tests ${testCount}\n# pass ${passCount}\n# fail ${failCount}\n`);
     summaryRelease?.();

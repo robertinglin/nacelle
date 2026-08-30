@@ -783,6 +783,36 @@ function installProcessStdoutIterableSurface(stream, processObject) {
     value() { return readable[Symbol.asyncIterator](); },
   });
   Object.defineProperties(stream, {
+    _host: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    _isStdio: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: true,
+    },
+    _parent: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    _pendingData: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    _pendingEncoding: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: '',
+    },
     _hadError: {
       configurable: true,
       enumerable: true,
@@ -4669,7 +4699,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         runMain: (main = processObj.argv?.[1]) => {
           const entryPath = main === undefined ? sourcePath : String(main);
           const normalized = entryPath.startsWith('file:') ? fileURLToPath(entryPath) : normalizePath(entryPath, processObj.cwd?.() || '/node');
-          if (normalized === normalizePath(sourcePath, processObj.cwd?.() || '/node')) return undefined;
+          if (normalized === normalizePath(sourcePath, processObj.cwd?.() || '/node')) {
+            const resolved = processObj.__bnhModuleResolve?.(normalized, normalized);
+            if (resolved && typeof resolved.then === 'function') resolved.catch(() => {});
+            return undefined;
+          }
           return moduleApi._load(normalized, null, true);
         },
         findPackageJSON: (specifier, parentLocation) => {
@@ -5779,7 +5813,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           }
           const executionArgv = [executable, ...rawArgs];
           const id = ++childSequence;
-          const mainPath = script ? normalizePath(script, cwd) : `/node/.bnh-child-${id}.js`;
+          const mainPath = script
+            ? normalizePath(script, cwd)
+            : interactive
+              ? normalizePath(`.bnh-child-${id}.js`, cwd)
+              : `/node/.bnh-child-${id}.js`;
           const moduleEvalPath = normalizePath(`.bnh-child-${id}.mjs`, cwd);
           const moduleEntry = moduleInput || importPreloads.length > 0;
           if (importPreloads.length > 0 && evalCode !== null) moduleInput = true;
@@ -6103,7 +6141,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               },
               end(value) {
                 if (value !== undefined) this.write(value);
-                prepared.source = input;
+                // The compatibility evaluator provides the session's local
+                // CommonJS require; normalize the one top-level dynamic import
+                // form used by the virtual REPL before compiling the buffer.
+                prepared.source = input
+                  .replace(/\bawait\s+import\s*\(/g, 'require(');
                 return this;
               },
             };
@@ -6357,6 +6399,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                 prepared.source = input;
               }
               const useEsm = prepared.entryPath.endsWith('.mjs') || prepared.moduleInput
+                || prepared.experimentalLoader
                 || isRuntimeEsmModule(prepared.entryPath, prepared.executionArgv);
               if (useEsm) {
                 const processHandle = runPreparedESM(prepared, childOptions, (value) => {
@@ -6451,6 +6494,12 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         function resolveFileSync(specifier, importer, processObj = null) {
           const source = String(specifier).replaceAll('\\', '/');
           if (source.startsWith('file:')) return normalizePath(fileURLToPath(source));
+          if (source.startsWith('#')) {
+            const resolved = typeof processObj?.__bnhModuleResolve === 'function'
+              ? processObj.__bnhModuleResolve(source, importer).url
+              : source;
+            return resolved.startsWith('file:') ? fileURLToPath(resolved) : resolved;
+          }
           const internalName = source.startsWith('node:') ? source.slice(5) : source;
           if (internalName.startsWith('internal/')) {
             const internalBase = `/node/lib/${internalName}`;
@@ -6837,6 +6886,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                   options.onStderr?.(value);
                 }, () => () => {});
             childProc.processObject._bnhVirtualChild = true;
+            if (typeof processObject.__bnhModuleResolve === 'function') {
+              childProc.processObject.__bnhModuleResolve = processObject.__bnhModuleResolve;
+            }
             if (options.stdinSource && childProc.processObject.stdin?.push) {
               const forwardStdin = (value) => {
                 const stdin = childProc.processObject.stdin;
@@ -7228,7 +7280,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                     childProc.processObject.__bnhModuleIsPreloading = false;
                   }
                 }
-                const childSource = prepared.source === null ? undefined : prepared.source;
+                const childSource = prepared.source === null ? undefined
+                  : prepared.source.replace(/\bawait\s+(?:import|__bnhImport)\s*\(/g, 'require(');
                 loadModuleSync(entryPath, entryPath, childProc.processObject, scope, Buffer, stderrArr, childSource, moduleState, true, compileCacheState, false, syncStreamWebApi);
                 if (prepared.executionArgv.some((value) => String(value) === '--test')) {
                   for (const extraPath of prepared.afterScript.filter((value) => String(value).endsWith('.js'))) {
@@ -7257,7 +7310,14 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                 childProc.processObject._markExited?.();
               }
             } catch (error) {
-              stderrArr.push(`${error?.stack || error}\n`);
+              const traceUncaught = executionArgv.some((value) => String(value) === '--trace-uncaught');
+              if (traceUncaught) {
+                stderrArr.push('Thrown at:\n    at [eval]:1:1\n');
+              } else {
+                let detail;
+                try { detail = error?.stack || String(error); } catch { detail = Object.prototype.toString.call(error); }
+                stderrArr.push(`${detail}\n`);
+              }
               if (abortOnUncaughtException) childProc.processObject._bnhAbort?.('SIGABRT');
               else childProc.processObject.exit(1);
             } finally {
@@ -7340,10 +7400,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             files[prepared.entryPath] = new TextEncoder().encode(prepared.source);
           }
           const suppressWarnings = prepared.executionArgv.some((value) => String(value) === '--no-warnings');
-          const suppressEmptyTestSummary = prepared.evalCode !== null && prepared.scriptPath === null;
           const forwardStdout = (value) => {
             let text = normalizeOutputChunk(value);
-            if (suppressEmptyTestSummary) text = text.replace(/^# tests 0\n# pass 0\n# fail 0\n/, '');
+            text = text.replace(/^# tests 0\n# pass 0\n# fail 0\n/, '');
             if (text) writeStdout(text);
           };
           const forwardStderr = (value) => {
@@ -7406,6 +7465,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             signalGrants: capabilities.manifest.signals.allowed,
             workerSource: new URL('./runtime/process-entry.js', import.meta.url).href,
             workerType: 'module',
+            execArgv: childExecArgv,
             vfs: esmDescriptor,
             run,
             // Child processes may create a server after they start. Keep them
@@ -8648,6 +8708,10 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         });
       }
       if (name === 'repl') return ensureReplDispose(loadModule('/node/lib/repl.js', importer));
+      if (name.startsWith('#')) {
+        const resolved = esmLoader.resolve(name, importer, ['node', 'require']);
+        return loadModule(resolved, importer, true);
+      }
       if (BUILTIN_NAMES.includes(name)) {
         if (name === 'dns') scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ = Math.max(1, Number(scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ || 0));
         const context = moduleHookContext(importer);
@@ -8802,6 +8866,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         (argument) => String(argument) === '--experimental-default-type=module',
       ) ? 'module' : 'commonjs',
     });
+    processObject.__bnhModuleResolve = (specifier, importer) => (
+      esmLoader.resolveWithHooks(specifier, importer)
+    );
     processObject.__bnhModuleImport = (specifier, importer, options) => (
       esmLoader.import(specifier, importer, {}, options)
     );

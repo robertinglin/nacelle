@@ -318,6 +318,23 @@ export function createModuleLoader({
     return result;
   };
 
+  const runResolveHooksAsync = async (specifier, importer) => {
+    if (!sharedRunModuleHook) return runResolveHooks(specifier, importer);
+    const context = hookContext(specifier, importer);
+    const fallback = (nextSpecifier, nextContext) => defaultResolve(
+      nextSpecifier,
+      nextContext?.parentURL?.startsWith('file:')
+        ? fileURLToPath(nextContext.parentURL)
+        : importer,
+      nextContext?.conditions || ['node', 'import'],
+    );
+    const result = await sharedRunModuleHook('resolve', specifier, context, fallback);
+    if (!result || typeof result !== 'object' || typeof result.url !== 'string') {
+      throw new TypeError('module resolve hook must return an object with a string url');
+    }
+    return result;
+  };
+
   const defaultLoad = (url) => {
     if (url.startsWith('node:')) return { format: 'builtin', source: null };
     if (url.startsWith('data:')) return { format: 'module', source: null };
@@ -789,8 +806,8 @@ export function createModuleLoader({
   const requestedExportName = (prefix) => {
     const isImport = /^\s*import\b/.test(prefix);
     const clause = prefix
-      .replace(/^\s*(?:import|export)\s+/, '')
-      .replace(/\s+from\s*$/, '')
+      .replace(/^\s*(?:import|export)\s*/, '')
+      .replace(/\s*from\s*$/, '')
       .trim();
     if (!clause || clause.startsWith('*')) return undefined;
     if (clause.startsWith('{')) {
@@ -890,7 +907,7 @@ export function createModuleLoader({
       }
     };
     rewriteStatic(
-      /(^|[;\n])([ \t]*(?:import|export)\s+[^;]*?\s+from\s+)(['"])((?:\\.|[^'"])*)\3/gm,
+      /(^|[;\n])([ \t]*(?:import|export)\s*[^;]*?\s*from\s*)(['"])((?:\\.|[^'"])*)\3/gm,
       true,
     );
     rewriteStatic(
@@ -903,7 +920,11 @@ export function createModuleLoader({
     }
     if (/\bimport\.meta\.resolve\b/.test(rewritten)) {
       const token = register((specifier) => {
-        const resolved = resolve(specifier, importer, ['node', 'import']);
+        const hooked = runResolveHooks(specifier, importer);
+        if (hooked && typeof hooked.then === 'function') hooked.catch(() => {});
+        const resolved = hooked && typeof hooked.url === 'string'
+          ? hookURLToSpecifier(hooked.url)
+          : resolve(specifier, importer, ['node', 'import']);
         if (isBuiltinSpecifier(resolved) || resolved.startsWith('node:')) return `node:${builtinName(resolved)}`;
         return resolved.startsWith('data:') ? resolved : fileURL(resolved);
       });
@@ -1161,6 +1182,7 @@ export function createModuleLoader({
   // before invoking the browser evaluator so HTTP imports work from both
   // --import preloads and --input-type=module entry points.
   const asyncModuleURLs = new Map();
+  const asyncModuleSources = new Map();
   const runLoadHooksAsync = async (resolved, format) => {
     const url = format === 'builtin'
       ? `node:${builtinName(resolved)}`
@@ -1185,7 +1207,7 @@ export function createModuleLoader({
     let rewritten = String(source);
     const patterns = [
       {
-        pattern: /(^|[;\n])([ \t]*(?:import|export)\s+[^;]*?\s+from\s+)(['"])((?:\\.|[^'"])*)\3/gm,
+        pattern: /(^|[;\n])([ \t]*(?:import|export)\s*[^;]*?\s*from\s*)(['"])((?:\\.|[^'"])*)\3/gm,
         exportAware: true,
       },
       {
@@ -1203,8 +1225,24 @@ export function createModuleLoader({
         const specifier = original[4];
         const prefix = original[2];
         const quoteOffset = original[0].indexOf(original[3], original[1].length + prefix.length);
-        const resolved = hookURLToSpecifier(runResolveHooks(specifier, importer).url);
+        const resolved = hookURLToSpecifier((await runResolveHooksAsync(specifier, importer)).url);
         const url = await moduleURLAsync(resolved);
+        nativeSpecifierHints.set(url, specifier);
+        // Keep the native namespace alongside the generated module URL. A
+        // later dynamic import can then reuse the already-instantiated module
+        // even when its virtual backing file has been removed meanwhile.
+        if (moduleFormat(resolved) === 'module' && !importCache.has(resolved)) {
+          importCache.set(resolved, import(url));
+        }
+        if (exportAware && requestedExportName(prefix) && resolved.endsWith('.json')) {
+          return {
+            start: match.index + quoteOffset,
+            end: match.index + quoteOffset + specifier.length + 2,
+            replacement: quote(invalidCjsModuleURL(specifier, requestedExportName(prefix))),
+            exportAware,
+            prefix,
+          };
+        }
         return {
           start: match.index + quoteOffset,
           end: match.index + quoteOffset + specifier.length + 2,
@@ -1223,7 +1261,11 @@ export function createModuleLoader({
     }
     if (/\bimport\.meta\.resolve\b/.test(rewritten)) {
       const token = register((specifier) => {
-        const resolved = resolve(specifier, importer, ['node', 'import']);
+        const hooked = runResolveHooks(specifier, importer);
+        if (hooked && typeof hooked.then === 'function') hooked.catch(() => {});
+        const resolved = hooked && typeof hooked.url === 'string'
+          ? hookURLToSpecifier(hooked.url)
+          : resolve(specifier, importer, ['node', 'import']);
         if (isBuiltinSpecifier(resolved) || resolved.startsWith('node:')) return `node:${builtinName(resolved)}`;
         return resolved.startsWith('data:') ? resolved : fileURL(resolved);
       });
@@ -1270,12 +1312,19 @@ export function createModuleLoader({
   };
 
   const moduleURLAsync = async (resolved) => {
+    if (moduleURLs.has(resolved)) return moduleURLs.get(resolved);
     if (asyncModuleURLs.has(resolved)) return asyncModuleURLs.get(resolved);
     const promise = (async () => {
       const source = await moduleSourceAsync(resolved);
-      return `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}_${moduleSequence++}`;
+      asyncModuleSources.set(resolved, source);
+      const url = `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}_${moduleSequence++}`;
+      moduleURLs.set(resolved, url);
+      return url;
     })();
     asyncModuleURLs.set(resolved, promise);
+    promise.catch(() => {
+      if (asyncModuleURLs.get(resolved) === promise) asyncModuleURLs.delete(resolved);
+    });
     return promise;
   };
 
@@ -1332,7 +1381,7 @@ export function createModuleLoader({
   };
 
   const importModule = async (specifier, importer, globals, options) => {
-    const resolvedResult = runResolveHooks(specifier, importer);
+    const resolvedResult = await runResolveHooksAsync(specifier, importer);
     const resolved = hookURLToSpecifier(resolvedResult.url);
     if (resolved.startsWith('data:')) return importData(resolved, options);
     if (resolved.startsWith('http:') || resolved.startsWith('https:')) {
@@ -1345,6 +1394,17 @@ export function createModuleLoader({
       throw packageError('ERR_UNKNOWN_BUILTIN_MODULE', `No such built-in module: ${resolved.slice(5)}`);
     }
     if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) unsupportedNativeAddon(resolved);
+    if (importCache.has(resolved)) return importCache.get(resolved);
+    // Native ESM modules are materialized into data URLs before evaluation. Keep
+    // using that captured graph on later imports: the backing virtual file may
+    // have been removed or replaced after the static import was prepared, but
+    // Node's ESM cache is keyed by the module URL rather than fresh file reads.
+    if (asyncModuleSources.has(resolved)) {
+      const source = asyncModuleSources.get(resolved);
+      const url = moduleURLs.get(resolved)
+        || `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}_${moduleSequence++}`;
+      return import(url);
+    }
     if (isBuiltinSpecifier(resolved) || moduleFormat(resolved) === 'module') return importNative(resolved);
     let exports;
     try {
@@ -1369,6 +1429,7 @@ export function createModuleLoader({
   return {
     cache,
     resolve,
+    resolveWithHooks: (specifier, importer) => runResolveHooks(specifier, importer),
     require: (specifier, importer, globals = {}) => evaluate(specifier, importer, globals),
     import: (specifier, importer = '/node/index.mjs', globals = {}, options) => importModule(specifier, importer, globals, options),
     syncBuiltinESMExports,

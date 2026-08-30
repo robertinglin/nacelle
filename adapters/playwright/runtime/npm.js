@@ -1,0 +1,576 @@
+import { unpackTarGz } from './tar.js';
+
+export function parseSemver(v) {
+  const clean = String(v || '').trim().replace(/^[=v]/, '');
+  const match = clean.match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$/);
+  if (!match) return null;
+  return {
+    major: parseInt(match[1], 10),
+    minor: match[2] !== undefined ? parseInt(match[2], 10) : 0,
+    patch: match[3] !== undefined ? parseInt(match[3], 10) : 0,
+    hasMinor: match[2] !== undefined,
+    hasPatch: match[3] !== undefined,
+    prerelease: match[4] || null,
+    build: match[5] || null,
+    raw: clean,
+  };
+}
+
+export function compareSemver(a, b) {
+  const sa = typeof a === 'string' ? parseSemver(a) : a;
+  const sb = typeof b === 'string' ? parseSemver(b) : b;
+  if (!sa && !sb) return 0;
+  if (!sa) return -1;
+  if (!sb) return 1;
+  if (sa.major !== sb.major) return sa.major > sb.major ? 1 : -1;
+  if (sa.minor !== sb.minor) return sa.minor > sb.minor ? 1 : -1;
+  if (sa.patch !== sb.patch) return sa.patch > sb.patch ? 1 : -1;
+  if (sa.prerelease && !sb.prerelease) return -1;
+  if (!sa.prerelease && sb.prerelease) return 1;
+  if (sa.prerelease && sb.prerelease) {
+    if (sa.prerelease !== sb.prerelease) return sa.prerelease > sb.prerelease ? 1 : -1;
+  }
+  return 0;
+}
+
+function satisfiesComparator(v, comp) {
+  const c = comp.trim();
+  if (!c || c === '*' || c === 'x' || c === 'X' || c === 'latest') return true;
+
+  // normalize x-ranges like 1.x, 1.2.x, 1.*
+  if (c.includes('x') || c.includes('X') || c.includes('*')) {
+    const parts = c.split('.');
+    if (parts[0] === '*' || parts[0] === 'x' || parts[0] === 'X') return true;
+    if (parts[1] === '*' || parts[1] === 'x' || parts[1] === 'X') {
+      const maj = parseInt(parts[0], 10);
+      return v.major === maj;
+    }
+    if (parts[2] === '*' || parts[2] === 'x' || parts[2] === 'X') {
+      const maj = parseInt(parts[0], 10);
+      const min = parseInt(parts[1], 10);
+      return v.major === maj && v.minor === min;
+    }
+  }
+
+  // Caret ^1.2.3
+  if (c.startsWith('^')) {
+    const target = parseSemver(c.slice(1));
+    if (!target) return false;
+    if (v.major !== target.major) return false;
+    if (target.major === 0) {
+      if (target.hasMinor && target.minor !== 0) {
+        if (v.minor !== target.minor) return false;
+        return v.patch >= target.patch;
+      }
+      if (target.hasPatch) return v.patch === target.patch;
+    }
+    return compareSemver(v, target) >= 0;
+  }
+
+  // Tilde ~1.2.3
+  if (c.startsWith('~')) {
+    const target = parseSemver(c.slice(1));
+    if (!target) return false;
+    if (v.major !== target.major) return false;
+    if (target.hasMinor && v.minor !== target.minor) return false;
+    return v.patch >= target.patch;
+  }
+
+  if (c.startsWith('>=')) {
+    const target = parseSemver(c.slice(2));
+    return target ? compareSemver(v, target) >= 0 : false;
+  }
+  if (c.startsWith('>')) {
+    const target = parseSemver(c.slice(1));
+    if (!target) return false;
+    if (!target.hasMinor && !target.hasPatch) {
+      return v.major > target.major;
+    }
+    return compareSemver(v, target) > 0;
+  }
+  if (c.startsWith('<=')) {
+    const target = parseSemver(c.slice(2));
+    if (!target) return false;
+    if (!target.hasMinor && !target.hasPatch) {
+      return v.major <= target.major;
+    }
+    return compareSemver(v, target) <= 0;
+  }
+  if (c.startsWith('<')) {
+    const target = parseSemver(c.slice(1));
+    return target ? compareSemver(v, target) < 0 : false;
+  }
+  if (c.startsWith('=')) {
+    const target = parseSemver(c.slice(1));
+    return target ? compareSemver(v, target) === 0 : false;
+  }
+
+  const exact = parseSemver(c);
+  if (exact) {
+    if (!exact.hasMinor && !exact.hasPatch) return v.major === exact.major;
+    if (!exact.hasPatch) return v.major === exact.major && v.minor === exact.minor;
+    return compareSemver(v, exact) === 0;
+  }
+  return true;
+}
+
+export function satisfiesSemver(version, range) {
+  const v = parseSemver(version);
+  if (!v) return false;
+  const trimmed = String(range || '').trim();
+  if (trimmed === '*' || trimmed === '' || trimmed === 'latest') return true;
+
+  // Handle || OR sets
+  const orSets = trimmed.split(/\s*\|\|\s*/);
+  return orSets.some((orSet) => {
+    // Handle hyphen ranges: 1.2.3 - 2.3.4
+    if (orSet.includes(' - ')) {
+      const [low, high] = orSet.split(' - ').map((s) => s.trim());
+      return satisfiesSemver(version, `>=${low} <=${high}`);
+    }
+    // Normalize spaces between operators and digits: '>= 2.1.2 < 3' -> '>=2.1.2 <3'
+    const normalized = orSet.replace(/(>=|<=|>|<|=|~|\^)\s+/g, '$1').trim();
+    if (!normalized) return true;
+    const comps = normalized.split(/\s+/);
+    return comps.every((comp) => satisfiesComparator(v, comp));
+  });
+}
+
+export function parsePackageSpec(spec) {
+  const trimmed = String(spec || '').trim();
+  let name = trimmed;
+  let range = 'latest';
+
+  if (trimmed.startsWith('@')) {
+    const slashIdx = trimmed.indexOf('/');
+    if (slashIdx !== -1) {
+      const atIdx = trimmed.indexOf('@', slashIdx);
+      if (atIdx !== -1) {
+        name = trimmed.slice(0, atIdx);
+        range = trimmed.slice(atIdx + 1);
+      }
+    }
+  } else {
+    const atIdx = trimmed.indexOf('@');
+    if (atIdx !== -1) {
+      name = trimmed.slice(0, atIdx);
+      range = trimmed.slice(atIdx + 1);
+    }
+  }
+
+  return { name, range: range || 'latest' };
+}
+
+/**
+ * Persistent IndexedDB and in-memory cache for NPM package metadata and tarball archives.
+ */
+export class BrowserNpmCache {
+  constructor({ dbName = 'bnh_npm_cache', globalObject = globalThis } = {}) {
+    this.dbName = dbName;
+    this.globalObject = globalObject;
+    this.memoryMeta = new Map();
+    this.memoryTarballs = new Map();
+    this.dbPromise = null;
+  }
+
+  async _getDb() {
+    if (this.dbPromise) return this.dbPromise;
+    const indexedDB = this.globalObject.indexedDB;
+    if (!indexedDB) return null;
+
+    this.dbPromise = new Promise((resolve) => {
+      try {
+        const req = indexedDB.open(this.dbName, 1);
+        req.onupgradeneeded = (e) => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains('metadata')) {
+            db.createObjectStore('metadata', { keyPath: 'name' });
+          }
+          if (!db.objectStoreNames.contains('tarballs')) {
+            db.createObjectStore('tarballs', { keyPath: 'key' });
+          }
+        };
+        req.onsuccess = (e) => resolve(e.target.result);
+        req.onerror = () => resolve(null);
+      } catch {
+        resolve(null);
+      }
+    });
+    return this.dbPromise;
+  }
+
+  async getMetadata(packageName) {
+    if (this.memoryMeta.has(packageName)) return this.memoryMeta.get(packageName);
+    const db = await this._getDb();
+    if (!db) return null;
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction('metadata', 'readonly');
+        const store = tx.objectStore('metadata');
+        const req = store.get(packageName);
+        req.onsuccess = () => {
+          const record = req.result;
+          if (record && record.data) {
+            this.memoryMeta.set(packageName, record.data);
+            resolve(record.data);
+          } else {
+            resolve(null);
+          }
+        };
+        req.onerror = () => resolve(null);
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+
+  async setMetadata(packageName, data) {
+    this.memoryMeta.set(packageName, data);
+    const db = await this._getDb();
+    if (!db) return;
+    try {
+      const tx = db.transaction('metadata', 'readwrite');
+      tx.objectStore('metadata').put({ name: packageName, data, cachedAt: Date.now() });
+    } catch {
+      // ignore storage failure
+    }
+  }
+
+  async getTarball(key) {
+    const rawKey = key.replace(/^(?:pkg-tarball:|tarball:|pkg:)/, '');
+    const candidateKeys = [key, rawKey, `tarball:${rawKey}`, `pkg-tarball:${rawKey}`, `pkg:${rawKey}`];
+    for (const k of candidateKeys) {
+      if (this.memoryTarballs.has(k)) return this.memoryTarballs.get(k);
+    }
+    const db = await this._getDb();
+    if (!db) return null;
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction('tarballs', 'readonly');
+        const store = tx.objectStore('tarballs');
+        const req = store.get(key);
+        req.onsuccess = () => {
+          const record = req.result;
+          if (record && record.bytes) {
+            const bytes = record.bytes instanceof Uint8Array ? record.bytes : new Uint8Array(record.bytes);
+            this.memoryTarballs.set(key, bytes);
+            resolve(bytes);
+          } else {
+            resolve(null);
+          }
+        };
+        req.onerror = () => resolve(null);
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+
+  async setTarball(key, bytes, meta = {}) {
+    const uint8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    this.memoryTarballs.set(key, uint8);
+    const db = await this._getDb();
+    if (!db) return;
+    try {
+      const tx = db.transaction('tarballs', 'readwrite');
+      tx.objectStore('tarballs').put({
+        key,
+        bytes: uint8,
+        size: uint8.byteLength,
+        name: meta.name || '',
+        version: meta.version || '',
+        cachedAt: Date.now(),
+      });
+    } catch {
+      // ignore storage failure
+    }
+  }
+
+  async listTarballs() {
+    const db = await this._getDb();
+    if (!db) {
+      return [...this.memoryTarballs.entries()].map(([key, bytes]) => ({
+        key,
+        size: bytes.byteLength,
+      }));
+    }
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction('tarballs', 'readonly');
+        const req = tx.objectStore('tarballs').getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => resolve([]);
+      } catch {
+        resolve([]);
+      }
+    });
+  }
+
+  async clear() {
+    this.memoryMeta.clear();
+    this.memoryTarballs.clear();
+    const db = await this._getDb();
+    if (!db) return;
+    try {
+      const tx = db.transaction(['metadata', 'tarballs'], 'readwrite');
+      tx.objectStore('metadata').clear();
+      tx.objectStore('tarballs').clear();
+    } catch {
+      // ignore storage failure
+    }
+  }
+
+  async getStats() {
+    const items = await this.listTarballs();
+    const totalBytes = items.reduce((acc, item) => acc + (item.size || item.bytes?.byteLength || 0), 0);
+    return { count: items.length, totalBytes };
+  }
+}
+
+/**
+ * In-browser NPM package installer supporting semver resolution, tarball downloading, and VFS unpacking.
+ */
+export class BrowserNpm {
+  constructor({
+    vfs,
+    registry = 'https://registry.npmjs.org',
+    cache = null,
+    fetchFn = typeof fetch === 'function' ? fetch : null,
+    globalObject = globalThis,
+    proxyUrl = undefined,
+  } = {}) {
+    this.vfs = vfs;
+    this.registry = registry.replace(/\/+$/, '');
+    this.globalObject = globalObject || globalThis;
+    this.cache = cache instanceof BrowserNpmCache ? cache : new BrowserNpmCache({ globalObject: this.globalObject });
+    if (proxyUrl !== undefined) {
+      this.proxyUrl = proxyUrl;
+    } else if (typeof this.globalObject?.location?.origin === 'string' && this.globalObject.location.origin.startsWith('http')) {
+      this.proxyUrl = `${this.globalObject.location.origin}/__npm_proxy__/`;
+    } else {
+      this.proxyUrl = null;
+    }
+    if (cache instanceof Map) {
+      for (const [k, v] of cache.entries()) {
+        if (k.startsWith('pkg-tarball:') || k.startsWith('tarball:')) {
+          this.cache.memoryTarballs.set(k, v);
+        } else if (k.startsWith('meta:')) {
+          this.cache.memoryMeta.set(k.slice(5), v);
+        } else {
+          this.cache.memoryTarballs.set(k, v);
+        }
+      }
+    }
+    const rawFetch = fetchFn || (typeof this.globalObject.fetch === 'function' ? this.globalObject.fetch : (typeof fetch === 'function' ? fetch : null));
+    this.fetchFn = rawFetch ? (url, init) => rawFetch.call(this.globalObject, url, init) : null;
+    this.installed = new Map(); // name -> version
+  }
+
+  async fetchPackageMetadata(packageName, { onProgress = null } = {}) {
+    const cached = await this.cache.getMetadata(packageName);
+    if (cached) {
+      onProgress?.({ phase: 'cache-hit-meta', name: packageName });
+      return cached;
+    }
+
+    if (!this.fetchFn) throw new Error('No fetch implementation available for npm registry');
+
+    const encodedName = packageName.startsWith('@')
+      ? `@${encodeURIComponent(packageName.slice(1))}`
+      : encodeURIComponent(packageName);
+    const directUrl = `${this.registry}/${encodedName}`;
+    const requestUrl = this.proxyUrl ? `${this.proxyUrl}${directUrl}` : directUrl;
+
+    onProgress?.({ phase: 'fetching-meta', name: packageName, url: directUrl });
+
+    let response;
+    try {
+      response = await this.fetchFn(requestUrl, {
+        headers: { accept: 'application/vnd.npm.install-v1+json, application/json;q=0.9, */*;q=0.8' },
+      });
+    } catch (proxyErr) {
+      if (this.proxyUrl) {
+        response = await this.fetchFn(directUrl, {
+          headers: { accept: 'application/vnd.npm.install-v1+json, application/json;q=0.9, */*;q=0.8' },
+        });
+      } else {
+        throw proxyErr;
+      }
+    }
+
+    if (!response.ok && this.proxyUrl) {
+      // Fallback to direct registry URL if proxy returned non-200
+      response = await this.fetchFn(directUrl, {
+        headers: { accept: 'application/vnd.npm.install-v1+json, application/json;q=0.9, */*;q=0.8' },
+      });
+    }
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch package metadata for ${packageName}: HTTP ${response.status}`);
+    }
+    const data = await response.json();
+    await this.cache.setMetadata(packageName, data);
+    return data;
+  }
+
+  resolveVersion(metadata, range) {
+    if (range === 'latest' && metadata['dist-tags']?.latest) {
+      const latest = metadata['dist-tags'].latest;
+      return { version: latest, doc: metadata.versions[latest] };
+    }
+
+    const versions = Object.keys(metadata.versions || {}).filter((v) => parseSemver(v));
+    // Sort highest first
+    versions.sort((a, b) => compareSemver(b, a));
+
+    for (const v of versions) {
+      if (satisfiesSemver(v, range)) {
+        return { version: v, doc: metadata.versions[v] };
+      }
+    }
+
+    if (metadata['dist-tags']?.[range]) {
+      const tagVersion = metadata['dist-tags'][range];
+      return { version: tagVersion, doc: metadata.versions[tagVersion] };
+    }
+
+    throw new Error(`No matching version found for ${metadata.name}@${range}`);
+  }
+
+  async fetchTarball(tarballUrl, { name = '', version = '', onProgress = null } = {}) {
+    const cacheKey = `tarball:${tarballUrl}`;
+    const cached = await this.cache.getTarball(cacheKey);
+    if (cached) {
+      onProgress?.({ phase: 'cache-hit-tarball', name, version, bytes: cached.byteLength });
+      return cached;
+    }
+
+    const pkgKey = `pkg-tarball:${name}@${version}`;
+    const cachedByPkg = await this.cache.getTarball(pkgKey);
+    if (cachedByPkg) {
+      onProgress?.({ phase: 'cache-hit-tarball', name, version, bytes: cachedByPkg.byteLength });
+      return cachedByPkg;
+    }
+
+    if (!this.fetchFn) throw new Error(`No fetch implementation available to download ${tarballUrl}`);
+
+    onProgress?.({ phase: 'downloading-tarball', name, version, url: tarballUrl });
+
+    const requestUrl = this.proxyUrl ? `${this.proxyUrl}${tarballUrl}` : tarballUrl;
+    let response;
+    try {
+      response = await this.fetchFn(requestUrl);
+    } catch (proxyErr) {
+      if (this.proxyUrl) {
+        response = await this.fetchFn(tarballUrl);
+      } else {
+        throw proxyErr;
+      }
+    }
+
+    if (!response.ok && this.proxyUrl) {
+      response = await this.fetchFn(tarballUrl);
+    }
+
+    if (!response.ok) {
+      throw new Error(`Failed to download tarball ${tarballUrl}: HTTP ${response.status}`);
+    }
+    const buffer = await response.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    await this.cache.setTarball(cacheKey, bytes, { name, version });
+    await this.cache.setTarball(pkgKey, bytes, { name, version });
+    return bytes;
+  }
+
+  async install(packageSpecs, { cwd = '/node', nodeModulesDir = null, onProgress = null, concurrency = 8 } = {}) {
+    const specs = Array.isArray(packageSpecs) ? packageSpecs : [packageSpecs];
+    const targetNodeModules = nodeModulesDir || (cwd.endsWith('/') ? `${cwd}node_modules` : `${cwd}/node_modules`);
+    const queue = specs.map((spec) => parsePackageSpec(spec));
+    const results = [];
+    const visited = new Set();
+    const filesToMount = {};
+
+    const processItem = async ({ name, range }) => {
+      const visitKey = `${name}@${range}`;
+      if (visited.has(visitKey) || this.installed.has(name)) return;
+      visited.add(visitKey);
+
+      let versionDoc = null;
+      let version = null;
+      let tarballBytes = null;
+
+      // Check direct tarball cache by spec
+      const directTarballKey = `pkg-tarball:${name}@${range}`;
+      const cachedDirect = await this.cache.getTarball(directTarballKey);
+      if (cachedDirect) {
+        tarballBytes = cachedDirect;
+        version = range === 'latest' ? '1.0.0' : range;
+        onProgress?.({ phase: 'cache-hit-tarball', name, version, bytes: tarballBytes.byteLength });
+      } else {
+        const metadata = await this.fetchPackageMetadata(name, { onProgress });
+        const resolved = this.resolveVersion(metadata, range);
+        version = resolved.version;
+        versionDoc = resolved.doc;
+        const tarballUrl = versionDoc?.dist?.tarball;
+        if (!tarballUrl) throw new Error(`Missing tarball URL for ${name}@${version}`);
+        tarballBytes = await this.fetchTarball(tarballUrl, { name, version, onProgress });
+      }
+
+      onProgress?.({ phase: 'unpacking', name, version });
+      const pkgDir = `${targetNodeModules}/${name}`;
+      const entries = await unpackTarGz(tarballBytes, { stripPrefix: 'package/', targetDir: pkgDir }, this.globalObject);
+
+      let pkgFilesCount = 0;
+      let pkgTotalBytes = 0;
+
+      for (const entry of entries) {
+        if (entry.type === 'file' && entry.data) {
+          filesToMount[entry.path] = entry.data;
+          pkgFilesCount += 1;
+          pkgTotalBytes += entry.data.byteLength;
+        }
+      }
+
+      this.installed.set(name, version);
+      results.push({ name, version, filesCount: pkgFilesCount, bytes: pkgTotalBytes });
+
+      // Enqueue dependencies from versionDoc or unpacked package.json
+      let deps = versionDoc?.dependencies;
+      if (!deps) {
+        const pkgJsonEntry = entries.find((e) => e.path === `${pkgDir}/package.json` || e.path.endsWith('/package.json'));
+        if (pkgJsonEntry?.data) {
+          try {
+            const raw = typeof pkgJsonEntry.data === 'string' ? pkgJsonEntry.data : new TextDecoder().decode(pkgJsonEntry.data);
+            const parsed = JSON.parse(raw);
+            deps = parsed.dependencies || {};
+            if (parsed.version && !versionDoc) version = parsed.version;
+          } catch {
+            deps = {};
+          }
+        }
+      }
+      deps = deps || {};
+      for (const [depName, depRange] of Object.entries(deps)) {
+        if (!this.installed.has(depName)) {
+          queue.push({ name: depName, range: depRange });
+        }
+      }
+    };
+
+    while (queue.length > 0) {
+      const batch = queue.splice(0, concurrency);
+      await Promise.all(batch.map((item) => processItem(item)));
+    }
+
+    // Mount all unpacked files into VFS
+    if (this.vfs && typeof this.vfs.mount === 'function') {
+      await this.vfs.mount(filesToMount);
+    }
+
+    return {
+      packages: results,
+      totalFiles: Object.keys(filesToMount).length,
+      files: filesToMount,
+    };
+  }
+}

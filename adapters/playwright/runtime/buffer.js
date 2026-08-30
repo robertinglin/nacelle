@@ -1353,8 +1353,9 @@ export function createBufferClass(scope = globalThis) {
         ? new NodeBuffer(pooled.buffer, pooled.byteOffset, pooled.byteLength, internalBuffer)
         : new NodeBuffer(validatedSize, internalBuffer);
     }
-    static allocUnsafeSlow(size) { return new NodeBuffer(validateBufferSize(size), internalBuffer); }
-    static isBuffer(value) { return value instanceof NodeBuffer; }
+    static isBuffer(value) {
+      return Boolean(value && (value instanceof NodeBuffer || value._isBuffer === true || (value instanceof Uint8Array && (value.constructor?.name === 'Buffer' || value._isBuffer === true))));
+    }
     static isEncoding(encoding) {
       return typeof encoding === 'string' && resolveEncodingOps(encoding) !== undefined;
     }
@@ -1644,6 +1645,7 @@ export function createBufferClass(scope = globalThis) {
     offset: { enumerable: true, get() { return this instanceof NodeBuffer ? this.byteOffset : undefined; } },
   });
   NodeBuffer.prototype.toLocaleString = NodeBuffer.prototype.toString;
+  NodeBuffer.prototype._isBuffer = true;
   NodeBuffer.poolSize = 8192;
   function Buffer(...args) {
     return new NodeBuffer(...args);

@@ -27,7 +27,12 @@ const server = createServer(async (request, response) => {
   try {
     const { relative, absolute } = safePath(request.url || '/');
     const body = relative === 'harness.html' ? harnessPage : await readFile(absolute);
-    response.writeHead(200, { 'content-type': contentType(relative) });
+    response.writeHead(200, {
+      'content-type': contentType(relative),
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Embedder-Policy': 'require-corp',
+      'Service-Worker-Allowed': '/',
+    });
     response.end(body);
   } catch (error) {
     response.writeHead(error?.message?.startsWith('unsafe') ? 400 : 404);
@@ -45,6 +50,8 @@ const cli = path.join(adapterRoot, 'node_modules', 'playwright', 'cli.js');
 const testFiles = process.env.BNH_BROWSER_TEST_FILES
   ? process.env.BNH_BROWSER_TEST_FILES.split(',').map((file) => file.trim()).filter(Boolean)
   : [
+    'tests/npm-install.spec.mjs',
+    'tests/express-iframe.spec.mjs',
     'tests/bridge-runtime.spec.mjs',
     'tests/adapter-env.spec.mjs',
     'tests/node-test-loader-boundaries.spec.mjs',

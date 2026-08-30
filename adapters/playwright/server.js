@@ -22,6 +22,10 @@ const mimeTypes = {
   '.js': 'application/javascript',
   '.mjs': 'application/javascript',
   '.json': 'application/json',
+  '.css': 'text/css',
+  '.svg': 'image/svg+xml',
+  '.wasm': 'application/wasm',
+  '.png': 'image/png',
 };
 
 const server = http.createServer((req, res) => {
@@ -41,6 +45,7 @@ const server = http.createServer((req, res) => {
         'Content-Type': contentType,
         'Cross-Origin-Opener-Policy': 'same-origin',
         'Cross-Origin-Embedder-Policy': 'require-corp',
+        'Service-Worker-Allowed': '/',
       });
       res.end(data);
     }

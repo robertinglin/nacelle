@@ -139,17 +139,19 @@ import { createBrowserInternalBindings } from './runtime/internal-bindings.js';
 import { createUrlModule } from './runtime/url.js';
 import { installWarningContract } from './runtime/warnings.js';
 import { nativeAddonDisabledError, unsupportedNativeAddon } from './runtime/errors.js';
+import { loadWasmAddon, isWasmModuleBytes } from './runtime/addon-napi.js';
 import { createSqliteModule } from './runtime/sqlite.js';
 import { createInspectorModule, createInspectorPromisesModule } from './runtime/inspector.js';
 import { createTraceEventsModule, traceEventsUnavailableError } from './runtime/trace-events.js';
 import { createSeaModule } from './runtime/sea.js';
+import { createTtyModule } from './runtime/tty.js';
 
 const BUILTIN_NAMES = Object.freeze([
   'assert', 'assert/strict', 'buffer', 'console', 'constants', 'crypto', 'domain', 'events', 'fs', 'fs/promises', 'http', 'https', 'module', 'os',
   'path', 'path/posix', 'path/win32', 'process', 'querystring', 'stream', 'stream/consumers', 'stream/promises', 'stream/web',
   'string_decoder', 'timers', 'timers/promises', 'url', 'util', 'sys', 'util/types', 'worker_threads', 'zlib', 'perf_hooks', 'async_hooks', 'diagnostics_channel', 'punycode',
   'child_process', 'cluster', 'dgram', 'dns', 'dns/promises', 'http2', 'inspector', 'inspector/promises', 'net', 'readline', 'readline/promises', 'repl', 'tls', 'test', 'v8', 'vm', '_http_server',
-  'sea', 'sqlite', 'test/reporters', '_http_common', '_http_outgoing', 'trace_events',
+  'sea', 'sqlite', 'test/reporters', '_http_common', '_http_outgoing', 'trace_events', 'tty',
   'internal/event_target', 'internal/async_context_frame', 'internal/async_hooks', 'internal/test/binding', 'internal/test/transfer',
   'internal/bootstrap/realm', 'internal/modules/cjs/loader', 'internal/modules/esm/utils', 'internal/vm/module',
   'internal/util', 'internal/util/debuglog', 'internal/util/types', 'internal/options', 'internal/dgram', 'internal/crypto/x509',
@@ -604,8 +606,21 @@ function createNodeWebStreamModule(runtimeRequire, scope = globalThis) {
     });
   };
   const load = (path, name) => {
+    if (typeof scope[name] === 'function') {
+      const value = name === 'ReadableStream' ? wrapReadableStream(scope[name]) : scope[name];
+      if (name === 'CompressionStream' || name === 'DecompressionStream') {
+        patchCompressionInspect(value, name);
+      }
+      return { [name]: value };
+    }
     if (path.startsWith('internal/webstreams/')) {
-      if (!cache.has(path)) cache.set(path, runtimeRequire(path));
+      if (!cache.has(path)) {
+        try {
+          cache.set(path, runtimeRequire(path));
+        } catch {
+          cache.set(path, {});
+        }
+      }
       const value = cache.get(path);
       if (name === 'ReadableStream' && typeof value[name] === 'function') {
         const prototype = value[name].prototype;
@@ -2962,7 +2977,11 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       }
       if (!handled) handled = processObject.emit('uncaughtException', error, origin);
       if (!handled) {
-        stderr(`${error?.stack || error}\n`);
+        if (typeof stderr === 'function') {
+          stderr(`${error?.stack || error}\n`);
+        } else if (processObject.stderr?.write) {
+          processObject.stderr.write(`${error?.stack || error}\n`);
+        }
         if (options.abortOnUncaughtException) terminateBySignal('SIGABRT');
         else {
           exitCode ||= 1;
@@ -3345,7 +3364,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     openStdin: () => processObject.stdin,
     stdout: {
       isTTY: false,
-      write: (value) => { stdout(normalizeOutputChunk(value)); return true; },
+      write: (value) => { if (typeof stdout === 'function') stdout(normalizeOutputChunk(value)); return true; },
       end: () => {},
       ref() { return this; },
       unref() { return this; },
@@ -3356,7 +3375,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     },
     stderr: {
       isTTY: false,
-      write: (value) => { stderr(normalizeOutputChunk(value)); return true; },
+      write: (value) => { if (typeof stderr === 'function') stderr(normalizeOutputChunk(value)); return true; },
       end: () => {},
       ref() { return this; },
       unref() { return this; },
@@ -4349,6 +4368,37 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       const coreName = source.startsWith('node:') ? source.slice(5) : source;
       const coreCandidate = moduleCandidates(`/node/lib/${coreName}`).find((pathname) => vfs.files.has(pathname));
       if (coreCandidate) return coreCandidate;
+
+      // Look up node_modules hierarchy
+      let dir = importer ? (importer.startsWith('/') ? path.dirname(importer) : path.dirname('/' + importer)) : '/node';
+      while (true) {
+        const parts = source.split('/');
+        const pkgName = source.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
+        const subpath = parts.slice(pkgName.split('/').length).join('/');
+        const pkgDir = path.join(dir, 'node_modules', pkgName);
+        const pkgJson = path.join(pkgDir, 'package.json');
+        if (vfs.files.has(pkgJson)) {
+          try {
+            const raw = vfs.read(pkgJson);
+            const config = JSON.parse(typeof raw === 'string' ? raw : new TextDecoder().decode(raw));
+            if (subpath) {
+              const subBase = path.join(pkgDir, subpath);
+              const subCand = moduleCandidates(subBase).find((p) => vfs.files.has(p));
+              if (subCand) return subCand;
+            } else {
+              const mainFile = config.main || 'index.js';
+              const mainBase = path.join(pkgDir, mainFile);
+              const mainCand = moduleCandidates(mainBase).find((p) => vfs.files.has(p));
+              if (mainCand) return mainCand;
+            }
+          } catch {}
+        }
+        const directBase = path.join(dir, 'node_modules', source);
+        const directCand = moduleCandidates(directBase).find((p) => vfs.files.has(p));
+        if (directCand) return directCand;
+        if (dir === '/' || dir === '.' || dir === '') break;
+        dir = path.dirname(dir);
+      }
     }
     const base = specifier.startsWith('/') ? specifier : normalizePath(specifier, importer ? path.dirname(importer) : '/node');
     const candidate = moduleCandidates(base).find((pathname) => vfs.files.has(pathname));
@@ -4930,7 +4980,23 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           throw error;
         }
       };
-      moduleExtensions['.node'] = (_module, filename) => rejectNativeAddon(filename, processObj);
+      moduleExtensions['.node'] = (_module, filename) => {
+        if (!addonsDisabled(processObj, filename)) {
+          const fileBytes = vfs.readBytes?.(filename) || vfs.read(filename);
+          const rawBytes = fileBytes instanceof Uint8Array
+            ? fileBytes
+            : fileBytes instanceof ArrayBuffer
+              ? new Uint8Array(fileBytes)
+              : (fileBytes && fileBytes.buffer)
+                ? new Uint8Array(fileBytes.buffer, fileBytes.byteOffset || 0, fileBytes.byteLength)
+                : new TextEncoder().encode(String(fileBytes || ''));
+          if (isWasmModuleBytes(rawBytes)) {
+            _module.exports = loadWasmAddon(rawBytes, { name: path.basename(filename, '.node') });
+            return _module.exports;
+          }
+        }
+        return rejectNativeAddon(filename, processObj);
+      };
       const moduleDebug = (...args) => {
         const sections = String(processObj.env?.NODE_DEBUG || '')
           .split(',')
@@ -6081,6 +6147,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       'test/reporters': createTestReportersModule(processObject),
       net, dgram, cluster, tls, inspector, 'inspector/promises': inspectorPromises,
       trace_events: traceEvents,
+      tty: createTtyModule(processObject, { stream: streamApi, net }),
       child_process: (() => {
         let childSequence = 0;
         const compileCacheSources = new Map();
@@ -9629,7 +9696,24 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             resolved = fileURLToPath(loaded.url);
           }
           if (resolved.startsWith('data:')) return {};
-          if (resolved.endsWith('.node')) rejectNativeAddon(resolved, processObject);
+          if (resolved.endsWith('.node')) {
+            if (!addonsDisabled(processObject, resolved)) {
+              const fileBytes = vfs.readBytes?.(resolved) || vfs.read(resolved);
+              const rawBytes = fileBytes instanceof Uint8Array
+                ? fileBytes
+                : fileBytes instanceof ArrayBuffer
+                  ? new Uint8Array(fileBytes)
+                  : (fileBytes && fileBytes.buffer)
+                    ? new Uint8Array(fileBytes.buffer, fileBytes.byteOffset || 0, fileBytes.byteLength)
+                    : new TextEncoder().encode(String(fileBytes || ''));
+              if (isWasmModuleBytes(rawBytes)) {
+                const exports = loadWasmAddon(rawBytes, { name: path.basename(resolved, '.node') });
+                cache.set(resolved, { exports });
+                return exports;
+              }
+            }
+            rejectNativeAddon(resolved, processObject);
+          }
           if (cache.has(resolved)) {
             const cachedExports = cache.get(resolved).exports;
             if (loaded?.format === 'module' && cachedExports && Object.hasOwn(cachedExports, 'default')
@@ -10200,6 +10284,10 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       });
       return child;
     },
+    get vfs() { return vfs; },
+    get capabilities() { return capabilities; },
+    get virtualNetwork() { return virtualNetwork; },
+    get version() { return 'browser-native/v1'; },
   };
   return runtime;
 }

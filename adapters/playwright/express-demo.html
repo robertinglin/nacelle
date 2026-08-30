@@ -1,0 +1,766 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Browser Node Harness — Express in Browser Demo</title>
+  <style>
+    :root {
+      --bg: #0b1120;
+      --panel-bg: #1e293b;
+      --card-bg: #0f172a;
+      --border: #334155;
+      --border-light: rgba(255, 255, 255, 0.1);
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-hover: #0284c7;
+      --success: #4ade80;
+      --warning: #facc15;
+      --error: #f87171;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100vh;
+      width: 100vw;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      height: 52px;
+      min-height: 52px;
+      flex-shrink: 0;
+      background: var(--panel-bg);
+      border-bottom: 1px solid var(--border);
+      padding: 0 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      z-index: 10;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: #e2e8f0;
+      letter-spacing: -0.01em;
+    }
+    .badge {
+      background: #0369a1;
+      color: #e0f2fe;
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    button {
+      background: var(--accent);
+      color: #0f172a;
+      border: none;
+      padding: 7px 14px;
+      border-radius: 6px;
+      font-weight: 600;
+      font-size: 0.82rem;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+    }
+    button:hover { background: var(--accent-hover); color: #ffffff; }
+    button.secondary {
+      background: #334155;
+      color: var(--text);
+    }
+    button.secondary:hover { background: #475569; }
+    button.success {
+      background: #16a34a;
+      color: #ffffff;
+    }
+    button.success:hover { background: #15803d; }
+    .npm-toolbar {
+      height: 38px;
+      min-height: 38px;
+      background: #131d31;
+      border-bottom: 1px solid var(--border);
+      padding: 0 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .npm-input {
+      background: #0b1120;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text);
+      padding: 4px 8px;
+      font-size: 0.78rem;
+      font-family: ui-monospace, monospace;
+      width: 240px;
+      outline: none;
+    }
+    .npm-cache-badge {
+      font-size: 0.74rem;
+      color: var(--text-muted);
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    main {
+      flex: 1;
+      min-height: 0;
+      min-width: 0;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      padding: 12px;
+      overflow: hidden;
+      height: calc(100vh - 90px);
+    }
+    .panel {
+      min-height: 0;
+      min-width: 0;
+      background: var(--panel-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      height: 100%;
+    }
+    .panel-header {
+      height: 36px;
+      min-height: 36px;
+      padding: 0 14px;
+      background: rgba(0, 0, 0, 0.25);
+      border-bottom: 1px solid var(--border);
+      font-size: 0.82rem;
+      font-weight: 600;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-shrink: 0;
+    }
+    .editor-container {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    textarea.code-editor {
+      flex: 1;
+      min-height: 0;
+      width: 100%;
+      background: var(--card-bg);
+      color: #e2e8f0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.84rem;
+      line-height: 1.5;
+      padding: 12px 14px;
+      border: none;
+      resize: none;
+      outline: none;
+      white-space: pre;
+      overflow: auto;
+    }
+    .split-vertical {
+      min-height: 0;
+      min-width: 0;
+      display: grid;
+      grid-template-rows: 1.15fr 0.85fr;
+      gap: 12px;
+      height: 100%;
+      overflow: hidden;
+    }
+    .preview-container {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      background: #ffffff;
+      overflow: hidden;
+      position: relative;
+    }
+    .address-bar {
+      height: 36px;
+      min-height: 36px;
+      background: #1e293b;
+      padding: 0 10px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .address-input {
+      flex: 1;
+      min-width: 80px;
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text);
+      padding: 4px 8px;
+      font-size: 0.78rem;
+      font-family: ui-monospace, monospace;
+      outline: none;
+    }
+    .url-quick-buttons {
+      display: flex;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    .url-quick-buttons button {
+      padding: 3px 7px;
+      font-size: 0.74rem;
+    }
+    iframe#app-preview {
+      flex: 1;
+      min-height: 0;
+      width: 100%;
+      height: 100%;
+      border: none;
+      background: #ffffff;
+    }
+    .terminal-container {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 1.3fr 1fr;
+      gap: 1px;
+      background: var(--border);
+      overflow: hidden;
+    }
+    .terminal-tab {
+      min-height: 0;
+      min-width: 0;
+      background: var(--card-bg);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .terminal-title {
+      height: 28px;
+      min-height: 28px;
+      padding: 0 10px;
+      background: rgba(255, 255, 255, 0.03);
+      font-size: 0.72rem;
+      font-weight: 700;
+      color: var(--text-muted);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      letter-spacing: 0.04em;
+    }
+    .terminal-body {
+      flex: 1;
+      min-height: 0;
+      padding: 8px 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.76rem;
+      line-height: 1.45;
+      overflow-y: auto;
+      overflow-x: hidden;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .stdout-text { color: #38bdf8; }
+    .stderr-text { color: #f87171; }
+    .system-log { color: #a3e635; }
+    .net-log { color: #fbbf24; }
+    .npm-log { color: #e879f9; }
+    .status-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 6px;
+      flex-shrink: 0;
+    }
+    .status-dot.online { background: var(--success); box-shadow: 0 0 8px var(--success); }
+    .status-dot.loading { background: var(--warning); animation: pulse 1s infinite; }
+    .status-dot.offline { background: var(--error); }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="status-dot loading" id="status-indicator"></span>
+      Browser Node Harness
+      <span class="badge">In-Browser Express</span>
+    </div>
+    <div class="controls">
+      <button id="btn-restart" class="secondary">Restart Server</button>
+      <button id="btn-run" class="success">▶ Run Express Code</button>
+    </div>
+  </header>
+
+  <!-- NPM In-Browser Caching & Package Installation Bar -->
+  <div class="npm-toolbar">
+    <span style="font-weight: 700; font-size: 0.78rem; color: var(--accent);">📦 NPM:</span>
+    <input class="npm-input" id="npm-pkg-input" placeholder="package spec (e.g. express@4.19.2, cors, ms)" value="express@4.19.2" />
+    <button id="btn-npm-install" class="secondary" style="padding: 4px 10px; font-size: 0.76rem;">Install from npmjs.org</button>
+    <span class="npm-cache-badge" id="npm-cache-badge">IndexedDB Cache: 0 pkgs</span>
+    <button id="btn-clear-cache" class="secondary" style="padding: 4px 8px; font-size: 0.72rem; color: var(--error);">🗑️ Clear Cache</button>
+  </div>
+
+  <main>
+    <!-- Left Column: Code Editor -->
+    <div class="panel">
+      <div class="panel-header">
+        <span>/node/app.js (Express Web Application)</span>
+        <span id="npm-status" style="font-size: 0.75rem; color: var(--accent)">Initializing...</span>
+      </div>
+      <div class="editor-container">
+        <textarea class="code-editor" id="code-editor" spellcheck="false">const express = require('express');
+const app = express();
+
+app.use((req, res, next) => {
+  res.set('X-Powered-By', 'Browser-Express-Native');
+  console.log(`[HTTP] ${req.method} ${req.url} (${new Date().toLocaleTimeString()})`);
+  next();
+});
+
+app.get('/', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <style>
+          body {
+            font-family: -apple-system, system-ui, sans-serif;
+            background: linear-gradient(135deg, #0ea5e9, #6366f1);
+            color: white;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            margin: 0;
+            text-align: center;
+            padding: 20px;
+          }
+          .card {
+            background: rgba(255, 255, 255, 0.15);
+            backdrop-filter: blur(10px);
+            padding: 30px 40px;
+            border-radius: 16px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+            border: 1px solid rgba(255, 255, 255, 0.25);
+            max-width: 480px;
+          }
+          h1 { margin: 0 0 12px; font-size: 1.8rem; font-weight: 800; }
+          p { margin: 0 0 18px; font-size: 1rem; opacity: 0.9; }
+          .btn {
+            background: white;
+            color: #4f46e5;
+            font-weight: 700;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+          }
+        </style>
+        <base href="/__vhost__/3000/">
+      </head>
+      <body>
+        <div class="card">
+          <h1 id="greeting">Hello from Browser Express!</h1>
+          <p id="status">⚡ Running directly in your browser's WebAssembly & JS engine</p>
+          <a class="btn" href="/__vhost__/3000/api/info">View JSON API</a>
+        </div>
+      </body>
+    </html>
+  `);
+});
+
+app.get('/api/info', (req, res) => {
+  res.json({
+    status: 'ok',
+    framework: 'express',
+    runtime: 'browser-node-harness',
+    uptimeSeconds: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.get('/hello', (req, res) => {
+  const name = req.query.name || 'Developer';
+  res.send(`
+    <base href="/__vhost__/3000/">
+    <body style="font-family: system-ui; padding: 40px; background: #f8fafc; color: #0f172a;">
+      <h1 style="color: #0284c7;">Hello, ${name}!</h1>
+      <p>This page was generated dynamically by in-browser Express.</p>
+      <p><a href="/__vhost__/3000/" style="color: #6366f1; font-weight: 600;">← Back to Home</a></p>
+    </body>
+  `);
+});
+
+const server = app.listen(3000, () => {
+  console.log('🚀 Express server listening on virtual port 3000');
+});
+</textarea>
+      </div>
+    </div>
+
+    <!-- Right Column: Live Iframe Preview & Streaming Terminal Logs -->
+    <div class="split-vertical">
+      <!-- Live Controlled Iframe Preview -->
+      <div class="panel">
+        <div class="panel-header">
+          <span>Live Controlled Iframe Preview</span>
+          <span style="font-size: 0.75rem; color: var(--accent);">http://127.0.0.1:3000</span>
+        </div>
+        <div class="address-bar">
+          <span style="color: var(--text-muted); font-size: 0.78rem;">URL:</span>
+          <input class="address-input" id="url-input" value="/__vhost__/3000/" />
+          <div class="url-quick-buttons">
+            <button class="secondary" onclick="navigateFrame('/__vhost__/3000/')">/</button>
+            <button class="secondary" onclick="navigateFrame('/__vhost__/3000/api/info')">/api/info</button>
+            <button class="secondary" onclick="navigateFrame('/__vhost__/3000/hello?name=Developer')">/hello</button>
+            <button id="btn-go">Go</button>
+          </div>
+        </div>
+        <div class="preview-container">
+          <iframe id="app-preview" src="about:blank"></iframe>
+        </div>
+      </div>
+
+      <!-- Stdout / Stderr & Network Terminal -->
+      <div class="panel">
+        <div class="panel-header">
+          <span>Node.js Output & Network Inspector</span>
+          <button class="secondary" id="btn-clear-logs" style="padding: 2px 8px; font-size: 0.7rem;">Clear</button>
+        </div>
+        <div class="terminal-container">
+          <div class="terminal-tab">
+            <div class="terminal-title">PROCESS STDOUT & STDERR</div>
+            <div class="terminal-body" id="term-output"></div>
+          </div>
+          <div class="terminal-tab">
+            <div class="terminal-title">HTTP TRAFFIC & NPM LOGS</div>
+            <div class="terminal-body" id="term-network"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script type="module">
+    import { createRuntime } from '/runtime.js';
+    import { BrowserNpm, BrowserNpmCache } from '/runtime/npm.js';
+    import { packTarGz } from '/runtime/tar.js';
+    import { createBrowserNet } from '/runtime/net.js';
+    import { installGatewayBridge } from '/runtime/gateway-bridge.js';
+    import { createBufferClass } from '/runtime/buffer.js';
+
+    window.Buffer = createBufferClass(window);
+
+    const termOutput = document.getElementById('term-output');
+    const termNetwork = document.getElementById('term-network');
+    const statusIndicator = document.getElementById('status-indicator');
+    const npmStatus = document.getElementById('npm-status');
+    const npmCacheBadge = document.getElementById('npm-cache-badge');
+    const iframe = document.getElementById('app-preview');
+    const urlInput = document.getElementById('url-input');
+    const npmPkgInput = document.getElementById('npm-pkg-input');
+
+    const npmCache = new BrowserNpmCache({ globalObject: window });
+
+    function logTerminal(text, type = 'stdout') {
+      const line = document.createElement('div');
+      line.className = type === 'stderr' ? 'stderr-text' : type === 'system' ? 'system-log' : 'stdout-text';
+      line.textContent = text;
+      termOutput.appendChild(line);
+      termOutput.scrollTop = termOutput.scrollHeight;
+    }
+
+    function logNetwork(text, type = 'net') {
+      const line = document.createElement('div');
+      line.className = type === 'npm' ? 'npm-log' : 'net-log';
+      line.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
+      termNetwork.appendChild(line);
+      termNetwork.scrollTop = termNetwork.scrollHeight;
+    }
+
+    async function updateCacheBadge() {
+      try {
+        const stats = await npmCache.getStats();
+        const kb = (stats.totalBytes / 1024).toFixed(1);
+        npmCacheBadge.textContent = `IndexedDB Cache: ${stats.count} pkgs (${kb} KB)`;
+      } catch {
+        npmCacheBadge.textContent = 'IndexedDB Cache: active';
+      }
+    }
+
+    window.navigateFrame = (path) => {
+      urlInput.value = path;
+      const targetUrl = path.startsWith('/') ? path : '/' + path;
+      iframe.src = targetUrl;
+      logNetwork(`Navigate -> ${targetUrl}`);
+    };
+
+    iframe.addEventListener('load', () => {
+      try {
+        const loc = iframe.contentWindow?.location;
+        if (loc && loc.pathname && loc.pathname !== '/blank' && loc.pathname !== 'about:blank') {
+          urlInput.value = loc.pathname + loc.search;
+        }
+      } catch {
+        // ignore
+      }
+    });
+
+    document.getElementById('btn-go').addEventListener('click', (e) => {
+      e.preventDefault();
+      const val = urlInput.value.trim();
+      const target = val.startsWith('/__vhost__/') ? val : (val.startsWith('/') ? `/__vhost__/3000${val}` : `/__vhost__/3000/${val}`);
+      urlInput.value = target;
+      iframe.src = target;
+      logNetwork(`Navigate -> ${target}`);
+    });
+
+    urlInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        document.getElementById('btn-go').click();
+      }
+    });
+
+    document.getElementById('btn-clear-logs').addEventListener('click', () => {
+      termOutput.innerHTML = '';
+      termNetwork.innerHTML = '';
+    });
+
+    document.getElementById('btn-clear-cache').addEventListener('click', async () => {
+      await npmCache.clear();
+      cachedNodeModulesMount = null;
+      await updateCacheBadge();
+      logNetwork('🗑️ IndexedDB NPM Cache cleared', 'npm');
+    });
+
+    let currentRuntime = null;
+    let activeAbortController = null;
+    let isInitialized = false;
+    let cachedNodeModulesMount = null;
+
+    document.getElementById('btn-npm-install').addEventListener('click', async () => {
+      const spec = npmPkgInput.value.trim();
+      if (!spec) return;
+      if (!currentRuntime) {
+        logTerminal('Runtime not initialized yet. Click Run Express Code first.', 'stderr');
+        return;
+      }
+
+      logNetwork(`[NPM] 🌐 Installing ${spec} from https://registry.npmjs.org...`, 'npm');
+      logTerminal(`[NPM] Installing package: ${spec}...`, 'system');
+
+      const npm = new BrowserNpm({
+        vfs: currentRuntime.vfs,
+        cache: npmCache,
+        globalObject: window,
+      });
+
+      try {
+        const res = await npm.install([spec], {
+          cwd: '/node',
+          onProgress: (ev) => {
+            if (ev.phase === 'cache-hit-tarball') {
+              logNetwork(`⚡ Cache HIT (tarball): ${ev.name}@${ev.version}`, 'npm');
+            } else if (ev.phase === 'cache-hit-meta') {
+              logNetwork(`⚡ Cache HIT (meta): ${ev.name}`, 'npm');
+            } else if (ev.phase === 'fetching-meta') {
+              logNetwork(`🌐 Fetching metadata: ${ev.name} (${ev.url})`, 'npm');
+            } else if (ev.phase === 'downloading-tarball') {
+              logNetwork(`⬇️ Downloading tarball: ${ev.name}@${ev.version} from npmjs.org`, 'npm');
+            } else if (ev.phase === 'unpacking') {
+              logNetwork(`📂 Unpacking ${ev.name}@${ev.version} into VFS...`, 'npm');
+            }
+          },
+        });
+        await updateCacheBadge();
+        logNetwork(`✓ Installed ${res.packages.map(p => `${p.name}@${p.version}`).join(', ')} (${res.totalFiles} files in VFS)`, 'npm');
+        logTerminal(`✓ NPM install successful: ${spec} is now available to require()`, 'system');
+      } catch (err) {
+        logNetwork(`❌ Failed to install ${spec}: ${err.message}`, 'npm');
+        logTerminal(`❌ NPM error: ${err.message}`, 'stderr');
+      }
+    });
+
+    async function initServiceWorker() {
+      if (!('serviceWorker' in navigator)) return;
+      logTerminal('Registering Service Worker HTTP Gateway...', 'system');
+      const reg = await navigator.serviceWorker.register('/runtime/gateway-sw.js', { scope: '/' });
+      await navigator.serviceWorker.ready;
+      if (!navigator.serviceWorker.controller) {
+        await new Promise((resolve) => {
+          const onControllerChange = () => {
+            navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+            resolve();
+          };
+          navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
+          setTimeout(resolve, 600);
+        });
+      }
+      logTerminal('✓ Service Worker HTTP Gateway active', 'system');
+    }
+
+    async function runServer() {
+      statusIndicator.className = 'status-dot loading';
+
+      if (activeAbortController) {
+        activeAbortController.abort();
+      }
+      activeAbortController = new AbortController();
+      const signal = activeAbortController.signal;
+
+      if (!isInitialized) {
+        await initServiceWorker();
+        await updateCacheBadge();
+        isInitialized = true;
+      }
+
+      logTerminal('--- Initializing In-Browser Node.js Runtime ---', 'system');
+
+      // 1. Create fresh runtime instance
+      currentRuntime = createRuntime({ globalObject: window });
+      await currentRuntime.reset({
+        runId: `express-run-${Date.now()}`,
+        signal,
+        capabilities: {
+          vfs: { mounts: [{ path: '/node', mode: 'read-write' }] },
+          workers: { entryModules: ['*'], maxChildren: 8 },
+          signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
+          envVars: { allowed: [] },
+          ipc: { enabled: true },
+          output: { maxBytes: 4 * 1024 * 1024, stdoutBytes: 2 * 1024 * 1024, stderrBytes: 2 * 1024 * 1024 },
+        },
+      });
+
+      // 2. Install Express from In-Memory Snapshot, IndexedDB Cache, or Live npmjs.org
+      if (cachedNodeModulesMount) {
+        logNetwork('⚡ Fast re-mount: Express packages restored from memory in 5ms', 'npm');
+        await currentRuntime.mount(cachedNodeModulesMount);
+        npmStatus.textContent = '✓ express@4.19.2 ready (in-memory)';
+      } else {
+        npmStatus.textContent = 'Resolving express@4.19.2...';
+        const npm = new BrowserNpm({
+          vfs: currentRuntime.vfs,
+          cache: npmCache,
+          globalObject: window,
+        });
+
+        const installRes = await npm.install(['express@4.19.2'], {
+          cwd: '/node',
+          onProgress: (ev) => {
+            if (ev.phase === 'cache-hit-tarball') {
+              logNetwork(`⚡ Cache HIT: ${ev.name}@${ev.version} (loaded from IndexedDB)`, 'npm');
+            } else if (ev.phase === 'cache-hit-meta') {
+              logNetwork(`⚡ Cache HIT (meta): ${ev.name}`, 'npm');
+            } else if (ev.phase === 'fetching-meta') {
+              logNetwork(`🌐 Fetch metadata: ${ev.name} from https://registry.npmjs.org`, 'npm');
+            } else if (ev.phase === 'downloading-tarball') {
+              logNetwork(`⬇️ Downloading tarball: ${ev.name}@${ev.version} from npmjs.org`, 'npm');
+            } else if (ev.phase === 'unpacking') {
+              logNetwork(`📂 Unpacking ${ev.name}@${ev.version} into /node/node_modules`, 'npm');
+            }
+          },
+        });
+
+        cachedNodeModulesMount = installRes.files;
+        npmStatus.textContent = '✓ express@4.19.2 ready';
+        await updateCacheBadge();
+      }
+
+      // 3. Connect Gateway Bridge
+      const netModule = createBrowserNet({
+        network: currentRuntime.virtualNetwork,
+        BufferClass: window.Buffer,
+      });
+      installGatewayBridge({ net: netModule, globalObject: window });
+
+      // 4. Mount updated user code
+      const code = document.getElementById('code-editor').value;
+      await currentRuntime.mount({
+        '/node/app.js': code,
+      });
+
+      logTerminal('Executing /node/app.js...', 'system');
+
+      // 5. Run entry
+      let refreshed = false;
+      const doRefresh = () => {
+        refreshed = true;
+        statusIndicator.className = 'status-dot online';
+        const val = (urlInput.value || '').trim();
+        const pathPart = val.startsWith('/__vhost__/')
+          ? val.split('?')[0]
+          : (val.startsWith('/') ? `/__vhost__/3000${val.split('?')[0]}` : '/__vhost__/3000/');
+        iframe.src = `${pathPart}?_t=${Date.now()}`;
+      };
+
+      await new Promise((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          doRefresh();
+          resolve();
+        };
+
+        currentRuntime.executeEntry('/node/app.js', { cwd: '/node', signal }, (stdoutChunk) => {
+          logTerminal(stdoutChunk, 'stdout');
+          if (stdoutChunk.includes('listening') || stdoutChunk.includes('3000')) {
+            setTimeout(finish, 50);
+          }
+        }, (stderrChunk) => {
+          logTerminal(stderrChunk, 'stderr');
+        }).catch((err) => {
+          logTerminal('Execute error: ' + err.message, 'stderr');
+          finish();
+        });
+
+        // Fallback refresh
+        setTimeout(finish, 15000);
+      });
+    }
+
+    document.getElementById('btn-run').addEventListener('click', () => {
+      runServer();
+    });
+
+    document.getElementById('btn-restart').addEventListener('click', () => {
+      runServer();
+    });
+
+    window.runServer = runServer;
+
+    // Auto-boot on load
+    runServer();
+  </script>
+</body>
+</html>

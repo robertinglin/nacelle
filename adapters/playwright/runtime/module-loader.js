@@ -695,6 +695,9 @@ export function createModuleLoader({
       return new URL(value, importer).href;
     }
     const base = value.startsWith('/') ? value : posix.join(posix.dirname(importer), value);
+    // ESM resolution does not add file extensions. CommonJS resolution keeps
+    // the Node-style extension and index fallbacks through require conditions.
+    if (conditions.includes('import') && !posix.extname(value)) return base;
     return resolveFileOrDirectory(base) || base;
   };
 
@@ -1198,8 +1201,7 @@ export function createModuleLoader({
   const runLoadHooksAsync = async (resolved, format) => {
     const url = format === 'builtin'
       ? `node:${builtinName(resolved)}`
-      : resolved.startsWith('custom-') || resolved.startsWith('data:')
-        || resolved.startsWith('http:') || resolved.startsWith('https:')
+      : /^[A-Za-z][A-Za-z\d+.-]*:/.test(resolved)
         ? resolved : fileURL(resolved);
     const context = {
       format,
@@ -1268,7 +1270,11 @@ export function createModuleLoader({
       }
     }
     if (/\bimport\s*\(/.test(rewritten)) {
-      const token = register((dynamicSpecifier, options) => importModule(dynamicSpecifier, importer, {}, options));
+      const token = register((dynamicSpecifier, options) => {
+        const pending = globalObject.process?.__bnhModuleRegistrationPromises;
+        const load = () => importModule(dynamicSpecifier, importer, {}, options);
+        return pending?.length ? Promise.all([...pending]).then(load) : load();
+      });
       rewritten = rewritten.replace(/\bimport\s*\(/g, `globalThis[${quote(registryName)}][${quote(token)}](`);
     }
     if (/\bimport\.meta\.resolve\b/.test(rewritten)) {
@@ -1293,7 +1299,7 @@ export function createModuleLoader({
   const moduleSourceAsync = async (resolved) => {
     const builtinValue = builtin(resolved);
     const format = isBuiltinSpecifier(resolved) ? 'builtin'
-      : resolved.startsWith('data:') || resolved.startsWith('http:') || resolved.startsWith('https:') ? 'module'
+      : /^[A-Za-z][A-Za-z\d+.-]*:/.test(resolved) ? 'module'
       : resolved.endsWith('.json') ? 'json' : moduleFormat(resolved);
     const loaded = await runLoadHooksAsync(resolved, format);
     const loadedResolved = loaded.url ? hookURLToSpecifier(loaded.url) : resolved;
@@ -1404,7 +1410,19 @@ export function createModuleLoader({
       const url = await moduleURLAsync(resolved);
       return import(url);
     }
+    if (!resolved.startsWith('node:') && /^[A-Za-z][A-Za-z\d+.-]*:/.test(resolved)) {
+      validateImportAttributes(resolved, options);
+      const url = await moduleURLAsync(resolved);
+      return import(url);
+    }
     validateImportAttributes(resolved, options);
+    if (resolved.endsWith('.json') && options?.with?.type !== 'json') {
+      throw packageError('ERR_IMPORT_ATTRIBUTE_MISSING', 'Module import attribute "type" is required for JSON modules');
+    }
+    const moduleMocks = globalObject.process?.__bnhModuleMocks || globalObject.__bnhModuleMocks;
+    const moduleMock = moduleMocks?.get(resolved)
+      || moduleMocks?.get(resolved.startsWith('node:') ? resolved.slice(5) : undefined);
+    if (moduleMock?.active) return moduleMock.getNamespace();
     const sharedNamespace = globalObject.__BNH_ESM_NAMESPACE_CACHE__?.get?.(resolved);
     if (sharedNamespace) {
       if (!Object.hasOwn(sharedNamespace, '__esModule')) return sharedNamespace;
@@ -1443,10 +1461,12 @@ export function createModuleLoader({
     }
     const module = cache.get(resolved);
     if (module?.promise) await module.promise;
-    return {
+    const namespace = {
       default: exports,
       ...(exports && (typeof exports === 'object' || typeof exports === 'function') ? exports : {}),
     };
+    importCache.set(resolved, namespace);
+    return namespace;
   };
 
   return {

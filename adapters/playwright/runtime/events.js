@@ -14,7 +14,53 @@ const kMaxEventTargetListenersWarned = Symbol('events.maxEventTargetListenersWar
 const kCapture = Symbol('events.captureRejections');
 const captureRejectionSymbol = Symbol.for('nodejs.rejection');
 const errorMonitor = Symbol('events.errorMonitor');
+const kEventTargetListeners = Symbol.for('nodejs.eventTargetListeners');
 let EventEmitterAsyncResource;
+
+function installEventTargetListenerTracking() {
+  const EventTarget = globalThis.EventTarget;
+  const prototype = EventTarget?.prototype;
+  if (!prototype || prototype[kEventTargetListeners]) return;
+  const nativeAdd = prototype.addEventListener;
+  const nativeRemove = prototype.removeEventListener;
+  if (typeof nativeAdd !== 'function' || typeof nativeRemove !== 'function') return;
+  const states = new WeakMap();
+  const add = function(type, listener, options) {
+    if (listener == null) return Reflect.apply(nativeAdd, this, [type, listener, options]);
+    const state = states.get(this) || new Map();
+    const listeners = state.get(type) || new Map();
+    const once = Boolean(options && typeof options === 'object' && options.once);
+    const wrapped = once
+      ? (...args) => {
+          listeners.delete(listener);
+          return listener.apply(this, args);
+        }
+      : listener;
+    Reflect.apply(nativeAdd, this, [type, wrapped, options]);
+    listeners.set(listener, wrapped);
+    state.set(type, listeners);
+    states.set(this, state);
+  };
+  const remove = function(type, listener, options) {
+    const state = states.get(this);
+    const listeners = state?.get(type);
+    const wrapped = listeners?.get(listener) || listener;
+    const result = Reflect.apply(nativeRemove, this, [type, wrapped, options]);
+    if (listeners?.has(listener)) {
+      listeners.delete(listener);
+      if (!listeners.size) state.delete(type);
+    }
+    return result;
+  };
+  Object.defineProperty(prototype, 'addEventListener', { configurable: true, value: add });
+  Object.defineProperty(prototype, 'removeEventListener', { configurable: true, value: remove });
+  Object.defineProperty(prototype, kEventTargetListeners, {
+    configurable: false,
+    value: (target, name) => [...(states.get(target)?.get(name) || new Map()).keys()],
+  });
+}
+
+installEventTargetListenerTracking();
 
 class ListenerList extends Array {
   get size() {
@@ -412,7 +458,9 @@ export function getEventListeners(emitter, name) {
   if (emitter && typeof emitter.listeners === 'function') {
     return emitter.listeners(name);
   }
-  if (isEventTarget(emitter)) return [];
+  if (isEventTarget(emitter)) {
+    return emitter[kEventTargetListeners]?.(emitter, name) || [];
+  }
   throw invalidEmitter(emitter);
 }
 

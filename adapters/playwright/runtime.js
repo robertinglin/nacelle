@@ -67,6 +67,7 @@ import {
   generatePrime,
   generatePrimeSync,
   generateKey,
+  generateKeySync,
   getCipherInfo,
   getRandomValues as createRandomValues,
   hkdf as createHkdf,
@@ -91,6 +92,7 @@ import {
   sign,
   signSync,
   scryptSync as createScryptSync,
+  validateScryptArguments,
   timingSafeEqual,
   verify,
   scrypt as createScrypt,
@@ -3610,15 +3612,21 @@ function createCryptoShim(scope, Buffer, processObject) {
   const nodeScrypt = (password, salt, keyLength, options, callback) => {
     const actualOptions = typeof options === 'function' ? {} : options;
     const actualCallback = typeof options === 'function' ? options : callback;
+    validateScryptArguments(password, salt, keyLength, actualOptions ?? {}, scope);
     if (typeof actualCallback !== 'function') {
       const error = new TypeError('The "callback" argument must be of type function');
       error.code = 'ERR_INVALID_ARG_TYPE';
       throw error;
     }
-    return createScrypt(password, salt, keyLength, actualOptions, (error, value) => {
-      if (error) actualCallback(error);
-      else actualCallback(null, Buffer.from(value));
-    }, scope);
+    const operation = Promise.resolve().then(() => createScryptSync(
+      password,
+      salt,
+      keyLength,
+      actualOptions ?? {},
+      scope,
+    ));
+    callbackOperation('SCRYPTREQUEST', operation, actualCallback, (value) => Buffer.from(value));
+    return undefined;
   };
   const nodeSign = (...args) => {
     const value = signSync(args[0], args[1], args[2], args[3], scope);
@@ -3628,17 +3636,8 @@ function createCryptoShim(scope, Buffer, processObject) {
     const value = verifySync(args[0], args[1], args[2], args[3], args[4], scope);
     return value === undefined ? verify(...args) : value;
   };
-  const nodeGenerateKeySync = (type, options = {}) => {
-    if (String(type).toLowerCase() !== 'aes') {
-      throw new Error(`synchronous ${type} key generation is unavailable in the browser runtime`);
-    }
-    const length = Number(options.length) || 256;
-    if (![128, 192, 256].includes(length)) {
-      const error = new RangeError('AES key length must be 128, 192, or 256 bits');
-      error.code = 'ERR_CRYPTO_INVALID_KEYLEN';
-      throw error;
-    }
-    return createSecretKeyShim(Buffer)(createRandomBytes(length / 8, scope));
+  const nodeGenerateKeySync = (type, options) => {
+    return generateKeySync(type, options);
   };
   const nodeHash = (algorithm, value, outputEncoding) => {
     if (typeof algorithm !== 'string') {
@@ -5022,18 +5021,32 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         _stat: stat,
         _resolveLookupPaths: resolveLookupPaths,
         _resolveFilename: resolveFilename,
-        _load: (name, parent, isMain) => runtimeRequire(
-          name,
-          typeof parent === 'string' ? parent : parent?.filename || sourcePath,
-        ),
+        _load: (name, parent, isMain) => {
+          if (String(name).startsWith('file:') && String(name).endsWith('.mjs')) {
+            const error = new Error(`Cannot find module '${name}'`);
+            error.code = 'MODULE_NOT_FOUND';
+            throw error;
+          }
+          return runtimeRequire(
+            name,
+            typeof parent === 'string' ? parent : parent?.filename || sourcePath,
+          );
+        },
         wrap: (script) => `${currentModuleWrapper[0]}${script}${currentModuleWrapper[1]}`,
         createRequire: (filename) => {
           const importer = typeof filename === 'string' && filename.startsWith('file:')
             ? fileURLToPath(filename)
             : String(filename || sourcePath);
-          return (name) => BUILTIN_NAMES.includes(builtinName(name))
-            ? moduleApi._load(name, importer)
-            : runtimeRequire(name, importer);
+          return (name) => {
+            if (String(name).startsWith('file:') && String(name).endsWith('.mjs')) {
+              const error = new Error(`Cannot find module '${name}'`);
+              error.code = 'MODULE_NOT_FOUND';
+              throw error;
+            }
+            return BUILTIN_NAMES.includes(builtinName(name))
+              ? moduleApi._load(name, importer)
+              : runtimeRequire(name, importer);
+          };
         },
         isBuiltin: (name) => BUILTIN_NAMES.includes(builtinName(name)),
         findSourceMap,
@@ -5096,20 +5109,33 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         getCompileCacheDir: () => processObj.env?.NODE_COMPILE_CACHE,
         flushCompileCache: () => {},
         constants: { compileCacheStatus },
-        register: (specifier, options = {}) => {
+        register: (specifier, parentURL, options) => {
           if (specifier === undefined) {
             const error = new TypeError('The "specifier" argument must be specified');
             error.code = 'ERR_MISSING_ARGS';
             throw error;
           }
-          if (options === null || typeof options !== 'object') {
+          if (parentURL !== undefined && parentURL !== null
+            && typeof parentURL === 'object' && options === undefined) {
+            options = parentURL;
+            parentURL = sourcePath;
+          }
+          if (options === undefined) options = {};
+          if (options === null || typeof options !== 'object' || Array.isArray(options)) {
             const error = new TypeError('The "options" argument must be of type object');
             error.code = 'ERR_INVALID_ARG_TYPE';
             throw error;
           }
           const registrations = processObj.__bnhModuleRegistrations || [];
-          registrations.push({ specifier, options, parentURL: sourcePath });
+          const registration = {
+            specifier,
+            options,
+            parentURL: parentURL === undefined || parentURL === null ? sourcePath : parentURL,
+          };
+          registrations.push(registration);
           processObj.__bnhModuleRegistrations = registrations;
+          const activate = processObj.__bnhActivateModuleRegistration;
+          if (typeof activate === 'function') activate(registration);
         },
         registerHooks,
         syncBuiltinESMExports: () => syncBuiltinESMExportsImpl(),
@@ -5805,7 +5831,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       get() { return timerPromises; },
     });
     const timerPromises = createTimerPromises(scope, trackTask);
-    const nodeTest = createNodeTest({ scope, processObject, stdout, stderr, trackTask, assert: assert.strict, timers, timerPromises, sourcePath });
+    const nodeTest = createNodeTest({ scope, processObject, stdout, stderr, trackTask, assert: assert.strict, timers, timerPromises, sourcePath, execArgv: runtimeOptions.execArgv });
     const vm = createVmModule(scope);
     const asyncHooks = createAsyncHooksModule();
     processObject._bnhExecutionAsyncId = asyncHooks.executionAsyncId;
@@ -6909,16 +6935,44 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               } else if (!result.pending) {
                 const scheduleFinish = scope.__BNH_NATIVE_TIMERS__?.setTimeout || scope.setTimeout;
                 scheduleFinish(() => {
-                  if (result.stdoutChunks?.length) stdout = result.stdoutChunks.join('');
-                  if (result.stderrChunks?.length) stderr = result.stderrChunks.join('');
+                  if (result.stdoutChunks?.length) {
+                    const complete = result.stdoutChunks.join('');
+                    const missing = stdoutEmitted && complete.endsWith(stdout)
+                      ? complete.slice(0, complete.length - stdout.length)
+                      : complete;
+                    stdout = complete;
+                    if (missing) writeStdout(missing);
+                  }
+                  if (result.stderrChunks?.length) {
+                    const complete = result.stderrChunks.join('');
+                    const missing = stderrEmitted && complete.endsWith(stderr)
+                      ? complete.slice(0, complete.length - stderr.length)
+                      : complete;
+                    stderr = complete;
+                    if (missing) writeStderr(missing);
+                  }
                   if (stdout && !stdoutEmitted) writeStdout(stdout);
                   if (stderr && !stderrEmitted) writeStderr(stderr);
                   scope.queueMicrotask(() => finish(terminalCode, terminalSignal));
                 });
               } else if (result.process) {
                 result.process.once?.('exit', (code, signal) => {
-                  if (result.stdoutChunks?.length) stdout = result.stdoutChunks.join('');
-                  if (result.stderrChunks?.length) stderr = result.stderrChunks.join('');
+                  if (result.stdoutChunks?.length) {
+                    const complete = result.stdoutChunks.join('');
+                    const missing = stdoutEmitted && complete.endsWith(stdout)
+                      ? complete.slice(0, complete.length - stdout.length)
+                      : complete;
+                    stdout = complete;
+                    if (missing) writeStdout(missing);
+                  }
+                  if (result.stderrChunks?.length) {
+                    const complete = result.stderrChunks.join('');
+                    const missing = stderrEmitted && complete.endsWith(stderr)
+                      ? complete.slice(0, complete.length - stderr.length)
+                      : complete;
+                    stderr = complete;
+                    if (missing) writeStderr(missing);
+                  }
                   if (stdout && !stdoutEmitted) writeStdout(stdout);
                   if (stderr && !stderrEmitted) writeStderr(stderr);
                   scope.queueMicrotask(() => finish(signal ? null : code, signal || null));
@@ -6952,6 +7006,15 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             const coreName = source.startsWith('node:') ? source.slice(5) : source;
             for (const candidate of moduleCandidates(`/node/lib/${coreName}`)) {
               try { readSource(candidate); return candidate; } catch { /* ignore */ }
+            }
+            let directory = path.dirname(importer || '/node/index.js');
+            while (true) {
+              const packageBase = path.join(directory, 'node_modules', source);
+              for (const candidate of moduleCandidates(packageBase)) {
+                try { readSource(candidate); return candidate; } catch { /* ignore */ }
+              }
+              if (directory === '/' || directory === '.' || directory === '') break;
+              directory = path.dirname(directory);
             }
           }
           const base = specifier.startsWith('/') ? specifier : normalizePath(specifier, importer ? path.dirname(importer) : '/node');
@@ -7106,6 +7169,34 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         }
 
         function loadModuleSync(entryPath, parentImport = entryPath, processObj, scopeObj, bufferClass, stderrArr = [], sourceOverride = undefined, moduleState = { main: null }, isMain = false, compileCacheState = null, fromEval = false, syncStreamWebApi = null) {
+          const moduleMocks = processObj?.__bnhModuleMocks
+            || scopeObj?.process?.__bnhModuleMocks
+            || scopeObj?.__bnhModuleMocks
+            || processObject?.__bnhModuleMocks;
+          const mockMaps = [
+            processObj?.__bnhModuleMocks,
+            scopeObj?.process?.__bnhModuleMocks,
+            scopeObj?.__bnhModuleMocks,
+            processObject?.__bnhModuleMocks,
+          ].filter((value, index, values) => value && values.indexOf(value) === index);
+          const moduleMockFor = (key) => {
+            const direct = mockMaps.map((map) => map.get(key)).find((mock) => mock?.active);
+            if (direct) return direct;
+            const value = String(key);
+            try {
+              const resolvedKey = resolveFileSync(value, entryPath, processObj);
+              const resolved = mockMaps.map((map) => map.get(resolvedKey)).find((mock) => mock?.active);
+              if (resolved) return resolved;
+            } catch { /* use the normal loader's resolution error */ }
+            return mockMaps.flatMap((map) => [...map.values()])
+              .find((mock, index, values) => mock?.active
+                && values.indexOf(mock) === index
+                && (mock.resolved === key
+                  || value.startsWith('/') && mock.resolved.startsWith(`${value}/`)
+                  || !value.startsWith('/') && mock.resolved.includes(`/node_modules/${value}/`)));
+          };
+          const registeredMock = moduleMockFor(entryPath);
+          if (registeredMock?.active) return registeredMock.getCjsValue();
           if (entryPath.endsWith('.node')) rejectNativeAddon(entryPath, processObj);
           const env = processObj?.env || {};
           const debugNative = env.NODE_DEBUG_NATIVE || '';
@@ -7203,6 +7294,26 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             if (builtin === 'trace_events' && processObj._bnhTraceEventsUnavailable) {
               throw traceEventsUnavailableError();
             }
+            if (String(name).startsWith('file:') && String(name).endsWith('.mjs')) {
+              const error = new Error(`Cannot find module '${name}'`);
+              error.code = 'MODULE_NOT_FOUND';
+              throw error;
+            }
+            const activeMocks = processObj?.__bnhModuleMocks
+              || scopeObj?.process?.__bnhModuleMocks
+              || scopeObj?.__bnhModuleMocks
+              || processObject?.__bnhModuleMocks;
+            const directMock = moduleMockFor(name)
+              || moduleMockFor(`node:${builtin}`);
+            if (directMock?.active) return directMock.getCjsValue();
+            if (isEsmModule(entryPath, processObj)
+              && (String(name).startsWith('./') || String(name).startsWith('../'))
+              && !path.extname(String(name))) {
+              const error = new Error(`Cannot find module '${name}' imported from '${entryPath}'`);
+              error.code = 'ERR_MODULE_NOT_FOUND';
+              error.name = 'Error [ERR_MODULE_NOT_FOUND]';
+              throw error;
+            }
             if (BUILTIN_NAMES.includes(builtin)) {
               const processBuiltin = processObj?._bnhBuiltinOverrides?.[builtin];
               if (processBuiltin !== undefined) return processBuiltin;
@@ -7222,6 +7333,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               return value;
             }
             const resolved = resolveFileSync(name, entryPath, processObj);
+            const mock = moduleMockFor(resolved);
+            if (mock?.active) return mock.getCjsValue();
             return loadModuleSync(resolved, entryPath, processObj, scopeObj, bufferClass, stderrArr, undefined, moduleState, false, compileCacheState, text.includes('eval('), syncStreamWebApi);
           };
           requireFn.resolve = (name) => BUILTIN_NAMES.includes(builtinName(name)) ? name : resolveFileSync(name, entryPath, processObj);
@@ -7229,6 +7342,17 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           requireFn.cache = new Map();
           moduleRecord.require = requireFn;
           const importFromCommonJs = (specifier, options) => {
+            if (processObj?.execArgv?.some((argument) => String(argument) === '--experimental-default-type=module')
+              && (String(specifier).startsWith('./') || String(specifier).startsWith('../'))
+              && !path.extname(String(specifier))) {
+              const error = new Error(`Cannot find module '${specifier}' imported from '${entryPath}'`);
+              error.code = 'ERR_MODULE_NOT_FOUND';
+              error.name = 'Error [ERR_MODULE_NOT_FOUND]';
+              throw error;
+            }
+            if (typeof processObj?.__bnhModuleImport === 'function') {
+              return processObj.__bnhModuleImport(specifier, entryPath, options);
+            }
             const name = builtinName(specifier);
             if (BUILTIN_NAMES.includes(name)) {
               const value = runtimeRequire(name, entryPath);
@@ -7236,13 +7360,30 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             }
             return esmLoader.import(specifier, entryPath, {}, options);
           };
-          runCommonJSWrapper(
-            typeof source === 'string' ? source : text,
-            entryPath,
-            [requireFn, moduleRecord, moduleExports, entryPath, path.dirname(entryPath),
-              importFromCommonJs],
-            moduleApi.wrapper,
-          );
+          const previousActiveProcess = scopeObj.__bnhActiveProcess;
+          const previousRuntimeActiveProcess = processObject.__bnhActiveProcess;
+          const previousPermissionProcess = scopeObj.__bnhModulePermissionProcess;
+          scopeObj.__bnhActiveProcess = processObj;
+          processObject.__bnhActiveProcess = processObj;
+          scopeObj.__bnhModulePermissionProcess = processObj;
+          nodeTest.__bnhSetActiveProcess?.(processObj);
+          try {
+            runCommonJSWrapper(
+              typeof source === 'string' ? source : text,
+              entryPath,
+              [requireFn, moduleRecord, moduleExports, entryPath, path.dirname(entryPath),
+                importFromCommonJs],
+              moduleApi.wrapper,
+            );
+          } finally {
+            if (previousActiveProcess === undefined) delete scopeObj.__bnhActiveProcess;
+            else scopeObj.__bnhActiveProcess = previousActiveProcess;
+            if (previousRuntimeActiveProcess === undefined) delete processObject.__bnhActiveProcess;
+            else processObject.__bnhActiveProcess = previousRuntimeActiveProcess;
+            if (previousPermissionProcess === undefined) delete scopeObj.__bnhModulePermissionProcess;
+            else scopeObj.__bnhModulePermissionProcess = previousPermissionProcess;
+            nodeTest.__bnhSetActiveProcess?.(previousRuntimeActiveProcess);
+          }
           moduleRecord.loaded = true;
           if (esmEntry && Object.hasOwn(moduleRecord.exports, 'default')
             && !Object.hasOwn(moduleRecord.exports, '__esModule')) {
@@ -7333,6 +7474,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             childProc.processObject._bnhVirtualChild = true;
             if (typeof processObject.__bnhModuleResolve === 'function') {
               childProc.processObject.__bnhModuleResolve = processObject.__bnhModuleResolve;
+            }
+            if (typeof processObject.__bnhModuleImport === 'function') {
+              childProc.processObject.__bnhModuleImport = processObject.__bnhModuleImport;
             }
             if (options.stdinSource && childProc.processObject.stdin?.push) {
               const forwardStdin = (value) => {
@@ -8862,8 +9006,16 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       return BUILTIN_NAMES.includes(builtinName(name)) ? name : resolveFile(name, importer, processObject);
     };
     builtins.module._load = (name, parent) => {
+      if (String(name).startsWith('file:') && String(name).endsWith('.mjs')) {
+        const error = new Error(`Cannot find module '${name}'`);
+        error.code = 'MODULE_NOT_FOUND';
+        throw error;
+      }
       const builtin = builtinName(name);
       const importer = typeof parent === 'string' ? parent : parent?.filename || entry;
+      const moduleMock = processObject.__bnhModuleMocks?.get(name)
+        || processObject.__bnhModuleMocks?.get(`node:${builtin}`);
+      if (moduleMock?.active) return moduleMock.getCjsValue();
       if (builtin === 'trace_events' && processObject._bnhTraceEventsUnavailable) {
         throw traceEventsUnavailableError();
       }
@@ -9106,6 +9258,10 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         const result = hook(currentValue, currentContext, next);
         return result === undefined ? next() : result;
       };
+      const pending = processObject.__bnhModuleRegistrationPromises;
+      if (!processObject.__bnhModuleRegistrationLoading && pending?.length) {
+        return Promise.all([...pending]).then(() => invoke(hooks.length - 1, value, context));
+      }
       return invoke(hooks.length - 1, value, context);
     };
     let mainModule = null;
@@ -9151,7 +9307,27 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       error.stack = `Error [ERR_REQUIRE_ASYNC_MODULE]: ${error.message}`;
       return error;
     };
+    const moduleMockFor = (specifier, importer = entry) => {
+      const state = processObject.__bnhModuleMocks;
+      if (!state) return undefined;
+      const raw = String(specifier);
+      const name = builtinName(raw);
+      const candidates = [raw, name, raw.startsWith('file:') ? fileURLToPath(raw) : undefined];
+      if (raw.startsWith('/')) candidates.push(raw);
+      try { candidates.push(resolveFile(raw, importer, processObject)); } catch { /* resolution errors belong to the normal loader */ }
+      return candidates.filter((candidate) => candidate !== undefined)
+        .map((candidate) => state.get(candidate))
+        .find((mock) => mock?.active);
+    };
+
     const loadModule = (specifier, importer = entry, skipResolve = false) => {
+      if (String(specifier).startsWith('file:') && String(specifier).endsWith('.mjs')) {
+        const error = new Error(`Cannot find module '${specifier}'`);
+        error.code = 'MODULE_NOT_FOUND';
+        throw error;
+      }
+      const mock = moduleMockFor(specifier, importer);
+      if (mock?.active) return mock.getCjsValue();
       const shimPath = String(specifier).startsWith('file:') ? fileURLToPath(specifier) : specifier;
       if (String(specifier).startsWith('data:text/javascript')) {
         const dataPath = String(specifier);
@@ -9391,20 +9567,33 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     processObject.__bnhModuleImport = (specifier, importer, options) => (
       esmLoader.import(specifier, importer, {}, options)
     );
+    const activateModuleRegistration = (registration) => {
+      if (registration.activation) return registration.activation;
+      const activation = (async () => {
+        processObject.__bnhModuleRegistrationLoading = true;
+        const registrationParent = registration.parentURL || entry;
+        try {
+          const hook = await esmLoader.import(registration.specifier, registrationParent);
+          await hook?.initialize?.(registration.options?.data);
+          const hooks = processObject.__bnhModuleHooks || [];
+          hooks.push({ resolve: hook?.resolve, load: hook?.load });
+          processObject.__bnhModuleHooks = hooks;
+        } finally {
+          processObject.__bnhModuleRegistrationLoading = false;
+        }
+      })();
+      registration.activation = activation;
+      const pending = processObject.__bnhModuleRegistrationPromises || [];
+      pending.push(activation);
+      processObject.__bnhModuleRegistrationPromises = pending;
+      return activation;
+    };
+    processObject.__bnhActivateModuleRegistration = activateModuleRegistration;
     builtins.module._bnhSetSyncBuiltinESMExports(esmLoader.syncBuiltinESMExports);
     const loadModuleRegistrations = async () => {
       const registrations = processObject.__bnhModuleRegistrations || [];
       processObject.__bnhModuleRegistrations = [];
-      for (const registration of registrations) {
-        const hook = await esmLoader.import(registration.specifier, registration.parentURL || entry);
-        await hook?.initialize?.(registration.options?.data);
-        const resolve = typeof hook?.resolve === 'function' && hook.resolve.constructor?.name === 'AsyncFunction'
-          ? new Function(`return (${String(hook.resolve).replace(/^async\s+/, '').replace(/\bawait\s+/g, '')})`)()
-          : hook?.resolve;
-        const hooks = processObject.__bnhModuleHooks || [];
-        hooks.push({ resolve, load: hook?.load });
-        processObject.__bnhModuleHooks = hooks;
-      }
+      for (const registration of registrations) await activateModuleRegistration(registration);
     };
     const importPreloads = async () => {
       const execArgv = processObject.execArgv || [];
@@ -9490,6 +9679,10 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       arch: processObject.arch,
     });
     const childConsole = createConsole(stdout, stderr, scope.console || {});
+    // HTTP compatibility instances retain the run's process object across
+    // asynchronous response delivery. Publish the matching console on that
+    // object before user modules can construct a request.
+    processObject._bnhConsole = childConsole;
     // The console builtin is also the global console object in Node. Reuse
     // the browser output facade while giving it the shared Console prototype
     // and stateful methods implemented by the compatibility module.

@@ -254,6 +254,10 @@ function streamError(code, message) {
     : code === 'ERR_OUT_OF_RANGE' ? RangeError : Error;
   const error = new ErrorClass(message);
   error.code = code;
+  Object.defineProperty(error, 'toString', {
+    configurable: true,
+    value() { return `${ErrorClass.name} [${code}]: ${message}`; },
+  });
   return error;
 }
 
@@ -488,12 +492,18 @@ Stream.prototype._maxListeners = undefined;
 function validateCombinatorOptions(options) {
   if (options === undefined || options === null) return {};
   if (typeof options !== 'object' || Array.isArray(options)) {
-    throw streamError('ERR_INVALID_ARG_TYPE', 'options must be an object');
+    throw streamError(
+      'ERR_INVALID_ARG_TYPE',
+      `The "options" argument must be of type object. Received ${streamReceivedValue(options)}`,
+    );
   }
   if (options.signal != null && (typeof options.signal !== 'object'
     || typeof options.signal.addEventListener !== 'function'
     || typeof options.signal.aborted !== 'boolean')) {
-    throw streamError('ERR_INVALID_ARG_TYPE', 'options.signal must be an AbortSignal');
+    throw streamError(
+      'ERR_INVALID_ARG_TYPE',
+      `The "options.signal" argument must be an instance of AbortSignal. Received ${streamReceivedValue(options.signal)}`,
+    );
   }
   return options;
 }
@@ -501,11 +511,11 @@ function validateCombinatorOptions(options) {
 function validateCombinator(fn, options) {
   if (typeof fn !== 'function') throw streamError('ERR_INVALID_ARG_TYPE', 'fn must be a function');
   const validated = validateCombinatorOptions(options);
-  const concurrency = options?.concurrency === undefined ? 1 : Math.floor(Number(options.concurrency));
+  const concurrency = options?.concurrency == null ? 1 : Math.floor(Number(options.concurrency));
   if (!Number.isInteger(concurrency) || concurrency < 1) {
     throw streamError('ERR_OUT_OF_RANGE', 'options.concurrency must be an integer greater than 0');
   }
-  const highWaterMark = options?.highWaterMark === undefined
+  const highWaterMark = options?.highWaterMark == null
     ? concurrency - 1
     : Math.floor(Number(options.highWaterMark));
   if (!Number.isInteger(highWaterMark) || highWaterMark < 0) {
@@ -551,10 +561,17 @@ function filterValues(source, fn, options) {
 
 function mapValues(source, fn, options) {
   const { signal, concurrency, highWaterMark } = validateCombinator(fn, options);
+  // Node's default map operator keeps one extra item in flight beyond its
+  // nominal concurrency so downstream cancellation still observes the same
+  // bounded prefetch. Explicit concurrency/highWaterMark settings retain the
+  // requested limits.
+  const initialPrefetch = concurrency === 1 && highWaterMark === 1;
   return (async function* map() {
     const queue = [];
     let active = 0;
     let done = false;
+    let initialPrefetched = 0;
+    const activeLimit = () => initialPrefetch && initialPrefetched < 3 ? 3 : concurrency;
     let resume;
     let next;
 
@@ -563,7 +580,8 @@ function mapValues(source, fn, options) {
     };
     const afterItemProcessed = () => {
       active -= 1;
-      if (resume && !done && active < concurrency && queue.length < highWaterMark) {
+      const limit = activeLimit();
+      if (resume && !done && active < limit && queue.length < limit) {
         const callback = resume;
         resume = null;
         wake(callback);
@@ -585,12 +603,14 @@ function mapValues(source, fn, options) {
             mapped = Promise.reject(error);
           }
           active += 1;
+          if (initialPrefetch && initialPrefetched < 3) initialPrefetched += 1;
           const result = Promise.resolve(mapped);
           result.then(afterItemProcessed, onItemError);
           queue.push(result);
           wake(next);
           next = null;
-          if (!done && (active >= concurrency || queue.length >= highWaterMark)) {
+          const limit = activeLimit();
+          if (!done && (active >= limit || queue.length >= limit)) {
             await new Promise((resolve) => { resume = resolve; });
           }
         }
@@ -619,7 +639,8 @@ function mapValues(source, fn, options) {
           if (signal.aborted) throw abortError(signal);
           queue.shift();
           if (value !== COMBINATOR_EMPTY) yield value;
-          if (resume && !done && active < concurrency && queue.length < highWaterMark) {
+          const limit = activeLimit();
+          if (resume && !done && active < limit && queue.length < limit) {
             const callback = resume;
             resume = null;
             wake(callback);
@@ -2122,6 +2143,15 @@ class WritableImpl extends EventEmitter {
       return false;
     }
     if (chunk === null) throw streamError('ERR_STREAM_NULL_VALUES', 'May not write null values to stream');
+    if (!this.writableObjectMode
+      && typeof chunk !== 'string'
+      && !isArrayBufferView(chunk)
+      && !chunk?.constructor?.isBuffer?.(chunk)) {
+      throw streamError(
+        'ERR_INVALID_ARG_TYPE',
+        `The "chunk" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received ${streamReceivedValue(chunk)}`,
+      );
+    }
     let bytes;
     let size;
     let requestEncoding = encoding;

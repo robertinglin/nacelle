@@ -145,6 +145,43 @@ function validatePort(port, allowZero = false) {
   return value;
 }
 
+function receivedArgument(value) {
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  if (typeof value === 'string') return `type string ('${value}')`;
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return `type ${typeof value} (${value})`;
+  }
+  return `an instance of ${value?.constructor?.name || typeof value}`;
+}
+
+function invalidArgumentType(name, expected, value) {
+  const expectation = Array.isArray(expected)
+    ? `one of type ${expected.join(' or ')}`
+    : `type ${expected}`;
+  const error = new TypeError(
+    `The "${name}" argument must be ${expectation}. Received ${receivedArgument(value)}`,
+  );
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function invalidAddressFamilyError(family, host, port) {
+  const error = new Error(`Invalid address family: ${family} ${host}:${port}`);
+  error.code = 'ERR_INVALID_ADDRESS_FAMILY';
+  error.host = host;
+  error.port = port;
+  return error;
+}
+
+function validateConnectPort(port) {
+  if ((typeof port !== 'number' && typeof port !== 'string')
+    || (typeof port === 'string' && port.trim().length === 0)) {
+    throw invalidArgumentType('options.port', ['number', 'string'], port);
+  }
+  return validatePort(port, true);
+}
+
 function serverNotRunningError() {
   const error = new Error('Server is not running');
   error.code = 'ERR_SERVER_NOT_RUNNING';
@@ -266,6 +303,11 @@ export class Socket extends Duplex {
   connect(...args) {
     const { options, callback } = parseConnectArgs(args);
     if (callback) this.once('connect', callback);
+    if (options.port === undefined && options.path == null) {
+      const error = new TypeError('The "options" or "port" or "path" argument must be specified');
+      error.code = 'ERR_MISSING_ARGS';
+      throw error;
+    }
     if (options.timeout) this.setTimeout(options.timeout);
     if (this.connecting || !this.pending) {
       schedule(() => this.emit('error', socketError('ERR_SOCKET_ALREADY_CONNECTED', 'connect', options.host || 'localhost', options.port)));
@@ -275,7 +317,10 @@ export class Socket extends Duplex {
     this._connectAttempt = attempt;
     if (options.path !== undefined) return this._connectPipe(options.path, options);
     if (!this._tcpResource) this._tcpResource = new AsyncResource('TCPWRAP');
-    const port = validatePort(options.port);
+    const port = validateConnectPort(options.port);
+    if (options.lookup != null && typeof options.lookup !== 'function') {
+      throw invalidArgumentType('options.lookup', 'function', options.lookup);
+    }
     const host = String(options.host || options.hostname || 'localhost');
     const family = Number(options.family || 0);
     this.connecting = true;
@@ -310,6 +355,10 @@ export class Socket extends Duplex {
         ? address
         : [{ address, family: resolvedFamily || virtualAddressFamily(address) }];
       if (!options.autoSelectFamily) {
+        if (candidates[0].family !== 4 && candidates[0].family !== 6) {
+          this._failConnect(invalidAddressFamilyError(candidates[0].family, host, port));
+          return;
+        }
         this._connectAddress(candidates[0].address, candidates[0].family, port, options);
         return;
       }
@@ -320,6 +369,11 @@ export class Socket extends Duplex {
       for (const candidate of candidates) {
         const candidateAddress = candidate.address;
         const candidateFamily = candidate.family || virtualAddressFamily(candidateAddress);
+        if (candidateFamily !== 4 && candidateFamily !== 6) {
+          settled = true;
+          this._failConnect(invalidAddressFamilyError(candidateFamily, host, port));
+          return;
+        }
         this.autoSelectFamilyAttemptedAddresses.push(
           candidateFamily === 6 ? `[${candidateAddress}]:${port}` : `${candidateAddress}:${port}`,
         );
@@ -409,7 +463,10 @@ export class Socket extends Duplex {
   }
 
   _connectPipe(path, options) {
-    if (typeof path !== 'string' || path.length === 0) {
+    if (typeof path !== 'string') {
+      throw invalidArgumentType('options.path', 'string', path);
+    }
+    if (path.length === 0) {
       const error = new TypeError('options.path must be a non-empty string');
       error.code = 'ERR_INVALID_ARG_VALUE';
       throw error;
@@ -428,7 +485,18 @@ export class Socket extends Duplex {
       path: resolvedPath,
       client: this,
       onConnected: (connection) => this._establish(connection, undefined, this._connectAttempt),
-      onError: (error) => this._failConnect(error),
+      onError: (error) => {
+        if (error?.code === 'ECONNREFUSED') {
+          const missing = new Error(`connect ENOENT ${resolvedPath}`);
+          missing.code = 'ENOENT';
+          missing.errno = 'ENOENT';
+          missing.syscall = 'connect';
+          missing.address = resolvedPath;
+          this._failConnect(missing);
+          return;
+        }
+        this._failConnect(error);
+      },
     });
     return this;
   }

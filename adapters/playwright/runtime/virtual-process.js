@@ -220,6 +220,25 @@ function createInMemoryProcess(options) {
   });
   ipcPair.child.unref?.();
 
+  // A forked entry can receive its first message while its module graph is
+  // still being evaluated. Node queues that IPC payload until the child has
+  // installed its message listener; retain the same behavior for the
+  // in-memory browser boundary.
+  const pendingChildMessages = [];
+  let childMessageFlushQueued = false;
+  const flushChildMessages = () => {
+    childMessageFlushQueued = false;
+    if (childProcess.listenerCount('message') === 0) return;
+    for (const [message, handle] of pendingChildMessages.splice(0)) {
+      childProcess.emit('message', message, handle);
+    }
+  };
+  childProcess.on('newListener', (name) => {
+    if (name !== 'message' || childMessageFlushQueued) return;
+    childMessageFlushQueued = true;
+    queueMicrotask(flushChildMessages);
+  });
+
   const finish = (kind, code = childProcess.getCode?.() || 0, signal = null, error = null, forced = false) => {
     if (terminal) return;
     transition(error || forced ? 'failed' : 'exited');
@@ -240,7 +259,10 @@ function createInMemoryProcess(options) {
     events.emit('message', message, handle);
   });
   ipcPair.parent.on('peerDisconnect', emitDisconnect);
-  ipcPair.child.on('message', (message, handle) => childProcess.emit('message', message, handle));
+  ipcPair.child.on('message', (message, handle) => {
+    if (childProcess.listenerCount('message') > 0) childProcess.emit('message', message, handle);
+    else pendingChildMessages.push([message, handle]);
+  });
   ipcPair.child.on('peerDisconnect', () => {
     if (!childProcess.connected) return;
     childProcess.connected = false;

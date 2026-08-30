@@ -860,7 +860,7 @@ export class Socket extends EventEmitter {
     // first IPC message before the parent has installed its message listener.
     // Hostname binds retain the normal asynchronous lookup path.
     if (address_ !== undefined && virtualAddressFamily(normalizedAddress) === family) {
-      completeBind(null, normalizedAddress, family);
+      queueMicrotask(() => completeBind(null, normalizedAddress, family));
     } else {
       queueMicrotask(() => {
         if (this._closed) return;

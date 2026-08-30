@@ -42,12 +42,166 @@ function normalizeProcessEnv(processObject) {
   processObject.env = stringified;
 }
 
-function createMockTracker(scope, timerModules) {
+function createMockTracker(scope, timerModules, moduleOptions = {}) {
   timerModules = timerModules || {};
   timerModules.timers ||= scope.require?.('node:timers') || {};
   timerModules.timerPromises ||= scope.require?.('node:timers/promises') || timerModules.timers.promises || {};
+  const processObject = moduleOptions.processObject || scope.process;
+  const sourcePath = moduleOptions.sourcePath || processObject?.argv?.[1] || '/node/index.js';
+  let activeProcessOverride;
+  const activeProcess = () => moduleOptions.activeProcess?.()
+    || activeProcessOverride || processObject.__bnhActiveProcess || scope.__bnhActiveProcess || scope.process || processObject;
   const mocks = [];
   let timers;
+
+  const moduleMockKeys = (resolved) => {
+    const keys = [resolved];
+    if (resolved.startsWith('node:')) keys.push(resolved.slice(5));
+    else if (resolved.startsWith('/')) keys.push(`file://${resolved}`);
+    return keys;
+  };
+
+  const resolveModuleSpecifier = (specifier) => {
+    const owner = activeProcess();
+    const resolve = owner?.__bnhModuleResolve || processObject?.__bnhModuleResolve;
+    if (typeof resolve === 'function') {
+      const stackCallers = [...String(new Error().stack || '').matchAll(/(?:\(|\s)(\/node\/[^:)]+):\d+:\d+\)?/g)];
+      const stackCaller = stackCallers.find((match) => !match[1].endsWith('/node-test.js'));
+      const candidateCaller = stackCaller?.[1] || owner?.argv?.[1] || processObject?.argv?.[1] || sourcePath;
+      const caller = /^(?:\/|file:|data:)/.test(String(candidateCaller))
+        ? candidateCaller
+        : `${owner?.cwd?.() || '/node'}/index.js`;
+      const result = resolve(specifier, caller);
+      const url = result?.url;
+      if (typeof url === 'string') {
+        if (url.startsWith('file:')) {
+          try { return decodeURIComponent(new URL(url).pathname); } catch { return url; }
+        }
+        return url;
+      }
+    }
+    if (specifier.startsWith('node:')) return specifier;
+    if (specifier.startsWith('/')) return specifier;
+    if (specifier.startsWith('.') && typeof URL === 'function') {
+      try { return decodeURIComponent(new URL(specifier, `file://${sourcePath}`).pathname); } catch { /* use raw */ }
+    }
+    return specifier;
+  };
+
+  const makeModuleMockValue = (entry) => {
+    const format = entry.format;
+    const base = entry.hasDefaultExport ? entry.defaultExport : {};
+    if (format === 'module') {
+      if (entry.hasDefaultExport) return base;
+      const namespace = {};
+      for (const name of Object.keys(entry.namedExports)) {
+        Object.defineProperty(namespace, name, Object.getOwnPropertyDescriptor(entry.namedExports, name));
+      }
+      return namespace;
+    }
+    const exportNames = Object.keys(entry.namedExports);
+    if (exportNames.length > 0 && (format === 'commonjs' || format === 'json')
+        && (base === null || (typeof base !== 'object' && typeof base !== 'function'))) {
+      throw new Error('Cannot create mock because named exports cannot be applied to the default export');
+    }
+    const value = format === 'json' && !entry.hasDefaultExport ? {} : base;
+    for (const name of exportNames) {
+      Object.defineProperty(value, name, Object.getOwnPropertyDescriptor(entry.namedExports, name));
+    }
+    return value;
+  };
+
+  const makeModuleMockNamespace = (entry) => {
+    if (entry.cache && entry.namespace) return entry.namespace;
+    const value = makeModuleMockValue(entry);
+    const namespace = entry.format === 'json'
+      ? { default: entry.hasDefaultExport ? entry.defaultExport : value }
+      : entry.format === 'module'
+        ? { ...(entry.hasDefaultExport ? { default: entry.defaultExport } : {}) }
+        : { default: value, ...(value && (typeof value === 'object' || typeof value === 'function') ? value : {}) };
+    if (entry.format === 'module') {
+      for (const name of Object.keys(entry.namedExports)) {
+        Object.defineProperty(namespace, name, Object.getOwnPropertyDescriptor(entry.namedExports, name));
+      }
+    }
+    if (entry.cache) entry.namespace = namespace;
+    return namespace;
+  };
+
+  const module = (specifier, options = {}) => {
+    const isUrl = specifier !== null && typeof specifier === 'object'
+      && typeof specifier.href === 'string' && typeof specifier.toString === 'function';
+    if (typeof specifier !== 'string' && !isUrl) {
+      throw invalidType('specifier', 'string or URL', specifier);
+    }
+    if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+      throw invalidType('options', 'Object', options);
+    }
+    const input = typeof specifier === 'string' ? specifier : String(specifier);
+    const owner = activeProcess();
+    const processCandidates = [owner, processObject, scope.process, scope.__bnhModulePermissionProcess, scope.__bnhActiveProcess];
+    const ownerArgs = processCandidates.flatMap((candidate) => [
+      ...(candidate?.argv || []), ...(candidate?.execArgv || []),
+    ]).concat(moduleOptions.execArgv || []).map(String);
+    if (ownerArgs.includes('--permission') && !ownerArgs.includes('--allow-worker')) {
+      const permissionProcess = processCandidates.find((candidate) => [
+        ...(candidate?.argv || []), ...(candidate?.execArgv || []),
+      ].map(String).includes('--permission')) || owner;
+      permissionProcess?.stdout?.write?.('Access to this API has been restricted. Use --allow-worker to enable module mocking.\n');
+      const error = new Error('Access to this API has been restricted. Use --allow-worker to enable module mocking.');
+      error.code = 'ERR_ACCESS_DENIED';
+      throw error;
+    }
+    const { cache = false, namedExports = {}, defaultExport } = options;
+    if (typeof cache !== 'boolean') throw invalidType('options.cache', 'boolean', cache);
+    if (namedExports === null || typeof namedExports !== 'object' || Array.isArray(namedExports)) {
+      throw invalidType('options.namedExports', 'Object', namedExports);
+    }
+    const resolved = resolveModuleSpecifier(input);
+    const format = resolved.startsWith('node:') || !resolved.endsWith('.mjs') && !resolved.endsWith('.json')
+      ? (resolved.endsWith('.js') && owner?.execArgv?.includes('--experimental-default-type=module') ? 'module' : 'commonjs')
+      : resolved.endsWith('.json') ? 'json' : 'module';
+    const state = owner.__bnhModuleMocks || (owner.__bnhModuleMocks = new Map());
+    scope.__bnhModuleMocks = state;
+    const keys = [...new Set([
+      ...moduleMockKeys(resolved),
+      input === resolved ? undefined : input,
+    ].filter((key) => key !== undefined))];
+    if (keys.some((key) => state.get(key)?.active)) {
+      const error = codedError(Error, 'ERR_INVALID_STATE', `Cannot mock '${input}'. The module is already mocked.`);
+      throw error;
+    }
+    const entry = {
+      active: true,
+      cache,
+      defaultExport,
+      format,
+      hasDefaultExport: Object.hasOwn(options, 'defaultExport'),
+      namedExports,
+      resolved,
+      cjsValue: null,
+      namespace: null,
+    };
+    entry.getCjsValue = () => {
+      if (entry.cache && entry.cjsValue !== null) return entry.cjsValue;
+      const value = makeModuleMockValue(entry);
+      if (entry.cache) entry.cjsValue = value;
+      return value;
+    };
+    entry.getNamespace = () => makeModuleMockNamespace(entry);
+    for (const key of keys) state.set(key, entry);
+    const context = {
+      restore() {
+        if (!entry.active) return;
+        entry.active = false;
+        for (const key of keys) if (state.get(key) === entry) state.delete(key);
+        entry.cjsValue = null;
+        entry.namespace = null;
+      },
+    };
+    mocks.push({ restore: context.restore });
+    return context;
+  };
 
   function validateFunction(value, name) {
     if (typeof value !== 'function') throw invalidType(name, 'function', value);
@@ -361,11 +515,11 @@ function createMockTracker(scope, timerModules) {
     if (options.getter === true) throw codedError(TypeError, 'ERR_INVALID_ARG_VALUE', "The property 'options.setter' cannot be used with 'options.getter'");
     return method(object, property, implementation, { ...options, setter: true });
   }
-  return { fn: (...args) => mockFunction(...args), method, getter, setter, property, get timers() { return timers ||= createTimers(); }, reset() { restoreAll(); timers?.reset(); mocks.length = 0; }, restoreAll };
+  return { fn: (...args) => mockFunction(...args), method, getter, setter, property, module, get timers() { return timers ||= createTimers(); }, reset() { restoreAll(); timers?.reset(); mocks.length = 0; }, restoreAll };
   function restoreAll() { for (const entry of mocks) entry.restore(); }
 }
 
-export function createNodeTest({ scope, processObject, stdout, stderr, trackTask, assert, timers = {}, timerPromises = {}, sourcePath }) {
+export function createNodeTest({ scope, processObject, stdout, stderr, trackTask, assert, timers = {}, timerPromises = {}, sourcePath, execArgv = [] }) {
   normalizeProcessEnv(processObject);
   const schedule = typeof scope.queueMicrotask === 'function' ? scope.queueMicrotask.bind(scope) : (callback) => scope.setTimeout(callback, 0);
   const root = { name: '<root>', fullName: '<root>', parent: null, before: [], after: [], beforeEach: [], afterEach: [], children: [], started: false, beforeReady: null, completion: null, runTail: Promise.resolve() };
@@ -381,7 +535,9 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
     else if (result.status === 'pass') passCount += 1;
   }
   const assertionRegistry = new Map();
-  const globalMock = createMockTracker(scope, { timers, timerPromises });
+  let activeProcessOverride;
+  const trackerOptions = { processObject, sourcePath, execArgv, activeProcess: () => activeProcessOverride };
+  const globalMock = createMockTracker(scope, { timers, timerPromises }, trackerOptions);
   const snapshotFiles = new Map();
   let serializers = [(value) => JSON.stringify(value, null, 2)];
   let resolveSnapshotPath = (path) => `${path}.snapshot`;
@@ -470,7 +626,7 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
         const suiteState = startSuite(parent); const beforeError = await suiteState.beforeReady; if (beforeError) { const detail = reportFailure(beforeError); stderr(`not ok - ${label}: ${detail}\n`); return { name: label, status: 'fail' }; }
         if (testOptions.skip || testOptions.todo) { stdout(`ok - ${label}${testOptions.skip ? ' # SKIP' : ' # TODO'}\n`); return { name: label, status: testOptions.skip ? 'skip' : 'pass' }; }
         let planCount = null; const context = { name: label, fullName, filePath: undefined, signal: testOptions.signal, assert: null, _assertionCount: 0, diagnostic, before: (fn) => node.before.push(fn), after: (fn) => node.after.push(fn), beforeEach: (fn) => node.beforeEach.push(fn), afterEach: (fn) => node.afterEach.push(fn), plan(count) { if (!Number.isInteger(count) || count < 0) throw codedError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The "count" argument must be a non-negative integer'); planCount = count; }, runOnly(value) { node.runOnly = Boolean(value); }, skip(message) { node.skipReason = message || true; }, todo(message) { node.todoReason = message || true; }, test: (childName, childOptions, childCallback) => { const child = register(childName, childOptions, childCallback, parent, node); node.children.push(child); return child; }, waitFor: (condition, options = {}) => { if (typeof condition !== 'function') throw invalidType('condition', 'function', condition); const interval = options.interval ?? 50; const timeout = options.timeout ?? 1000; return new Promise((resolve, reject) => { const started = Date.now(); const poll = async () => { try { resolve(await condition()); } catch (error) { if (Date.now() - started >= timeout) { error.cause ||= error; reject(error); } else scope.setTimeout(poll, interval); } }; poll(); }); } };
-        context.assert = createTestAssert(context); node.context = context; node.mock = createMockTracker(scope, { timers, timerPromises }); Object.defineProperty(context, 'mock', { enumerable: true, get: () => node.mock });
+        context.assert = createTestAssert(context); node.context = context; node.mock = createMockTracker(scope, { timers, timerPromises }, trackerOptions); Object.defineProperty(context, 'mock', { enumerable: true, get: () => node.mock });
         let failure = null; try { await runHooks(hookChain(parent, 'beforeEach'), context); if (ownerNode?.beforeReady) await ownerNode.beforeReady; if (ownerNode) await runHooks(ownerNode.beforeEach, context); if (typeof task.callback === 'function') { if (task.callback.length > 1) await new Promise((resolve, reject) => { let called = false; const done = (error) => { if (called) return; called = true; if (error) reject(error); else resolve(); }; try { Reflect.apply(task.callback, context, [context, done]); } catch (error) { reject(error); } }); else await Reflect.apply(task.callback, context, [context]); } } catch (error) { failure = error; }
         try { if (ownerNode) await runHooks([...ownerNode.afterEach].reverse(), context); await runHooks(hookChain(parent, 'afterEach'), context); } catch (error) { failure ||= error; }
         const childResults = await Promise.all(node.children); if (node.beforeReady) await node.beforeReady; try { await runHooks([...node.after].reverse(), context); } catch (error) { failure ||= error; }
@@ -490,6 +646,10 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
   const mock = globalMock;
   Object.assign(test, { test, it: test, describe, suite: describe, only: test, skip: (name, options, callback) => { const d = splitDefinition(name, options, callback); return register(d.name, { ...d.options, skip: true }, d.callback); }, todo: (name, options, callback) => { const d = splitDefinition(name, options, callback); return register(d.name, { ...d.options, todo: true }, d.callback); }, before: (callback) => hook('before', callback), after: (callback) => hook('after', callback), beforeEach: (callback) => hook('beforeEach', callback), afterEach: (callback) => hook('afterEach', callback), run: (options = {}) => ({ concurrency: options.concurrency ?? 1 }) });
   Object.defineProperty(test, 'mock', { configurable: true, enumerable: true, get: () => mock });
+  Object.defineProperty(test, '__bnhSetActiveProcess', {
+    configurable: true,
+    value: (value) => { activeProcessOverride = value; },
+  });
   Object.defineProperty(test, 'snapshot', { configurable: true, enumerable: true, value: snapshotApi });
   Object.defineProperty(test, 'assert', { configurable: true, enumerable: true, value: assertionApi });
   const summaryRelease = trackTask();
@@ -521,6 +681,7 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
         timers,
         timerPromises,
         sourcePath: activeProcess.argv?.[1],
+        execArgv: activeProcess.execArgv,
       });
       instances.set(activeProcess, instance);
     }

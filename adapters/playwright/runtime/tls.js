@@ -76,6 +76,7 @@ function isRecord(value) {
 }
 
 function receivedArgument(value) {
+  if (value === undefined) return 'undefined';
   if (value === null) return 'null';
   if (typeof value === 'function') return 'function';
   if (typeof value === 'object') return `an instance of ${value.constructor?.name || 'Object'}`;
@@ -1262,8 +1263,15 @@ export class TLSSocket extends Duplex {
   isSessionReused() { return Boolean(this._sessionReused); }
   setMaxSendFragment() { return true; }
   setServername(servername) {
-    if (this._options._isServer) throw tlsError('ERR_TLS_SNI_FROM_SERVER', 'Cannot set SNI from a server');
-    if (typeof servername !== 'string') throw tlsError('ERR_INVALID_ARG_TYPE', 'The "name" argument must be of type string');
+    if (this._options._isServer) {
+      throw tlsError('ERR_TLS_SNI_FROM_SERVER', 'Cannot issue SNI from a TLS server-side socket');
+    }
+    if (typeof servername !== 'string') {
+      throw tlsError(
+        'ERR_INVALID_ARG_TYPE',
+        `The "name" argument must be of type string. Received ${receivedArgument(servername)}`,
+      );
+    }
     this.servername = servername;
     return this;
   }

@@ -2318,15 +2318,35 @@ export function createConsoleModule(processObject) {
   return Object.freeze(consoleObject);
 }
 
-async function readStream(stream) {
+function consumerChunk(value, rejectObjectMode) {
+  if (rejectObjectMode && value !== null && typeof value === 'object'
+      && !(value instanceof ArrayBuffer) && !ArrayBuffer.isView(value)) {
+    const error = new TypeError(
+      'The "chunk" argument must be of type string or an instance of Buffer, TypedArray, DataView, or ArrayBuffer',
+    );
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  return bytes(value);
+}
+
+async function readStream(stream, { rejectObjectMode = false } = {}) {
+  if (!stream || (typeof stream.getReader !== 'function' && typeof stream[Symbol.asyncIterator] !== 'function')) {
+    throw invalidArgumentType('stream', 'a stream or an iterable', stream);
+  }
   if (stream?.getReader) {
+    if (stream.locked) {
+      const error = new TypeError('Invalid state: ReadableStream is locked');
+      error.code = 'ERR_INVALID_STATE';
+      throw error;
+    }
     const reader = stream.getReader();
     const chunks = [];
     try {
       while (true) {
         const item = await reader.read();
         if (item.done) break;
-        chunks.push(bytes(item.value));
+        chunks.push(consumerChunk(item.value, rejectObjectMode));
       }
     } finally {
       reader.releaseLock();
@@ -2334,7 +2354,7 @@ async function readStream(stream) {
     return chunks;
   }
   const chunks = [];
-  for await (const item of stream || []) chunks.push(bytes(item));
+  for await (const item of stream) chunks.push(consumerChunk(item, rejectObjectMode));
   return chunks;
 }
 
@@ -2346,13 +2366,13 @@ function joinChunks(chunks) {
 }
 
 export function createStreamConsumers(scope, BufferClass) {
-  const collect = async (stream) => joinChunks(await readStream(stream));
+  const collect = async (stream, options) => joinChunks(await readStream(stream, options));
   return Object.freeze({
     arrayBuffer: async (stream) => (await collect(stream)).buffer,
     blob: async (stream) => new scope.Blob([await collect(stream)]),
-    buffer: async (stream) => BufferClass.from(await collect(stream)),
-    json: async (stream) => JSON.parse(new TextDecoder().decode(await collect(stream))),
-    text: async (stream) => new TextDecoder().decode(await collect(stream)),
+    buffer: async (stream) => new BufferClass(await collect(stream)),
+    json: async (stream) => JSON.parse(new TextDecoder().decode(await collect(stream, { rejectObjectMode: true }))),
+    text: async (stream) => new TextDecoder().decode(await collect(stream, { rejectObjectMode: true })),
   });
 }
 

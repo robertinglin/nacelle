@@ -222,8 +222,12 @@ function createWebTransform(scope, format, mode) {
   if (typeof Constructor !== 'function') {
     throw formatUnsupported(format, mode);
   }
+  // zlib is created before the runtime installs Node-compatible web streams
+  // on the page global. Keep compression on the browser-native stream graph;
+  // otherwise the shim recursively constructs itself and mixes stream brands.
+  const nativeFormat = format === 'br' || format === 'brotli' ? 'deflate-raw' : format;
   try {
-    return new Constructor(format);
+    return new Constructor(nativeFormat);
   } catch (error) {
     throw formatUnsupported(format, mode, error);
   }
@@ -743,40 +747,47 @@ function createProperty(Constructor, bufferClass, scope) {
 }
 
 export function createZlibShim(scope, BufferClass) {
+  const nativeScope = Object.create(scope);
+  Object.defineProperties(nativeScope, {
+    Blob: { value: scope.Blob },
+    Response: { value: scope.Response },
+    CompressionStream: { value: scope.CompressionStream },
+    DecompressionStream: { value: scope.DecompressionStream },
+  });
   const zlib = {
     constants,
     codes,
     crc32: (data, value) => crc32(data, value, scope),
-    gzip: (value, callback) => operation(value, 'gzip', 'compress', BufferClass, scope, callback),
-    gunzip: (value, callback) => operation(value, 'gzip', 'decompress', BufferClass, scope, callback),
-    deflate: (value, callback) => operation(value, 'deflate', 'compress', BufferClass, scope, callback),
-    inflate: (value, callback) => operation(value, 'deflate', 'decompress', BufferClass, scope, callback),
-    deflateRaw: (value, callback) => operation(value, 'deflate-raw', 'compress', BufferClass, scope, callback),
-    inflateRaw: (value, callback) => operation(value, 'deflate-raw', 'decompress', BufferClass, scope, callback),
+    gzip: (value, callback) => operation(value, 'gzip', 'compress', BufferClass, nativeScope, callback),
+    gunzip: (value, callback) => operation(value, 'gzip', 'decompress', BufferClass, nativeScope, callback),
+    deflate: (value, callback) => operation(value, 'deflate', 'compress', BufferClass, nativeScope, callback),
+    inflate: (value, callback) => operation(value, 'deflate', 'decompress', BufferClass, nativeScope, callback),
+    deflateRaw: (value, callback) => operation(value, 'deflate-raw', 'compress', BufferClass, nativeScope, callback),
+    inflateRaw: (value, callback) => operation(value, 'deflate-raw', 'decompress', BufferClass, nativeScope, callback),
     Inflate,
-    createInflate: createProperty(Inflate, BufferClass, scope),
+    createInflate: createProperty(Inflate, BufferClass, nativeScope),
     Deflate,
-    createDeflate: createProperty(Deflate, BufferClass, scope),
+    createDeflate: createProperty(Deflate, BufferClass, nativeScope),
     Gunzip,
-    createGunzip: createProperty(Gunzip, BufferClass, scope),
+    createGunzip: createProperty(Gunzip, BufferClass, nativeScope),
     Unzip,
-    createUnzip: createProperty(Unzip, BufferClass, scope),
+    createUnzip: createProperty(Unzip, BufferClass, nativeScope),
     Gzip,
-    createGzip: createProperty(Gzip, BufferClass, scope),
+    createGzip: createProperty(Gzip, BufferClass, nativeScope),
     DeflateRaw,
-    createDeflateRaw: createProperty(DeflateRaw, BufferClass, scope),
+    createDeflateRaw: createProperty(DeflateRaw, BufferClass, nativeScope),
     InflateRaw,
-    createInflateRaw: createProperty(InflateRaw, BufferClass, scope),
+    createInflateRaw: createProperty(InflateRaw, BufferClass, nativeScope),
     BrotliCompress,
     BrotliDecompress,
-    brotliCompress: (value, optionsOrCallback, callback) => operation(value, 'br', 'compress', BufferClass, scope, optionsOrCallback, callback),
-    brotliDecompress: (value, optionsOrCallback, callback) => operation(value, 'br', 'decompress', BufferClass, scope, optionsOrCallback, callback),
-    createBrotliCompress: createProperty(BrotliCompress, BufferClass, scope),
-    createBrotliDecompress: createProperty(BrotliDecompress, BufferClass, scope),
+    brotliCompress: (value, optionsOrCallback, callback) => operation(value, 'br', 'compress', BufferClass, nativeScope, optionsOrCallback, callback),
+    brotliDecompress: (value, optionsOrCallback, callback) => operation(value, 'br', 'decompress', BufferClass, nativeScope, optionsOrCallback, callback),
+    createBrotliCompress: createProperty(BrotliCompress, BufferClass, nativeScope),
+    createBrotliDecompress: createProperty(BrotliDecompress, BufferClass, nativeScope),
     ZstdCompress,
     ZstdDecompress,
-    createZstdCompress: createProperty(ZstdCompress, BufferClass, scope),
-    createZstdDecompress: createProperty(ZstdDecompress, BufferClass, scope),
+    createZstdCompress: createProperty(ZstdCompress, BufferClass, nativeScope),
+    createZstdDecompress: createProperty(ZstdDecompress, BufferClass, nativeScope),
     gzipSync(value) { syncUnavailable('compression', 'gzip', value); },
     gunzipSync(value) { syncUnavailable('decompression', 'gunzip', value); },
     deflateSync(value) { syncUnavailable('compression', 'deflate', value); },
@@ -787,8 +798,8 @@ export function createZlibShim(scope, BufferClass) {
     unzipSync(value) { syncUnavailable('decompression', 'unzip', value); },
     brotliCompressSync(value) { syncUnavailable('Brotli compression', 'brotliCompress', value); },
     brotliDecompressSync(value) { syncUnavailable('Brotli decompression', 'brotliDecompress', value); },
-    zstdCompress: (value, optionsOrCallback, callback) => operation(value, 'zstd', 'compress', BufferClass, scope, optionsOrCallback, callback),
-    zstdDecompress: (value, optionsOrCallback, callback) => operation(value, 'zstd', 'decompress', BufferClass, scope, optionsOrCallback, callback),
+    zstdCompress: (value, optionsOrCallback, callback) => operation(value, 'zstd', 'compress', BufferClass, nativeScope, optionsOrCallback, callback),
+    zstdDecompress: (value, optionsOrCallback, callback) => operation(value, 'zstd', 'decompress', BufferClass, nativeScope, optionsOrCallback, callback),
     zstdCompressSync(value) { syncUnavailable('compression', 'zstdCompress', value); },
     zstdDecompressSync(value) { syncUnavailable('decompression', 'zstdDecompress', value); },
   };

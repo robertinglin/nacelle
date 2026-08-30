@@ -3724,8 +3724,12 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       this._clientTcpConnectResource = null;
       this._taskRelease = null;
       this._proxyEnv = { ...proxyEnv, ...scope.process?.env };
-      this._ownerProcess = scope.process || ownerProcess;
-      this._ownerConsole = scope.console;
+      // The compatibility module is constructed once, but requests can be
+      // created after the shared realm has restored its parent process. Use
+      // the explicit module owner for virtual-child callbacks and its console
+      // facade for response metadata.
+      this._ownerProcess = ownerProcess || scope.process;
+      this._ownerConsole = this._ownerProcess?._bnhConsole || scope.console;
       this.parser = {
         consume: (stream) => {
           if (stream === null || (typeof stream !== 'object' && typeof stream !== 'function')) {
@@ -4299,7 +4303,14 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
           }
         }
         this.response = new IncomingMessage(response, this, scope, BufferClass);
-        this.response._runInAsyncScope(() => this.emit('response', this.response));
+        // The response event is delivered from a fetch/network promise, so
+        // restore the process and console that created the request at the
+        // event boundary. Child processes otherwise log response metadata to
+        // the parent console while streamed body bytes still reach child
+        // stdout.
+        this.response._runInAsyncScope(() => this._runInOwnerContext(
+          () => this.emit('response', this.response),
+        ));
         void this.response.start();
       }));
     }

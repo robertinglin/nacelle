@@ -239,11 +239,49 @@ function zlibDataError(error) {
 
 function receivedType(value) {
   if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
   if (typeof value === 'string') return `type string ('${value}')`;
   if (typeof value === 'number' || typeof value === 'boolean') {
     return `type ${typeof value} (${value})`;
   }
   return `an instance of ${value?.constructor?.name || typeof value}`;
+}
+
+function invalidBufferType(value) {
+  const error = new TypeError(
+    'The "buffer" argument must be of type string or an instance of Buffer, ' +
+    `TypedArray, DataView, or ArrayBuffer. Received ${receivedType(value)}`,
+  );
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function validateBuffer(value) {
+  if (typeof value === 'string' || ArrayBuffer.isView(value) ||
+      Object.prototype.toString.call(value) === '[object ArrayBuffer]') {
+    return;
+  }
+  throw invalidBufferType(value);
+}
+
+function validateBrotliOptions(options) {
+  if (!options?.params) return;
+  for (const origKey of Object.keys(options.params)) {
+    const key = +origKey;
+    if (!Number.isInteger(key) || key < 0 || key > constants.BROTLI_PARAM_NDIRECT) {
+      const error = new Error(`Invalid Brotli parameter: ${origKey}`);
+      error.code = 'ERR_BROTLI_INVALID_PARAM';
+      throw error;
+    }
+    const value = options.params[origKey];
+    if (typeof value !== 'number' && typeof value !== 'boolean') {
+      const error = new TypeError(
+        `The "options.params[key]" argument must be of type number. Received ${receivedType(value)}`,
+      );
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+  }
 }
 
 function checkZlibParam(value, name, lower, upper, defaultValue) {
@@ -579,13 +617,27 @@ class DeflateRaw extends ZlibStream {
   }
 }
 
-class BrotliCompress extends ZlibStream {
-  constructor(_options, bufferClass, scope) { super('br', 'compress', bufferClass, scope); }
+function BrotliCompress(options, bufferClass, scope) {
+  validateBrotliOptions(options);
+  return Reflect.construct(
+    ZlibStream,
+    ['br', 'compress', bufferClass, scope],
+    new.target || BrotliCompress,
+  );
 }
+Object.setPrototypeOf(BrotliCompress.prototype, ZlibStream.prototype);
+Object.setPrototypeOf(BrotliCompress, ZlibStream);
 
-class BrotliDecompress extends ZlibStream {
-  constructor(_options, bufferClass, scope) { super('br', 'decompress', bufferClass, scope); }
+function BrotliDecompress(options, bufferClass, scope) {
+  validateBrotliOptions(options);
+  return Reflect.construct(
+    ZlibStream,
+    ['br', 'decompress', bufferClass, scope],
+    new.target || BrotliDecompress,
+  );
 }
+Object.setPrototypeOf(BrotliDecompress.prototype, ZlibStream.prototype);
+Object.setPrototypeOf(BrotliDecompress, ZlibStream);
 
 for (const Constructor of [
   BrotliCompress,
@@ -637,7 +689,8 @@ function operation(value, format, mode, BufferClass, scope, optionsOrCallback, c
   );
 }
 
-function syncUnavailable(kind, method) {
+function syncUnavailable(kind, method, value) {
+  validateBuffer(value);
   throw new Error(`synchronous ${kind} is unavailable in a browser; use zlib.${method}`);
 }
 
@@ -724,20 +777,20 @@ export function createZlibShim(scope, BufferClass) {
     ZstdDecompress,
     createZstdCompress: createProperty(ZstdCompress, BufferClass, scope),
     createZstdDecompress: createProperty(ZstdDecompress, BufferClass, scope),
-    gzipSync() { syncUnavailable('compression', 'gzip'); },
-    gunzipSync() { syncUnavailable('decompression', 'gunzip'); },
-    deflateSync() { syncUnavailable('compression', 'deflate'); },
-    deflateRawSync() { syncUnavailable('compression', 'deflateRaw'); },
-    inflateRawSync() { syncUnavailable('decompression', 'inflateRaw'); },
-    inflateSync() { syncUnavailable('decompression', 'inflate'); },
+    gzipSync(value) { syncUnavailable('compression', 'gzip', value); },
+    gunzipSync(value) { syncUnavailable('decompression', 'gunzip', value); },
+    deflateSync(value) { syncUnavailable('compression', 'deflate', value); },
+    deflateRawSync(value) { syncUnavailable('compression', 'deflateRaw', value); },
+    inflateRawSync(value) { syncUnavailable('decompression', 'inflateRaw', value); },
+    inflateSync(value) { syncUnavailable('decompression', 'inflate', value); },
     unzip: (value, optionsOrCallback, callback) => operation(value, (input, targetScope) => unzipFormat(input, targetScope), 'decompress', BufferClass, scope, optionsOrCallback, callback),
-    unzipSync() { syncUnavailable('decompression', 'unzip'); },
-    brotliCompressSync() { syncUnavailable('Brotli compression', 'brotliCompress'); },
-    brotliDecompressSync() { syncUnavailable('Brotli decompression', 'brotliDecompress'); },
+    unzipSync(value) { syncUnavailable('decompression', 'unzip', value); },
+    brotliCompressSync(value) { syncUnavailable('Brotli compression', 'brotliCompress', value); },
+    brotliDecompressSync(value) { syncUnavailable('Brotli decompression', 'brotliDecompress', value); },
     zstdCompress: (value, optionsOrCallback, callback) => operation(value, 'zstd', 'compress', BufferClass, scope, optionsOrCallback, callback),
     zstdDecompress: (value, optionsOrCallback, callback) => operation(value, 'zstd', 'decompress', BufferClass, scope, optionsOrCallback, callback),
-    zstdCompressSync() { syncUnavailable('compression', 'zstdCompress'); },
-    zstdDecompressSync() { syncUnavailable('decompression', 'zstdDecompress'); },
+    zstdCompressSync(value) { syncUnavailable('compression', 'zstdCompress', value); },
+    zstdDecompressSync(value) { syncUnavailable('decompression', 'zstdDecompress', value); },
   };
   for (const [name, value] of Object.entries(constants)) {
     if (name.startsWith('BROTLI')) continue;

@@ -125,6 +125,12 @@ npm run examples:bash
 
 # Try the TypeScript strip-and-run demo
 npm run examples:typescript
+
+# Try the browser proxy configuration demo
+npm run examples:proxy
+
+# Run the native Node-compatible proxy example without a browser
+npm run examples:proxy-native
 ```
 
 Each example page includes a navigation menu (☰) at the top to easily switch between examples.
@@ -139,6 +145,9 @@ failure. The Nacelle run must explicitly grant its proxy capability; the
 extension's per-origin permission is a separate check. See
 [`nacelle-plus/README.md`](nacelle-plus/README.md) for setup, streaming, and
 permission handling.
+
+The supported Node release-line audit and upgrade policy are in
+[`docs/node-version-support.md`](docs/node-version-support.md).
 
 ### Inline shell execution
 
@@ -155,6 +164,29 @@ console.log(await proc.stdoutText());
 ```
 
 The TypeScript demo uses the browser runtime's `module.stripTypeScriptTypes()` implementation from an inline bash build script, then executes the emitted JavaScript.
+
+### Proxy configuration
+
+`createProxyConfig()` provides one small, explicit configuration for HTTP(S)
+environment proxy routing. It normalizes proxy URLs, mirrors upper- and
+lower-case environment keys, supports `NO_PROXY`, and enables routing for the
+virtual Node process:
+
+```javascript
+import { Nacelle, createProxyConfig } from 'nacelle';
+
+const node = await Nacelle.create({
+  proxy: createProxyConfig({
+    httpProxy: 'http://127.0.0.1:3128',
+    httpsProxy: 'http://127.0.0.1:3128',
+    noProxy: ['localhost', '127.0.0.1:3000'],
+  }),
+});
+```
+
+The native example uses standard `node:http` `createServer()` and `get()` calls
+inside Nacelle. The first request is routed to the proxy, while the proxy's
+upstream request temporarily disables environment routing to avoid a loop.
 
 ---
 

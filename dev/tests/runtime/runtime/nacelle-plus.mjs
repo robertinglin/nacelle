@@ -43,6 +43,52 @@ test('Nacelle+ page adapter round-trips a request over the message bridge', asyn
   adapter.close();
 });
 
+test('Nacelle+ diagnostics are opt-in, structured, and secret-free', async () => {
+  const events = [];
+  const scope = messageScope((message, _transfer, respond) => {
+    if (message.type !== 'request') return;
+    queueMicrotask(() => respond({
+      data: {
+        source: 'nacelle-plus-extension',
+        type: 'response-start',
+        requestId: message.requestId,
+        response: { status: 200, headers: {} },
+      },
+    }));
+    queueMicrotask(() => respond({
+      data: { source: 'nacelle-plus-extension', type: 'response-chunk', requestId: message.requestId, sequence: 1, body: new TextEncoder().encode('ok').buffer },
+    }));
+    queueMicrotask(() => respond({
+      data: { source: 'nacelle-plus-extension', type: 'response-end', requestId: message.requestId },
+    }));
+  });
+  const adapter = createNacellePlusAdapter({
+    globalObject: scope,
+    timeout: 100,
+    debug: (event) => events.push(event),
+  });
+  const response = await adapter.request({
+    target: 'https://api.example.test/data?token=secret#fragment',
+    headers: {},
+    fallbackReason: 'cors',
+  });
+  assert.equal(await new Response(response.body).text(), 'ok');
+  await new Promise((resolve) => queueMicrotask(resolve));
+
+  assert.deepEqual(events.map((event) => event.phase), ['start', 'response', 'finish']);
+  assert.equal(events[0].transport, 'nacelle-plus');
+  assert.equal(events[0].request_id, events[1].request_id);
+  assert.equal(events[0].origin, 'https://api.example.test');
+  assert.equal(events[0].target, 'https://api.example.test/data');
+  assert.equal(events[0].fallback_reason, 'cors');
+  assert.equal(events[2].grant, 'allowed');
+  assert.equal(events[2].stream, true);
+  assert.equal(events[2].bytes_in, 2);
+  assert.equal(events[2].termination, 'completed');
+  assert.equal(JSON.stringify(events).includes('secret'), false);
+  adapter.close();
+});
+
 test('Nacelle+ reports a deterministic error when the extension bridge is lost', async () => {
   const scope = messageScope((message, _transfer, respond) => {
     if (message.type !== 'request') return;

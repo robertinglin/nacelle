@@ -16,13 +16,7 @@ export interface NacelleOptions {
   /** Optional Nacelle+ privileged transport companion */
   nacellePlus?: boolean | NacellePlusOptions;
   /** Explicit Nacelle capability grant for privileged transport */
-  proxy?: {
-    mode?: 'virtual' | 'proxy';
-    enabled?: boolean;
-    capability?: boolean | Record<string, boolean>;
-    capabilityKey?: string;
-    adapter?: any;
-  };
+  proxy?: ProxyConfig;
 }
 
 export interface NpmProgressEvent {
@@ -84,7 +78,49 @@ export interface NacellePlusOptions {
   fallback?: boolean;
   /** Timeout for page/extension bridge requests in milliseconds */
   timeout?: number;
+  /** Emit secret-free structured transport diagnostics when enabled */
+  debug?: boolean | ((event: NacellePlusDiagnosticEvent) => void) | { enabled?: boolean; onEvent?: (event: NacellePlusDiagnosticEvent) => void };
 }
+
+export interface ProxyConfig {
+  /** Existing run-scoped proxy capability mode */
+  mode?: 'virtual' | 'proxy';
+  /** Enable the selected proxy capability */
+  enabled?: boolean;
+  /** Explicit capability grant */
+  capability?: boolean | Record<string, boolean>;
+  capabilityKey?: string;
+  adapter?: any;
+  /** Shared HTTP(S) proxy URL */
+  url?: string;
+  proxyUrl?: string;
+  /** Per-scheme proxy URLs */
+  httpProxy?: string;
+  httpsProxy?: string;
+  /** Hosts that bypass environment proxy routing */
+  noProxy?: string | string[];
+  /** Disable environment proxy routing while retaining configured URLs */
+  useEnvProxy?: boolean;
+  /** Additional process environment values */
+  env?: Record<string, string>;
+}
+
+export interface NacellePlusDiagnosticEvent {
+  transport: 'nacelle-plus';
+  phase: 'start' | 'response' | 'finish';
+  request_id: string;
+  origin: string;
+  target: string;
+  fallback_reason: string;
+  grant: string;
+  stream: boolean;
+  bytes_in: number;
+  duration_ms?: number;
+  status?: number;
+  termination?: 'completed' | 'aborted' | 'revoked' | 'transport_lost' | 'failed';
+}
+
+export function createProxyConfig(options?: ProxyConfig): ProxyConfig;
 
 export interface PackageJson {
   name?: string;

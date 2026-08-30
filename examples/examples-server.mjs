@@ -108,6 +108,7 @@ const server = createServer(async (req, res) => {
     if (pathname === '/express') pathname = '/express.html';
     if (pathname === '/vite' || pathname === '/vite-react') pathname = '/vite-react.html';
     if (pathname === '/wasm') pathname = '/wasm.html';
+    if (pathname === '/proxy') pathname = '/proxy.html';
 
     const safeRelative = pathname.replace(/^\/+/, '');
     
@@ -149,6 +150,7 @@ const port = server.address().port;
 const expressUrl = `http://127.0.0.1:${port}/express.html`;
 const wasmUrl = `http://127.0.0.1:${port}/wasm.html`;
 const viteReactUrl = `http://127.0.0.1:${port}/vite-react.html`;
+const proxyUrl = `http://127.0.0.1:${port}/proxy.html`;
 const targetUrl = process.argv.includes('--wasm')
   ? wasmUrl
   : (process.argv.includes('--vite-react') || process.argv.includes('--vite'))
@@ -157,6 +159,8 @@ const targetUrl = process.argv.includes('--wasm')
       ? `http://127.0.0.1:${port}/typescript.html`
       : process.argv.includes('--bash')
         ? `http://127.0.0.1:${port}/bash.html`
+        : process.argv.includes('--proxy')
+          ? proxyUrl
         : expressUrl;
 
 console.log('\n======================================================');
@@ -167,6 +171,7 @@ console.log(`  Vite + React Example: \x1b[36m${viteReactUrl}\x1b[0m`);
 console.log(`  WASM Addon Example:   \x1b[36m${wasmUrl}\x1b[0m\n`);
 console.log(`  Bash Shell Example:   \x1b[36mhttp://127.0.0.1:${port}/bash.html\x1b[0m`);
 console.log(`  TypeScript Example:   \x1b[36mhttp://127.0.0.1:${port}/typescript.html\x1b[0m\n`);
+console.log(`  Proxy Config Example: \x1b[36m${proxyUrl}\x1b[0m\n`);
 console.log(`  Target URL:           \x1b[32m${targetUrl}\x1b[0m\n`);
 
 let browser = null;

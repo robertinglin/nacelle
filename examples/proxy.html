@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nacelle — Proxy Configuration Demo</title>
+  <style>
+    :root { color-scheme: dark; --bg: #0b1020; --panel: #151d35; --card: #0f172a; --border: #33446d; --text: #edf2ff; --muted: #aebbd7; --accent: #fbbf24; --ok: #86efac; --error: #fda4af; }
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; margin: 0; }
+    body { background: radial-gradient(circle at top right, #713f12, var(--bg) 50%); color: var(--text); font: 15px/1.5 system-ui, sans-serif; }
+    header { min-height: 60px; padding: 0 22px; display: flex; align-items: center; justify-content: space-between; background: #151d35e8; border-bottom: 1px solid var(--border); }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; }
+    .badge { padding: 3px 9px; border-radius: 999px; background: #92400e; color: #fef3c7; font-size: .72rem; }
+    .nav-wrap { position: relative; }
+    .hamburger { border: 1px solid var(--border); border-radius: 6px; padding: 5px 9px; background: transparent; color: var(--text); cursor: pointer; font-size: 1.1rem; }
+    .nav { position: absolute; top: 42px; left: 0; z-index: 2; display: none; min-width: 250px; padding: 6px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); box-shadow: 0 16px 35px #0008; }
+    .nav.open { display: grid; gap: 3px; }
+    .nav a { padding: 8px 10px; border-radius: 5px; color: var(--text); text-decoration: none; font-size: .85rem; }
+    .nav a:hover, .nav a.active { background: #78350f; color: var(--accent); }
+    main { width: min(980px, calc(100% - 32px)); margin: 0 auto; padding: 28px 0 40px; display: grid; gap: 18px; }
+    .intro, .panel { border: 1px solid var(--border); border-radius: 12px; background: #151d35e8; }
+    .intro { padding: 22px; }
+    h1 { margin: 0 0 6px; font-size: 1.45rem; }
+    p { margin: 0; color: var(--muted); }
+    button { margin-top: 16px; border: 0; border-radius: 6px; padding: 8px 13px; background: var(--accent); color: #451a03; font-weight: 750; cursor: pointer; }
+    .status { margin-left: 10px; color: var(--muted); font: .8rem ui-monospace, monospace; }
+    .status.ok { color: var(--ok); }
+    .status.error { color: var(--error); }
+    .panel { overflow: hidden; }
+    .panel h2 { margin: 0; padding: 13px 16px; border-bottom: 1px solid var(--border); font-size: .9rem; }
+    pre { min-height: 180px; margin: 0; padding: 16px; overflow: auto; white-space: pre-wrap; background: var(--card); color: var(--text); font: .84rem/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .note { padding: 14px 16px; color: var(--muted); font-size: .86rem; }
+    code { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="nav-wrap">
+      <button class="hamburger" id="menu-button" title="Switch example">☰</button>
+      <nav class="nav" id="menu">
+        <a href="/express.html">🚀 Express.js Server</a>
+        <a href="/vite-react.html">⚛️ Vite + React IDE</a>
+        <a href="/wasm.html">🧩 Native WASM Addons</a>
+        <a href="/bash.html">⌘ Inline Bash Shell</a>
+        <a href="/typescript.html">📘 TypeScript Compile</a>
+        <a href="/proxy.html" class="active">🔀 Proxy Configuration</a>
+      </nav>
+    </div>
+    <div class="brand">⚡ nacelle <span class="badge">Proxy Demo</span></div>
+    <span id="status" class="status">ready</span>
+  </header>
+
+  <main>
+    <section class="intro">
+      <h1>Route native Node HTTP through a configured proxy</h1>
+      <p>This uses <code>createProxyConfig()</code>, <code>http.createServer()</code>, and <code>http.get()</code>. The target and forwarding proxy are both real Node-compatible servers inside the virtual runtime.</p>
+      <button id="run-button">Run proxy request</button><span id="exit-status" class="status">not run</span>
+    </section>
+    <section class="panel">
+      <h2>Proxy configuration</h2>
+      <pre id="config">createProxyConfig({ httpProxy: 'http://127.0.0.1:3128' })</pre>
+    </section>
+    <section class="panel">
+      <h2>Native request result</h2>
+      <pre id="output">Run the request to see the proxy marker and forwarded response.</pre>
+      <div class="note">The proxy receives the absolute target, disables proxying only for its upstream hop, and restores the environment before returning. This is the same environment-proxy path used by npm-style HTTP clients.</div>
+    </section>
+  </main>
+
+  <script type="module">
+    import { Nacelle, createProxyConfig } from '/index.js';
+
+    const output = document.getElementById('output');
+    const status = document.getElementById('status');
+    const exitStatus = document.getElementById('exit-status');
+
+    function setStatus(element, text, kind = '') {
+      element.textContent = text;
+      element.className = `status ${kind}`;
+    }
+
+    async function runDemo() {
+      setStatus(status, 'running');
+      setStatus(exitStatus, 'running');
+      output.textContent = '';
+      try {
+        const node = await Nacelle.create({
+          gateway: false,
+          globalObject: window,
+          proxy: createProxyConfig({ httpProxy: 'http://127.0.0.1:3128' }),
+        });
+        const child = await node.execute(`
+          const http = require('node:http');
+          const target = http.createServer((request, response) => {
+            response.writeHead(200, { 'content-type': 'text/plain', 'x-target': 'native' });
+            response.end('target:' + request.url);
+          });
+          const proxy = http.createServer((request, response) => {
+            const saved = process.env.NODE_USE_ENV_PROXY;
+            process.env.NODE_USE_ENV_PROXY = '0';
+            http.get(request.url, (upstream) => {
+              const chunks = [];
+              upstream.on('data', (chunk) => chunks.push(chunk));
+              upstream.on('end', () => {
+                response.writeHead(upstream.statusCode, { ...upstream.headers, 'x-via-proxy': 'yes' });
+                response.end(Buffer.concat(chunks));
+                if (saved === undefined) delete process.env.NODE_USE_ENV_PROXY;
+                else process.env.NODE_USE_ENV_PROXY = saved;
+              });
+            }).on('error', (error) => {
+              response.writeHead(502);
+              response.end(error.message);
+              if (saved === undefined) delete process.env.NODE_USE_ENV_PROXY;
+              else process.env.NODE_USE_ENV_PROXY = saved;
+            });
+          });
+          target.listen(3129, '127.0.0.1', () => proxy.listen(3128, '127.0.0.1', () => {
+            http.get('http://127.0.0.1:3129/demo', (response) => {
+              let body = '';
+              response.setEncoding('utf8');
+              response.on('data', (chunk) => { body += chunk; });
+              response.on('end', () => {
+                process.stdout.write(JSON.stringify({ status: response.statusCode, viaProxy: response.headers['x-via-proxy'], body }));
+                proxy.close();
+                target.close();
+              });
+            }).on('error', (error) => { console.error(error); process.exitCode = 1; });
+          }));
+        `);
+        const code = await child.exit;
+        output.textContent = await child.stdoutText() || await child.stderrText();
+        setStatus(exitStatus, `exit ${code}`, code === 0 ? 'ok' : 'error');
+        setStatus(status, code === 0 ? 'complete' : 'failed', code === 0 ? 'ok' : 'error');
+      } catch (error) {
+        output.textContent = error.stack || error.message;
+        setStatus(exitStatus, 'error', 'error');
+        setStatus(status, 'failed', 'error');
+      }
+    }
+
+    document.getElementById('run-button').addEventListener('click', runDemo);
+    document.getElementById('menu-button').addEventListener('click', (event) => {
+      event.stopPropagation();
+      document.getElementById('menu').classList.toggle('open');
+    });
+    document.addEventListener('click', () => document.getElementById('menu').classList.remove('open'));
+    if (new URLSearchParams(location.search).has('autorun')) runDemo();
+  </script>
+</body>
+</html>

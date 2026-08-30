@@ -19,6 +19,7 @@ function requestInit(request) {
   const init = {
     method: request.method || 'GET',
     headers: request.headers,
+    redirect: request.redirect,
     signal: request.signal,
   };
   if (!['GET', 'HEAD'].includes(String(init.method).toUpperCase()) && request.body !== undefined) {
@@ -53,7 +54,7 @@ export function createNegotiatedTransport({ globalObject = globalThis, adapter, 
       return await nativeFetch(target, requestInit(proxyRequest));
     } catch (error) {
       if (!isBrowserFetchFailure(error)) throw error;
-      return invokeAdapter(adapter, proxyRequest);
+      return invokeAdapter(adapter, { ...proxyRequest, fallbackReason: 'cors' });
     }
   };
 
@@ -70,6 +71,7 @@ export function createNegotiatedTransport({ globalObject = globalThis, adapter, 
         target,
         method: init.method || 'GET',
         headers: init.headers,
+        redirect: init.redirect,
         body: init.body,
         signal: init.signal,
       });

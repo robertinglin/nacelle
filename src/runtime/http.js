@@ -3747,12 +3747,16 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       this._clientTcpResource = null;
       this._clientTcpConnectResource = null;
       this._taskRelease = null;
-      this._proxyEnv = { ...proxyEnv, ...scope.process?.env };
       // The compatibility module is constructed once, but requests can be
       // created after the shared realm has restored its parent process. Use
       // the explicit module owner for virtual-child callbacks and its console
       // facade for response metadata.
       this._ownerProcess = ownerProcess || scope.process;
+      // Do not merge the host page/Node environment here. A virtual process
+      // must honor its own NO_PROXY and proxy URLs, even when the embedding
+      // process has a different proxy policy (for example, localhost in the
+      // host's NO_PROXY list).
+      this._proxyEnv = { ...proxyEnv };
       this._ownerConsole = this._ownerProcess?._bnhConsole || scope.console;
       this.parser = {
         consume: (stream) => {
@@ -4189,9 +4193,23 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
         }
       }
 
+      let environmentProxyConfig = null;
+      if (!this._proxy) {
+        try {
+          environmentProxyConfig = proxyConfigFor(
+            this._url,
+            this._options,
+            { ...this._proxyEnv, ...this._ownerProcess?.env },
+            scope,
+          );
+        } catch (error) {
+          this.destroy(error);
+          return;
+        }
+      }
       const customCreateConnection = this._agent?.createConnection;
       const customCreateSocket = this._agent?.createSocket;
-      const createConnection = proxySupports(this._proxy, 'request')
+      const createConnection = proxySupports(this._proxy, 'request') || environmentProxyConfig
         ? null
         : typeof customCreateSocket === 'function'
           && customCreateSocket !== BrowserAgent.prototype.createSocket
@@ -4258,8 +4276,8 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
           }));
         }
         else {
-          const runtimeProxyEnv = { ...this._proxyEnv, ...scope.process?.env };
-          const proxyConfig = proxyConfigFor(
+          const runtimeProxyEnv = { ...this._proxyEnv, ...this._ownerProcess?.env };
+          const proxyConfig = environmentProxyConfig || proxyConfigFor(
             this._url,
             this._options,
             runtimeProxyEnv,

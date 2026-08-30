@@ -4,6 +4,7 @@ const NacellePlusPolicy = (() => {
   const MAX_HEADER_VALUE_BYTES = 64 * 1024;
   const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
   const METHODS = new Set(['DELETE', 'GET', 'HEAD', 'OPTIONS', 'PATCH', 'POST', 'PUT']);
+  const REDIRECT_MODES = new Set(['follow', 'manual', 'error']);
   const FORBIDDEN_HEADERS = new Set([
     'connection', 'content-length', 'cookie', 'host', 'origin', 'referer',
     'set-cookie', 'transfer-encoding', 'upgrade',
@@ -66,6 +67,9 @@ const NacellePlusPolicy = (() => {
     if (!origin(request.target)) return failure('ERR_INVALID_URL', 'Nacelle+ only supports credential-free HTTP(S) targets');
     const method = String(request.method || 'GET').toUpperCase();
     if (!METHODS.has(method)) return failure('ERR_NACELLE_PLUS_METHOD', `unsupported HTTP method: ${method}`);
+    if (request.redirect !== undefined && !REDIRECT_MODES.has(request.redirect)) {
+      return failure('ERR_NACELLE_PLUS_REDIRECT', `unsupported redirect mode: ${request.redirect}`);
+    }
     if (request.headers !== undefined && (typeof request.headers !== 'object' || Array.isArray(request.headers))) {
       return failure('ERR_NACELLE_PLUS_HEADERS', 'request headers must be an object');
     }

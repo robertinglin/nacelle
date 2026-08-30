@@ -1,4 +1,5 @@
 import { createNegotiatedTransport } from './transport.js';
+import { createNacellePlusDiagnostics } from './nacelle-plus-diagnostics.js';
 
 const PAGE_REQUEST_SOURCE = 'nacelle-plus-page';
 const EXTENSION_RESPONSE_SOURCE = 'nacelle-plus-extension';
@@ -8,6 +9,7 @@ const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 const MAX_RESPONSE_HEADER_VALUE_BYTES = 64 * 1024;
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const METHODS = new Set(['DELETE', 'GET', 'HEAD', 'OPTIONS', 'PATCH', 'POST', 'PUT']);
+const REDIRECT_MODES = new Set(['follow', 'manual', 'error']);
 const FORBIDDEN_HEADERS = new Set(['connection', 'content-length', 'cookie', 'host', 'origin', 'referer', 'set-cookie', 'transfer-encoding', 'upgrade']);
 
 function transportError(code, message) {
@@ -35,6 +37,9 @@ function validateRequest(request) {
   }
   const method = String(request.method || 'GET').toUpperCase();
   if (!METHODS.has(method)) throw transportError('ERR_NACELLE_PLUS_METHOD', `unsupported HTTP method: ${method}`);
+  if (request.redirect !== undefined && !REDIRECT_MODES.has(request.redirect)) {
+    throw transportError('ERR_NACELLE_PLUS_REDIRECT', `unsupported redirect mode: ${request.redirect}`);
+  }
   if (request.headers !== undefined && (typeof request.headers !== 'object' || Array.isArray(request.headers))) {
     throw transportError('ERR_NACELLE_PLUS_HEADERS', 'request headers must be an object');
   }
@@ -152,13 +157,14 @@ function makeResponse(metadata, onCancel, onChunkAck) {
 }
 
 /** Create the page/content-script bridge used by the Chrome and Firefox companions. */
-export function createNacellePlusAdapter({ globalObject = globalThis, extensionId, timeout = 15_000 } = {}) {
+export function createNacellePlusAdapter({ globalObject = globalThis, extensionId, timeout = 15_000, debug = false } = {}) {
   if (typeof globalObject.postMessage !== 'function' || typeof globalObject.addEventListener !== 'function') {
     throw transportError('ERR_NACELLE_PLUS_UNAVAILABLE', 'Nacelle+ requires a browser page message bridge');
   }
   if (!Number.isFinite(timeout) || timeout <= 0) throw transportError('ERR_INVALID_TRANSPORT_TIMEOUT', 'Nacelle+ timeout must be positive');
 
   const pending = new Map();
+  const diagnostics = createNacellePlusDiagnostics({ debug, globalObject });
   let sequence = 0;
   const expire = (requestId, request) => {
     if (!pending.has(requestId)) return;
@@ -166,6 +172,7 @@ export function createNacellePlusAdapter({ globalObject = globalThis, extensionI
     request.signal?.removeEventListener?.('abort', request.onAbort);
     pending.delete(requestId);
     const error = transportError('ETIMEDOUT', `Nacelle+ stream timed out after ${timeout}ms`);
+    request.diagnostic.finish(error);
     if (request.started) request.stream?.fail(error);
     else request.reject(error);
   };
@@ -188,11 +195,13 @@ export function createNacellePlusAdapter({ globalObject = globalThis, extensionI
         clearTimeout(request.timer);
         postMessage(globalObject, { source: PAGE_REQUEST_SOURCE, type: 'cancel', version: 1, requestId: message.requestId });
         pending.delete(message.requestId);
+        request.diagnostic.finish(error);
         request.reject(error);
         return;
       }
       request.started = true;
       clearTimeout(request.timer);
+      request.diagnostic.response({ stream: true, status: metadata.status });
       request.stream = makeResponse(metadata, () => {
         postMessage(globalObject, { source: PAGE_REQUEST_SOURCE, type: 'cancel', version: 1, requestId: message.requestId });
       }, (sequence) => {
@@ -207,11 +216,15 @@ export function createNacellePlusAdapter({ globalObject = globalThis, extensionI
     if (message.type === 'response-chunk') {
       if (request.stream && message.body instanceof ArrayBuffer && Number.isInteger(message.sequence) && message.sequence > 0) {
         request.total += message.body.byteLength;
+        request.diagnostic.addBytes(message.body.byteLength);
         if (request.total > MAX_RESPONSE_BYTES) {
+          const error = transportError('ERR_NACELLE_PLUS_RESPONSE_TOO_LARGE', 'Nacelle+ response exceeds the 16 MiB limit');
           postMessage(globalObject, { source: PAGE_REQUEST_SOURCE, type: 'cancel', version: 1, requestId: message.requestId });
           clearTimeout(request.timer);
           pending.delete(message.requestId);
-          request.stream.fail(transportError('ERR_NACELLE_PLUS_RESPONSE_TOO_LARGE', 'Nacelle+ response exceeds the 16 MiB limit'));
+          request.signal?.removeEventListener?.('abort', request.onAbort);
+          request.stream.fail(error);
+          request.diagnostic.finish(error);
           return;
         }
         request.stream.push(message.body, message.sequence);
@@ -221,6 +234,7 @@ export function createNacellePlusAdapter({ globalObject = globalThis, extensionI
     }
     if (message.type === 'response-end') {
       clearTimeout(request.timer);
+      request.diagnostic.finish(null, request.stream?.response?.status);
       request.stream?.end();
       request.signal?.removeEventListener?.('abort', request.onAbort);
       pending.delete(message.requestId);
@@ -231,6 +245,7 @@ export function createNacellePlusAdapter({ globalObject = globalThis, extensionI
       pending.delete(message.requestId);
       request.signal?.removeEventListener?.('abort', request.onAbort);
       const error = errorFromResponse(message.response);
+      request.diagnostic.finish(error, request.stream?.response?.status);
       if (request.started) request.stream?.fail(error);
       else request.reject(error);
     }
@@ -242,22 +257,29 @@ export function createNacellePlusAdapter({ globalObject = globalThis, extensionI
       const request = validateRequest(rawRequest);
       const requestId = `nacelle-plus-${Date.now()}-${sequence += 1}`;
       const body = copyTransferableBody(request.body);
+      const diagnostic = diagnostics.start({
+        requestId,
+        target: request.target,
+        fallbackReason: request.fallbackReason,
+      });
       const message = {
         source: PAGE_REQUEST_SOURCE,
         type: 'request',
         version: 1,
         extensionId,
         requestId,
-        request: (({ signal, ...wireRequest }) => ({ ...wireRequest, body }))(request),
+        request: (({ signal, fallbackReason, ...wireRequest }) => ({ ...wireRequest, body }))(request),
       };
       return new Promise((resolve, reject) => {
-        const record = { resolve, reject, timer: null, started: false, stream: null, signal: request.signal, total: 0 };
+        const record = { resolve, reject, timer: null, started: false, stream: null, signal: request.signal, total: 0, diagnostic };
         pending.set(requestId, record);
         armTimeout(requestId, record);
         if (request.signal?.aborted) {
           clearTimeout(record.timer);
           pending.delete(requestId);
-          reject(transportError('ABORT_ERR', 'Nacelle+ request was aborted'));
+          const error = transportError('ABORT_ERR', 'Nacelle+ request was aborted');
+          diagnostic.finish(error);
+          reject(error);
           return;
         }
         const onAbort = () => {
@@ -265,6 +287,7 @@ export function createNacellePlusAdapter({ globalObject = globalThis, extensionI
           clearTimeout(record.timer);
           pending.delete(requestId);
           const error = transportError('ABORT_ERR', 'Nacelle+ request was aborted');
+          diagnostic.finish(error, record.stream?.response?.status);
           if (record.started) record.stream?.fail(error);
           else reject(error);
         };
@@ -281,6 +304,7 @@ export function createNacellePlusAdapter({ globalObject = globalThis, extensionI
         request.signal?.removeEventListener?.('abort', request.onAbort);
         postMessage(globalObject, { source: PAGE_REQUEST_SOURCE, type: 'cancel', version: 1, requestId });
         const error = transportError('ERR_NACELLE_PLUS_CLOSED', 'Nacelle+ adapter closed');
+        request.diagnostic.finish(error, request.stream?.response?.status);
         if (request.started) request.stream?.fail(error);
         else request.reject(error);
       }

@@ -42,6 +42,7 @@
     "dist",
     "src/*.js",
     "src/runtime",
+    "nacelle-plus",
     "src/types.d.ts",
     "README.md",
     "LICENSE"
@@ -54,6 +55,7 @@
     "examples:wasm": "node examples/examples-server.mjs --wasm",
     "examples:bash": "node examples/examples-server.mjs --bash",
     "examples:typescript": "node examples/examples-server.mjs --typescript",
+    "build:nacelle-plus": "node nacelle-plus/build.mjs",
     "publish:release": "node scripts/publish-release.mjs",
     "publish:n22": "node scripts/publish-release.mjs --channel=n22 --set-latest",
     "publish:v22": "node scripts/publish-release.mjs --channel=n22 --set-latest"

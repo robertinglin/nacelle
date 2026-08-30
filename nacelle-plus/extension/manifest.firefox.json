@@ -1,0 +1,22 @@
+{
+  "manifest_version": 2,
+  "name": "Nacelle+",
+  "version": "0.1.0",
+  "description": "Optional privileged HTTP transport for Nacelle browser runtimes.",
+  "permissions": ["activeTab", "storage"],
+  "optional_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "scripts": ["background.js"],
+    "persistent": false
+  },
+  "browser_action": {
+    "default_title": "Nacelle+ permissions",
+    "default_popup": "popup.html"
+  },
+  "applications": {
+    "gecko": {
+      "id": "nacelle-plus@example.invalid",
+      "strict_min_version": "109.0"
+    }
+  }
+}

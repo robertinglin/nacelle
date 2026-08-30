@@ -2,6 +2,8 @@ import { createRuntime, runtime as defaultRuntime } from './runtime.js';
 import { BrowserNpm, BrowserNpmCache, parseScriptCommand } from './runtime/npm.js';
 import { createShellProcess } from './runtime/shell.js';
 import { parseShellScript, tokenizeShellScript } from './runtime/shell-parser.js';
+import { createNacellePlusAdapter, createNacellePlusTransport } from './runtime/nacelle-plus.js';
+import { createNegotiatedTransport, isBrowserFetchFailure } from './runtime/transport.js';
 import { installGatewayBridge } from './runtime/gateway-bridge.js';
 import { watchFrameAddress } from './runtime/frame-address.js';
 import { createBrowserNet } from './runtime/net.js';
@@ -17,6 +19,10 @@ export {
   parseScriptCommand,
   parseShellScript,
   tokenizeShellScript,
+  createNacellePlusAdapter,
+  createNacellePlusTransport,
+  createNegotiatedTransport,
+  isBrowserFetchFailure,
 };
 
 /**
@@ -65,6 +71,7 @@ export class Nacelle {
    * @param {boolean|Object} [options.gateway=true] Enable Service Worker & iframe gateway
    * @param {string} [options.wasmBaseUrl] Custom base URL for WASM binaries
    * @param {Object} [options.globalObject=globalThis]
+   * @param {Object|boolean} [options.nacellePlus] Optional privileged transport companion
    */
   static async create(options = {}) {
     const cwd = options.cwd || '/node';
@@ -106,6 +113,18 @@ export class Nacelle {
       mounts.unshift({ path: cwd, mode: 'read-write' });
     }
 
+    const nacellePlusOptions = options.nacellePlus === true
+      ? {}
+      : options.nacellePlus && typeof options.nacellePlus === 'object'
+        ? options.nacellePlus
+        : null;
+    const transport = nacellePlusOptions
+      ? createNacellePlusTransport({ ...nacellePlusOptions, globalObject })
+      : null;
+    const proxy = options.proxy || (transport
+      ? { mode: 'proxy', enabled: true, capability: { proxy: true }, adapter: transport.adapter }
+      : { mode: 'virtual', enabled: false });
+
     // Reset runtime state with default grants
     await runtime.reset({
       runId: `node-session-${Date.now()}`,
@@ -116,8 +135,9 @@ export class Nacelle {
         signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
         output: { maxBytes: 10 * 1024 * 1024, stdoutBytes: 4 * 1024 * 1024, stderrBytes: 4 * 1024 * 1024 },
         envVars: { allowed: Object.keys(env) },
-        proxy: { mode: 'virtual', enabled: false },
+        proxy: { mode: proxy.mode || 'virtual', enabled: proxy.enabled === true },
       },
+      proxy,
     });
 
     // Install Gateway Bridge with proper createBrowserNet instance
@@ -129,7 +149,7 @@ export class Nacelle {
       installGatewayBridge({ net: netModule, globalObject });
     }
 
-    const instance = new Nacelle(runtime, { cwd, env, globalObject });
+    const instance = new Nacelle(runtime, { cwd, env, globalObject, transport });
 
     // Seed initial files if provided
     if (options.files) {
@@ -146,6 +166,7 @@ export class Nacelle {
     this._cwd = config.cwd;
     this._env = config.env;
     this._globalObject = config.globalObject;
+    this._transport = config.transport || null;
     this._listeners = new Map();
     this._npmCache = new BrowserNpmCache({ globalObject: this._globalObject });
   }
@@ -163,6 +184,11 @@ export class Nacelle {
   /** Virtual Network broker */
   get virtualNetwork() {
     return this._runtime.virtualNetwork;
+  }
+
+  /** Optional negotiated transport, when Nacelle+ or another adapter is enabled. */
+  get transport() {
+    return this._transport;
   }
 
   /**

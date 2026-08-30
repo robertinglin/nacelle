@@ -3678,6 +3678,13 @@ function proxyResponse(result, url, scope) {
   return responseFromBytes(url, statusCode, headers, bytes, scope);
 }
 
+function proxySupports(proxy, operation) {
+  const adapter = proxy?.adapter;
+  return typeof adapter === 'function'
+    || typeof adapter?.[operation] === 'function'
+    || typeof adapter?.handle === 'function';
+}
+
 function proxyRequestOptions(url, init) {
   return {
     url,
@@ -4184,13 +4191,15 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
 
       const customCreateConnection = this._agent?.createConnection;
       const customCreateSocket = this._agent?.createSocket;
-      const createConnection = typeof customCreateSocket === 'function'
-        && customCreateSocket !== BrowserAgent.prototype.createSocket
-        ? customCreateSocket
-        : typeof customCreateConnection === 'function'
-          && customCreateConnection !== BrowserAgent.prototype.createConnection
-          ? customCreateConnection
-          : null;
+      const createConnection = proxySupports(this._proxy, 'request')
+        ? null
+        : typeof customCreateSocket === 'function'
+          && customCreateSocket !== BrowserAgent.prototype.createSocket
+          ? customCreateSocket
+          : typeof customCreateConnection === 'function'
+            && customCreateConnection !== BrowserAgent.prototype.createConnection
+            ? customCreateConnection
+            : null;
       if (createConnection) {
         let socket;
         const usesCreateSocket = createConnection === customCreateSocket;

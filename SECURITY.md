@@ -31,6 +31,12 @@ Use operating-system controls to restrict:
 - host browsers and user profiles;
 - process count, memory, CPU, disk, and wall-clock time.
 
+Nacelle+ is an optional browser extension boundary, not a runtime escape hatch.
+It requests host access per page/target-origin pair, omits credentials by
+default, limits response bodies, and only handles explicitly granted HTTP
+requests. Treat the extension's requested host permissions as sensitive and
+review its allowlist before installing it.
+
 The supplied Playwright adapter launches fresh headless browser contexts and a worktree-scoped development server. The browser process and server still run with the host account's permissions.
 
 ## Patch validation is not containment

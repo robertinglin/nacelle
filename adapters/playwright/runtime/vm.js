@@ -341,9 +341,11 @@ function validateOneOf(value, name, choices) {
   }
 }
 
-function validateBuffer(value, name) {
-  const isBuffer = typeof globalThis.Buffer?.isBuffer === 'function' && globalThis.Buffer.isBuffer(value);
-  if (!isBuffer && !ArrayBuffer.isView(value)) throw vmInvalidArgType(name, ['Buffer', 'TypedArray', 'DataView'], value);
+function validateBuffer(value, name, scope = globalThis) {
+  const BufferConstructor = scope?.Buffer || globalThis.Buffer;
+  const isBuffer = typeof BufferConstructor?.isBuffer === 'function' && BufferConstructor.isBuffer(value);
+  const arrayBuffer = scope?.ArrayBuffer || ArrayBuffer;
+  if (!isBuffer && !arrayBuffer.isView(value)) throw vmInvalidArgType(name, ['Buffer', 'TypedArray', 'DataView'], value);
 }
 
 function validateStringArray(value, name) {
@@ -580,9 +582,30 @@ export function createVmModule(scope = globalThis) {
     return `vm:module(${id})`;
   };
 
+  function normalizeContextError(value) {
+    if (!value || typeof value !== 'object' || !(value instanceof (scope.Error || Error))) return value;
+    const name = value.name || value.constructor?.name;
+    if (typeof name !== 'string' || !name.endsWith('Error')) return value;
+    const foreignConstructor = function ForeignVmError() {};
+    Object.defineProperty(foreignConstructor, 'name', { configurable: true, value: name });
+    const foreignPrototype = Object.create(scope.Error?.prototype || Error.prototype);
+    Object.defineProperty(foreignPrototype, 'constructor', { configurable: true, value: foreignConstructor });
+    const normalized = Object.create(foreignPrototype);
+    for (const key of Reflect.ownKeys(value)) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(value, key);
+      if (!descriptor) continue;
+      try { Object.defineProperty(normalized, key, descriptor); } catch { /* preserve the normalized error */ }
+    }
+    if (!Object.prototype.hasOwnProperty.call(normalized, 'name')) {
+      Object.defineProperty(normalized, 'name', { configurable: true, value: name });
+    }
+    return normalized;
+  }
+
   function createContext(sandbox = {}, options = {}) {
-    if (isContext(sandbox)) return sandbox;
-    const context = contextObject(sandbox);
+    const dontContextify = sandbox === VM_CONSTANTS.DONT_CONTEXTIFY;
+    if (!dontContextify && isContext(sandbox)) return sandbox;
+    const context = contextObject(dontContextify ? {} : sandbox);
     validateObject(options, 'options');
     const {
       name = `VM Context ${defaultContextNameIndex++}`,
@@ -660,7 +683,7 @@ export function createVmModule(scope = globalThis) {
     validateString(filename, 'options.filename');
     validateInt32(columnOffset, 'options.columnOffset');
     validateInt32(lineOffset, 'options.lineOffset');
-    if (cachedData !== undefined) validateBuffer(cachedData, 'options.cachedData');
+    if (cachedData !== undefined) validateBuffer(cachedData, 'options.cachedData', scope);
     validateBoolean(produceCachedData, 'options.produceCachedData');
     if (parsingContext !== undefined) {
       if (parsingContext === null || typeof parsingContext !== 'object' || !isContext(parsingContext)) {
@@ -730,7 +753,7 @@ export function createVmModule(scope = globalThis) {
       validateString(filename, 'options.filename');
       validateInt32(lineOffset, 'options.lineOffset');
       validateInt32(columnOffset, 'options.columnOffset');
-      if (cachedData !== undefined) validateBuffer(cachedData, 'options.cachedData');
+      if (cachedData !== undefined) validateBuffer(cachedData, 'options.cachedData', scope);
       validateBoolean(produceCachedData, 'options.produceCachedData');
       this.options = { ...options, filename, lineOffset, columnOffset, produceCachedData };
       FunctionConstructor(this.code);
@@ -750,9 +773,9 @@ export function createVmModule(scope = globalThis) {
       const previousFilename = scope.__bnhVmFilename;
       scope.__bnhVmFilename = this.options.filename;
       try {
-        if (!realm) return evaluate(context, source);
+        if (!realm) return normalizeContextError(evaluate(context, source));
         copyContextToRealm(context, realm.global, realm.managedKeys);
-        return realm.evaluate(source);
+        return normalizeContextError(realm.evaluate(source));
       } finally {
         if (previousFilename === undefined) delete scope.__bnhVmFilename;
         else scope.__bnhVmFilename = previousFilename;
@@ -861,6 +884,7 @@ export function createVmModule(scope = globalThis) {
 
     evaluate(options = {}) {
       if (options === null || typeof options !== 'object' || Array.isArray(options)) return Promise.reject(vmInvalidArgType('options', 'Object', options));
+      if (options.timeout !== undefined) validateUint32(options.timeout, 'options.timeout', true);
       if (this._status !== 'linked' && this._status !== 'evaluated' && this._status !== 'errored') return Promise.reject(vmError('ERR_VM_MODULE_STATUS', 'Module status must be one of linked, evaluated, or errored'));
       if (this._status === 'errored') return markVmPromise(Promise.reject(this._error), '<rejected>');
       if (this._evaluation) return this._evaluation;

@@ -905,6 +905,8 @@ export class TLSSocket extends Duplex {
     return this;
   }
 
+  get _handle() { return this._tlsHandle ?? this._socket ?? null; }
+  set _handle(value) { this._tlsHandle = value; }
   get _connecting() { return this.connecting; }
   get pending() { return this._pending ?? (!this._handle || this.connecting); }
   get readyState() {
@@ -1193,6 +1195,9 @@ class TLSServer extends EventEmitter {
   getConnections(callback) { return this._raw.getConnections(callback); }
   ref() { this._raw.ref(); return this; }
   unref() { this._raw.unref(); return this; }
+  _emitCloseIfDrained() { return this._raw._emitCloseIfDrained?.(); }
+  _listen2(...args) { return this._raw._listen2?.(...args); }
+  _setupWorker(...args) { return this._raw._setupWorker?.(...args); }
 
   setSecureContext(options) {
     validateTlsOptions(options);

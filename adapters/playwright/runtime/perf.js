@@ -19,6 +19,19 @@ const PERFORMANCE_METHODS = Object.freeze([
 ]);
 
 const PERFORMANCE_CONSTANTS = Object.freeze({
+  NODE_PERFORMANCE_ENTRY_TYPE_DNS: 4,
+  NODE_PERFORMANCE_ENTRY_TYPE_GC: 0,
+  NODE_PERFORMANCE_ENTRY_TYPE_HTTP: 1,
+  NODE_PERFORMANCE_ENTRY_TYPE_HTTP2: 2,
+  NODE_PERFORMANCE_ENTRY_TYPE_NET: 3,
+  NODE_PERFORMANCE_MILESTONE_TIME_ORIGIN_TIMESTAMP: 0,
+  NODE_PERFORMANCE_MILESTONE_TIME_ORIGIN: 1,
+  NODE_PERFORMANCE_MILESTONE_ENVIRONMENT: 2,
+  NODE_PERFORMANCE_MILESTONE_NODE_START: 3,
+  NODE_PERFORMANCE_MILESTONE_V8_START: 4,
+  NODE_PERFORMANCE_MILESTONE_LOOP_START: 5,
+  NODE_PERFORMANCE_MILESTONE_LOOP_EXIT: 6,
+  NODE_PERFORMANCE_MILESTONE_BOOTSTRAP_COMPLETE: 7,
   NODE_PERFORMANCE_GC_MAJOR: 2,
   NODE_PERFORMANCE_GC_MINOR: 1,
   NODE_PERFORMANCE_GC_INCREMENTAL: 4,
@@ -124,7 +137,7 @@ function sortEntries(entries) {
 }
 
 function createObserverEntryListClass() {
-  return class BrowserPerformanceObserverEntryList {
+  class BrowserPerformanceObserverEntryList {
     #entries;
 
     constructor(entries) {
@@ -144,7 +157,23 @@ function createObserverEntryListClass() {
     getEntriesByType(type) {
       return this.#entries.filter((entry) => entry.entryType === type);
     }
-  };
+  }
+
+  Object.defineProperty(BrowserPerformanceObserverEntryList.prototype, Symbol.toStringTag, {
+    configurable: true,
+    value: 'PerformanceObserverEntryList',
+  });
+  Object.defineProperty(BrowserPerformanceObserverEntryList.prototype, INSPECT_CUSTOM, {
+    configurable: true,
+    value(depth, options = {}) {
+      if (depth < 0) return this;
+      return `PerformanceObserverEntryList ${inspect(
+        { entries: this.getEntries() },
+        inspectOptionsAtChildDepth(options),
+      )}`;
+    },
+  });
+  return BrowserPerformanceObserverEntryList;
 }
 
 function normalizeObserveOptions(options) {
@@ -301,6 +330,10 @@ function createPerformanceObserver(globalObject, observers) {
       entryTypes: state ? [...state.observedTypes] : [],
       buffer: records,
     }, inspectOptionsAtChildDepth(options))}`;
+  });
+  Object.defineProperty(BrowserPerformanceObserver.prototype, Symbol.toStringTag, {
+    configurable: true,
+    value: 'PerformanceObserver',
   });
 
   const nativeTypes = Array.isArray(NativePerformanceObserver.supportedEntryTypes)
@@ -562,6 +595,7 @@ function createVirtualNodeTiming(performance, globalObject) {
     name: 'node',
     entryType: 'node',
     startTime: 0,
+    timeOrigin: Number(performance.timeOrigin) || Date.now(),
     nodeStart: Math.max(0.001, processStart * 0.25),
     v8Start: Math.max(0.002, processStart * 0.5),
     environment: Math.max(0.003, processStart * 0.75),
@@ -605,6 +639,14 @@ function createVirtualNodeTiming(performance, globalObject) {
         idleTime: timing.idleTime,
       };
     } },
+  });
+  Object.defineProperty(timing, INSPECT_CUSTOM, {
+    configurable: true,
+    enumerable: false,
+    value(depth, options = {}) {
+      if (depth < 0) return this;
+      return `PerformanceNodeTiming ${inspect(this.toJSON(), inspectOptionsAtChildDepth(options))}`;
+    },
   });
   return timing;
 }

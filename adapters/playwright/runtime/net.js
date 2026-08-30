@@ -165,6 +165,19 @@ function isPipeName(value) {
   return typeof value === 'string' && !(Number(value) >= 0);
 }
 
+function resolvePipePath(path, processObject) {
+  if (typeof path !== 'string' || path.length === 0) return path;
+  const cwd = String(processObject?.cwd?.() || '/node').replace(/\/+$/, '') || '/';
+  const source = path.startsWith('/') ? path : `${cwd}/${path}`;
+  const parts = [];
+  for (const part of source.split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') { parts.pop(); continue; }
+    parts.push(part);
+  }
+  return `/${parts.join('/')}`;
+}
+
 function normalizeArgs(args) {
   if (args.length === 0) return [{}, null];
   const arg0 = args[0];
@@ -406,10 +419,11 @@ export class Socket extends Duplex {
     this.connecting = true;
     this._pending = true;
     this._readyState = 'opening';
-    this.path = path;
-    this._connectOptions = { ...options, path };
+    const resolvedPath = resolvePipePath(path, this._ownerProcess);
+    this.path = resolvedPath;
+    this._connectOptions = { ...options, path: resolvedPath };
     this._network.connectPipe({
-      path,
+      path: resolvedPath,
       client: this,
       onConnected: (connection) => this._establish(connection, undefined, this._connectAttempt),
       onError: (error) => this._failConnect(error),
@@ -902,6 +916,7 @@ export class Server extends EventEmitter {
     this._pipeResource = null;
     this._tcpResource = null;
     this._taskRelease = null;
+    this._taskTracker = null;
     this._closeRequested = false;
     this._clusterHandle = null;
     this._reusePortBinding = null;
@@ -950,7 +965,8 @@ export class Server extends EventEmitter {
     this._closeEmitted = false;
     if (configuredCluster(this._config)?._getServer) return this._listenCluster(options, address, family, callback);
     const trackTask = this._config.getTaskTracker?.() || this._config.trackTask;
-    const taskRelease = trackTask?.() || null;
+    this._taskTracker = trackTask;
+    const taskRelease = this._unref ? null : trackTask?.() || null;
     const tcpResource = new AsyncResource('TCPSERVERWRAP');
     this._tcpResource = tcpResource;
     try {
@@ -1000,10 +1016,12 @@ export class Server extends EventEmitter {
       throw error;
     }
     if (this.listening) return this;
-    if (configuredCluster(this._config)?._getServer) return this._listenClusterPipe(path, callback);
+    const resolvedPath = resolvePipePath(path, this._ownerProcess);
+    if (configuredCluster(this._config)?._getServer) return this._listenClusterPipe(resolvedPath, callback);
     const trackTask = this._config.getTaskTracker?.() || this._config.trackTask;
-    const taskRelease = trackTask?.() || null;
-    this._pipeName = path;
+    this._taskTracker = trackTask;
+    const taskRelease = this._unref ? null : trackTask?.() || null;
+    this._pipeName = resolvedPath;
     this._pipeResource = new AsyncResource('PIPESERVERWRAP');
     schedule(() => {
       if (this.listening || this._closeRequested) {
@@ -1014,12 +1032,12 @@ export class Server extends EventEmitter {
         return;
       }
       try {
-        this._network.bindPipe(this, path);
+        this._network.bindPipe(this, resolvedPath);
         this._taskRelease = taskRelease;
         this._listening = true;
         this._runWithOwner(() => {
           this.emit('listening');
-          try { this._config.onListening?.(path); } catch { /* parent may already be terminal */ }
+          try { this._config.onListening?.(resolvedPath); } catch { /* parent may already be terminal */ }
         });
       } catch (error) {
         taskRelease?.();
@@ -1086,6 +1104,7 @@ export class Server extends EventEmitter {
   }
 
   _listenClusterPipe(path, callback) {
+    path = resolvePipePath(path, this._ownerProcess);
     const trackTask = this._config.getTaskTracker?.() || this._config.trackTask;
     this._taskTracker = trackTask;
     let settled = false;
@@ -1284,6 +1303,20 @@ export class Server extends EventEmitter {
     accepted._tcpResource = new AsyncResource('TCPWRAP', {
       triggerAsyncId: this._tcpResource?.asyncId(),
     });
+    const cluster = configuredCluster(this._config);
+    if (cluster?.isWorker && this._ownerProcess?.listenerCount?.('internalMessage') > 0) {
+      const handle = {
+        close: (callback) => {
+          if (typeof callback === 'function') accepted.once('close', callback);
+          accepted.destroy();
+        },
+      };
+      this._runWithOwner(() => this._ownerProcess.emit('internalMessage', { act: 'newconn' }, handle));
+      if (this._closeRequested || !this.listening) {
+        handle.close();
+        return;
+      }
+    }
     const emitConnection = () => this._runWithOwner(() => this.emit('connection', accepted));
     if (this._tcpResource) this._tcpResource.runInAsyncScope(emitConnection, this);
     else if (this._pipeResource) this._pipeResource.runInAsyncScope(emitConnection, this);
@@ -1309,13 +1342,20 @@ export class Server extends EventEmitter {
   }
 
   ref() {
-    this._unref = false;
+    if (this._unref) {
+      this._unref = false;
+      if (this.listening && !this._taskRelease) this._taskRelease = this._taskTracker?.() || null;
+    }
     if (this._handle) this._handle.ref();
     return this;
   }
 
   unref() {
-    this._unref = true;
+    if (!this._unref) {
+      this._unref = true;
+      this._taskRelease?.();
+      this._taskRelease = null;
+    }
     if (this._handle) this._handle.unref();
     return this;
   }
@@ -1334,8 +1374,9 @@ function createDetachedServerHandle(network, config, address, port, addressType,
   if (typeof fd === 'number' && fd >= 0) return -1;
   const server = new Server({}, undefined, config);
   if (port === -1 && addressType === -1) {
-    server._pipeName = address;
-    network.bindPipe(server, address);
+    const resolvedPath = resolvePipePath(address, server._ownerProcess);
+    server._pipeName = resolvedPath;
+    network.bindPipe(server, resolvedPath);
   } else {
     const family = addressType === 6 ? 6 : 4;
     const bindAddress = normalizeVirtualAddress(address || (family === 6 ? '::' : '0.0.0.0'), family);

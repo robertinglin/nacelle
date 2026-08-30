@@ -2,7 +2,7 @@ import { inspect as nodeInspect } from './assert.js';
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
-const MAX_BUFFER_LENGTH = 0x7fffffff;
+const MAX_BUFFER_LENGTH = Number.MAX_SAFE_INTEGER;
 
 // ---------------------------------------------------------------------------
 // One byte/encoding layer shared by Buffer.from, Buffer#write,
@@ -342,10 +342,10 @@ function nativeSliceRange(length, start, end) {
     if (value === undefined) return fallback;
     const number = Number(value);
     if (Number.isNaN(number)) return 0;
-    if (!Number.isFinite(number)) throw outOfRangeIndexError();
+    if (number === Infinity) return length;
+    if (number === -Infinity) return 0;
     const index = Math.trunc(number);
-    if (index < 0 || index > length) throw outOfRangeIndexError();
-    return index;
+    return Math.min(length, Math.max(0, index < 0 ? length + index : index));
   };
   return [normalize(start, 0), normalize(end, length)];
 }
@@ -389,7 +389,9 @@ function nativeWrite(buffer, value, offset, length, operations, strictLength = t
   const bytes = operations.encode(value);
   const written = operations === UTF8_OPS
     ? completeUtf8Prefix(bytes, range.length)
-    : Math.min(bytes.length, range.length);
+    : operations === UCS2_OPS
+      ? Math.min(bytes.length, range.length - (range.length & 1))
+      : Math.min(bytes.length, range.length);
   buffer.set(bytes.subarray(0, written), range.offset);
   return written;
 }
@@ -1229,8 +1231,14 @@ export function createBufferClass(scope = globalThis) {
         other.subarray(targetFirst, Math.max(targetFirst, targetLast)),
       );
     }
-    slice(start, end) { return new NodeBuffer(super.slice(start, end), internalBuffer); }
-    subarray(start, end) { return new NodeBuffer(super.subarray(start, end), internalBuffer); }
+    slice(start, end) {
+      const [first, last] = nativeSliceRange(this.length, start, end);
+      return new NodeBuffer(this.buffer, this.byteOffset + first, last - first, internalBuffer);
+    }
+    subarray(start, end) {
+      const [first, last] = nativeSliceRange(this.length, start, end);
+      return new NodeBuffer(this.buffer, this.byteOffset + first, last - first, internalBuffer);
+    }
     fill(value, start, end, encoding) {
       if (this.length > this.byteLength) {
         const error = new RangeError('Attempt to access memory outside buffer bounds');

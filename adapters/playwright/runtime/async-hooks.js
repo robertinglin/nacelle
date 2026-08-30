@@ -223,8 +223,7 @@ function destroyResource(asyncId) {
   const record = resources.get(asyncId);
   if (!record || !record.destroyed || record.destroyEmitted) return;
   record.destroyEmitted = true;
-  const destroyObserved = record.initObserved
-    || [...hooks].some((hook) => hook.process === record.process);
+  const destroyObserved = record.initObserved;
   if (destroyObserved) withResourceProcess(asyncId, () => emit('destroy', asyncId));
   const relatedAsyncId = relatedAsyncIds.get(asyncId);
   if (relatedAsyncId !== undefined) {
@@ -276,7 +275,7 @@ export function collectAsyncResources() {
   }
 }
 
-function runInScope(asyncId, callback, thisArg, args, deferRestore = false) {
+function runInScope(asyncId, callback, thisArg, args, deferRestore = false, restoreAfterMicrotask = false) {
   const previous = executionId;
   const previousUserCode = globalThis.__bnhUserCode;
   executionId = asyncId;
@@ -292,10 +291,12 @@ function runInScope(asyncId, callback, thisArg, args, deferRestore = false) {
       try {
         return Reflect.apply(callback, thisArg, args);
       } finally {
-        // A hook can be enabled from inside the callback itself. Node still
-        // reports that callback's after event, even though its before event
-        // happened while hooks were disabled.
-        if (!dispatchAfter && [...hooks].some((hook) => hook.process === record?.process)) {
+        // Node only reports the after event for a resource whose init was
+        // observed by an enabled hook. A resource created before any hook was
+        // enabled never had its init emitted, so it must not receive a
+        // before/after pair either, even if a hook becomes enabled later.
+        if (!dispatchAfter && record?.initObserved
+            && [...hooks].some((hook) => hook.process === record?.process)) {
           dispatchAfter = true;
         }
         if (dispatchAfter) {
@@ -309,7 +310,11 @@ function runInScope(asyncId, callback, thisArg, args, deferRestore = false) {
     }
     throw error;
   } finally {
-    if (deferRestore && hostSetTimeout) {
+    if (restoreAfterMicrotask && hostQueueMicrotask) {
+      hostQueueMicrotask(() => {
+        if (executionId === asyncId) executionId = previous;
+      });
+    } else if (deferRestore && hostSetTimeout) {
       hostSetTimeout(() => {
         if (executionId === asyncId) executionId = previous;
       }, 0);
@@ -362,7 +367,7 @@ function installTaskHooks(scope) {
   const originalQueueMicrotask = scope.queueMicrotask;
   if (typeof originalQueueMicrotask === 'function') {
     scope.queueMicrotask = function patchedQueueMicrotask(callback) {
-      if (typeof callback !== 'function' || executionId !== 1) {
+      if (typeof callback !== 'function' || !isUserCodeActive()) {
         return originalQueueMicrotask.call(this, callback);
       }
       const resource = {};
@@ -497,7 +502,11 @@ class AsyncHook {
       this.enabled = true;
       hooks.add(this);
       installPromiseHooks();
-      if (this.destroy) promiseContextSwitchPending = true;
+      // Native async functions use an intrinsic promise continuation that is
+      // not observable through the patched Promise.prototype.then. Mark the
+      // next user promise boundary so Promise.resolve can recreate the
+      // visible async resource chain even for hooks that only observe init.
+      promiseContextSwitchPending = true;
       if (isBrowserRealm) installTaskHooks(globalThis);
     }
     return this;
@@ -635,6 +644,7 @@ export class AsyncResource {
       throw invalidAsyncType(type);
     }
     this._asyncId = newAsyncId(type, triggerAsyncId, this, true, true);
+    this._type = type;
     // Browser DNS uses one GETADDRINFOREQWRAP for both lookup and c-ares-like
     // resolve calls. Preserve the visible Node QUERYWRAP boundary without
     // changing the underlying browser DNS operation or its public request id.
@@ -652,7 +662,12 @@ export class AsyncResource {
 
   runInAsyncScope(callback, thisArg, ...args) {
     if (typeof callback !== 'function') throw new TypeError('callback must be a function');
-    return runInScope(this._asyncId, callback, thisArg, args);
+    const retainTaskResource = this._type === 'Timeout'
+      || this._type === 'Interval'
+      || this._type === 'Immediate'
+      || this._type === 'TickObject'
+      || this._type === 'Microtask';
+    return runInScope(this._asyncId, callback, thisArg, args, false, retainTaskResource);
   }
 
   emitDestroy() {

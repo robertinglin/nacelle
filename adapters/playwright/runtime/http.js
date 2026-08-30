@@ -1241,6 +1241,33 @@ class VirtualServerRequest extends Readable {
     this._scope = scope;
     this._BufferClass = BufferClass;
     this._body = init.body === undefined ? new Uint8Array() : toBytes(init.body, scope);
+    this._resource = null;
+  }
+
+  _ensureAsyncResource() {
+    if (!this._resource) {
+      this._resource = new AsyncResource('HTTPINCOMINGMESSAGE', {
+        triggerAsyncId: this.socket?._tcpResource?.asyncId(),
+      });
+    }
+    return this._resource;
+  }
+
+  _runInAsyncScope(callback) {
+    const resource = this._ensureAsyncResource();
+    return resource.runInAsyncScope(callback, this);
+  }
+
+  _emitClose() {
+    if (this._closeEmitted) return;
+    this._closeEmitted = true;
+    this._readableState.closeEmitted = true;
+    this._readableState.closed = true;
+    try {
+      this._runInAsyncScope(() => this.emit('close'));
+    } finally {
+      this._resource?.emitDestroy?.();
+    }
   }
 
   on(name, listener) {
@@ -1252,10 +1279,16 @@ class VirtualServerRequest extends Readable {
   begin() {
     schedule(this._scope, () => {
       if (this.destroyed) return;
-      if (this._body.byteLength) this.push(nodeChunk(this._body, this._scope, this._BufferClass));
-      this.complete = true;
-      this.readableComplete = true;
-      this.push(null);
+      this._runInAsyncScope(() => {
+        const consumed = this.listenerCount('data') > 0
+          || this.listenerCount('readable') > 0
+          || this.listenerCount('end') > 0;
+        if (this._body.byteLength) this.push(nodeChunk(this._body, this._scope, this._BufferClass));
+        this.complete = true;
+        this.readableComplete = true;
+        this.push(null);
+        if (!consumed) this.destroy();
+      });
     });
   }
 }
@@ -2223,7 +2256,7 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
             });
             schedule(scope, () => {
               try {
-                binding.server.emit('request', request, response);
+                binding.server._runInOwnerContext(() => binding.server.emit('request', request, response));
                 request.begin();
               } catch (error) {
                 reject(error);
@@ -2302,7 +2335,7 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
       binding.rawServer.listen(port, host);
       if (server._unrefRequested) binding.rawServer.unref?.();
     }
-    return { host, port };
+    return { host, port, rawServer: binding.rawServer };
   }
 
   function unbind(server) {
@@ -2456,7 +2489,13 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
           publishDiagnostic(diagnostics, 'http.server.response.created', { request, response });
           response.socket = request.socket;
           response.connection = request.connection;
-          binding.server.emit('request', request, response);
+          // The request callback is a user-visible async boundary. Enter the
+          // incoming-message resource before dispatching it so
+          // executionAsyncResource() and continuation-local state survive
+          // both timers and native async-function awaits.
+          request._runInAsyncScope(() => binding.server._runInOwnerContext(
+            () => binding.server.emit('request', request, response),
+          ));
           request.begin();
         } catch (error) {
           reject(error);
@@ -2610,7 +2649,7 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
   return { bind, unbind, dispatch, dispatchProxyConnect, getServerAsyncId };
 }
 
-function createServerClass(protocol, scope, registry, BufferClass, trackTask) {
+function createServerClass(protocol, scope, registry, BufferClass, trackTask, ownerProcess) {
   class Server extends EventEmitter {
     constructor(options, listener) {
       super();
@@ -2629,12 +2668,19 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask) {
       this.keepAliveTimeout = 5000;
       this.maxHeadersCount = null;
       this._bound = null;
+      this._tcpResource = null;
+      this._ownerProcess = scope.process || ownerProcess;
       this._taskRelease = null;
       this._taskTracker = trackTask;
       this._unrefRequested = false;
       this._closeRequested = false;
       this._closeEmitted = false;
       this._connections = 0;
+      this._ownerProcess = scope.process || ownerProcess || null;
+      if (this._ownerProcess) {
+        this._ownerProcess._bnhHttpServers ||= new Set();
+        this._ownerProcess._bnhHttpServers.add(this);
+      }
       this._usingWorkers = false;
       this._workers = [];
       this._secureContextOptions = { ...this.options };
@@ -2649,6 +2695,21 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask) {
       if (typeof listener === 'function') this.on('request', listener);
     }
 
+    _runInOwnerContext(callback) {
+      if (typeof this._ownerProcess?._bnhRunInContext === 'function') {
+        return this._ownerProcess._bnhRunInContext(callback);
+      }
+      const previousProcess = scope.process;
+      const previousConsole = scope.console;
+      scope.process = this._ownerProcess || previousProcess;
+      if (this._ownerProcess?._bnhConsole) scope.console = this._ownerProcess._bnhConsole;
+      try { return callback(); }
+      finally {
+        scope.console = previousConsole;
+        scope.process = previousProcess;
+      }
+    }
+
     _listen2(address, port, addressType) {
       const host = address || (addressType === 6 ? '::' : '0.0.0.0');
       return this.listen({ host, port: port ?? 0 });
@@ -2661,23 +2722,27 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask) {
     listen(...args) {
       const { options, callback } = serverListenOptions(args);
       if (callback) this.once('listening', callback);
-      schedule(scope, () => {
+      schedule(scope, () => this._runInOwnerContext(() => {
         if (this.listening) return;
         try {
           const bound = registry.bind(this, protocol, options);
           this._bound = bound;
+          this._tcpResource = new AsyncResource('TCPSERVERWRAP');
           this._taskRelease = this._unrefRequested ? null : trackTask?.() || null;
           this._closeRequested = false;
           this._closeEmitted = false;
           this[kConnectionsCheckingInterval]._destroyed = false;
           this._listening = true;
-          schedule(scope, () => {
-            if (this.listening && this._bound === bound) this.emit('listening');
-          });
+          schedule(scope, () => this._runInOwnerContext(() => {
+            if (!this.listening || this._bound !== bound) return;
+            const emitListening = () => this.emit('listening');
+            if (this._tcpResource) this._tcpResource.runInAsyncScope(emitListening, this);
+            else emitListening();
+          }));
         } catch (error) {
           this.emit('error', error);
         }
-      });
+      }));
       return this;
     }
 
@@ -2698,6 +2763,7 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask) {
       this._taskRelease = null;
       this._bound = null;
       this._listening = false;
+      this._ownerProcess?._bnhHttpServers?.delete(this);
       this[kConnectionsCheckingInterval]._destroyed = true;
       this._emitCloseIfDrained();
       return this;
@@ -2710,7 +2776,12 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask) {
     _emitCloseIfDrained() {
       if (!this._closeRequested || this._bound || this._connections || this._closeEmitted) return;
       this._closeEmitted = true;
-      schedule(scope, () => this.emit('close'));
+      schedule(scope, () => this._runInOwnerContext(() => {
+        try { this.emit('close'); } finally {
+          this._tcpResource?.emitDestroy?.();
+          this._tcpResource = null;
+        }
+      }));
     }
 
     _setupWorker(socketList) {
@@ -3101,9 +3172,10 @@ class IncomingMessage extends Readable {
     this._closed = false;
     this._consuming = false;
     this._dumped = false;
-    this._resource = new AsyncResource('HTTPINCOMINGMESSAGE', {
-      triggerAsyncId: this.socket?._tcpResource?.asyncId() ?? owner?._resource?.asyncId(),
+    this._resource = owner?._resource || new AsyncResource('HTTPCLIENTREQUEST', {
+      triggerAsyncId: this.socket?._tcpResource?.asyncId(),
     });
+    this._ownsResource = !owner?._resource;
     this._decoder = null;
     this.body = this;
     this._timeoutHandle = null;
@@ -3187,7 +3259,7 @@ class IncomingMessage extends Readable {
     try {
       this._runInAsyncScope(() => this.emit('close'));
     } finally {
-      this._resource?.emitDestroy?.();
+      if (this._ownsResource) this._resource?.emitDestroy?.();
     }
   }
 
@@ -3542,7 +3614,7 @@ function proxyRequestOptions(url, init) {
   };
 }
 
-function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv, diagnostics, ownerProcess) {
+function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv, diagnostics, ownerProcess, trackTask) {
   const ClientRequest = class ClientRequest extends EventEmitter {
     constructor(url, options = {}) {
       super();
@@ -3592,6 +3664,7 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       this._resource = null;
       this._clientTcpResource = null;
       this._clientTcpConnectResource = null;
+      this._taskRelease = null;
       this._proxyEnv = { ...proxyEnv, ...scope.process?.env };
       this._ownerProcess = scope.process || ownerProcess;
       this._ownerConsole = scope.console;
@@ -3600,7 +3673,10 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
           if (stream === null || (typeof stream !== 'object' && typeof stream !== 'function')) {
             const processObject = this._ownerProcess || scope.process;
             if (typeof processObject?._bnhAbort === 'function') {
-              processObject._bnhAbort('SIGABRT');
+              processObject._bnhAbort('SIGABRT', 'HTTP parser consume failed\n');
+              if (processObject._bnhVirtualChild) {
+                processObject.emit?.('exit', null, processObject.getSignal?.() || 'SIGABRT');
+              }
               throw new Error('HTTP parser consume failed');
             }
             if (typeof processObject?.abort === 'function') {
@@ -3691,13 +3767,14 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
 
     _ensureAsyncResources(requestURL = this._url) {
       if (this._resource) return;
-      const serverAsyncId = this._virtualNetwork?.getServerAsyncId?.(requestURL);
-      const serverTrigger = serverAsyncId === undefined ? {} : { triggerAsyncId: serverAsyncId };
-      this._clientTcpResource = new AsyncResource('TCPWRAP', serverTrigger);
+      // Client resources inherit the context that created the request. The
+      // server's TCP resource is a separate boundary and using it as the
+      // trigger here loses AsyncLocalStorage state for client callbacks.
+      this._clientTcpResource = new AsyncResource('TCPWRAP');
       this._clientTcpConnectResource = new AsyncResource('TCPCONNECTWRAP', {
         triggerAsyncId: this._clientTcpResource.asyncId(),
       });
-      this._resource = new AsyncResource('HTTPCLIENTREQUEST', serverTrigger);
+      this._resource = new AsyncResource('HTTPCLIENTREQUEST');
     }
 
     _runInOwnerContext(callback) {
@@ -3707,6 +3784,9 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       if (this._ownerConsole) scope.console = this._ownerConsole;
       try {
         return callback();
+      } catch (error) {
+        if (this._ownerProcess?._bnhIsExited?.()) return undefined;
+        throw error;
       } finally {
         scope.process = previousProcess;
         scope.console = previousConsole;
@@ -3828,6 +3908,7 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
         }));
         return false;
       }
+      if (!this._started) schedule(scope, () => this._runInAsyncScope(() => this._dispatch()));
       if (callback) schedule(scope, () => this._runInAsyncScope(() => callback()));
       return true;
     }
@@ -3916,6 +3997,8 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
           this._resource?.emitDestroy?.();
           this._clientTcpConnectResource?.emitDestroy?.();
           this._clientTcpResource?.emitDestroy?.();
+          this._taskRelease?.();
+          this._taskRelease = null;
         }
       }));
     }
@@ -3924,10 +4007,11 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       if (this._started || this.destroyed) return;
       if (this._agentSocketAttempted && (this._agentSocket || this.destroyed)) return;
       this._started = true;
+      this._taskRelease ||= trackTask?.() || null;
       this._ensureAsyncResources();
       publishDiagnostic(diagnostics, 'http.client.request.start', { request: this });
       this._armTimeout();
-      if (!this._headersOnlyDispatch) {
+      if (!this._headersOnlyDispatch && this.finished) {
         setOutgoingMessageFinished(this);
         this._runInOwnerContext(() => {
           this.emit('finish');
@@ -4156,7 +4240,7 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
           }
         }
         this.response = new IncomingMessage(response, this, scope, BufferClass);
-        this.emit('response', this.response);
+        this.response._runInAsyncScope(() => this.emit('response', this.response));
         void this.response.start();
       }));
     }
@@ -4316,9 +4400,10 @@ export function createHttpCompatibility(scope = globalThis, {
     proxyEnv,
     diagnostics,
     ownerProcess,
+    trackTask,
   );
-  const HttpServer = createServerClass(DEFAULT_HTTP_PROTOCOL, scope, virtualNetwork, BufferClass, trackTask);
-  const HttpsServer = createServerClass(DEFAULT_HTTPS_PROTOCOL, scope, virtualNetwork, BufferClass, trackTask);
+  const HttpServer = createServerClass(DEFAULT_HTTP_PROTOCOL, scope, virtualNetwork, BufferClass, trackTask, ownerProcess);
+  const HttpsServer = createServerClass(DEFAULT_HTTPS_PROTOCOL, scope, virtualNetwork, BufferClass, trackTask, ownerProcess);
   Object.setPrototypeOf(VirtualServerRequest.prototype, IncomingMessage.prototype);
   Object.setPrototypeOf(VirtualServerResponse.prototype, OutgoingMessage.prototype);
   const HttpAgent = class Agent extends BrowserAgent {

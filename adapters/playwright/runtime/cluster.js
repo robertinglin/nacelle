@@ -5,6 +5,7 @@ import { sharedVirtualNetwork } from './virtual-network.js';
 const INTERNAL = Symbol('browser-cluster-worker');
 const DEFAULT_EXEC = '/browser/node';
 let nextClusterGroupId = 1;
+let nextClusterWorkerPid = 1000;
 const DEFAULT_SETTINGS = Object.freeze({
   silent: false,
 });
@@ -234,6 +235,7 @@ function makeWorkerCluster(options) {
   const emitter = new BrowserEventEmitter();
   const workers = Object.create(null);
   const network = options.network || sharedVirtualNetwork;
+  const dgram = options.dgram;
   const groupId = options.clusterGroupId ?? processObject.ppid ?? 'browser-cluster';
   const serverHandles = new Set();
   const worker = new ClusterWorker(INTERNAL, processObject, Number(options.id ?? processObject.pid ?? 1), null, { child: true });
@@ -244,6 +246,40 @@ function makeWorkerCluster(options) {
   };
   const getServer = (server, query, callback) => {
     try {
+      const addressType = query.addressType;
+      if ((addressType === 'udp4' || addressType === 'udp6') && dgram?.newHandle) {
+        const fd = Number(query.fd);
+        const fdGroupId = Number.isInteger(fd) && fd > 0 ? `browser-udp-fd-${fd}` : undefined;
+        const existing = fdGroupId ? network.getClusterUdpBinding?.(fdGroupId) : undefined;
+        if (fdGroupId && !existing) {
+          nextTick(callback, errorWithCode('EEXIST', 'open EEXIST'));
+          return;
+        }
+        const address = existing?.address || query.address || (addressType === 'udp6' ? '::' : '0.0.0.0');
+        const port = existing?.port ?? query.port ?? 0;
+        const handle = dgram.newHandle(addressType);
+        const result = handle._bnhBindCluster?.(fdGroupId || groupId, address, port, {
+          reuseAddr: Boolean(Number(query.flags) & 4),
+          reusePort: Boolean(Number(query.flags) & 2),
+        });
+        if (result) {
+          nextTick(callback, errorWithCode(result === -98 ? 'EADDRINUSE' : 'EINVAL', 'bind failed'));
+          return;
+        }
+        serverHandles.add(handle);
+        nextTick(() => {
+          callback(null, handle);
+          processObject.send?.({
+            type: 'bnh-cluster-listening',
+            address: {
+              address: handle.boundAddress,
+              port: handle.boundPort,
+              family: addressType === 'udp6' ? 'IPv6' : 'IPv4',
+            },
+          });
+        });
+        return;
+      }
       const binding = query.port < 0
         ? network.bindClusterPipe(groupId, query.address)
         : network.bindClusterTcp(groupId, query.address, query.port, { ipv6Only: query.ipv6Only === true });
@@ -257,6 +293,22 @@ function makeWorkerCluster(options) {
         close() {
           if (!serverHandles.delete(handle)) return;
           binding.removeServer(server);
+          // A primary-side IPC disconnect closes the worker's native handle
+          // directly. Mirror net.Server#close so the worker observes the
+          // close event before its disconnect callback, as it would with a
+          // real cluster server.
+          if (server._clusterHandle === handle) server._clusterHandle = null;
+          if (server.listening) server.close();
+          // The IPC disconnect event is delivered synchronously. If active
+          // sockets were destroyed above, their stream close notifications
+          // are microtask-delayed; publish the server close boundary now so
+          // a worker's disconnect listener cannot observe it first.
+          if (!server._closeEmitted) {
+            server._connections = 0;
+            server._activeSockets?.clear?.();
+            server._closeEmitted = true;
+            server.emit('close');
+          }
         },
         getsockname(out) {
           if (binding.address !== undefined) {
@@ -266,6 +318,7 @@ function makeWorkerCluster(options) {
         },
       };
       serverHandles.add(handle);
+      server._bnhClusterWorkerProcess = processObject;
       binding.addServer(server);
       nextTick(callback, null, handle);
     } catch (error) {
@@ -281,6 +334,7 @@ function makeWorkerCluster(options) {
     worker,
     workers,
     Worker: ClusterWorker,
+    _bnhGroupId: groupId,
     SCHED_NONE: 1,
     SCHED_RR: 2,
     schedulingPolicy: 1,
@@ -301,10 +355,13 @@ function makeWorkerCluster(options) {
       worker.disconnect();
     },
   });
-  processObject.on?.('message', (message, handle) => {
+  const onWorkerMessage = (message, handle) => {
     worker.emit('message', message, handle);
     emitter.emit('message', worker, message, handle);
-  });
+  };
+  onWorkerMessage._bnhInternal = true;
+  onWorkerMessage.__bnhInternalClusterListener = true;
+  processObject.on?.('message', onWorkerMessage);
   processObject.on?.('disconnect', () => {
     worker._disconnected = true;
     worker.emit('disconnect');
@@ -415,6 +472,7 @@ function makePrimaryCluster(options) {
     isMaster: { enumerable: true, value: true },
     isWorker: { enumerable: true, value: false },
     worker: { enumerable: true, value: null },
+    _bnhGroupId: { enumerable: false, get: () => stateFor(activeProcess()).groupId },
     workers: { enumerable: true, get: () => stateFor(activeProcess()).workers },
     settings: { enumerable: true, get: () => stateFor(activeProcess()).settings },
   });
@@ -456,7 +514,8 @@ function makePrimaryCluster(options) {
         execArgv: settings.execArgv,
         cwd: settings.cwd || parentProcess?.cwd?.(),
         ppid: Number(parentProcess?.pid || 0),
-        pid: options.pidBase === undefined ? undefined : options.pidBase + id,
+        pid: options.pidBase === undefined ? nextClusterWorkerPid++ : options.pidBase + id,
+        clusterWorkerId: id,
         clusterGroupId: state.groupId,
         childId: `cluster-worker-${id}`,
         runId: String(options.runId || `cluster-${Date.now()}`),
@@ -472,6 +531,8 @@ function makePrimaryCluster(options) {
       const channel = diagnostics?.channel?.('child_process');
       if (channel?.hasSubscribers) channel.publish({ process: processHandle });
       const worker = new ClusterWorker(INTERNAL, processHandle, id, cluster);
+      const releaseWorkerTask = options.trackTask?.();
+      processHandle.once?.('exit', () => releaseWorkerTask?.());
       state.workers[id] = worker;
       emitter.emit('fork', worker);
 
@@ -531,7 +592,9 @@ function makePrimaryCluster(options) {
           callback?.();
         }
       };
-      for (const worker of activeWorkers) worker.disconnect(done);
+      for (const worker of activeWorkers) {
+        worker.disconnect(done);
+      }
     },
   });
   return cluster;

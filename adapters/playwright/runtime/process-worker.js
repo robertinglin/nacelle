@@ -191,7 +191,20 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       return numeric;
     };
     process.config ||= { variables: { v8_enable_i18n_support: 1, openssl_quic: false, asan: 0 }, target_defaults: { default_configuration: 'Release' } };
-    process.features ||= { inspector: false, debug: false };
+    process.features ||= {
+      inspector: true,
+      debug: false,
+      uv: false,
+      ipv6: true,
+      openssl_is_boringssl: false,
+      tls_alpn: true,
+      tls_sni: true,
+      tls_ocsp: true,
+      tls: true,
+      cached_builtins: false,
+      require_module: false,
+      typescript: false,
+    };
     process.execPath ||= '/browser/node';
     process.argv0 ||= 'node';
     process.versions ||= { node: '22.0.0', v8: '12.0.0' };
@@ -293,7 +306,18 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       connected: true,
       exitCode: 0,
       cwd: () => identity.cwd,
-      chdir: (value) => { identity.cwd = String(value); },
+      chdir: (value) => {
+        const source = String(value);
+        const base = String(identity.cwd || '/node');
+        const absolute = source.startsWith('/') ? source : base.replace(/\/+$/, '') + '/' + source;
+        const parts = [];
+        for (const part of absolute.split('/')) {
+          if (!part || part === '.') continue;
+          if (part === '..') { parts.pop(); continue; }
+          parts.push(part);
+        }
+        identity.cwd = '/' + parts.join('/');
+      },
       send(value, transferList, callback) {
         if (typeof transferList === 'function') { callback = transferList; transferList = undefined; }
         if (disconnected) {

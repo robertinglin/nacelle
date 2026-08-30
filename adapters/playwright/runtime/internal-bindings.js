@@ -2,10 +2,29 @@ import { createVmModule } from './vm.js';
 import { AsyncResource } from './async-hooks.js';
 
 const SIGNALS = Object.freeze({
+  SIGCHLD: 17,
+  SIGCONT: 18,
+  SIGFPE: 8,
+  SIGHUP: 1,
+  SIGILL: 4,
   SIGINT: 2,
+  SIGIO: 29,
+  SIGIOT: 6,
   SIGTERM: 15,
   SIGKILL: 9,
+  SIGPOLL: 29,
   SIGPIPE: 13,
+  SIGABRT: 6,
+  SIGALRM: 14,
+  SIGBUS: 7,
+  SIGPROF: 27,
+  SIGPWR: 30,
+  SIGQUIT: 3,
+  SIGSEGV: 11,
+  SIGSTKFLT: 16,
+  SIGSTOP: 19,
+  SIGSYS: 31,
+  SIGTRAP: 5,
 });
 
 const objectToString = Object.prototype.toString;
@@ -865,6 +884,9 @@ function createHttpParserBinding(globalObject) {
 }
 
 function createHttp2Binding() {
+  const nghttp2ErrorMessages = new Map([
+    [-517, 'GOAWAY has already been sent'],
+  ]);
   const constants = new Proxy({
     HTTP2_HEADER_STATUS: ':status', HTTP2_HEADER_METHOD: ':method', HTTP2_HEADER_AUTHORITY: ':authority',
     HTTP2_HEADER_SCHEME: ':scheme', HTTP2_HEADER_PATH: ':path', HTTP2_HEADER_PROTOCOL: ':protocol',
@@ -872,7 +894,11 @@ function createHttp2Binding() {
     HTTP2_HEADER_HTTP2_SETTINGS: 'http2-settings', HTTP2_HEADER_TRANSFER_ENCODING: 'transfer-encoding',
     HTTP2_HEADER_KEEP_ALIVE: 'keep-alive', HTTP2_HEADER_PROXY_CONNECTION: 'proxy-connection',
     HTTP2_METHOD_CONNECT: 'CONNECT', HTTP2_METHOD_DELETE: 'DELETE', HTTP2_METHOD_GET: 'GET', HTTP2_METHOD_HEAD: 'HEAD',
-    HTTP_STATUS_CONTINUE: 100, HTTP_STATUS_EARLY_HINTS: 103, HTTP_STATUS_OK: 200,
+    HTTP_STATUS_CONTINUE: 100, HTTP_STATUS_EARLY_HINTS: 103, HTTP_STATUS_PROCESSING: 102, HTTP_STATUS_OK: 200,
+    HTTP_STATUS_PARTIAL_CONTENT: 206, HTTP_STATUS_PAYMENT_REQUIRED: 402,
+    HTTP_STATUS_PROXY_AUTHENTICATION_REQUIRED: 407, HTTP_STATUS_PRECONDITION_FAILED: 412,
+    HTTP_STATUS_PAYLOAD_TOO_LARGE: 413, HTTP_STATUS_PRECONDITION_REQUIRED: 428,
+    HTTP_STATUS_PERMANENT_REDIRECT: 308,
     HTTP_STATUS_METHOD_NOT_ALLOWED: 405, HTTP_STATUS_EXPECTATION_FAILED: 417,
   }, { get: (target, name) => target[name] ?? String(name) });
   class Http2Session {
@@ -891,7 +917,7 @@ function createHttp2Binding() {
     refreshDefaultSettings() {},
     packSettings: () => new Uint8Array(),
     setCallbackFunctions() {},
-    nghttp2ErrorString: (code) => String(code),
+    nghttp2ErrorString: (code) => nghttp2ErrorMessages.get(code) ?? String(code),
   };
 }
 
@@ -1123,7 +1149,7 @@ function createTaskQueueBinding(globalObject) {
   };
 }
 
-export function createBrowserInternalBindings({ globalObject = globalThis, constants = {}, onWorkerMessage, network } = {}) {
+export function createBrowserInternalBindings({ globalObject = globalThis, constants = {}, onWorkerMessage, network, trackTask, clusterGroupId } = {}) {
   const descriptors = globalObject.__BNH_VIRTUAL_FD_TYPES__ || new Map();
   globalObject.__BNH_VIRTUAL_FD_TYPES__ = descriptors;
   const udpHandles = globalObject.__BNH_VIRTUAL_UDP_HANDLES__ || new Map();
@@ -1398,7 +1424,7 @@ export function createBrowserInternalBindings({ globalObject = globalThis, const
       getEmbedderOptions: () => ({}),
       getEnvOptionsInputType: () => [],
     },
-    config: { hasIntl: false },
+    config: { hasIntl: false, hasInspector: true },
     errors: createErrorsBinding(),
     process_methods: createProcessMethodsBinding(),
     symbols,
@@ -1447,8 +1473,24 @@ export function createBrowserInternalBindings({ globalObject = globalThis, const
           super('UDP');
           this._bnhInitialize();
           this._closed = false;
+          this._bnhRawUdpHandle = true;
           this.fd = nextUdpDescriptor++;
-          this._bnhUdpState = { address: '0.0.0.0', family: 'IPv4', port: 0, bound: false };
+          this._bnhUdpState = {
+            address: '0.0.0.0', family: 'IPv4', port: 0, bound: false,
+            receiving: false, taskRelease: null, listeners: [], nextListener: 0,
+          };
+          Object.defineProperty(this, 'onmessage', {
+            configurable: true,
+            enumerable: false,
+            get: () => this._bnhUdpState.listeners.at(-1)?.callback,
+            set: (callback) => {
+              if (typeof callback !== 'function') return;
+              const owner = this[symbols.owner_symbol];
+              const existing = this._bnhUdpState.listeners.find((listener) => listener.owner === owner);
+              if (existing) existing.callback = callback;
+              else if (owner) this._bnhUdpState.listeners.push({ owner, callback });
+            },
+          });
           descriptors.set(this.fd, 'udp');
           udpHandles.set(this.fd, { handle: this, ...this._bnhUdpState });
         }
@@ -1457,9 +1499,12 @@ export function createBrowserInternalBindings({ globalObject = globalThis, const
           state.address = String(address || '0.0.0.0');
           state.family = state.address.includes(':') ? 'IPv6' : 'IPv4';
           const requestedPort = Number(port) || 0;
-          state.port = requestedPort || network?.allocateUdpPort?.(state.address) || 51000;
-          const groupId = `browser-udp-fd-${this.fd}`;
-          const binding = network?.bindClusterUdp?.(groupId, state.address, state.port, { socket: this });
+          state.port = requestedPort;
+          this._bnhRawUdpHandle = !this[symbols.owner_symbol];
+          const groupId = this._bnhRawUdpHandle
+            ? `browser-udp-fd-${this.fd}`
+            : (clusterGroupId || `browser-cluster-${this.ppid || this.pid || 0}`);
+          const binding = network?.bindClusterUdp?.(groupId, state.address, requestedPort, { socket: this });
           if (!binding) return -22;
           state.address = binding.address;
           state.port = binding.port;
@@ -1473,12 +1518,83 @@ export function createBrowserInternalBindings({ globalObject = globalThis, const
           if (address) Object.assign(address, state);
           return 0;
         }
-        send(request) { request?._bnhInitialize(); queueMicrotask(() => request?.oncomplete?.(0)); return 0; }
-        _receiveDatagram() {}
+        open(fd) {
+          const descriptor = udpHandles.get(fd);
+          if (descriptors.get(fd) !== 'udp' || !descriptor) return -22;
+          const state = this._bnhUdpState;
+          state.address = descriptor.address;
+          state.family = descriptor.family;
+          state.port = descriptor.port;
+          state.bound = Boolean(descriptor.bound);
+          state.clusterGroupId = descriptor.clusterGroupId;
+          this._bnhRawUdpHandle = false;
+          return 0;
+        }
+        recvStart() {
+          const state = this._bnhUdpState;
+          if (this._closed) return -22;
+          state.receiving = true;
+          if (!state.taskRelease) state.taskRelease = trackTask?.() || null;
+          if (state.bound && state.clusterGroupId) {
+            network?.bindClusterUdp?.(state.clusterGroupId, state.address, state.port, { socket: this });
+          }
+          return 0;
+        }
+        recvStop() {
+          const state = this._bnhUdpState;
+          state.receiving = false;
+          state.taskRelease?.();
+          state.taskRelease = null;
+          return 0;
+        }
+        send(request, buffer, offset, length, port, address) {
+          request?._bnhInitialize();
+          const list = Array.isArray(buffer) ? buffer : [buffer];
+          const bytes = list.reduce((result, item) => {
+            const part = item instanceof Uint8Array
+              ? new Uint8Array(item.buffer, item.byteOffset, item.byteLength)
+              : new Uint8Array(item || []);
+            const next = new Uint8Array(result.byteLength + part.byteLength);
+            next.set(result);
+            next.set(part, result.byteLength);
+            return next;
+          }, new Uint8Array(0));
+          const targetPort = Array.isArray(buffer)
+            ? (typeof length === 'number' && length > 0 ? length : this._bnhUdpState.remotePort)
+            : port;
+          const targetAddress = Array.isArray(buffer)
+            ? (typeof port === 'string' ? port : this._bnhUdpState.remoteAddress)
+            : address;
+          queueMicrotask(() => {
+            if (this._bnhUdpState.bound && targetPort !== undefined) {
+              network?.sendUdp?.({
+                source: this,
+                address: targetAddress || (this._bnhUdpState.family === 'IPv6' ? '::1' : '127.0.0.1'),
+                port: targetPort,
+                bytes,
+              });
+            }
+            request?.oncomplete?.call(request, 0, bytes.byteLength);
+          });
+          return 0;
+        }
+        _receiveDatagram(bytes, rinfo) {
+          const state = this._bnhUdpState;
+          if (this._closed || !state.receiving) return;
+          const listeners = state.listeners.filter((listener) => !listener.owner?._closed);
+          if (!listeners.length) return;
+          const listener = listeners[state.nextListener % listeners.length];
+          state.nextListener = (state.nextListener + 1) % listeners.length;
+          const receiver = Object.create(this);
+          Object.defineProperty(receiver, symbols.owner_symbol, { configurable: true, value: listener.owner });
+          listener.callback.call(receiver, bytes.byteLength, receiver, bytes, rinfo);
+        }
         close(callback) {
           if (this._closed) return 0;
           this._closed = true;
           network?.unbindUdp?.(this);
+          this._bnhUdpState.taskRelease?.();
+          this._bnhUdpState.taskRelease = null;
           descriptors.delete(this.fd);
           udpHandles.delete(this.fd);
           callback?.();

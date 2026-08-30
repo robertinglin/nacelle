@@ -718,6 +718,17 @@ export function createVfs(options = {}) {
   let recursiveRmdirWarningEmitted = false;
   let truncateDescriptorWarningEmitted = false;
 
+  const currentWorkingDirectory = () => {
+    try {
+      const cwd = globalThis.process?.cwd?.();
+      return typeof cwd === 'string' && cwd.startsWith('/') ? cwd : '/node';
+    } catch {
+      return '/node';
+    }
+  };
+  const virtualSocketExists = (path) => globalThis.__BNH_VIRTUAL_PIPE_PATHS__ instanceof Set
+    && globalThis.__BNH_VIRTUAL_PIPE_PATHS__.has(path);
+
   function findMount(path) {
     let selected;
     for (const mount of mounts.values()) {
@@ -727,7 +738,7 @@ export function createVfs(options = {}) {
   }
 
   function resolve(value) {
-    return normalizePath(value);
+    return normalizePath(value, currentWorkingDirectory());
   }
 
   function access(path, operation, write = false) {
@@ -778,7 +789,7 @@ export function createVfs(options = {}) {
   }
 
   function nodeExists(path) {
-    return files.has(path) || directories.has(path) || symlinks.has(path);
+    return files.has(path) || directories.has(path) || symlinks.has(path) || virtualSocketExists(path);
   }
 
   function metadataFor(path) {
@@ -1151,6 +1162,7 @@ export function createVfs(options = {}) {
     access(path, 'stat');
     if (files.has(path)) return new Stats('file', files.get(path).byteLength, metadataFor(path));
     if (directories.has(path)) return new Stats('directory', 0, metadataFor(path));
+    if (virtualSocketExists(path)) return new Stats('socket', 0, { mode: 0o777, ...metadataFor(path) });
     throw missing(path, 'stat');
   }
 
@@ -1181,6 +1193,7 @@ export function createVfs(options = {}) {
     if (symlinks.has(path)) return new Stats('symlink', textEncoder.encode(symlinks.get(path)).byteLength, metadataFor(path));
     if (files.has(path)) return new Stats('file', files.get(path).byteLength, metadataFor(path));
     if (directories.has(path)) return new Stats('directory', 0, metadataFor(path));
+    if (virtualSocketExists(path)) return new Stats('socket', 0, { mode: 0o777, ...metadataFor(path) });
     throw missing(path, 'lstat');
   }
 
@@ -2092,6 +2105,47 @@ export function createVfs(options = {}) {
       createReadStream(optionsValue = {}) {
         descriptor(record.fd);
         return createReadStream(null, { ...optionsValue, fd: record.fd, autoClose: false });
+      },
+      readableWebStream(optionsValue = {}) {
+        descriptor(record.fd);
+        const autoClose = optionsValue?.autoClose === true;
+        const chunkSize = 64 * 1024;
+        let position = 0;
+        let closed = false;
+        const closeIfNeeded = () => {
+          if (!autoClose || closed) return;
+          closed = true;
+          if (descriptors.has(record.fd)) closeDescriptor(record.fd);
+        };
+        const stream = new ReadableStream({
+          pull(controller) {
+            if (closed) return;
+            try {
+              descriptor(record.fd);
+              const source = readBytes(record.path, 'read');
+              if (position >= source.length) {
+                closeIfNeeded();
+                controller.close();
+                return;
+              }
+              const next = source.slice(position, position + chunkSize);
+              position += next.length;
+              controller.enqueue(next);
+            } catch (error) {
+              closeIfNeeded();
+              controller.error(error);
+            }
+          },
+          cancel() {
+            closeIfNeeded();
+          },
+        });
+        Object.defineProperty(stream, Symbol.for('bnh.filehandle.webstream'), {
+          configurable: false,
+          enumerable: false,
+          value: true,
+        });
+        return stream;
       },
       createWriteStream(optionsValue = {}) {
         descriptor(record.fd);

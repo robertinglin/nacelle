@@ -257,6 +257,22 @@ class DatabaseSync {
     }
     unavailable();
   }
+
+  [Symbol.for('nodejs.dispose')]() {
+    try {
+      this.close();
+    } catch {
+      // Node's sqlite disposal hook ignores close errors.
+    }
+  }
+}
+
+if (Symbol.dispose && Symbol.dispose !== Symbol.for('nodejs.dispose')) {
+  Object.defineProperty(DatabaseSync.prototype, Symbol.dispose, {
+    configurable: true,
+    value: DatabaseSync.prototype[Symbol.for('nodejs.dispose')],
+    writable: true,
+  });
 }
 
 class StatementSync {

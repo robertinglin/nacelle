@@ -15,6 +15,18 @@ let nextProcessId = 1000;
 let nextRunId = 1;
 const sharedFileBuffers = new WeakMap();
 
+function resolveLogicalCwd(value, cwd = '/node') {
+  const input = String(value);
+  const source = input.startsWith('/') ? input : `${String(cwd).replace(/\/+$/, '') || '/'}/${input}`;
+  const parts = [];
+  for (const part of source.split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') parts.pop();
+    else parts.push(part);
+  }
+  return `/${parts.join('/')}`;
+}
+
 function execveTypeError(name, expected, value) {
   const received = value === null
     ? 'null'
@@ -522,7 +534,7 @@ export function createProcess({ argv, env, cwd, execArgv, output = {}, platform 
   if (ipc) process.channel = ipc;
   process.state = 'running';
   process.cwd = () => logicalCwd;
-  process.chdir = (value) => { logicalCwd = String(value); };
+  process.chdir = (value) => { logicalCwd = resolveLogicalCwd(value, logicalCwd); };
   process.nextTick = (callback, ...args) => queueMicrotask(() => callback(...args));
   process.hrtime = (previous) => {
     const now = performance.now();

@@ -285,6 +285,10 @@ export function createDiagnosticsModule() {
       channels.set(this.name, this);
     }
 
+    static [Symbol.hasInstance](instance) {
+      return Object.getPrototypeOf(instance) === Channel.prototype;
+    }
+
     subscribe(subscription) {
       super.subscribe(subscription);
       if (typeof this.name === 'string' && this.name.startsWith('console.')) {

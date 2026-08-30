@@ -50,40 +50,38 @@ function receivedValue(value) {
 }
 
 function invalidArgumentType(name, expected, value) {
+  const normalizedExpected = expected === 'of type Function'
+    ? 'of type function'
+    : expected === 'of type Object'
+      ? 'of type object'
+      : expected;
   const error = new TypeError(
-    `The "${name}" ${name.includes('.') ? 'property' : 'argument'} must be ${expected}. Received ${receivedValue(value)}`,
+    `The "${name}" ${name.includes('.') ? 'property' : 'argument'} must be ${normalizedExpected}. Received ${receivedValue(value)}`,
   );
   error.code = 'ERR_INVALID_ARG_TYPE';
   return error;
 }
 
 function validateFunction(value, name) {
-  if (typeof value !== 'function') throw invalidArgumentType(name, 'of type function', value);
+  if (typeof value !== 'function') throw invalidArgumentType(name, 'of type Function', value);
 }
 
 function validateObject(value, name) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw invalidArgumentType(name, 'of type object', value);
+    throw invalidArgumentType(name, 'of type Object', value);
   }
 }
 
 function validateAbortSignal(value, name) {
-  if (value === undefined) return;
-  const AbortSignal = globalThis.AbortSignal;
-  const isNativeSignal = typeof AbortSignal === 'function' && value instanceof AbortSignal;
-  const isSignalLike = typeof value?.addEventListener === 'function'
-    && typeof value?.removeEventListener === 'function'
-    && typeof value.aborted === 'boolean';
-  if (!isNativeSignal && !isSignalLike) {
-    throw invalidArgumentType(name, 'an instance of AbortSignal', value);
+  if (value !== undefined
+    && (value === null || typeof value !== 'object' || !('aborted' in value))) {
+    throw invalidArgumentType(name, 'AbortSignal', value);
   }
 }
 
 function validateMaxListeners(value, name = 'n') {
   if (typeof value !== 'number') {
-    const error = new TypeError(`The "${name}" argument must be of type number. Received ${receivedValue(value)}`);
-    error.code = 'ERR_INVALID_ARG_TYPE';
-    throw error;
+    throw invalidArgumentType(name, 'of type number', value);
   }
   if (Number.isNaN(value) || value < 0) {
     const error = new RangeError(`The value of "${name}" is out of range. It must be >= 0. Received ${receivedValue(value)}`);
@@ -120,14 +118,18 @@ function invalidThis(name) {
   return error;
 }
 
+function invalidEventEmitter(value) {
+  const error = new TypeError(
+    `The "emitter" argument must be an instance of EventEmitter. Received ${receivedValue(value)}`,
+  );
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
 function initializeCapture(target, options) {
   if (options?.captureRejections) {
     if (typeof options.captureRejections !== 'boolean') {
-      const error = new TypeError(
-        `The "options.captureRejections" property must be of type boolean. Received ${receivedValue(options.captureRejections)}`,
-      );
-      error.code = 'ERR_INVALID_ARG_TYPE';
-      throw error;
+      throw invalidArgumentType('options.captureRejections', 'of type boolean', options.captureRejections);
     }
     target[kCapture] = Boolean(options.captureRejections);
   } else {
@@ -249,6 +251,7 @@ export class BrowserEventEmitter {
   }
 
   off(name, listener) {
+    validateFunction(listener, 'listener');
     const listeners = this._listeners.get(name);
     if (!listeners) return this;
     let index = listeners.length - 1;
@@ -437,7 +440,7 @@ export function once(emitter, name, options = {}) {
     validateObject(options, 'options');
     validateAbortSignal(options.signal, 'options.signal');
     if (typeof emitter?.on !== 'function' && typeof emitter?.addEventListener !== 'function') {
-      throw invalidEmitter(emitter);
+      throw invalidEventEmitter(emitter);
     }
   } catch (error) {
     return Promise.reject(error);
@@ -563,11 +566,7 @@ Object.defineProperty(EventEmitter, 'captureRejections', {
   get: () => EventEmitter.prototype[kCapture],
   set: (value) => {
     if (typeof value !== 'boolean') {
-      const error = new TypeError(
-        `The "EventEmitter.captureRejections" property must be of type boolean. Received ${receivedValue(value)}`,
-      );
-      error.code = 'ERR_INVALID_ARG_TYPE';
-      throw error;
+      throw invalidArgumentType('EventEmitter.captureRejections', 'of type boolean', value);
     }
     EventEmitter.prototype[kCapture] = value;
   },
@@ -599,11 +598,7 @@ function lazyEventEmitterAsyncResource() {
         options = undefined;
       } else {
         if (new.target === EventEmitterAsyncResource && typeof options?.name !== 'string') {
-          const error = new TypeError(
-            `The "options.name" property must be of type string. Received ${receivedValue(options?.name)}`,
-          );
-          error.code = 'ERR_INVALID_ARG_TYPE';
-          throw error;
+          throw invalidArgumentType('options.name', 'of type string', options?.name);
         }
         name = options?.name || new.target.name;
       }
@@ -691,7 +686,7 @@ EventEmitter.on = function on(emitter, name, options = {}) {
   validateObject(options, 'options');
   validateAbortSignal(options.signal, 'options.signal');
   if (typeof emitter?.on !== 'function' && typeof emitter?.addEventListener !== 'function') {
-    throw invalidEmitter(emitter);
+    throw invalidEventEmitter(emitter);
   }
   const highWaterMark = options.highWaterMark ?? options.highWatermark ?? Number.MAX_SAFE_INTEGER;
   const lowWaterMark = options.lowWaterMark ?? options.lowWatermark ?? 1;

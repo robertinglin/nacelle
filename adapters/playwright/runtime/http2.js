@@ -573,7 +573,13 @@ export function performServerHandshake(socket, options = {}) {
   const session = new ClientHttp2Session(
     { host: 'localhost', port: 0, protocol: options?.encrypted === false ? 'http:' : 'https:' },
     { ...options },
-    { scope: globalThis, vfs: options?.vfs, diagnostics: options?.diagnostics },
+    {
+      scope: globalThis,
+      vfs: options?.vfs,
+      diagnostics: options?.diagnostics,
+      connection: socket,
+      serverHandshake: true,
+    },
   );
   session.type = constants.NGHTTP2_SESSION_SERVER;
   if (socket && typeof socket === 'object') socket._http2ServerSession = session;
@@ -782,6 +788,18 @@ class VirtualHttp2Stream extends Duplex {
   }
 
   _read() {}
+
+  // DuplexImpl dispatches writes through the public owner before consulting
+  // the inner writable.  Keep the HTTP/2 stream's body sink on the owner so
+  // request.end() works for streams created from a duplexPair() connection.
+  _write(chunk, _encoding, callback) {
+    try {
+      this._body.push(bytesFor(chunk, this._scope));
+      callback();
+    } catch (error) {
+      callback(error);
+    }
+  }
 
   _bodyBytes() {
     const size = this._body.reduce((total, part) => total + part.byteLength, 0);
@@ -1045,6 +1063,10 @@ class VirtualHttp2Stream extends Duplex {
       this._diagnosticChunks.push({ chunk, encoding: diagnosticEncoding });
     }
     if (typeof chunk === 'string') chunk = bytesFor(chunk, this._scope, encoding);
+    if (this._role === 'server' && this.headersSent) {
+      if (chunk !== undefined) this._sendResponseChunk(chunk);
+      return super.end(undefined, undefined, callback);
+    }
     return super.end(chunk, encoding, callback);
   }
 
@@ -1603,6 +1625,10 @@ export class ClientHttp2Session extends EventEmitter {
     this._options = options;
     this._proxy = internal.proxy;
     this._server = internal.server;
+    this._connection = internal.connection || null;
+    this._serverHandshake = internal.serverHandshake === true;
+    this._serverSession = null;
+    this._trackTask = internal.trackTask;
     this._taskRelease = internal.trackTask?.() || null;
     this._pendingRequests = [];
     this._streams = new Set();
@@ -1616,8 +1642,25 @@ export class ClientHttp2Session extends EventEmitter {
     this.timeout = 0;
     this.localSettings = { ...DEFAULT_SETTINGS };
     this.remoteSettings = { ...DEFAULT_SETTINGS, ...(this._server?._options?.settings || {}) };
-    this.socket = Object.freeze({ encrypted: true, alpnProtocol: 'h2', authorized: true });
-    schedule(() => void this._connect());
+    this.socket = this._connection || Object.freeze({ encrypted: true, alpnProtocol: 'h2', authorized: true });
+    if (this._serverHandshake) {
+      this._connected = true;
+      this.connecting = false;
+    } else {
+      schedule(() => void this._connect());
+    }
+  }
+
+  _retainTask() {
+    if (!this._taskRelease && this._trackTask && !this.closed && !this.destroyed) {
+      this._taskRelease = this._trackTask();
+    }
+  }
+
+  _releaseIdleTask() {
+    if (this.closed || this.destroyed || this.connecting || this._pendingRequests.length || this._streams.size) return;
+    this._taskRelease?.();
+    this._taskRelease = null;
   }
 
   async _connect() {
@@ -1635,6 +1678,15 @@ export class ClientHttp2Session extends EventEmitter {
         }
       }
       if (this.closed || this.destroyed) return;
+      const serverSession = this._connection?._peer?._http2ServerSession;
+      if (serverSession) {
+        this._serverSession = serverSession;
+        serverSession._clientSession = this;
+        serverSession._connected = true;
+        serverSession.connecting = false;
+        serverSession.socket = this._connection._peer;
+        schedule(() => serverSession.emit('connect'));
+      }
       this._connected = true;
       this.connecting = false;
       this.emit('connect');
@@ -1649,6 +1701,7 @@ export class ClientHttp2Session extends EventEmitter {
 
   request(headers = {}, options = {}) {
     if (this.closed || this.destroyed) throw http2Error('ERR_HTTP2_INVALID_SESSION', 'Cannot create a stream on a closed session');
+    this._retainTask();
     const normalized = normalizeHeaders(headers);
     if (!normalized[':method']) normalized[':method'] = 'GET';
     if (!normalized[':scheme'] && normalized[':method'] !== 'CONNECT') normalized[':scheme'] = this._authority.protocol.slice(0, -1);
@@ -1662,7 +1715,10 @@ export class ClientHttp2Session extends EventEmitter {
     this._streams.add(stream);
     stream._publishCreatedDiagnostics(normalized);
     schedule(() => this._dispatch(stream));
-    stream.once('close', () => this._streams.delete(stream));
+    stream.once('close', () => {
+      this._streams.delete(stream);
+      this._releaseIdleTask();
+    });
     const { signal } = options;
     if (signal) {
       const abort = () => stream.destroy(abortError());
@@ -1686,20 +1742,21 @@ export class ClientHttp2Session extends EventEmitter {
     stream._dispatched = true;
     stream._publishStartDiagnostics(stream._headers);
     stream._publishBodyDiagnostics();
-    if (this._server) {
-      const serverStream = new VirtualHttp2Stream(this, { id: stream.id, role: 'server', headers: stream._headers });
+    const server = this._server || this._serverSession;
+    if (server) {
+      const serverStream = new VirtualHttp2Stream(server, { id: stream.id, role: 'server', headers: stream._headers });
       stream._peer = serverStream;
       serverStream._peer = stream;
       serverStream._publishCreatedDiagnostics(stream._headers);
       serverStream._publishStartDiagnostics(stream._headers);
-      this._server.emit('stream', serverStream, { ...stream._headers }, 0);
-      if (this._server.listenerCount('request') > 0) {
-        this._server._emitRequest(serverStream, stream._headers);
+      server.emit('stream', serverStream, { ...stream._headers }, 0);
+      if (server.listenerCount('request') > 0 && typeof server._emitRequest === 'function') {
+        server._emitRequest(serverStream, stream._headers);
       }
       const body = stream._bodyBytes();
       if (body.byteLength) serverStream.push(body);
       serverStream.push(null);
-      if (this._server.listenerCount('stream') === 0 && this._server.listenerCount('request') === 0) {
+      if (server.listenerCount('stream') === 0 && server.listenerCount('request') === 0) {
         schedule(() => {
           if (!serverStream.headersSent) serverStream.respond({ ':status': 200, 'x-bnh-virtual': '1' });
           if (!serverStream.closed) serverStream.end();
@@ -1880,6 +1937,9 @@ export function createHttp2Module(scope = globalThis, options = {}) {
     if (typeof connectOptions === 'function') { listener = connectOptions; connectOptions = {}; }
     const target = authorityParts(authority, scope);
     const server = serverFor(target.host, target.port);
+    const connection = typeof connectOptions.createConnection === 'function'
+      ? connectOptions.createConnection(target, connectOptions)
+      : undefined;
     const session = new ClientHttp2Session(target, { ...connectOptions }, {
       scope,
       vfs: options.vfs,
@@ -1887,6 +1947,7 @@ export function createHttp2Module(scope = globalThis, options = {}) {
       server,
       diagnostics,
       trackTask: options.trackTask,
+      connection,
     });
     if (typeof listener === 'function') session.once('connect', listener);
     return session;

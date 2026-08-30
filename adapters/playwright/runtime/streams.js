@@ -9,6 +9,11 @@ let defaultWritableHighWaterMark = DEFAULT_WRITABLE_HIGH_WATER_MARK;
 let defaultObjectHighWaterMark = 16;
 
 const kReadableStateDataEmitted = Symbol('readableStateDataEmitted');
+const kReadableStateClosed = Symbol('readableStateClosed');
+const kReadableStateConstructed = Symbol('readableStateConstructed');
+const kReadableStateDestroyed = Symbol('readableStateDestroyed');
+const kReadableStateEmitClose = Symbol('readableStateEmitClose');
+const kReadableStateEmittedReadable = Symbol('readableStateEmittedReadable');
 const kReadableStateObjectMode = Symbol('readableStateObjectMode');
 const kReadableStateEnded = Symbol('readableStateEnded');
 const kReadableStateErrored = Symbol('readableStateErrored');
@@ -22,6 +27,13 @@ const kReadableStateMultiAwaitDrain = Symbol('readableStateMultiAwaitDrain');
 const kReadableStateNeedReadable = Symbol('readableStateNeedReadable');
 const kReadableStateReadableListening = Symbol('readableStateReadableListening');
 const kReadableStateReading = Symbol('readableStateReading');
+const kReadableStateAutoDestroy = Symbol('readableStateAutoDestroy');
+const kReadableStateCloseEmitted = Symbol('readableStateCloseEmitted');
+const kReadableStateEndEmitted = Symbol('readableStateEndEmitted');
+const kReadableStateErrorEmitted = Symbol('readableStateErrorEmitted');
+const kReadableStateReadingMore = Symbol('readableStateReadingMore');
+const kReadableStateResumeScheduled = Symbol('readableStateResumeScheduled');
+const kReadableStateSync = Symbol('readableStateSync');
 
 export function setDefaultHighWaterMark(objectMode, value) {
   if (typeof objectMode !== 'boolean') throw streamError('ERR_INVALID_ARG_TYPE', 'The "objectMode" argument must be of type boolean');
@@ -640,6 +652,7 @@ export class Readable extends EventEmitter {
       highWaterMark: options.highWaterMark
         ?? (objectMode ? defaultObjectHighWaterMark : defaultHighWaterMark),
       buffer: this._buffer,
+      length: 0,
       autoDestroy: options.autoDestroy !== false, emitClose: options.emitClose !== false,
       closeEmitted: false,
       closed: false, errorEmitted: false,
@@ -850,6 +863,7 @@ export class Readable extends EventEmitter {
     if (this.readableObjectMode) {
       this._buffer.push(chunk);
       this._bufferedBytes += 1;
+      this._readableState.length = this._bufferedBytes;
       if (this._flowing) this._scheduleFlowDrain();
       this._scheduleReadable();
       this._resolveSourceWaiter();
@@ -868,6 +882,7 @@ export class Readable extends EventEmitter {
     if (typeof chunk === 'string' && this._preserveStrings) {
       this._buffer.push(chunk);
       this._bufferedBytes += chunk.length;
+      this._readableState.length = this._bufferedBytes;
       if (this._flowing) this._scheduleFlowDrain();
       this._scheduleReadable();
       this._resolveSourceWaiter();
@@ -878,6 +893,7 @@ export class Readable extends EventEmitter {
     const bytes = toBytes(chunk);
     this._buffer.push(bytes);
     this._bufferedBytes += bytes.byteLength;
+    this._readableState.length = this._bufferedBytes;
     if (this._flowing) this._scheduleFlowDrain();
     this._scheduleReadable();
     this._resolveSourceWaiter();
@@ -924,6 +940,7 @@ export class Readable extends EventEmitter {
         (total, value) => total + (this.readableObjectMode ? 1 : typeof value === 'string' ? value.length : value.byteLength),
         0,
       );
+      this._readableState.length = this._bufferedBytes;
     }
     if (chunk === null && !this._ended && !this._destroyed) this._readOnce();
     this._resolveSourceWaiter();
@@ -955,6 +972,7 @@ export class Readable extends EventEmitter {
     this._bufferedBytes += this.readableObjectMode
       ? 1
       : typeof value === 'string' ? value.length : value.byteLength;
+    this._readableState.length = this._bufferedBytes;
     if (this._flowing) this._scheduleFlowDrain();
     else this._scheduleReadable();
     return this._bufferedBytes < this.readableHighWaterMark;
@@ -974,6 +992,7 @@ export class Readable extends EventEmitter {
       || (this.readableHighWaterMark > 0 && this._bufferedBytes >= this.readableHighWaterMark)) return;
     this._reading = true;
     this._readableState.reading = true;
+    this._readableState.sync = true;
     let pending = false;
     try {
       const result = this._read(this.readableHighWaterMark);
@@ -996,6 +1015,7 @@ export class Readable extends EventEmitter {
     } catch (error) {
       this.destroy(error);
     } finally {
+      this._readableState.sync = false;
       if (!pending) {
         this._reading = false;
         this._readableState.reading = false;
@@ -1060,8 +1080,10 @@ export class Readable extends EventEmitter {
     this._readableState.paused = false;
     if (this._resumeScheduled) return this;
     this._resumeScheduled = true;
+    this._readableState.resumeScheduled = true;
     queueMicrotask(() => {
       this._resumeScheduled = false;
+      this._readableState.resumeScheduled = false;
       if (!this._flowing || this._destroyed) return;
       if (this._resumePending) {
         this._resumePending = false;
@@ -1197,6 +1219,7 @@ export class Readable extends EventEmitter {
     this._readableState.errored = error || null;
     this._buffer.length = 0;
     this._bufferedBytes = 0;
+    this._readableState.length = 0;
     this._error = error || null;
     this._resolveSourceWaiter();
     this._resolvePending?.();
@@ -1255,8 +1278,9 @@ export class Readable extends EventEmitter {
   _emitClose() {
     if (this._closeEmitted) return;
     this._closeEmitted = true;
+    this._readableState.closeEmitted = true;
     this._readableState.closed = true;
-    this.emit('close');
+    if (this._readableState.emitClose !== false) this.emit('close');
   }
 
   iterator(options = undefined) {
@@ -1484,7 +1508,7 @@ Readable.prototype._read = function _read(_size) {
 for (const property of [
   'readable', 'readableHighWaterMark', 'readableBuffer',
   'readableFlowing', 'readableLength', 'readableObjectMode', 'readableEncoding',
-  'errored', 'closed', 'destroyed', 'readableEnded',
+  'errored', 'closed', 'destroyed', 'readableEnded', 'readableAborted', 'readableDidRead',
 ]) Object.defineProperty(Readable.prototype, property, { configurable: false });
 
 function readableDefaultEncoding(options) {
@@ -1520,6 +1544,7 @@ function ReadableState(options = {}, stream) {
   this.closeEmitted = false;
   this.multiAwaitDrain = false;
   this.readingMore = false;
+  this.length = 0;
   this.dataEmitted = false;
   this.errored = null;
   this.defaultEncoding = readableDefaultEncoding(options);
@@ -1528,6 +1553,42 @@ function ReadableState(options = {}, stream) {
 }
 
 Object.defineProperties(ReadableState.prototype, {
+  autoDestroy: {
+    configurable: false,
+    enumerable: false,
+    get() { return Boolean(this[kReadableStateAutoDestroy]); },
+    set(value) { this[kReadableStateAutoDestroy] = Boolean(value); },
+  },
+  closeEmitted: {
+    configurable: false,
+    enumerable: false,
+    get() { return Boolean(this[kReadableStateCloseEmitted]); },
+    set(value) { this[kReadableStateCloseEmitted] = Boolean(value); },
+  },
+  closed: {
+    configurable: false,
+    enumerable: false,
+    get() { return Boolean(this[kReadableStateClosed]); },
+    set(value) { this[kReadableStateClosed] = Boolean(value); },
+  },
+  constructed: {
+    configurable: false,
+    enumerable: false,
+    get() { return Boolean(this[kReadableStateConstructed]); },
+    set(value) { this[kReadableStateConstructed] = Boolean(value); },
+  },
+  endEmitted: {
+    configurable: false,
+    enumerable: false,
+    get() { return Boolean(this[kReadableStateEndEmitted]); },
+    set(value) { this[kReadableStateEndEmitted] = Boolean(value); },
+  },
+  errorEmitted: {
+    configurable: false,
+    enumerable: false,
+    get() { return Boolean(this[kReadableStateErrorEmitted]); },
+    set(value) { this[kReadableStateErrorEmitted] = Boolean(value); },
+  },
   objectMode: {
     configurable: false,
     enumerable: false,
@@ -1545,6 +1606,24 @@ Object.defineProperties(ReadableState.prototype, {
     enumerable: false,
     get() { return Boolean(this[kReadableStateDataEmitted]); },
     set(value) { this[kReadableStateDataEmitted] = Boolean(value); },
+  },
+  destroyed: {
+    configurable: false,
+    enumerable: false,
+    get() { return Boolean(this[kReadableStateDestroyed]); },
+    set(value) { this[kReadableStateDestroyed] = Boolean(value); },
+  },
+  emitClose: {
+    configurable: false,
+    enumerable: false,
+    get() { return Boolean(this[kReadableStateEmitClose]); },
+    set(value) { this[kReadableStateEmitClose] = Boolean(value); },
+  },
+  emittedReadable: {
+    configurable: false,
+    enumerable: false,
+    get() { return Boolean(this[kReadableStateEmittedReadable]); },
+    set(value) { this[kReadableStateEmittedReadable] = Boolean(value); },
   },
   errored: {
     configurable: false,
@@ -1590,6 +1669,24 @@ Object.defineProperties(ReadableState.prototype, {
     get() { return Boolean(this[kReadableStateReadableListening]); },
     set(value) { this[kReadableStateReadableListening] = Boolean(value); },
   },
+  readingMore: {
+    configurable: false,
+    enumerable: false,
+    get() { return Boolean(this[kReadableStateReadingMore]); },
+    set(value) { this[kReadableStateReadingMore] = Boolean(value); },
+  },
+  resumeScheduled: {
+    configurable: false,
+    enumerable: false,
+    get() { return Boolean(this[kReadableStateResumeScheduled]); },
+    set(value) { this[kReadableStateResumeScheduled] = Boolean(value); },
+  },
+  sync: {
+    configurable: false,
+    enumerable: false,
+    get() { return Boolean(this[kReadableStateSync]); },
+    set(value) { this[kReadableStateSync] = Boolean(value); },
+  },
   multiAwaitDrain: {
     configurable: false,
     enumerable: false,
@@ -1627,14 +1724,48 @@ Object.defineProperties(ReadableState.prototype, {
 
 function readableFromList(n, state) {
   const buffer = state?.buffer;
-  if (!Array.isArray(buffer)) return null;
+  if (!buffer) return null;
+
+  // Internal callers may provide Node's linked BufferList rather than the
+  // browser runtime's array-backed queue. Preserve the public helper's
+  // observable behavior for both representations.
+  if (!Array.isArray(buffer)) {
+    const bufferedLength = Number.isFinite(state.length) && state.length > 0
+      ? state.length
+      : buffer.length || 0;
+    if (bufferedLength === 0) return null;
+    if (state.objectMode) {
+      const result = buffer.shift?.();
+      state.length = Math.max(0, bufferedLength - 1);
+      return result;
+    }
+    if (!n || n >= bufferedLength) {
+      const result = state.decoder
+        ? buffer.join('')
+        : buffer.length === 1 ? buffer.head?.data : buffer.concat(bufferedLength);
+      buffer.clear?.();
+      state.length = 0;
+      return result;
+    }
+    const head = buffer.head?.data;
+    if (head == null) return null;
+    const result = state.decoder
+      ? String(head).slice(0, n)
+      : bufferChunk(toBytes(head).slice(0, n));
+    buffer.head.data = typeof head === 'string' ? head.slice(n) : head.slice(n);
+    state.length = Math.max(0, bufferedLength - n);
+    return result;
+  }
 
   let index = Number.isInteger(state.bufferIndex) ? state.bufferIndex : 0;
   const availableChunks = () => buffer.slice(index).filter((value) => value != null);
   const values = availableChunks();
-  const bufferedLength = Number.isFinite(state.length)
-    ? state.length
+  const measuredLength = state.objectMode
+    ? values.length
     : values.reduce((total, value) => total + (value?.byteLength ?? value?.length ?? 0), 0);
+  const bufferedLength = Number.isFinite(state.length) && state.length > 0
+    ? state.length
+    : measuredLength;
   if (bufferedLength === 0 || values.length === 0) return null;
 
   const consume = (count) => {
@@ -1732,6 +1863,86 @@ Readable._fromList = readableFromList;
 Stream.Readable = Readable;
 defineAsyncDispose(Readable.prototype);
 
+const writableStateValues = new WeakMap();
+function nop() {}
+
+function WritableState(options = {}, stream) {
+  writableStateValues.set(this, Object.create(null));
+  Object.assign(this, {
+    objectMode: Boolean(options.writableObjectMode ?? options.objectMode),
+    finalCalled: false, needDrain: false, ending: false, ended: false, finished: false,
+    destroyed: false, decodeStrings: options.decodeStrings !== false, writing: false,
+    sync: true, bufferProcessing: false, constructed: true, prefinished: false,
+    errorEmitted: false, emitClose: options.emitClose !== false,
+    autoDestroy: options.autoDestroy !== false, closed: false, closeEmitted: false,
+    allBuffers: true, allNoop: true, errored: null, writable: options.writable !== false,
+    defaultEncoding: options.defaultEncoding == null
+      ? 'utf8' : normalizeWritableEncoding(options.defaultEncoding),
+    highWaterMark: options.highWaterMark
+      ?? (options.writableObjectMode ?? options.objectMode
+        ? defaultObjectHighWaterMark : defaultWritableHighWaterMark),
+    writecb: nop, afterWriteTickInfo: null, buffered: stream?._queue || [],
+    length: 0,
+  });
+}
+
+function defineWritableStateBoolean(name) {
+  Object.defineProperty(WritableState.prototype, name, {
+    configurable: false,
+    enumerable: false,
+    get() { return Boolean(writableStateValues.get(this)?.[name]); },
+    set(value) {
+      const values = writableStateValues.get(this) || Object.create(null);
+      values[name] = Boolean(value);
+      writableStateValues.set(this, values);
+    },
+  });
+}
+
+for (const property of [
+  'closeEmitted', 'closed', 'constructed', 'decodeStrings',
+  'destroyed', 'emitClose', 'ended', 'autoDestroy', 'bufferProcessing',
+  'ending', 'errorEmitted', 'allBuffers', 'allNoop', 'objectMode',
+  'finalCalled', 'needDrain', 'finished', 'writing', 'sync', 'prefinished', 'writable',
+]) defineWritableStateBoolean(property);
+
+function defineWritableStateValue(name, fallback) {
+  Object.defineProperty(WritableState.prototype, name, {
+    configurable: false,
+    enumerable: false,
+    get() {
+      const values = writableStateValues.get(this);
+      if (values && Object.prototype.hasOwnProperty.call(values, name)) return values[name];
+      return typeof fallback === 'function' ? fallback() : fallback;
+    },
+    set(value) {
+      const values = writableStateValues.get(this) || Object.create(null);
+      values[name] = value;
+      writableStateValues.set(this, values);
+    },
+  });
+}
+
+// Node keeps these cold-path values off the instance and exposes them through
+// non-enumerable accessors. This matters to internal stream users that inspect
+// WritableState directly, in addition to keeping the browser state shape
+// compatible with Node's WritableState.
+defineWritableStateValue('afterWriteTickInfo', null);
+defineWritableStateValue('buffered', () => []);
+defineWritableStateValue('errored', null);
+defineWritableStateValue('writecb', nop);
+
+Object.defineProperty(WritableState.prototype, 'defaultEncoding', {
+  configurable: false,
+  enumerable: false,
+  get() { return writableStateValues.get(this)?.defaultEncoding ?? 'utf8'; },
+  set(value) {
+    const values = writableStateValues.get(this) || Object.create(null);
+    values.defaultEncoding = value === 'utf-8' ? 'utf8' : value;
+    writableStateValues.set(this, values);
+  },
+});
+
 class WritableImpl extends EventEmitter {
   constructor(options = {}) {
     super();
@@ -1741,11 +1952,6 @@ class WritableImpl extends EventEmitter {
     this.isTTY = false;
     this._writableObjectMode = Boolean(options.writableObjectMode ?? options.objectMode);
     this.decodeStrings = options.decodeStrings !== false;
-    const highWaterMark = options.highWaterMark
-      ?? (this._writableObjectMode ? defaultObjectHighWaterMark : defaultWritableHighWaterMark);
-    const defaultEncoding = options.defaultEncoding == null
-      ? 'utf8'
-      : normalizeWritableEncoding(options.defaultEncoding);
     const inheritedDestroy = this._destroy;
     const inheritedFinal = this._final;
     if (options.write) this._write = options.write;
@@ -1768,24 +1974,7 @@ class WritableImpl extends EventEmitter {
     this._endCallbacks = [];
     this._endCallbackCalled = false;
     this._corked = 0;
-    this._writableState = {
-      writable: true,
-      destroyed: false,
-      errored: null,
-      ended: false,
-      finished: false,
-      finalCalled: false, needDrain: false, ending: false,
-      writing: false, sync: true, bufferProcessing: false, constructed: true, prefinished: false,
-      decodeStrings: this.decodeStrings, allBuffers: true, allNoop: true, writecb: null,
-      afterWriteTickInfo: null, buffered: this._queue,
-      length: 0,
-      objectMode: this.writableObjectMode,
-      highWaterMark,
-      defaultEncoding,
-      autoDestroy: options.autoDestroy !== false, emitClose: options.emitClose !== false,
-      closeEmitted: false,
-      closed: false, errorEmitted: false,
-    };
+    this._writableState = new WritableState(options, this);
     if (options.writable === false) {
       this.writable = false;
       this._ending = true;
@@ -1853,7 +2042,13 @@ class WritableImpl extends EventEmitter {
     this._writableState.destroyed = false;
     this._writableState.errored = null;
     this._writableState.closed = false;
+    this._writableState.closeEmitted = false;
+    this._writableState.constructed = true;
     this._writableState.errorEmitted = false;
+    this._writableState.finalCalled = false;
+    this._writableState.needDrain = false;
+    this._writableState.prefinished = false;
+    this._writableState.ending = !writable;
     this._writableState.ended = !writable;
     this._writableState.finished = !writable;
     this._writableState.length = 0;
@@ -1948,7 +2143,10 @@ class WritableImpl extends EventEmitter {
     this._queue.push(request);
     this._pendingBytes += size;
     this._writableState.length = this._pendingBytes;
-    if (this._pendingBytes >= this.writableHighWaterMark) this._needDrain = true;
+    if (this._pendingBytes >= this.writableHighWaterMark) {
+      this._needDrain = true;
+      this._writableState.needDrain = true;
+    }
     this._processNext();
     return !this._destroyed && this._pendingBytes < this.writableHighWaterMark;
   }
@@ -1983,6 +2181,7 @@ class WritableImpl extends EventEmitter {
     }
     if (chunk !== undefined) this.write(chunk, encoding);
     this._ending = true;
+    this._writableState.ending = true;
     this._endCallbacks.push(callback);
     this._finishIfReady();
     return this;
@@ -2061,6 +2260,8 @@ class WritableImpl extends EventEmitter {
     if (typeof writev === 'function' && this._queue.length) {
       const requests = [request, ...this._queue.splice(0)];
       const done = (error) => {
+        this._writableState.writing = false;
+        this._writableState.writecb = nop;
         if (requests.some((item) => item.settled)) {
           const duplicate = streamError('ERR_MULTIPLE_CALLBACK', 'Callback called multiple times');
           if (!this._destroyed) this.destroy(duplicate);
@@ -2078,11 +2279,14 @@ class WritableImpl extends EventEmitter {
         for (const item of requests) item.callback();
         if (this._needDrain && this._pendingBytes < this.writableHighWaterMark) {
           this._needDrain = false;
+          this._writableState.needDrain = false;
           this.emit('drain');
         }
         queueMicrotask(() => this._processNext());
       };
       try {
+        this._writableState.writing = true;
+        this._writableState.writecb = done;
         writev.call(
           this._owner || this,
           requests.map((item) => ({ chunk: item.bytes, encoding: item.encoding })),
@@ -2094,6 +2298,8 @@ class WritableImpl extends EventEmitter {
       return;
     }
     const done = (error) => {
+      this._writableState.writing = false;
+      this._writableState.writecb = nop;
       if (request.settled) {
         const duplicate = new Error('Callback called multiple times');
         duplicate.code = 'ERR_MULTIPLE_CALLBACK';
@@ -2108,8 +2314,12 @@ class WritableImpl extends EventEmitter {
     };
     try {
       const write = this._owner?._write || this._write;
+      this._writableState.writing = true;
+      this._writableState.writecb = done;
       write.call(this._owner || this, request.bytes, request.encoding, done);
     } catch (error) {
+      this._writableState.writing = false;
+      this._writableState.writecb = nop;
       throw error;
     }
   }
@@ -2131,6 +2341,7 @@ class WritableImpl extends EventEmitter {
     request.callback();
     if (this._needDrain && this._pendingBytes < this.writableHighWaterMark) {
       this._needDrain = false;
+      this._writableState.needDrain = false;
       this.emit('drain');
     }
     if (continueProcessing) queueMicrotask(() => this._processNext());
@@ -2143,6 +2354,7 @@ class WritableImpl extends EventEmitter {
       if (!this._destroyed) this.destroy(error);
       else if (!this._resetDestroyed && !this._errorEmitted) {
         this._errorEmitted = true;
+        this._writableState.errorEmitted = true;
         this.emit('error', error);
       }
     }
@@ -2150,6 +2362,7 @@ class WritableImpl extends EventEmitter {
 
   _finishIfReady() {
     if (!this._ending || this._current || this._queue.length || this._finishEmitted || this._destroyed) return;
+    this._writableState.finalCalled = true;
     if (this._final && !this._finalStarted) {
       this._finalStarted = true;
       let called = false;
@@ -2174,6 +2387,7 @@ class WritableImpl extends EventEmitter {
     if (this._finishEmitted || this._finishScheduled || this._destroyed) return;
     this.writable = false;
     this._writableState.writable = false;
+    this._writableState.prefinished = true;
     this._writableState.ended = true;
     this._finishScheduled = true;
     this.emit('prefinish');
@@ -2199,6 +2413,7 @@ class WritableImpl extends EventEmitter {
   _emitClose() {
     if (this._closeEmitted) return;
     this._closeEmitted = true;
+    this._writableState.closeEmitted = true;
     this._writableState.closed = true;
     this.emit('close');
   }
@@ -2230,20 +2445,7 @@ export function Writable(options = {}) {
 
 Writable.prototype = WritableImpl.prototype;
 
-Writable.WritableState = function WritableState(options = {}, stream) {
-  Object.assign(this, {
-    objectMode: Boolean(options.writableObjectMode ?? options.objectMode),
-    finalCalled: false, needDrain: false, ending: false, ended: false, finished: false,
-    destroyed: false, decodeStrings: options.decodeStrings !== false, writing: false,
-    sync: true, bufferProcessing: false, constructed: true, prefinished: false,
-    errorEmitted: false, emitClose: options.emitClose !== false,
-    autoDestroy: options.autoDestroy !== false, closed: false, allBuffers: true,
-    allNoop: true, errored: null, writable: options.writable !== false,
-    defaultEncoding: options.defaultEncoding || 'utf8',
-    highWaterMark: options.highWaterMark ?? defaultWritableHighWaterMark,
-    writecb: null, afterWriteTickInfo: null, buffered: stream?._queue || [],
-  });
-};
+Writable.WritableState = WritableState;
 Writable.WritableState.prototype.getBuffer = function getBuffer() {
   return this.buffered?.slice?.() || [];
 };
@@ -2783,6 +2985,8 @@ export function duplexPair(options = {}) {
   });
   first = createSide(() => second);
   second = createSide(() => first);
+  Object.defineProperty(first, '_peer', { configurable: true, value: second });
+  Object.defineProperty(second, '_peer', { configurable: true, value: first });
   return [first, second];
 }
 

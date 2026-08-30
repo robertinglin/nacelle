@@ -784,60 +784,70 @@ export class Socket extends EventEmitter {
     this._binding = true;
     state.bindState = BIND_STATE_BINDING;
     this._taskRelease = this._refed ? this._trackTask?.() || null : null;
-    queueMicrotask(() => {
+    const completeBind = (lookupError, resolvedAddress, resolvedFamily) => {
       if (this._closed) return;
-      const handle = this[VIRTUAL_DGRAM_STATE].handle;
-      handle.lookup.call(handle, normalizedAddress, (lookupError, resolvedAddress, resolvedFamily) => {
+      if (lookupError) {
+        this._taskRelease?.();
+        this._taskRelease = null;
+        this._binding = false;
+        this[VIRTUAL_DGRAM_STATE].bindState = BIND_STATE_UNBOUND;
+        this.emit('error', lookupError);
+        return;
+      }
+      normalizedAddress = normalizeVirtualAddress(
+        resolvedAddress || normalizedAddress,
+        resolvedFamily || family,
+      );
+      try {
+        const cluster = typeof this._cluster === 'function' ? this._cluster() : this._cluster;
+        const groupId = this._clusterGroupId || cluster?.worker?.process?.ppid;
+        const useClusterBinding = state.fdClusterGroupId !== undefined
+          || ((cluster?.isWorker || this._clusterGroupId !== undefined)
+            && typeof this._network.bindClusterUdp === 'function');
+        const result = useClusterBinding
+          ? this._network.bindClusterUdp(state.fdClusterGroupId ?? groupId, normalizedAddress, requestedPort, {
+              reuseAddr: state.reuseAddr,
+              reusePort: this._reusePort,
+              ipv6Only: this._ipv6Only,
+              socket: this,
+            })
+          : this._network.bindUdp(this, normalizedAddress, requestedPort, {
+              reuseAddr: state.reuseAddr,
+              reusePort: this._reusePort,
+              ipv6Only: this._ipv6Only,
+              processOwner: this._processOwner,
+            });
+        this.boundPort = result.port;
+        this.boundAddress = result.address;
+        if (!this._taskRelease && this._refed) this._taskRelease = this._trackTask?.() || null;
+        this._binding = false;
+        this._bound = true;
+        state.bindState = BIND_STATE_BOUND;
+        state.handle.recvStart?.();
+        this.emit('listening');
+        this._onListening?.(this.address());
+        callback?.call(this);
+      } catch (error) {
+        this._taskRelease?.();
+        this._taskRelease = null;
+        this._binding = false;
+        this[VIRTUAL_DGRAM_STATE].bindState = BIND_STATE_UNBOUND;
+        this.emit('error', error);
+      }
+    };
+    // A literal address is already resolved. Complete this virtual bind now
+    // so a child fork queued earlier cannot run and synchronously answer the
+    // first IPC message before the parent has installed its message listener.
+    // Hostname binds retain the normal asynchronous lookup path.
+    if (address_ !== undefined && virtualAddressFamily(normalizedAddress) === family) {
+      completeBind(null, normalizedAddress, family);
+    } else {
+      queueMicrotask(() => {
         if (this._closed) return;
-        if (lookupError) {
-          this._taskRelease?.();
-          this._taskRelease = null;
-          this._binding = false;
-          this[VIRTUAL_DGRAM_STATE].bindState = BIND_STATE_UNBOUND;
-          this.emit('error', lookupError);
-          return;
-        }
-        normalizedAddress = normalizeVirtualAddress(
-          resolvedAddress || normalizedAddress,
-          resolvedFamily || family,
-        );
-        try {
-          const cluster = typeof this._cluster === 'function' ? this._cluster() : this._cluster;
-          const groupId = this._clusterGroupId || cluster?.worker?.process?.ppid;
-          const useClusterBinding = state.fdClusterGroupId !== undefined
-            || ((cluster?.isWorker || this._clusterGroupId !== undefined)
-              && typeof this._network.bindClusterUdp === 'function');
-          const result = useClusterBinding
-            ? this._network.bindClusterUdp(state.fdClusterGroupId ?? groupId, normalizedAddress, requestedPort, {
-                reuseAddr: state.reuseAddr,
-                reusePort: this._reusePort,
-                ipv6Only: this._ipv6Only,
-                socket: this,
-              })
-            : this._network.bindUdp(this, normalizedAddress, requestedPort, {
-                reuseAddr: state.reuseAddr,
-                reusePort: this._reusePort,
-                ipv6Only: this._ipv6Only,
-              });
-          this.boundPort = result.port;
-          this.boundAddress = result.address;
-          if (!this._taskRelease && this._refed) this._taskRelease = this._trackTask?.() || null;
-          this._binding = false;
-          this._bound = true;
-          state.bindState = BIND_STATE_BOUND;
-          state.handle.recvStart?.();
-          this.emit('listening');
-          this._onListening?.(this.address());
-          callback?.call(this);
-        } catch (error) {
-          this._taskRelease?.();
-          this._taskRelease = null;
-          this._binding = false;
-          this[VIRTUAL_DGRAM_STATE].bindState = BIND_STATE_UNBOUND;
-          this.emit('error', error);
-        }
+        const handle = this[VIRTUAL_DGRAM_STATE].handle;
+        handle.lookup.call(handle, normalizedAddress, completeBind);
       });
-    });
+    }
     return this;
   }
 
@@ -1156,6 +1166,20 @@ export class Socket extends EventEmitter {
     return this;
   }
 
+  _networkClosed() {
+    if (this._closed) return;
+    this._closed = true;
+    this._binding = false;
+    this._bound = false;
+    this[VIRTUAL_DGRAM_STATE].bindState = BIND_STATE_UNBOUND;
+    this.boundPort = null;
+    this.boundAddress = null;
+    stopReceiving(this);
+    this._taskRelease?.();
+    this._taskRelease = null;
+    queueMicrotask(() => this.emit('close'));
+  }
+
   async [SymbolNodeAsyncDispose]() {
     if (!this[VIRTUAL_DGRAM_STATE].handle) return;
     await new Promise((resolve, reject) => {
@@ -1414,8 +1438,12 @@ export function createBrowserDgram({ network = sharedVirtualNetwork, transport, 
     sockets.clear();
   };
   closeProcessSockets._bnhInternal = true;
+  const unbindProcess = () => configuredNetwork.unbindProcess?.(processOwner);
+  unbindProcess._bnhInternal = true;
   processOwner?.once?.('disconnect', closeProcessSockets);
   processOwner?.once?.('exit', closeProcessSockets);
+  processOwner?.once?.('disconnect', unbindProcess);
+  processOwner?.once?.('exit', unbindProcess);
   const createHandle = (address, port, addressType, fd, flags) => createSocketHandle(
     address,
     port,

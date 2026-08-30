@@ -5,6 +5,8 @@ import { Transform, Writable } from './streams.js';
 
 const objectToString = Object.prototype.toString;
 const virtualKeyPairs = new Map();
+const cryptoKeyMaterialMarker = Symbol.for('bnh.cryptoKeyMaterial');
+const cryptoKeyTrackerMarker = Symbol.for('bnh.cryptoKeyTracker');
 const VERIFY_SYNC_BLOCKER = 'Web Crypto exposes only asynchronous SubtleCrypto.verify; no browser-native synchronous verifier is available for this key';
 const X509_PARSER_BLOCKER = 'Web Crypto exposes key operations but no browser-native X.509 parser or certificate-chain field extraction';
 const LEGACY_CIPHER_BLOCKER = 'Web Crypto exposes cipher operations asynchronously; the Node legacy Cipheriv API is synchronous and stream-based';
@@ -90,6 +92,36 @@ export function hasWebCrypto(globalObject = globalThis) {
     && typeof crypto.subtle.digest === 'function');
 }
 
+export function installCryptoKeyMaterialTracking(globalObject = globalThis) {
+  const subtle = globalObject?.crypto?.subtle;
+  if (!subtle || typeof subtle.importKey !== 'function' || subtle[cryptoKeyTrackerMarker]) return;
+  const importKey = subtle.importKey.bind(subtle);
+  const wrappedImportKey = function wrappedImportKey(...args) {
+    const result = importKey(...args);
+    if (args[0] !== 'raw') return result;
+    const material = new Uint8Array(toCryptoBytes(args[1], globalObject.TextEncoder));
+    return Promise.resolve(result).then((key) => {
+      try {
+        Object.defineProperty(key, cryptoKeyMaterialMarker, {
+          configurable: true,
+          value: material,
+        });
+      } catch { /* Some native key objects may be sealed. */ }
+      return key;
+    });
+  };
+  try {
+    Object.defineProperty(subtle, 'importKey', {
+      configurable: true,
+      value: wrappedImportKey,
+    });
+    Object.defineProperty(subtle, cryptoKeyTrackerMarker, {
+      configurable: true,
+      value: true,
+    });
+  } catch { /* Native SubtleCrypto implementations may be immutable. */ }
+}
+
 export function browserCryptoVersion(globalObject = globalThis) {
   return hasWebCrypto(globalObject) ? '3.0.0' : undefined;
 }
@@ -144,6 +176,12 @@ function installLazyTransformStateAccessors(prototype) {
         value: stream._writableState,
         writable: true,
       },
+      allowHalfOpen: {
+        configurable: true,
+        enumerable: true,
+        value: stream.allowHalfOpen,
+        writable: true,
+      },
     });
   };
   const getter = (name) => function getState() {
@@ -171,6 +209,24 @@ function installLazyTransformStateAccessors(prototype) {
       enumerable: true,
       get: getter('_writableState'),
       set: setter('_writableState'),
+    },
+  });
+}
+
+function installLazyTransformAllowHalfOpen(prototype) {
+  Object.defineProperty(prototype, 'allowHalfOpen', {
+    configurable: true,
+    enumerable: true,
+    get() {
+      return undefined;
+    },
+    set(value) {
+      Object.defineProperty(this, 'allowHalfOpen', {
+        configurable: true,
+        enumerable: true,
+        value,
+        writable: true,
+      });
     },
   });
 }
@@ -491,7 +547,8 @@ export function createHashShim(BufferClass) {
       streamResult: undefined,
     };
 
-    const hash = new Transform();
+    const hash = Object.create(Hash.prototype);
+    hash._options = {};
     Object.setPrototypeOf(hash, Hash.prototype);
     states.set(hash, state);
     return hash;
@@ -585,6 +642,7 @@ export function createHashShim(BufferClass) {
 
   Object.setPrototypeOf(Hash.prototype, Transform.prototype);
   installLazyTransformStateAccessors(Hash.prototype);
+  installLazyTransformAllowHalfOpen(Hash.prototype);
   return Hash;
 }
 
@@ -654,7 +712,8 @@ export function createHmacShim(BufferClass, processObject, scope = globalThis) {
     if (!(this instanceof Hmac)) return new Hmac(algorithm, key);
     const normalizedAlgorithm = hmacAlgorithm(algorithm);
     const secret = key?.type === 'secret' ? key.key : key;
-    const stream = new Transform();
+    const stream = Object.create(Hmac.prototype);
+    stream._options = {};
     Object.setPrototypeOf(stream, Hmac.prototype);
     try {
       stream._key = bytes(secret);
@@ -720,6 +779,7 @@ export function createHmacShim(BufferClass, processObject, scope = globalThis) {
 
   Object.setPrototypeOf(Hmac.prototype, Transform.prototype);
   installLazyTransformStateAccessors(Hmac.prototype);
+  installLazyTransformAllowHalfOpen(Hmac.prototype);
   return Hmac;
 }
 
@@ -1509,7 +1569,41 @@ export function generateKeyPairSync(type, options = {}) {
 }
 
 export class BrowserECDH {
-  static convertKey() {
+  static convertKey(key, curve, inEnc, outEnc, format) {
+    if (typeof curve !== 'string') {
+      const received = curve === undefined ? 'undefined' : typeof curve;
+      const error = new TypeError(
+        `The "curve" argument must be of type string. Received ${received}`,
+      );
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    if (typeof key !== 'string' && !isArrayBuffer(key) && !isArrayBufferView(key)) {
+      const received = key === undefined
+        ? 'undefined'
+        : key === null
+          ? 'null'
+          : typeof key === 'object'
+            ? `an instance of ${key.constructor?.name || 'Object'}`
+            : `type ${typeof key} (${String(key)})`;
+      const error = new TypeError(
+        'The "key" argument must be of type string or an instance of ArrayBuffer, '
+        + `Buffer, TypedArray, or DataView. Received ${received}`,
+      );
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    if (format && !['compressed', 'hybrid', 'uncompressed'].includes(format)) {
+      const error = new TypeError(`Invalid ECDH format: ${format}`);
+      error.code = 'ERR_CRYPTO_ECDH_INVALID_FORMAT';
+      throw error;
+    }
+    const curveName = curve.toLowerCase();
+    if (!ECDH_CURVES[curve] && !ECDH_CURVES[curveName] && curveName !== 'secp256k1') {
+      throw new TypeError('Invalid EC curve name');
+    }
+    void inEnc;
+    void outEnc;
     throw new UnsupportedWebCapabilityError(
       'ECDH.convertKey',
       'Web Crypto does not expose synchronous elliptic-curve point format conversion',
@@ -2418,6 +2512,7 @@ export class Decipheriv extends Cipheriv {
 }
 
 installLazyTransformStateAccessors(Decipheriv.prototype);
+installLazyTransformAllowHalfOpen(Decipheriv.prototype);
 
 export function createCipheriv() {
   return legacyCipherUnavailable('createCipheriv');

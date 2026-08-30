@@ -269,7 +269,8 @@ export function createModuleLoader({
   const hookContext = (specifier, importer) => ({
     conditions: ['node', 'import'],
     importAttributes: {},
-    parentURL: importer.startsWith('data:') ? importer : fileURL(importer),
+    parentURL: importer.startsWith('data:') || /^[A-Za-z][A-Za-z\d+.-]*:/.test(importer)
+      ? importer : fileURL(importer),
     source: specifier,
   });
 
@@ -278,9 +279,11 @@ export function createModuleLoader({
     return {
       url: isBuiltinSpecifier(resolved) || resolved.startsWith('node:')
         ? `node:${builtinName(resolved)}`
-        : resolved.startsWith('data:') ? resolved : fileURL(resolved),
+        : resolved.startsWith('data:') || resolved.startsWith('http:') || resolved.startsWith('https:')
+          ? resolved : fileURL(resolved),
       format: isBuiltinSpecifier(resolved)
         ? 'builtin'
+        : resolved.startsWith('data:') ? 'module'
         : resolved.endsWith('.json') ? 'json' : moduleFormat(resolved),
     };
   };
@@ -390,7 +393,7 @@ export function createModuleLoader({
         if (config.type === 'module' || config.type === 'commonjs') return config.type;
         return 'untyped';
       }
-      if (directory === '/') return undefined;
+      if (directory === '/' || directory === '.' || directory === '') return undefined;
       directory = posix.dirname(directory);
     }
   };
@@ -398,6 +401,13 @@ export function createModuleLoader({
   const moduleFormat = (resolved) => {
     if (resolved.endsWith('.mjs')) return 'module';
     if (resolved.endsWith('.cjs')) return 'commonjs';
+    const extension = posix.extname(resolved);
+    if (extension && !['.js', '.json', '.node'].includes(extension)) {
+      throw packageError(
+        'ERR_UNKNOWN_FILE_EXTENSION',
+        `Unknown file extension "${extension}" for ${resolved}`,
+      );
+    }
     const type = packageScopeType(resolved);
     if (type === 'module' || type === 'commonjs') return type;
     if (resolved.includes('/node_modules/')) return 'commonjs';
@@ -423,6 +433,7 @@ export function createModuleLoader({
   const packageError = (code, message) => {
     const error = new Error(message);
     error.code = code;
+    error.name = `Error [${code}]`;
     return error;
   };
 
@@ -635,6 +646,7 @@ export function createModuleLoader({
     }
     if (value.startsWith('data:')) return value;
     if (/^[A-Za-z][A-Za-z\d+.-]*:/.test(value)) {
+      if (value.startsWith('http:') || value.startsWith('https:')) return value;
       throw packageError('ERR_UNSUPPORTED_ESM_URL_SCHEME', 'Only file, data, and node URLs are supported');
     }
     if (value.startsWith('#')) {
@@ -648,6 +660,10 @@ export function createModuleLoader({
         || resolveNodeLibrary(value)
         || resolvePackage(value, importer, conditions)
         || value;
+    }
+    if ((importer.startsWith('http:') || importer.startsWith('https:'))
+      && (value.startsWith('./') || value.startsWith('../') || value === '.' || value === '..')) {
+      return new URL(value, importer).href;
     }
     const base = value.startsWith('/') ? value : posix.join(posix.dirname(importer), value);
     return resolveFileOrDirectory(base) || base;
@@ -793,20 +809,110 @@ export function createModuleLoader({
     return url;
   }
 
+  // The source being transformed can itself contain examples or template
+  // strings that look like import declarations (the Node test suite does
+  // this frequently). Keep string/comment contents masked while locating
+  // declarations, then take the actual specifier from the original source.
+  const maskJavaScriptLiterals = (source) => {
+    const value = String(source);
+    const masked = value.split('');
+    let state = 'code';
+    let quoteChar = '';
+    for (let index = 0; index < value.length; index += 1) {
+      const char = value[index];
+      const next = value[index + 1];
+      if (state === 'code') {
+        if (char === '/' && next === '/') {
+          masked[index] = ' ';
+          masked[index + 1] = ' ';
+          state = 'line-comment';
+          index += 1;
+        } else if (char === '/' && next === '*') {
+          masked[index] = ' ';
+          masked[index + 1] = ' ';
+          state = 'block-comment';
+          index += 1;
+        } else if (char === '\'' || char === '"' || char === '`') {
+          quoteChar = char;
+          state = 'string';
+        }
+        continue;
+      }
+      if (state === 'line-comment') {
+        if (char === '\n' || char === '\r') state = 'code';
+        else masked[index] = ' ';
+        continue;
+      }
+      if (state === 'block-comment') {
+        if (char === '*' && next === '/') {
+          masked[index] = ' ';
+          masked[index + 1] = ' ';
+          state = 'code';
+          index += 1;
+        } else if (char !== '\n' && char !== '\r') masked[index] = ' ';
+        continue;
+      }
+      if (char === '\\') {
+        masked[index] = ' ';
+        if (index + 1 < value.length && value[index + 1] !== '\n' && value[index + 1] !== '\r') {
+          masked[index + 1] = ' ';
+          index += 1;
+        }
+      } else if (char === quoteChar) {
+        state = 'code';
+      } else if (char !== '\n' && char !== '\r') {
+        masked[index] = ' ';
+      }
+    }
+    return masked.join('');
+  };
+
   function rewriteImports(source, importer) {
     let rewritten = String(source);
-    rewritten = rewritten.replace(
+    const rewriteStatic = (pattern, exportAware) => {
+      const masked = maskJavaScriptLiterals(rewritten);
+      const matches = [...masked.matchAll(pattern)];
+      const originalPattern = new RegExp(pattern.source, pattern.flags.replace('g', ''));
+      for (let index = matches.length - 1; index >= 0; index -= 1) {
+        const match = matches[index];
+        const original = rewritten.slice(match.index, match.index + match[0].length).match(originalPattern);
+        if (!original) continue;
+        const specifier = original[4];
+        const prefix = original[2];
+        const quoteOffset = original[0].indexOf(original[3], original[1].length + prefix.length);
+        const start = match.index + quoteOffset;
+        const replacement = quote(rewriteSpecifier(
+          specifier,
+          importer,
+          exportAware ? requestedExportName(prefix) : undefined,
+        ));
+        rewritten = `${rewritten.slice(0, start)}${replacement}${rewritten.slice(start + specifier.length + 2)}`;
+      }
+    };
+    rewriteStatic(
       /(^|[;\n])([ \t]*(?:import|export)\s+[^;]*?\s+from\s+)(['"])((?:\\.|[^'"])*)\3/gm,
-      (match, boundary, prefix, delimiter, specifier) => `${boundary}${prefix}${quote(rewriteSpecifier(specifier, importer, requestedExportName(prefix)))}`,
+      true,
     );
-    rewritten = rewritten.replace(
+    rewriteStatic(
       /(^|[;\n])([ \t]*import[ \t]*)(['"])((?:\\.|[^'"])*)\3/gm,
-      (match, boundary, prefix, delimiter, specifier) => `${boundary}${prefix}${quote(rewriteSpecifier(specifier, importer))}`,
+      false,
     );
     if (/\bimport\s*\(/.test(rewritten)) {
       const token = register((dynamicSpecifier, options) => importModule(dynamicSpecifier, importer, {}, options));
       rewritten = rewritten.replace(/\bimport\s*\(/g, `globalThis[${quote(registryName)}][${quote(token)}](`);
     }
+    if (/\bimport\.meta\.resolve\b/.test(rewritten)) {
+      const token = register((specifier) => {
+        const resolved = resolve(specifier, importer, ['node', 'import']);
+        if (isBuiltinSpecifier(resolved) || resolved.startsWith('node:')) return `node:${builtinName(resolved)}`;
+        return resolved.startsWith('data:') ? resolved : fileURL(resolved);
+      });
+      rewritten = rewritten.replace(
+        /\bimport\.meta\.resolve\b/g,
+        `globalThis[${quote(registryName)}][${quote(token)}]`,
+      );
+    }
+    rewritten = rewritten.replace(/\s+with\s*\{\s*type\s*:\s*['"]json['"]\s*\}/g, '');
     // Native data modules do not have a file URL. Preserve the Node-facing
     // identity used by code that builds URLs relative to import.meta.url.
     rewritten = rewritten.replace(/\bimport\.meta\.filename\b/g, quote(importer));
@@ -880,6 +986,7 @@ export function createModuleLoader({
   function moduleSource(resolved) {
     const builtinValue = builtin(resolved);
     const format = isBuiltinSpecifier(resolved) ? 'builtin'
+      : resolved.startsWith('data:') ? 'module'
       : resolved.endsWith('.json') ? 'json' : moduleFormat(resolved);
     const loaded = runLoadHooks(resolved, format);
     const loadedResolved = loaded.url ? hookURLToSpecifier(loaded.url) : resolved;
@@ -1009,17 +1116,186 @@ export function createModuleLoader({
     return import(moduleURL(value), options);
   };
 
+  // Experimental loaders are allowed to provide an asynchronous `load` hook.
+  // Browser-native ESM cannot ask the VFS reader to resolve an http(s) URL, so
+  // fetch the hook result first and recursively turn its static remote imports
+  // into data-module URLs before handing the graph to the browser evaluator.
+  const remoteImportCache = new Map();
+  const rewriteRemoteImports = async (source, importer) => {
+    let rewritten = String(source);
+    const replacements = [];
+    const pattern = /(^|[;\n])([ \t]*(?:import|export)\s+[^;]*?\s+from\s+|[ \t]*import\s*)(['"])((?:\\.|[^'"])*)\3/gm;
+    for (const match of rewritten.matchAll(pattern)) {
+      const specifier = decodeStaticString(match[4]);
+      if (!specifier.startsWith('./') && !specifier.startsWith('../')
+        && specifier !== '.' && specifier !== '..') continue;
+      const child = resolve(specifier, importer, ['node', 'import']);
+      if (!child.startsWith('http:') && !child.startsWith('https:')) continue;
+      replacements.push({ start: match.index + match[0].lastIndexOf(match[3]) + 1, end: match.index + match[0].lastIndexOf(match[3]) + 1 + match[3].length, url: await importRemote(child, importer) });
+    }
+    for (const replacement of replacements.reverse()) {
+      rewritten = `${rewritten.slice(0, replacement.start)}${replacement.url}${rewritten.slice(replacement.end)}`;
+    }
+    return rewritten;
+  };
+  const importRemote = async (resolved, importer) => {
+    if (remoteImportCache.has(resolved)) return remoteImportCache.get(resolved);
+    const promise = (async () => {
+      const context = hookContext(resolved, importer);
+      const loaded = sharedRunModuleHook
+        ? await sharedRunModuleHook('load', resolved, context, () => undefined)
+        : undefined;
+      if (!loaded || loaded.source === undefined || loaded.source === null) {
+        throw packageError('ERR_UNSUPPORTED_ESM_URL_SCHEME', `No loader is registered for ${resolved}`);
+      }
+      const source = await rewriteRemoteImports(sourceText(loaded.source), resolved);
+      const url = `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}_${moduleSequence++}`;
+      return url;
+    })();
+    remoteImportCache.set(resolved, promise);
+    return promise;
+  };
+
+  // Static imports are discovered while building a data module, but loader
+  // hooks may fetch their source asynchronously. Build the complete graph
+  // before invoking the browser evaluator so HTTP imports work from both
+  // --import preloads and --input-type=module entry points.
+  const asyncModuleURLs = new Map();
+  const runLoadHooksAsync = async (resolved, format) => {
+    const url = format === 'builtin'
+      ? `node:${builtinName(resolved)}`
+      : resolved.startsWith('custom-') || resolved.startsWith('data:')
+        || resolved.startsWith('http:') || resolved.startsWith('https:')
+        ? resolved : fileURL(resolved);
+    const context = {
+      format,
+      conditions: ['node', 'import'],
+      importAttributes: {},
+      parentURL: resolved.startsWith('data:') || /^[A-Za-z][A-Za-z\d+.-]*:/.test(resolved)
+        ? resolved : fileURL(resolved),
+    };
+    const result = sharedRunModuleHook
+      ? await sharedRunModuleHook('load', url, context, (nextURL) => defaultLoad(nextURL))
+      : runLoadHooks(resolved, format);
+    if (!result || typeof result !== 'object') throw new TypeError('module load hook must return an object');
+    return { ...result, url: result.url || url };
+  };
+
+  const rewriteImportsAsync = async (source, importer) => {
+    let rewritten = String(source);
+    const patterns = [
+      {
+        pattern: /(^|[;\n])([ \t]*(?:import|export)\s+[^;]*?\s+from\s+)(['"])((?:\\.|[^'"])*)\3/gm,
+        exportAware: true,
+      },
+      {
+        pattern: /(^|[;\n])([ \t]*import[ \t]*)(['"])((?:\\.|[^'"])*)\3/gm,
+        exportAware: false,
+      },
+    ];
+    for (const { pattern, exportAware } of patterns) {
+      const masked = maskJavaScriptLiterals(rewritten);
+      const matches = [...masked.matchAll(pattern)];
+      const originalPattern = new RegExp(pattern.source, pattern.flags.replace('g', ''));
+      const replacements = await Promise.all(matches.map(async (match) => {
+        const original = rewritten.slice(match.index, match.index + match[0].length).match(originalPattern);
+        if (!original) return null;
+        const specifier = original[4];
+        const prefix = original[2];
+        const quoteOffset = original[0].indexOf(original[3], original[1].length + prefix.length);
+        const resolved = hookURLToSpecifier(runResolveHooks(specifier, importer).url);
+        const url = await moduleURLAsync(resolved);
+        return {
+          start: match.index + quoteOffset,
+          end: match.index + quoteOffset + specifier.length + 2,
+          replacement: quote(url),
+          exportAware,
+          prefix,
+        };
+      }));
+      for (const replacement of replacements.filter(Boolean).reverse()) {
+        rewritten = `${rewritten.slice(0, replacement.start)}${replacement.replacement}${rewritten.slice(replacement.end)}`;
+      }
+    }
+    if (/\bimport\s*\(/.test(rewritten)) {
+      const token = register((dynamicSpecifier, options) => importModule(dynamicSpecifier, importer, {}, options));
+      rewritten = rewritten.replace(/\bimport\s*\(/g, `globalThis[${quote(registryName)}][${quote(token)}](`);
+    }
+    if (/\bimport\.meta\.resolve\b/.test(rewritten)) {
+      const token = register((specifier) => {
+        const resolved = resolve(specifier, importer, ['node', 'import']);
+        if (isBuiltinSpecifier(resolved) || resolved.startsWith('node:')) return `node:${builtinName(resolved)}`;
+        return resolved.startsWith('data:') ? resolved : fileURL(resolved);
+      });
+      rewritten = rewritten.replace(/\bimport\.meta\.resolve\b/g, `globalThis[${quote(registryName)}][${quote(token)}]`);
+    }
+    rewritten = rewritten.replace(/\s+with\s*\{\s*type\s*:\s*['"]json['"]\s*\}/g, '');
+    rewritten = rewritten.replace(/\bimport\.meta\.filename\b/g, quote(importer));
+    rewritten = rewritten.replace(/\bimport\.meta\.dirname\b/g, quote(posix.dirname(importer)));
+    rewritten = rewritten.replace(/\bimport\.meta\.url\b/g, quote(importer.startsWith('data:') ? importer : `file://${importer}`));
+    return rewritten;
+  };
+
+  const moduleSourceAsync = async (resolved) => {
+    const builtinValue = builtin(resolved);
+    const format = isBuiltinSpecifier(resolved) ? 'builtin'
+      : resolved.startsWith('data:') || resolved.startsWith('http:') || resolved.startsWith('https:') ? 'module'
+      : resolved.endsWith('.json') ? 'json' : moduleFormat(resolved);
+    const loaded = await runLoadHooksAsync(resolved, format);
+    const loadedResolved = loaded.url ? hookURLToSpecifier(loaded.url) : resolved;
+    if (loaded.format === 'builtin' && isBuiltinSpecifier(loadedResolved)) {
+      return builtinModuleSource(loadedResolved, builtin(loadedResolved));
+    }
+    if (loaded.source !== undefined && loaded.source !== null) {
+      if (isWasmBytes(loaded.source)) return wasmModuleSource(loaded.source, loadedResolved);
+      const loadedText = sourceText(loaded.source);
+      if (loaded.format === 'json') return `export default ${JSON.stringify(JSON.parse(loadedText))};`;
+      if (loaded.format === 'module') return `${await rewriteImportsAsync(loadedText, loadedResolved)}\n//# sourceURL=${loadedResolved}`;
+      return cjsModuleSource(loadedResolved, loadedText);
+    }
+    if (isBuiltinSpecifier(resolved)) return builtinModuleSource(resolved, builtinValue);
+    if (resolved.startsWith('node:')) {
+      const error = new Error(`Cannot find builtin module '${resolved}'`);
+      error.code = 'MODULE_NOT_FOUND';
+      throw error;
+    }
+    if (resolved.startsWith('data:')) {
+      return `${await rewriteImportsAsync(decodeDataBody(resolved), resolved)}\n//# sourceURL=${resolved}`;
+    }
+    const value = read(resolved, resolved).value;
+    if (isWasmBytes(value)) return wasmModuleSource(value, resolved);
+    if (resolved.endsWith('.json')) return `export default ${JSON.stringify(JSON.parse(sourceText(value)))};`;
+    if (moduleFormat(resolved) !== 'module') return cjsModuleSource(resolved, sourceText(value));
+    return `${await rewriteImportsAsync(sourceText(value), resolved)}\n//# sourceURL=${resolved}`;
+  };
+
+  const moduleURLAsync = async (resolved) => {
+    if (asyncModuleURLs.has(resolved)) return asyncModuleURLs.get(resolved);
+    const promise = (async () => {
+      const source = await moduleSourceAsync(resolved);
+      return `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}_${moduleSequence++}`;
+    })();
+    asyncModuleURLs.set(resolved, promise);
+    return promise;
+  };
+
   const importNative = async (resolved) => {
     if (!importCache.has(resolved)) {
       let url;
       try {
-        url = moduleURL(resolved);
+        url = await moduleURLAsync(resolved);
       } catch (error) {
-        if (error?.code === 'MODULE_NOT_FOUND') error.code = 'ERR_MODULE_NOT_FOUND';
+        if (error?.code === 'MODULE_NOT_FOUND') {
+          error.code = 'ERR_MODULE_NOT_FOUND';
+          error.name = 'Error [ERR_MODULE_NOT_FOUND]';
+        }
         throw error;
       }
       importCache.set(resolved, import(url).catch((error) => {
-        if (error?.code === 'MODULE_NOT_FOUND') error.code = 'ERR_MODULE_NOT_FOUND';
+        if (error?.code === 'MODULE_NOT_FOUND') {
+          error.code = 'ERR_MODULE_NOT_FOUND';
+          error.name = 'Error [ERR_MODULE_NOT_FOUND]';
+        }
         const message = String(error?.message || '');
         const hint = [...nativeSpecifierHints.entries()].find(([internalURL]) => message.includes(internalURL));
         if (hint) {
@@ -1059,12 +1335,17 @@ export function createModuleLoader({
     const resolvedResult = runResolveHooks(specifier, importer);
     const resolved = hookURLToSpecifier(resolvedResult.url);
     if (resolved.startsWith('data:')) return importData(resolved, options);
+    if (resolved.startsWith('http:') || resolved.startsWith('https:')) {
+      validateImportAttributes(resolved, options);
+      const url = await moduleURLAsync(resolved);
+      return import(url);
+    }
     validateImportAttributes(resolved, options);
     if (resolved.startsWith('node:') && !isBuiltinSpecifier(resolved)) {
       throw packageError('ERR_UNKNOWN_BUILTIN_MODULE', `No such built-in module: ${resolved.slice(5)}`);
     }
     if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) unsupportedNativeAddon(resolved);
-    if (moduleFormat(resolved) === 'module' || isBuiltinSpecifier(resolved)) return importNative(resolved);
+    if (isBuiltinSpecifier(resolved) || moduleFormat(resolved) === 'module') return importNative(resolved);
     let exports;
     try {
       exports = evaluate(resolved, importer, globals);
@@ -1072,6 +1353,7 @@ export function createModuleLoader({
       if (error?.code === 'ENOENT' || error?.code === 'MODULE_NOT_FOUND') {
         const missing = new Error(`Cannot find module '${specifier}' imported from '${importer}'`);
         missing.code = 'ERR_MODULE_NOT_FOUND';
+        missing.name = 'Error [ERR_MODULE_NOT_FOUND]';
         throw missing;
       }
       throw error;

@@ -333,6 +333,7 @@ function createInMemoryProcess(options) {
           signal: abortController?.signal || childProcess,
           cluster: options.cluster,
           clusterGroupId: options.clusterGroupId,
+          clusterWorkerId: options.clusterWorkerId,
         };
         runResult = typeof options.run === 'function' ? options.run(context) : runVfsEntry(options, context);
       } catch (error) {

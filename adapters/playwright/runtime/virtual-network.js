@@ -39,6 +39,17 @@ function normalizePipePath(path) {
   return path;
 }
 
+const virtualPipePaths = () => {
+  const scope = globalThis;
+  if (!(scope.__BNH_VIRTUAL_PIPE_PATHS__ instanceof Set)) {
+    Object.defineProperty(scope, '__BNH_VIRTUAL_PIPE_PATHS__', {
+      configurable: true,
+      value: new Set(),
+    });
+  }
+  return scope.__BNH_VIRTUAL_PIPE_PATHS__;
+};
+
 function isIPv4(value) {
   const parts = String(value).split('.');
   return parts.length === 4 && parts.every((part) => /^(?:0|[1-9]\d{0,2})$/.test(part) && Number(part) <= 255);
@@ -192,6 +203,7 @@ export function createVirtualNetwork({ transport } = {}) {
       : endpointKey(address, actualPort);
     const binding = {
       owner,
+      processOwner: options.processOwner,
       address,
       port: actualPort,
       key,
@@ -208,7 +220,10 @@ export function createVirtualNetwork({ transport } = {}) {
     return {
       _bnhClusterUdp: true,
       _sockets: sockets,
-      addSocket(socket) { sockets.add(socket); },
+      addSocket(socket) {
+        if (!socket || socket._bnhRawUdpHandle) return;
+        sockets.add(socket);
+      },
       removeSocket(socket) { sockets.delete(socket); },
       receive(bytes, rinfo) {
         const available = [...sockets].filter((socket) => !socket._closed);
@@ -256,6 +271,15 @@ export function createVirtualNetwork({ transport } = {}) {
     }
   }
 
+  function unbindProcess(processOwner) {
+    if (!processOwner) return;
+    for (const [key, binding] of udpBindings) {
+      if (binding.processOwner !== processOwner) continue;
+      udpBindings.delete(key);
+      binding.owner?._networkClosed?.();
+    }
+  }
+
   function bindClusterTcp(groupId, address, requestedPort, options = {}) {
     const port = validatePort(requestedPort);
     const requested = { address, ...options };
@@ -294,6 +318,7 @@ export function createVirtualNetwork({ transport } = {}) {
     };
     binding.owner = makeClusterOwner(binding);
     pipeBindings.set(name, binding);
+    virtualPipePaths().add(name);
     return clusterBindingResult(binding);
   }
 
@@ -310,6 +335,7 @@ export function createVirtualNetwork({ transport } = {}) {
         binding.owner.removeServer(server);
         if (!binding.owner.hasServers()) {
           bindings.delete(key);
+          if (binding.path !== undefined) virtualPipePaths().delete(binding.path);
         }
       },
     };
@@ -326,12 +352,16 @@ export function createVirtualNetwork({ transport } = {}) {
     const existing = pipeBindings.get(name);
     if (existing && existing.owner !== owner) throw networkError('EADDRINUSE', 'listen', name);
     pipeBindings.set(name, { owner, path: name });
+    virtualPipePaths().add(name);
     return { path: name };
   }
 
   function unbindPipe(owner) {
     for (const [path, binding] of pipeBindings) {
-      if (binding.owner === owner) pipeBindings.delete(path);
+      if (binding.owner === owner) {
+        pipeBindings.delete(path);
+        virtualPipePaths().delete(path);
+      }
     }
   }
 
@@ -512,6 +542,7 @@ export function createVirtualNetwork({ transport } = {}) {
     unbindPipe,
     connectPipe,
     bindUdp: (owner, address, port, options) => bind(udpBindings, owner, address, port, 'udp', options),
+    unbindProcess,
     bindClusterUdp,
     getClusterUdpBinding: (groupId) => {
       const binding = [...udpBindings.values()].find((candidate) => candidate.clusterGroupId === groupId);
@@ -524,6 +555,7 @@ export function createVirtualNetwork({ transport } = {}) {
       tcpBindings.clear();
       udpBindings.clear();
       pipeBindings.clear();
+      virtualPipePaths().clear();
     },
     hasBindings() {
       return tcpBindings.size > 0 || udpBindings.size > 0 || pipeBindings.size > 0;

@@ -39,11 +39,14 @@ function relativePath(from, to, platform) {
 
 function resolvePath(parts, platform) {
   const separator = platform === 'win32' ? '\\' : '/';
-  const isAbsolute = (value) => platform === 'win32' ? /^[A-Za-z]:[\\/]/.test(String(value)) || /^\\\\/.test(String(value)) : String(value).startsWith('/');
+  const isAbsolute = (value) => {
+    validateString(value, 'path');
+    return platform === 'win32' ? /^[A-Za-z]:[\\/]/.test(value) || /^\\\\/.test(value) : value.startsWith('/');
+  };
   const resolved = [];
   let absolute = false;
   for (let index = parts.length - 1; index >= 0; index -= 1) {
-    const part = String(parts[index] ?? '');
+    const part = validateString(parts[index], `paths[${index}]`);
     if (!part) continue;
     resolved.unshift(part);
     if (isAbsolute(part)) {
@@ -65,11 +68,32 @@ function toNamespacedPath(value, platform) {
 }
 
 function invalidStringArgument(name, value) {
-  const received = value === null ? 'null' : value === undefined ? 'undefined' : typeof value === 'object'
-    ? `an instance of ${value?.constructor?.name || 'Object'}` : typeof value;
+  const received = value === null || value === undefined
+    ? `Received ${value}`
+    : typeof value === 'function'
+      ? `Received function ${value.name || ''}`.trimEnd()
+      : typeof value === 'object'
+        ? `Received an instance of ${value?.constructor?.name || 'Object'}`
+        : `Received type ${typeof value} (${typeof value === 'string' ? `'${value.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'` : String(value)})`;
   const error = new TypeError(`The "${name}" argument must be of type string. Received ${received}`);
   error.code = 'ERR_INVALID_ARG_TYPE';
   return error;
+}
+
+function validateString(value, name) {
+  if (typeof value !== 'string') throw invalidStringArgument(name, value);
+  return value;
+}
+
+function validateObject(value, name) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    const received = value === null ? 'null' : Array.isArray(value)
+      ? 'an instance of Array' : typeof value;
+    const error = new TypeError(`The "${name}" argument must be of type Object. Received ${received}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  return value;
 }
 
 function globPathInfo(value, platform) {
@@ -194,29 +218,41 @@ function createPath(platform) {
     toNamespacedPath: namespacedPath,
     _makeLong: namespacedPath,
     matchesGlob: globMatcher,
-    normalize: (value) => normalizePath(value, platform),
-    join: (...parts) => normalizePath(parts.filter((part) => part !== '').join(separator), platform),
+    normalize: (value) => normalizePath(validateString(value, 'path'), platform),
+    join: (...parts) => normalizePath(parts
+      .map((part) => validateString(part, 'path'))
+      .filter((part) => part !== '')
+      .join(separator), platform),
     resolve(...parts) { return resolvePath(parts, platform); },
     relative(from, to) {
+      validateString(from, 'from'); validateString(to, 'to');
       return relativePath(resolvePath([from], platform), resolvePath([to], platform), platform);
     },
     dirname(value) {
+      validateString(value, 'path');
       const normalized = normalizePath(value, platform); const index = normalized.lastIndexOf(separator);
       if (index < 0) return '.'; if (index === 0) return separator; return normalized.slice(0, index) || separator;
     },
     basename(value, suffix) {
+      if (suffix !== undefined) validateString(suffix, 'suffix');
+      validateString(value, 'path');
       const name = String(value).replaceAll('\\', separator).split(separator).at(-1) || '';
       return suffix && name.endsWith(suffix) ? name.slice(0, -suffix.length) : name;
     },
     extname(value) {
+      validateString(value, 'path');
       const name = String(value).replaceAll('\\', separator).split(separator).at(-1) || '';
       const index = name.lastIndexOf('.'); return index <= 0 ? '' : name.slice(index);
     },
     parse(value) {
+      validateString(value, 'path');
       const root = isAbsolute(value) ? separator : ''; const base = this.basename(value); const ext = this.extname(base);
       return { root, dir: this.dirname(value), base, ext, name: ext ? base.slice(0, -ext.length) : base };
     },
-    format(value) { return `${value.dir || value.root || ''}${value.dir || value.root ? separator : ''}${value.base || `${value.name || ''}${value.ext || ''}`}`; },
+    format(value) {
+      validateObject(value, 'pathObject');
+      return `${value.dir || value.root || ''}${value.dir || value.root ? separator : ''}${value.base || `${value.name || ''}${value.ext || ''}`}`;
+    },
   };
 }
 

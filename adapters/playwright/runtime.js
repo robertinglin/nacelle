@@ -4250,6 +4250,57 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
   const virtualProcessLiveness = new Map();
   const environmentData = new Map();
 
+  // The upstream ESM resolver is bundled as a Node internal module, but its
+  // native fs binding has no browser equivalent. Keep its legacy-main seam in
+  // the shared runtime so path values are resolved by the browser VFS.
+  const legacyMainResolve = (packageJsonUrl, packageConfig, base) => {
+    if (!packageJsonUrl || typeof packageJsonUrl.href !== 'string') {
+      const error = new Error('The packageJSONUrl argument must be a URL');
+      error.code = 'ERR_INTERNAL_ASSERTION';
+      throw error;
+    }
+    const packagePath = path.dirname(fileURLToPath(packageJsonUrl.href));
+    const extensions = ['', '.js', '.json', '.node', '/index.js', '/index.json', '/index.node'];
+    const packageFallbackExtensions = ['.js', '.json', '.node'];
+    const packageMain = packageConfig?.main;
+    const isFile = (value) => {
+      try {
+        const filePath = path.normalize(value);
+        return vfs.entries(path.dirname(filePath)).some((entry) => entry.name === path.basename(filePath) && entry._kind === 'file');
+      } catch { return false; }
+    };
+    if (typeof packageMain === 'string') {
+      const initialPath = path.resolve(packagePath, packageMain);
+      for (let index = 0; index < extensions.length; index += 1) {
+        if (isFile(initialPath + extensions[index])) return pathToFileURL(initialPath + extensions[index]);
+      }
+    }
+    const initialPath = path.resolve(packagePath, './index');
+    for (let index = 0; index < packageFallbackExtensions.length; index += 1) {
+      if (isFile(initialPath + packageFallbackExtensions[index])) return pathToFileURL(initialPath + packageFallbackExtensions[index]);
+    }
+    if (base === undefined) throw moduleArgumentTypeError('base', 'string or an instance of URL', base);
+    const baseHref = typeof base === 'string' ? base : base?.href;
+    let basePath;
+    try {
+      basePath = fileURLToPath(baseHref);
+    } catch (error) {
+      if (baseHref === undefined || baseHref === '') {
+        const invalidUrl = new TypeError(`Invalid URL: ${baseHref ?? base}`);
+        invalidUrl.code = 'ERR_INVALID_URL';
+        throw invalidUrl;
+      }
+      throw error;
+    }
+    const mainFile = typeof packageMain === 'string'
+      ? path.resolve(packagePath, packageMain)
+      : `${initialPath}.js`;
+    const notFound = new Error(`Cannot find package '${mainFile}' imported from ${basePath}`);
+    notFound.code = 'ERR_MODULE_NOT_FOUND';
+    throw notFound;
+  };
+  const internalEsmResolve = { legacyMainResolve };
+
   const trackVirtualProcess = (processHandle) => {
     const pid = Number(processHandle?.pid);
     if (!Number.isInteger(pid)) return processHandle;
@@ -5758,6 +5809,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       diagnostics: diagnosticsChannels,
     });
     const http2 = createHttp2Module(scope, {
+      net,
+      network: virtualNetwork,
       proxy: activeProxy,
       vfs,
       diagnostics: diagnosticsChannels,
@@ -7379,6 +7432,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               return { kChannelHandle };
             }
             const builtin = builtinName(name);
+            if (builtin === 'internal/modules/esm/resolve') return internalEsmResolve;
             if (builtin === 'trace_events' && processObj._bnhTraceEventsUnavailable) {
               throw traceEventsUnavailableError();
             }
@@ -9453,6 +9507,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       if (shimPath === '/node/lib/dgram.js') return builtins.dgram;
       if (shimPath === '/node/lib/cluster.js') return builtins.cluster;
       const name = builtinName(specifier);
+      if (name === 'internal/modules/esm/resolve') return internalEsmResolve;
       if (name === 'trace_events' && processObject._bnhTraceEventsUnavailable) {
         throw traceEventsUnavailableError();
       }

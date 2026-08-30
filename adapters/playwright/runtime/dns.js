@@ -1,4 +1,5 @@
 import { AsyncResource } from './async-hooks.js';
+import { sharedVirtualNetwork } from './virtual-network.js';
 
 const BUILTIN_RECORDS = Object.freeze({
   localhost: [{ address: '127.0.0.1', family: 4 }],
@@ -147,10 +148,18 @@ function invalidArgumentError(message, code, ErrorClass = TypeError) {
   return error;
 }
 
+function describeReceived(value) {
+  if (value === undefined || value === null) return String(value);
+  if (typeof value === 'object') return `an instance of ${value.constructor?.name || 'Object'}`;
+  if (typeof value === 'function') return `function ${value.name || ''}`.trim();
+  const inspected = typeof value === 'string' ? `'${value}'` : String(value);
+  return `type ${typeof value} (${inspected})`;
+}
+
 function validateLookupHostname(hostname) {
   if (typeof hostname !== 'string') {
     throw invalidArgumentError(
-      `The "hostname" argument must be of type string. Received type ${typeof hostname}`,
+      `The "hostname" argument must be of type string. Received ${describeReceived(hostname)}`,
       'ERR_INVALID_ARG_TYPE',
     );
   }
@@ -181,12 +190,17 @@ function validateLookupOptions(options) {
       throw invalidArgumentError(`The argument 'hints' is invalid. Received ${options.hints}`, 'ERR_INVALID_ARG_VALUE');
     }
   }
-  if (Object.hasOwn(options, 'family')
-    && (typeof options.family !== 'number' || !Number.isInteger(options.family) || ![0, 4, 6].includes(options.family))) {
-    throw invalidArgumentError(
-      `The property 'options.family' must be one of: 0, 4, 6. Received ${String(options.family)}`,
-      'ERR_INVALID_ARG_VALUE',
-    );
+  if (Object.hasOwn(options, 'family')) {
+    if (typeof options.family === 'string' && ['IPv4', 'IPv6'].includes(options.family)) {
+      // Node accepts these string aliases and normalizes them before lookup.
+    } else if (typeof options.family !== 'number') {
+      throw invalidArgumentError('The "family" option must be of type number', 'ERR_INVALID_ARG_TYPE');
+    } else if (!Number.isInteger(options.family) || ![0, 4, 6].includes(options.family)) {
+      throw invalidArgumentError(
+        `The property 'options.family' must be one of: 0, 4, 6. Received ${String(options.family)}`,
+        'ERR_INVALID_ARG_VALUE',
+      );
+    }
   }
   for (const name of ['all', 'verbatim']) {
     if (Object.hasOwn(options, name) && typeof options[name] !== 'boolean') {
@@ -200,12 +214,12 @@ function validateLookupOptions(options) {
 }
 
 function validateLookupServicePort(port) {
-  let value;
-  try { value = Number(port); } catch { value = Number.NaN; }
-  if (!Number.isInteger(value) || value < 0 || value > 65535) {
-    throw invalidArgumentError(`Port should be between 0 and 65535. Received ${String(port)}.`, 'ERR_SOCKET_BAD_PORT', RangeError);
+  if (typeof port !== 'number' || !Number.isInteger(port) || port < 0 || port > 65535) {
+    const error = new RangeError('Port should be between 0 and 65535.');
+    error.code = 'ERR_SOCKET_BAD_PORT';
+    throw error;
   }
-  return value;
+  return port;
 }
 
 function normalizeRecord(record) {
@@ -355,7 +369,7 @@ function normalizeLookupOptions(options) {
   if (typeof options === 'number') return { family: options, all: false };
   if (!options || typeof options !== 'object') return { family: 0, all: false };
   return {
-    family: Number(options.family || 0),
+    family: options.family === 'IPv4' ? 4 : options.family === 'IPv6' ? 6 : Number(options.family || 0),
     all: Boolean(options.all),
     verbatim: Boolean(options.verbatim),
     order: options.order,
@@ -437,12 +451,149 @@ function promiseFor(work, synchronous) {
 }
 
 /** Create deterministic browser DNS with optional in-memory records. */
-export function createBrowserDns({ synchronous = false, records = {}, proxy, lookupHook } = {}) {
+export function createBrowserDns({ synchronous = false, records = {}, proxy, lookupHook, network = sharedVirtualNetwork } = {}) {
   const customRecords = normalizeRecords(records);
   const customQueryRecords = normalizeQueryRecords(records);
   let servers = ['127.0.0.1'];
   let resultOrder = 'verbatim';
   let defaultResolverHandle;
+  let nextQueryId = 1;
+
+  const queryTypes = Object.freeze({ A: 1, NS: 2, CNAME: 5, SOA: 6, PTR: 12, MX: 15, TXT: 16, AAAA: 28, ANY: 255 });
+
+  function writeDnsName(name) {
+    const labels = String(name).split('.');
+    const result = [];
+    for (const label of labels) {
+      result.push(label.length, ...new TextEncoder().encode(label));
+    }
+    result.push(0);
+    return result;
+  }
+
+  function readDnsName(bytes, start) {
+    const labels = [];
+    let offset = start;
+    let next = start;
+    let jumped = false;
+    while (offset < bytes.length) {
+      const length = bytes[offset++];
+      if (length === 0) {
+        if (!jumped) next = offset;
+        break;
+      }
+      if ((length & 0xc0) === 0xc0) {
+        const pointer = ((length & 0x3f) << 8) | bytes[offset++];
+        if (!jumped) next = offset;
+        offset = pointer;
+        jumped = true;
+        continue;
+      }
+      labels.push(new TextDecoder().decode(bytes.slice(offset, offset + length)));
+      offset += length;
+    }
+    return { name: labels.join('.'), next };
+  }
+
+  function readU16(bytes, offset) { return (bytes[offset] << 8) | bytes[offset + 1]; }
+  function readU32(bytes, offset) {
+    return (bytes[offset] * 0x1000000) + (bytes[offset + 1] << 16) + (bytes[offset + 2] << 8) + bytes[offset + 3];
+  }
+
+  function formatIpv6(bytes, offset) {
+    const groups = [];
+    for (let index = 0; index < 8; index += 1) groups.push(readU16(bytes, offset + index * 2).toString(16));
+    let bestStart = -1;
+    let bestLength = 0;
+    for (let index = 0; index < groups.length;) {
+      if (groups[index] !== '0') { index += 1; continue; }
+      const start = index;
+      while (index < groups.length && groups[index] === '0') index += 1;
+      if (index - start > bestLength) { bestStart = start; bestLength = index - start; }
+    }
+    if (bestLength < 2) return groups.join(':');
+    return `${groups.slice(0, bestStart).join(':')}::${groups.slice(bestStart + bestLength).join(':')}`;
+  }
+
+  function parseDnsResponse(bytes, type) {
+    const count = readU16(bytes, 4);
+    const answers = readU16(bytes, 6);
+    let offset = 12;
+    for (let index = 0; index < count; index += 1) {
+      offset = readDnsName(bytes, offset).next + 4;
+    }
+    const records = [];
+    for (let index = 0; index < answers; index += 1) {
+      const domain = readDnsName(bytes, offset);
+      offset = domain.next;
+      const answerType = readU16(bytes, offset);
+      const dataLength = readU16(bytes, offset + 8);
+      const ttl = readU32(bytes, offset + 4);
+      const dataOffset = offset + 10;
+      offset = dataOffset + dataLength;
+      const record = { type: Object.keys(queryTypes).find((key) => queryTypes[key] === answerType), ttl };
+      if (answerType === queryTypes.A && dataLength === 4) {
+        record.address = `${bytes[dataOffset]}.${bytes[dataOffset + 1]}.${bytes[dataOffset + 2]}.${bytes[dataOffset + 3]}`;
+      } else if (answerType === queryTypes.AAAA && dataLength === 16) {
+        record.address = formatIpv6(bytes, dataOffset);
+      } else if ([queryTypes.NS, queryTypes.CNAME, queryTypes.PTR].includes(answerType)) {
+        record.value = readDnsName(bytes, dataOffset).name;
+      } else if (answerType === queryTypes.MX) {
+        record.priority = readU16(bytes, dataOffset);
+        record.exchange = readDnsName(bytes, dataOffset + 2).name;
+      } else if (answerType === queryTypes.SOA) {
+        const nsname = readDnsName(bytes, dataOffset);
+        const hostmaster = readDnsName(bytes, dataOffset + nsname.next - dataOffset);
+        const trailer = hostmaster.next;
+        record.nsname = nsname.name;
+        record.hostmaster = hostmaster.name;
+        record.serial = readU32(bytes, trailer);
+        record.refresh = readU32(bytes, trailer + 4);
+        record.retry = readU32(bytes, trailer + 8);
+        record.expire = readU32(bytes, trailer + 12);
+        record.minttl = readU32(bytes, trailer + 16);
+      }
+      records.push(record);
+    }
+    return type === 'ANY' ? records : records.filter((record) => record.type === type);
+  }
+
+  function queryDnsServer(hostname, type, callback) {
+    const server = servers[0];
+    if (!network || typeof server !== 'string' || !queryTypes[type]) return false;
+    const match = /^(\[[^\]]+\]|[^:]+)(?::(\d+))?$/.exec(server);
+    if (!match) return false;
+    const address = match[1].replace(/^\[|\]$/g, '');
+    const port = Number(match[2] || 53);
+    const client = {
+      boundAddress: address.includes(':') ? '::1' : '127.0.0.1',
+      boundPort: 0,
+      _closed: false,
+      _receiveDatagram(bytes) {
+        if (this._closed) return;
+        this._closed = true;
+        network.unbindUdp(client);
+        try { callback(null, parseDnsResponse(new Uint8Array(bytes), type)); }
+        catch (error) { callback(error); }
+      },
+    };
+    let binding;
+    try {
+      binding = network.bindUdp(client, client.boundAddress, 0, {});
+      client.boundPort = binding.port;
+      const id = nextQueryId++ & 0xffff;
+      const packet = new Uint8Array([
+        id >> 8, id & 0xff, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+        ...writeDnsName(hostname), queryTypes[type] >> 8, queryTypes[type] & 0xff, 0, 1,
+      ]);
+      network.sendUdp({ source: client, address, port, bytes: packet });
+    } catch (error) {
+      client._closed = true;
+      if (binding) network.unbindUdp(client);
+      callback(error);
+    }
+    return true;
+  }
 
   function receivedArgument(value) {
     if (value === undefined || value === null) return String(value);
@@ -560,7 +711,9 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     const lookupOptions = normalizeLookupOptions(actualOptions);
     if (hostname && hostname !== false) validateLookupHostname(hostname);
     const actualCallback = typeof options === 'function' ? options : callback;
-    if (typeof actualCallback !== 'function') throw new TypeError('callback must be a function');
+    if (typeof actualCallback !== 'function') {
+      throw invalidArgumentError('The "callback" argument must be of type function', 'ERR_INVALID_ARG_TYPE');
+    }
     lookupHook?.(hostname, lookupOptions);
     const request = caresRequest('GETADDRINFOREQWRAP');
     let destroyed = false;
@@ -657,21 +810,37 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     return request;
   }
 
-  function resolveFamily(hostname, family, callback) {
+  function resolveFamily(hostname, family, options, callback) {
+    if (typeof options === 'function') {
+      callback = options;
+      options = undefined;
+    }
     if (typeof callback !== 'function') throw new TypeError('callback must be a function');
+    const includeTtl = Boolean(options?.ttl);
     const request = caresRequest('QUERYWRAP');
     const completeCallback = (...args) => {
       try { request.runInAsyncScope(callback, undefined, ...args); }
       finally { queueMicrotask(() => request.emitDestroy()); }
     };
+    if (queryDnsServer(hostname, family === 4 ? 'A' : 'AAAA', (error, records) => {
+      if (error) completeCallback(error);
+      else completeCallback(null, records.map((record) => includeTtl
+        ? { address: record.address, ttl: record.ttl }
+        : record.address));
+    })) return request;
     if (proxyIsActive(proxy) && !hasLocalRecord(customRecords, String(hostname))) {
       Promise.resolve(proxy.resolve({ hostname: String(hostname), family, all: true }))
-        .then((result) => completeCallback(null, normalizeProxyRecords(result, hostname, family).map((record) => record.address)))
+        .then((result) => completeCallback(null, normalizeProxyRecords(result, hostname, family).map((record) => includeTtl
+          ? { address: record.address, ttl: record.ttl ?? 0 }
+          : record.address)))
         .catch((error) => completeCallback(error));
       return request;
     }
     const complete = () => {
-      try { completeCallback(null, [lookupAddress(hostname, family).address]); }
+      try {
+        const record = lookupAddress(hostname, family);
+        completeCallback(null, [includeTtl ? { address: record.address, ttl: record.ttl ?? 0 } : record.address]);
+      }
       catch (error) { completeCallback(error); }
     };
     if (synchronous) complete();
@@ -723,7 +892,7 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
               ? `an instance of ${rrtype.constructor?.name || 'Object'}`
               : `type ${typeof rrtype}`;
       throw invalidArgumentError(
-        `The "rrtype" argument must be of type string. Received ${received}`,
+        `The "rrtype" argument must be of type string. Received ${describeReceived(rrtype)}`,
         'ERR_INVALID_ARG_TYPE',
       );
     }
@@ -747,6 +916,11 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
       ANY: 'queryAny',
       TXT: 'queryTxt',
     }[type];
+    if (queryDnsServer(hostname, type, (error, records) => {
+      if (error) completeCallback(error);
+      else if (type === 'ANY') completeCallback(null, records);
+      else completeCallback(null, records.map((record) => record.address));
+    })) return request;
     const channel = queryChannel(resolverHandle);
     if (queryName && typeof channel?.[queryName] === 'function') {
       let caresResult;
@@ -802,7 +976,7 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
   function validateResolverName(hostname) {
     if (typeof hostname !== 'string') {
       throw invalidArgumentError(
-        `The "name" argument must be of type string. Received type ${typeof hostname}`,
+        `The "name" argument must be of type string. Received ${describeReceived(hostname)}`,
         'ERR_INVALID_ARG_TYPE',
       );
     }
@@ -871,6 +1045,10 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
         completeCallback(queryError(type, hostname));
       }
     };
+    if (queryDnsServer(hostname, type, (error, records) => {
+      if (error) completeCallback(error);
+      else completeCallback(null, type === 'SOA' ? normalizeQueryResult(type, records[0]) : records.map((record) => normalizeQueryResult(type, record)));
+    })) return request;
     const channel = queryChannel(resolverHandle);
     const query = channel?.[metadata.binding];
     if (typeof query === 'function') {
@@ -922,7 +1100,14 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
   }
   function resolvePtr(hostname, callback, resolverHandle) { return queryRecords(hostname, 'PTR', callback, resolverHandle); }
   function resolveNaptr(hostname, callback, resolverHandle) { return queryRecords(hostname, 'NAPTR', callback, resolverHandle); }
-  function resolveSoa(hostname, callback, resolverHandle) { return queryRecords(hostname, 'SOA', callback, resolverHandle); }
+  function resolveSoa(hostname, options, callback, resolverHandle) {
+    if (typeof options === 'function') {
+      resolverHandle = resolverHandle ?? callback;
+      callback = options;
+      options = undefined;
+    }
+    return queryRecords(hostname, 'SOA', callback, resolverHandle, options);
+  }
 
   function queryPromise(hostname, type, resolverHandle, options) {
     validateResolverName(hostname);
@@ -988,17 +1173,11 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
         else resolve(lookupOptions.all ? address : { address, family });
       }));
     },
-    resolve4(hostname) {
-      if (proxyIsActive(proxy) && !hasLocalRecord(customRecords, String(hostname))) {
-        return new Promise((resolve, reject) => resolveFamily(hostname, 4, (error, values) => error ? reject(error) : resolve(values)));
-      }
-      return promiseFor(() => [lookupAddress(hostname, 4).address], synchronous);
+    resolve4(hostname, options) {
+      return new Promise((resolve, reject) => resolveFamily(hostname, 4, options, (error, values) => error ? reject(error) : resolve(values)));
     },
-    resolve6(hostname) {
-      if (proxyIsActive(proxy) && !hasLocalRecord(customRecords, String(hostname))) {
-        return new Promise((resolve, reject) => resolveFamily(hostname, 6, (error, values) => error ? reject(error) : resolve(values)));
-      }
-      return promiseFor(() => [lookupAddress(hostname, 6).address], synchronous);
+    resolve6(hostname, options) {
+      return new Promise((resolve, reject) => resolveFamily(hostname, 6, options, (error, values) => error ? reject(error) : resolve(values)));
     },
     reverse(address) {
       if (proxyIsActive(proxy) && !hasLocalRecord(customRecords, String(address))) {
@@ -1010,7 +1189,7 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
       const type = rrtype;
       if (typeof type !== 'string') {
         throw invalidArgumentError(
-          `The "rrtype" argument must be of type string. Received type ${typeof type}`,
+          `The "rrtype" argument must be of type string. Received ${describeReceived(type)}`,
           'ERR_INVALID_ARG_TYPE',
         );
       }
@@ -1021,8 +1200,12 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
       if (RESOLVER_TYPES[type]) return queryPromise(hostname, type);
       return new Promise((resolveValue, reject) => resolve(hostname, type, (error, value) => error ? reject(error) : resolveValue(value)));
     },
-    resolve4(hostname) { return promiseFor(() => [lookupAddress(hostname, 4).address], synchronous); },
-    resolve6(hostname) { return promiseFor(() => [lookupAddress(hostname, 6).address], synchronous); },
+    resolve4(hostname, options) {
+      return new Promise((resolve, reject) => resolveFamily(hostname, 4, options, (error, values) => error ? reject(error) : resolve(values)));
+    },
+    resolve6(hostname, options) {
+      return new Promise((resolve, reject) => resolveFamily(hostname, 6, options, (error, values) => error ? reject(error) : resolve(values)));
+    },
     resolveAny(hostname) { return new Promise((resolveValue, reject) => resolveAny(hostname, (error, value) => error ? reject(error) : resolveValue(value))); },
     resolveTxt(hostname) { return new Promise((resolveValue, reject) => resolveTxt(hostname, (error, value) => error ? reject(error) : resolveValue(value))); },
     resolveCaa(hostname, options) { return queryPromise(hostname, 'CAA', undefined, options); },
@@ -1035,6 +1218,9 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     resolveNaptr(hostname) { return queryPromise(hostname, 'NAPTR'); },
     resolveSoa(hostname) { return queryPromise(hostname, 'SOA'); },
     lookupService(address, port) {
+      if (arguments.length < 2) {
+        throw invalidArgumentError('The "address" and "port" arguments must be specified', 'ERR_MISSING_ARGS');
+      }
       const host = String(address);
       if (addressFamily(host) === 0) {
         throw invalidArgumentError(`The argument 'address' is invalid. Received '${host}'`, 'ERR_INVALID_ARG_VALUE');
@@ -1094,8 +1280,8 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     cancel() { this._handle.cancel?.(); }
     lookup(...args) { return lookup(...args); }
     resolve(hostname, rrtype, callback) { return resolve(hostname, rrtype, callback, this._handle); }
-    resolve4(...args) { return resolveFamily(args[0], 4, args[1]); }
-    resolve6(...args) { return resolveFamily(args[0], 6, args[1]); }
+    resolve4(...args) { return resolveFamily(args[0], 4, args[1], args[2]); }
+    resolve6(...args) { return resolveFamily(args[0], 6, args[1], args[2]); }
     resolveAny(...args) { return resolveAny(...args); }
     resolveTxt(...args) { return resolveTxt(...args); }
     resolveCaa(hostname, callback) {
@@ -1122,7 +1308,9 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     }
     resolvePtr(...args) { return resolvePtr(...args, this._handle); }
     resolveNaptr(...args) { return resolveNaptr(...args, this._handle); }
-    resolveSoa(...args) { return resolveSoa(...args, this._handle); }
+    resolveSoa(hostname, options, callback) {
+      return resolveSoa(hostname, options, callback, this._handle);
+    }
     reverse(...args) { return reverse(...args); }
     lookupService(...args) { return lookupService(...args); }
   }
@@ -1133,7 +1321,7 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
       const type = rrtype === undefined ? 'A' : rrtype;
       if (typeof type !== 'string') {
         throw invalidArgumentError(
-          `The "rrtype" argument must be of type string. Received type ${typeof type}`,
+          `The "rrtype" argument must be of type string. Received ${describeReceived(type)}`,
           'ERR_INVALID_ARG_TYPE',
         );
       }
@@ -1144,8 +1332,8 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
       if (RESOLVER_TYPES[type]) return queryPromise(hostname, type, this._handle);
       return new Promise((resolveValue, reject) => resolve(hostname, type, (error, value) => error ? reject(error) : resolveValue(value), this._handle));
     }
-    resolve4(hostname) { return promises.resolve4(hostname); }
-    resolve6(hostname) { return promises.resolve6(hostname); }
+    resolve4(hostname, options) { return promises.resolve4(hostname, options); }
+    resolve6(hostname, options) { return promises.resolve6(hostname, options); }
     resolveAny(hostname) { return promises.resolveAny(hostname); }
     resolveTxt(hostname) { return promises.resolveTxt(hostname); }
     resolveCaa(hostname, options) { return queryPromise(hostname, 'CAA', this._handle, options); }
@@ -1165,8 +1353,8 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
   return {
     lookup,
     lookupService,
-    resolve4: (hostname, callback) => resolveFamily(hostname, 4, callback),
-    resolve6: (hostname, callback) => resolveFamily(hostname, 6, callback),
+    resolve4: (hostname, options, callback) => resolveFamily(hostname, 4, options, callback),
+    resolve6: (hostname, options, callback) => resolveFamily(hostname, 6, options, callback),
     reverse,
     resolve,
     resolveAny,

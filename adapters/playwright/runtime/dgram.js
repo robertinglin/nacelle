@@ -28,7 +28,17 @@ const UV_EADDRINUSE = -98;
 let nextVirtualDescriptor = 1000;
 
 function invalidArgumentType(name, expected, value) {
-  const received = value === null ? 'null' : value === undefined ? 'undefined' : `type ${typeof value}`;
+  let received;
+  if (value === null || value === undefined) {
+    received = String(value);
+  } else if (typeof value === 'object') {
+    received = `an instance of ${value.constructor?.name || 'Object'}`;
+  } else if (typeof value === 'function') {
+    received = `function ${value.name || ''}`.trim();
+  } else {
+    const inspected = typeof value === 'string' ? `'${value}'` : String(value);
+    received = `type ${typeof value} (${inspected})`;
+  }
   const error = new TypeError(`The "${name}" argument must be of type ${expected}. Received ${received}`);
   error.code = 'ERR_INVALID_ARG_TYPE';
   return error;
@@ -45,16 +55,24 @@ function missingArgument(name) {
 }
 
 function bufferOutOfBounds(name) {
-  const error = new RangeError(`The ${name} is outside the bounds of the buffer`);
+  const error = new RangeError(`"${name}" is outside of buffer bounds`);
   error.code = 'ERR_BUFFER_OUT_OF_BOUNDS';
   return error;
 }
+
+const DGRAM_BUFFER_EXPECTED = 'string or an instance of Buffer, TypedArray, or DataView';
 
 function asBytes(value, offset = 0, length = undefined) {
   let bytes;
   if (typeof value === 'string') bytes = new TextEncoder().encode(value);
   else if (Array.isArray(value)) {
-    const parts = value.map((part) => asBytes(part));
+    const parts = [];
+    for (const part of value) {
+      if (typeof part !== 'string' && !ArrayBuffer.isView(part)) {
+        throw invalidArgumentType('buffer list arguments', DGRAM_BUFFER_EXPECTED, value);
+      }
+      parts.push(asBytes(part));
+    }
     bytes = new Uint8Array(parts.reduce((total, part) => total + part.byteLength, 0));
     let cursor = 0;
     for (const part of parts) {
@@ -63,7 +81,7 @@ function asBytes(value, offset = 0, length = undefined) {
     }
   }
   else if (ArrayBuffer.isView(value)) bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  else throw invalidArgumentType('buffer', 'Buffer, TypedArray, DataView, or string', value);
+  else throw invalidArgumentType('buffer', DGRAM_BUFFER_EXPECTED, value);
   if (!Number.isInteger(offset) || offset < 0) throw bufferOutOfBounds('offset');
   if (offset > bytes.byteLength) throw bufferOutOfBounds('offset');
   if (length === undefined) length = bytes.byteLength - offset;
@@ -72,9 +90,11 @@ function asBytes(value, offset = 0, length = undefined) {
   return bytes.slice(offset, offset + length);
 }
 
-function validatePort(port) {
+function validatePort(port, allowZero = true) {
   const value = Number(port);
-  if (!Number.isInteger(value) || value < 0 || value > 65535) throw new RangeError(`port must be an integer between 0 and 65535: ${port}`);
+  if (!Number.isInteger(value) || value < (allowZero ? 0 : 1) || value > 65535) {
+    throw new RangeError(`port must be an integer between ${allowZero ? 0 : 1} and 65535: ${port}`);
+  }
   return value;
 }
 
@@ -932,7 +952,7 @@ export class Socket extends EventEmitter {
     if (port === undefined) {
       throw socketError('ERR_SOCKET_BAD_PORT', 'Port should be specified');
     }
-    port = validatePort(port);
+    port = validatePort(port, false);
     const sendState = {
       bytes: bytes.byteLength,
       resource: null,

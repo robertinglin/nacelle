@@ -3913,7 +3913,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
   let runSpec = null;
   let virtualNetwork = getSharedVirtualNetwork(scope);
   let esmExecutionTail = Promise.resolve();
-  let dnsModule = createBrowserDns();
+  let dnsModule = createBrowserDns({ network: virtualNetwork });
   let proxyCapability = createProxyCapability();
   const virtualProcessLiveness = new Map();
   const environmentData = new Map();
@@ -4966,7 +4966,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         if (typeof callback !== 'function') return Reflect.apply(dnsModule.lookupService, this, args);
         const startTime = performanceNow();
         const host = args[0];
-        const port = Number(args[1]);
+        const port = args[1];
         const wrappedArgs = [...args];
         wrappedArgs[wrappedArgs.length - 1] = (error, hostname, service) => {
           if (!error) recordDnsEntry('lookupService', startTime, {
@@ -5002,7 +5002,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         lookupService(...args) {
           const startTime = performanceNow();
           const host = args[0];
-          const port = Number(args[1]);
+          const port = args[1];
           return Reflect.apply(dnsModule.promises.lookupService, this, args).then((result) => {
             recordDnsEntry('lookupService', startTime, {
               host: String(host),
@@ -5040,8 +5040,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         }
         return Reflect.apply(dnsModule.resolve, this, [hostname, rrtype, onComplete]);
       },
-      resolveAny(hostname, callback) {
-        if (typeof callback !== 'function') return Reflect.apply(dnsModule.resolveAny, this, [hostname, callback]);
+      resolveAny(hostname, options, callback) {
+        const actualCallback = typeof options === 'function' ? options : callback;
+        if (typeof actualCallback !== 'function') return Reflect.apply(dnsModule.resolveAny, this, [hostname, actualCallback]);
         const startTime = performanceNow();
         return Reflect.apply(dnsModule.resolveAny, this, [hostname, (error, result) => {
           if (!error) recordDnsEntry('queryAny', startTime, {
@@ -5049,7 +5050,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             ttl: false,
             result: Array.isArray(result) ? result : [],
           });
-          return callback(error, result);
+          return actualCallback(error, result);
         }]);
       },
     };
@@ -9294,7 +9295,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       if (proxyTransport) virtualNetwork = createVirtualNetwork({ transport: proxyTransport });
       else if (preserveSharedNetwork) virtualNetwork = inheritedNetwork || getSharedVirtualNetwork(scope);
       else virtualNetwork = replaceSharedVirtualNetwork(scope);
-      dnsModule = createBrowserDns({ proxy: proxyCapability });
+      dnsModule = createBrowserDns({ proxy: proxyCapability, network: virtualNetwork });
       scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ = 0;
       vfs = capabilities.vfs;
       mounted = false;

@@ -182,7 +182,7 @@ function validateLookupOptions(options) {
   if (typeof options !== 'object') {
     throw invalidArgumentError('The "options" argument must be an object', 'ERR_INVALID_ARG_TYPE');
   }
-  if (Object.hasOwn(options, 'hints')) {
+  if (options.hints != null) {
     if (typeof options.hints !== 'number') {
       throw invalidArgumentError('The "hints" option must be a number', 'ERR_INVALID_ARG_TYPE');
     }
@@ -190,12 +190,10 @@ function validateLookupOptions(options) {
       throw invalidArgumentError(`The argument 'hints' is invalid. Received ${options.hints}`, 'ERR_INVALID_ARG_VALUE');
     }
   }
-  if (Object.hasOwn(options, 'family')) {
+  if (options.family != null) {
     if (typeof options.family === 'string' && ['IPv4', 'IPv6'].includes(options.family)) {
       // Node accepts these string aliases and normalizes them before lookup.
-    } else if (typeof options.family !== 'number') {
-      throw invalidArgumentError('The "family" option must be of type number', 'ERR_INVALID_ARG_TYPE');
-    } else if (!Number.isInteger(options.family) || ![0, 4, 6].includes(options.family)) {
+    } else if (![0, 4, 6].includes(options.family)) {
       throw invalidArgumentError(
         `The property 'options.family' must be one of: 0, 4, 6. Received ${String(options.family)}`,
         'ERR_INVALID_ARG_VALUE',
@@ -203,12 +201,11 @@ function validateLookupOptions(options) {
     }
   }
   for (const name of ['all', 'verbatim']) {
-    if (Object.hasOwn(options, name) && typeof options[name] !== 'boolean') {
+    if (options[name] != null && typeof options[name] !== 'boolean') {
       throw invalidArgumentError(`The "${name}" option must be a boolean`, 'ERR_INVALID_ARG_TYPE');
     }
   }
-  if (Object.hasOwn(options, 'order') && options.order !== undefined
-    && !['verbatim', 'ipv4first', 'ipv6first'].includes(options.order)) {
+  if (options.order != null && !['verbatim', 'ipv4first', 'ipv6first'].includes(options.order)) {
     throw invalidArgumentError(`The "order" option is invalid: ${String(options.order)}`, 'ERR_INVALID_ARG_VALUE');
   }
 }
@@ -464,6 +461,18 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
   let resultOrder = 'verbatim';
   let defaultResolverHandle;
   let nextQueryId = 1;
+  let invalidHostnameWarningEmitted = false;
+
+  function emitInvalidHostnameWarning(hostname) {
+    if (invalidHostnameWarningEmitted) return;
+    invalidHostnameWarningEmitted = true;
+    globalThis.process?.emitWarning?.(
+      `The provided hostname "${hostname}" is not a valid `
+      + 'hostname, and is supported in the dns module solely for compatibility.',
+      'DeprecationWarning',
+      'DEP0118',
+    );
+  }
 
   const queryTypes = Object.freeze({ A: 1, NS: 2, CNAME: 5, SOA: 6, PTR: 12, MX: 15, TXT: 16, AAAA: 28, ANY: 255, CAA: 257 });
 
@@ -789,6 +798,7 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     if (typeof actualCallback !== 'function') {
       throw invalidArgumentError('The "callback" argument must be of type function', 'ERR_INVALID_ARG_TYPE');
     }
+    if (!hostname) emitInvalidHostnameWarning(hostname);
     lookupHook?.(hostname, lookupOptions);
     const request = caresRequest('GETADDRINFOREQWRAP');
     let destroyed = false;
@@ -1242,7 +1252,10 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
     lookup(hostname, options) {
       validateLookupOptions(options);
       const lookupOptions = normalizeLookupOptions(options);
-      if (hostname === false && lookupOptions.all) return promiseFor(() => [], synchronous);
+      if (hostname === false && lookupOptions.all) {
+        emitInvalidHostnameWarning(hostname);
+        return promiseFor(() => [], synchronous);
+      }
       if (hostname && hostname !== false) validateLookupHostname(hostname);
       return new Promise((resolve, reject) => lookup(hostname, lookupOptions, (error, address, family) => {
         if (error) reject(error);

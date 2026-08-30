@@ -5814,12 +5814,23 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     const inspector = createInspectorModule({ processObject, isWorker: Boolean(runtimeOptions.workerThread), scope });
     const inspectorPromises = createInspectorPromisesModule(inspector);
     const internalTestBindingBase = createInternalTestBinding(processObject);
+    const internalTestBindingWarningProcesses = new WeakSet();
+    const emitInternalTestBindingWarning = (targetProcess = processObject) => {
+      if (!targetProcess || internalTestBindingWarningProcesses.has(targetProcess)) return;
+      internalTestBindingWarningProcesses.add(targetProcess);
+      targetProcess.nextTick?.(() => {
+        const warning = new Error('These APIs are for internal testing only. Do not use them.');
+        warning.name = 'internal/test/binding';
+        targetProcess.emit?.('warning', warning);
+      });
+    };
     const internalTestBinding = {
       // Keep internal/test/binding and the public internalBinding hook on the
       // same contract so stateful bindings (notably stream_wrap) are shared.
       __bnhContract: internalBindingContract,
       primordials: createPrimordials(scope),
       internalBinding(name) {
+        emitInternalTestBindingWarning(processObject);
         try { return internalBindingContract.internalBinding(name); }
         catch { return internalTestBindingBase.internalBinding(name); }
       },
@@ -7401,7 +7412,10 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               }
               if (builtin === 'module') return createModuleApi(processObj, (value) => stderrArr.push(value));
               if (builtin === 'process') return processObj;
-              if (builtin === 'internal/test/binding') return internalTestBinding;
+              if (builtin === 'internal/test/binding') {
+                emitInternalTestBindingWarning(processObj);
+                return internalTestBinding;
+              }
               if (builtin === 'dns') return dns;
               if (builtin === 'dns/promises') return dnsPromises;
               if (builtin === 'v8') return createBrowserV8Module(processObj, scopeObj);
@@ -9455,6 +9469,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         return loadModule(resolved, importer, true);
       }
       if (BUILTIN_NAMES.includes(name)) {
+        if (name === 'internal/test/binding') emitInternalTestBindingWarning();
         if (name === 'dns') scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ = Math.max(1, Number(scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ || 0));
         const context = moduleHookContext(importer);
         const resolved = runModuleHook('resolve', specifier, context, (currentSpecifier) => ({

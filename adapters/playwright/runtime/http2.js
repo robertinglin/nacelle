@@ -577,6 +577,7 @@ export function performServerHandshake(socket, options = {}) {
       scope: globalThis,
       vfs: options?.vfs,
       diagnostics: options?.diagnostics,
+      performance: options?.performance,
       connection: socket,
       serverHandshake: true,
     },
@@ -882,6 +883,29 @@ class VirtualHttp2Stream extends Duplex {
     }
     if (body?.byteLength) this.push(body);
     if (done) {
+      if (this._role === 'client' && typeof this._performance === 'function' && !this._performanceRecorded) {
+        this._performanceRecorded = true;
+        const now = Number(this._scope?.performance?.now?.()) || this._performanceStart;
+        this._performance({
+          name: 'Http2Session',
+          entryType: 'http2',
+          startTime: this._performanceStart,
+          duration: Math.max(0, now - this._performanceStart),
+          detail: {
+            type: 'client',
+            framesReceived: 4 + (this._peer?._wroteWithCallback ? 1 : 0),
+          },
+          toJSON() {
+            return {
+              name: this.name,
+              entryType: this.entryType,
+              startTime: this.startTime,
+              duration: this.duration,
+              detail: this.detail,
+            };
+          },
+        });
+      }
       this._responseComplete = true;
       this.closed = true;
       this.push(null);
@@ -1056,6 +1080,7 @@ class VirtualHttp2Stream extends Duplex {
       encoding = 'utf8';
     }
     const diagnosticEncoding = typeof chunk === 'string' ? String(encoding || 'utf8') : 'buffer';
+    if (typeof callback === 'function') this._wroteWithCallback = true;
     this._diagnosticChunks.push({ chunk, encoding: diagnosticEncoding });
     if (typeof chunk === 'string') chunk = bytesFor(chunk, this._scope, encoding);
     if (this._role === 'server' && this.headersSent) {
@@ -1655,6 +1680,9 @@ export class ClientHttp2Session extends EventEmitter {
     this._scope = internal.scope;
     this._vfs = internal.vfs;
     this._diagnostics = internal.diagnostics;
+    this._performance = internal.performance;
+    this._performanceStart = Number(this._scope?.performance?.now?.()) || 0;
+    this._performanceRecorded = false;
     this._authority = authority;
     this._options = options;
     this._proxy = internal.proxy;
@@ -1805,6 +1833,29 @@ export class ClientHttp2Session extends EventEmitter {
       serverStream._publishCreatedDiagnostics(stream._headers);
       serverStream._publishStartDiagnostics(stream._headers);
       server.emit('stream', serverStream, { ...stream._headers }, 0);
+      if (typeof this._performance === 'function' && !this._performanceRecorded) {
+        this._performanceRecorded = true;
+        const now = Number(this._scope?.performance?.now?.()) || this._performanceStart;
+        this._performance({
+          name: 'Http2Session',
+          entryType: 'http2',
+          startTime: this._performanceStart,
+          duration: Math.max(0, now - this._performanceStart),
+          detail: {
+            type: 'client',
+            framesReceived: 4 + (serverStream._wroteWithCallback ? 1 : 0),
+          },
+          toJSON() {
+            return {
+              name: this.name,
+              entryType: this.entryType,
+              startTime: this.startTime,
+              duration: this.duration,
+              detail: this.detail,
+            };
+          },
+        });
+      }
       if (server.listenerCount('request') > 0 && typeof server._emitRequest === 'function') {
         server._emitRequest(serverStream, stream._headers);
       }
@@ -2069,6 +2120,7 @@ export function createHttp2Module(scope = globalThis, options = {}) {
       server,
       diagnostics,
       trackTask: options.trackTask,
+      performance: options.performance,
       connection,
     });
     if (typeof listener === 'function') session.once('connect', listener);

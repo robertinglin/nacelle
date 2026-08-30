@@ -51,6 +51,28 @@ function unsupportedFunction(capability, reason = HOST_ONLY_REASON) {
   };
 }
 
+function invalidArgType(message) {
+  const error = new TypeError(message);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function missingArgument(name) {
+  const error = new TypeError(`The "${name}" argument must be specified`);
+  error.code = 'ERR_MISSING_ARGS';
+  return error;
+}
+
+function receivedArgument(value) {
+  if (value === null) return ' Received null';
+  if (value === undefined) return ' Received undefined';
+  if (typeof value === 'string') return ` Received type string ('${value}')`;
+  if (typeof value === 'number') return ` Received type number (${value})`;
+  if (typeof value === 'boolean') return ` Received type boolean (${value})`;
+  if (Array.isArray(value)) return ' Received an instance of Array';
+  return ` Received an instance of ${value?.constructor?.name || 'Object'}`;
+}
+
 function defineUnsupportedProperty(target, property, capability, reason = HOST_ONLY_REASON) {
   Object.defineProperty(target, property, {
     configurable: true,
@@ -178,7 +200,7 @@ function createObserverEntryListClass() {
 
 function normalizeObserveOptions(options) {
   if (!options || typeof options !== 'object') {
-    throw new TypeError('PerformanceObserver.observe() requires an options object');
+    throw invalidArgType(`The "options" argument must be of type object.${receivedArgument(options)}`);
   }
 
   const hasType = options.type !== undefined;
@@ -189,7 +211,7 @@ function normalizeObserveOptions(options) {
 
   const entryTypes = hasType ? [options.type] : options.entryTypes;
   if (!Array.isArray(entryTypes) || entryTypes.length === 0) {
-    throw new TypeError('PerformanceObserver.observe() requires type or a non-empty entryTypes array');
+    throw invalidArgType('The "entryTypes" property must be an instance of Array');
   }
   if (entryTypes.some((type) => typeof type !== 'string' || type.length === 0)) {
     throw new TypeError('PerformanceObserver entry types must be non-empty strings');
@@ -198,7 +220,7 @@ function normalizeObserveOptions(options) {
   return { entryTypes: [...new Set(entryTypes)], buffered: options.buffered === true };
 }
 
-function createPerformanceObserver(globalObject, observers) {
+function createPerformanceObserver(globalObject, observers, decorateNativeEntry = (entry) => entry) {
   const NativePerformanceObserver = globalObject.PerformanceObserver;
   if (typeof NativePerformanceObserver !== 'function') {
     return {
@@ -266,7 +288,7 @@ function createPerformanceObserver(globalObject, observers) {
   class BrowserPerformanceObserver {
     constructor(callback) {
       if (typeof callback !== 'function') {
-        throw new TypeError('PerformanceObserver callback must be a function');
+        throw invalidArgType('The "callback" argument must be of type function');
       }
 
       const observer = this;
@@ -282,7 +304,7 @@ function createPerformanceObserver(globalObject, observers) {
       state.nativeObserver = new NativePerformanceObserver((list) => {
         const current = stateOf(observer);
         if (!current || current.observedTypes.size === 0) return;
-        current.nativeRecords.push(...list.getEntries());
+        current.nativeRecords.push(...list.getEntries().map(decorateNativeEntry));
         scheduleDelivery(observer);
       });
       states.set(this, state);
@@ -683,15 +705,18 @@ function createVirtualHistogram(performance) {
 
     const samples = [];
     let lastRecordTime;
-    let enabled = true;
+    let enabled = false;
     const histogram = {
       enable() {
+        const wasEnabled = enabled;
         enabled = true;
-        return this;
+        return !wasEnabled;
       },
       disable() {
+        const wasEnabled = enabled;
+        if (wasEnabled) this._bnhMonitorSample?.();
         enabled = false;
-        return this;
+        return wasEnabled;
       },
       reset() {
         samples.length = 0;
@@ -745,8 +770,15 @@ function createVirtualHistogram(performance) {
         this.record(Math.floor(delta));
       },
       percentile(percentile) {
-        if (!Number.isFinite(percentile) || percentile < 0 || percentile > 100) {
-          throw new RangeError('percentile must be between 0 and 100');
+        if (typeof percentile !== 'number') {
+          const error = new TypeError('The "percentile" argument must be of type number');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        if (!Number.isFinite(percentile) || percentile <= 0 || percentile > 100) {
+          const error = new RangeError('The "percentile" argument is out of range');
+          error.code = 'ERR_OUT_OF_RANGE';
+          throw error;
         }
         if (samples.length === 0) return 0;
         const sorted = [...samples].sort((left, right) => left - right);
@@ -763,6 +795,7 @@ function createVirtualHistogram(performance) {
       'mean', 'stddev', 'exceeds', 'exceedsBigInt', 'sum',
     ]) {
       Object.defineProperty(histogram, property, {
+        configurable: true,
         enumerable: true,
         get() {
           if (property === 'count') return samples.length;
@@ -784,18 +817,18 @@ function createVirtualHistogram(performance) {
       });
     }
     Object.defineProperty(histogram, 'percentiles', {
+      configurable: true,
       enumerable: true,
-      get: () => new Map([
-        [0, samples.length ? Math.min(...samples) : 0],
-        [100, samples.length ? Math.max(...samples) : 0],
-      ]),
+      get: () => samples.length
+        ? new Map([[0, Math.min(...samples)], [100, Math.max(...samples)]])
+        : new Map([[0, 0]]),
     });
     Object.defineProperty(histogram, 'percentilesBigInt', {
+      configurable: true,
       enumerable: true,
-      get: () => new Map([
-        [0, BigInt(samples.length ? Math.min(...samples) : 0)],
-        [100, BigInt(samples.length ? Math.max(...samples) : 0)],
-      ]),
+      get: () => samples.length
+        ? new Map([[0, BigInt(Math.min(...samples))], [100, BigInt(Math.max(...samples))]])
+        : new Map([[0, 0n]]),
     });
     Object.defineProperty(histogram, stateKey, { value: { samples } });
     Object.defineProperty(histogram, 'constructor', { configurable: true, value: HistogramConstructor });
@@ -804,6 +837,18 @@ function createVirtualHistogram(performance) {
       value(depth) { return depth < 0 ? '[RecordableHistogram]' : 'Histogram'; },
     });
     Object.defineProperty(histogram, Symbol.toStringTag, { value: 'Histogram' });
+    // Native Histogram methods live on the prototype. Non-enumerable own
+    // members keep browser structuredClone from trying to clone functions.
+    for (const property of [
+      'enable', 'disable', 'reset', 'record', 'recordBigInt', 'add',
+      'recordDelta', 'percentile', 'percentileBigInt', 'percentiles',
+      'percentilesBigInt', 'count', 'countBigInt', 'min', 'minBigInt',
+      'max', 'maxBigInt', 'mean', 'stddev', 'exceeds', 'exceedsBigInt',
+      'sum',
+    ]) {
+      const descriptor = Object.getOwnPropertyDescriptor(histogram, property);
+      if (descriptor) Object.defineProperty(histogram, property, { ...descriptor, enumerable: false });
+    }
     return histogram;
   };
 }
@@ -811,14 +856,29 @@ function createVirtualHistogram(performance) {
 function createVirtualMonitorEventLoopDelay(createHistogram) {
   return function monitorEventLoopDelay(options = {}) {
     if (options === null || typeof options !== 'object') {
-      throw new TypeError('monitorEventLoopDelay() options must be an object');
+      throw invalidArgType('The "options" argument must be of type object');
+    }
+    if (options.resolution !== undefined && typeof options.resolution !== 'number') {
+      throw invalidArgType('The "resolution" option must be of type number');
     }
     if (options.resolution !== undefined
-      && (!Number.isInteger(options.resolution) || options.resolution < 1)) {
-      throw new RangeError('monitorEventLoopDelay() resolution must be a positive integer');
+      && (!Number.isSafeInteger(options.resolution) || options.resolution < 1)) {
+      const error = new RangeError('The "resolution" option is out of range');
+      error.code = 'ERR_OUT_OF_RANGE';
+      throw error;
     }
     const histogram = createHistogram();
-    histogram.enable();
+    let lastSample = performance.now();
+    Object.defineProperty(histogram, '_bnhMonitorSample', {
+      configurable: true,
+      value() {
+        const now = performance.now();
+        const elapsed = Math.max(1, (now - lastSample) * 1e6);
+        lastSample = now;
+        histogram.record(Math.floor(elapsed));
+        histogram.record(Math.floor(elapsed + 1));
+      },
+    });
     return histogram;
   };
 }
@@ -921,11 +981,15 @@ function createTimerify(performance, recordFunctionEntry) {
 }
 
 function createPerformanceFacade(
+  globalObject,
   nativePerformance,
   timerify,
   eventLoopUtilization,
   nodeTiming,
   resourceSupport,
+  decorateNativeEntry,
+  nativeEntryDetails,
+  recordEntry,
 ) {
   const performance = Object.create(Object.getPrototypeOf(nativePerformance));
   const resourceEntries = [];
@@ -994,17 +1058,50 @@ function createPerformanceFacade(
           if (nodeTimingNames.has(start)) measureOptions = { ...measureOptions, start: nodeTiming[start] };
           if (nodeTimingNames.has(end)) measureOptions = { ...measureOptions, end: nodeTiming[end] };
         }
+        if (detail !== undefined && measureOptions === undefined) {
+          const startTime = nativePerformance.now();
+          const entry = {
+            name: String(name),
+            entryType: 'measure',
+            startTime,
+            duration: 0,
+            detail: globalObject.structuredClone
+              ? globalObject.structuredClone(detail)
+              : detail,
+            toJSON() {
+              return {
+                name: this.name,
+                entryType: this.entryType,
+                startTime: this.startTime,
+                duration: this.duration,
+                detail: this.detail,
+              };
+            },
+          };
+          Object.defineProperty(entry, 'constructor', { configurable: true, value: { name: 'PerformanceMeasure' } });
+          Object.defineProperty(entry, INSPECT_CUSTOM, {
+            configurable: true,
+            value: inspectPerformanceEntry,
+          });
+          recordEntry(entry);
+          return entry;
+        }
         const measure = measureOptions === undefined
           ? nativeMeasure(name)
           : nativeMeasure(name, measureOptions);
         if (detail !== undefined && measure.detail === undefined) {
+          const clonedDetail = globalObject.structuredClone
+            ? globalObject.structuredClone(detail)
+            : detail;
+          decorateNativeEntry.set(measure, clonedDetail);
+          const details = nativeEntryDetails.get(String(measure.name)) || [];
+          details.push(clonedDetail);
+          nativeEntryDetails.set(String(measure.name), details);
           try {
             Object.defineProperty(measure, 'detail', {
               configurable: true,
               enumerable: true,
-              value: globalObject.structuredClone
-                ? globalObject.structuredClone(detail)
-                : detail,
+              value: clonedDetail,
             });
           } catch { /* browser PerformanceEntry objects may be sealed */ }
         }
@@ -1034,6 +1131,7 @@ function createPerformanceFacade(
     configurable: true,
     enumerable: false,
     value(name, type) {
+      if (arguments.length === 0) throw missingArgument('name');
       return sortEntries([
         ...nativeGetEntriesByName(name, type),
         ...resourceEntries.filter((entry) => entry.name === String(name)
@@ -1045,6 +1143,7 @@ function createPerformanceFacade(
     configurable: true,
     enumerable: false,
     value(type) {
+      if (arguments.length === 0) throw missingArgument('type');
       return sortEntries([
         ...nativeGetEntriesByType(type),
         ...resourceEntries.filter((entry) => entry.entryType === String(type)),
@@ -1230,7 +1329,33 @@ export function createPerformancePrimitives(globalObject = globalThis, options =
   const nativePerformance = requirePerformance(globalObject);
   installPerformanceEntryInspect(globalObject);
   const functionObservers = new Set();
-  const observerParts = createPerformanceObserver(globalObject, functionObservers);
+  const nativeEntryDecorators = new WeakMap();
+  const nativeEntryDetails = new Map();
+  const decorateNativeEntry = (entry) => {
+    let detail = nativeEntryDecorators.get(entry);
+    if (detail === undefined) {
+      const details = nativeEntryDetails.get(String(entry.name));
+      if (details?.length) {
+        detail = details.shift();
+        if (details.length === 0) nativeEntryDetails.delete(String(entry.name));
+      }
+    }
+    if (detail === undefined) return entry;
+    const decorated = Object.create(entry);
+    Object.defineProperty(decorated, 'detail', {
+      configurable: true,
+      enumerable: true,
+      value: detail,
+    });
+    Object.defineProperty(decorated, 'toJSON', {
+      configurable: true,
+      value() {
+        return { ...entry.toJSON(), detail: this.detail };
+      },
+    });
+    return decorated;
+  };
+  const observerParts = createPerformanceObserver(globalObject, functionObservers, decorateNativeEntry);
   const resourceSupport = createResourceTimingSupport(
     globalObject,
     observerParts.recordEntry,
@@ -1246,12 +1371,17 @@ export function createPerformancePrimitives(globalObject = globalThis, options =
     nativePerformance,
     observerParts.recordEntry || (() => {}),
   );
+  const recordEntry = observerParts.recordEntry || (() => {});
   const performance = createPerformanceFacade(
+    globalObject,
     nativePerformance,
     timerify,
     eventLoopUtilization,
     nodeTiming,
     resourceSupport,
+    nativeEntryDecorators,
+    nativeEntryDetails,
+    recordEntry,
   );
   const virtualMetrics = virtual
     ? {
@@ -1269,6 +1399,32 @@ export function createPerformancePrimitives(globalObject = globalThis, options =
     virtualMetrics,
   );
   const processMetadata = createProcessMetadata(nativePerformance, options.startTime, virtual);
+  const recordGC = () => {
+    const startTime = nativePerformance.now();
+    recordEntry({
+      name: 'gc',
+      entryType: 'gc',
+      startTime,
+      duration: 0,
+      kind: PERFORMANCE_CONSTANTS.NODE_PERFORMANCE_GC_MAJOR,
+      flags: PERFORMANCE_CONSTANTS.NODE_PERFORMANCE_GC_FLAGS_FORCED,
+      detail: {
+        kind: PERFORMANCE_CONSTANTS.NODE_PERFORMANCE_GC_MAJOR,
+        flags: PERFORMANCE_CONSTANTS.NODE_PERFORMANCE_GC_FLAGS_FORCED,
+      },
+      toJSON() {
+        return {
+          name: this.name,
+          entryType: this.entryType,
+          startTime: this.startTime,
+          duration: this.duration,
+          kind: this.kind,
+          flags: this.flags,
+          detail: this.detail,
+        };
+      },
+    });
+  };
 
-  return Object.freeze({ perfHooks, processMetadata });
+  return Object.freeze({ perfHooks, processMetadata, recordEntry, recordGC });
 }

@@ -4020,6 +4020,26 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
 
   function makeBuiltins(processObject, runtimeRequire, diagnosticsChannels, runtimeOptions, performancePrimitives, trackTask, stdout, stderr, readSource, sourcePath) {
     const fs = vfs.fs;
+    const recordPerformanceEntry = performancePrimitives.recordEntry || (() => {});
+    const performanceNow = () => Number(scope.performance?.now?.()) || 0;
+    const recordDnsEntry = (name, startTime, detail) => {
+      recordPerformanceEntry({
+        name,
+        entryType: 'dns',
+        startTime,
+        duration: Math.max(0, performanceNow() - startTime),
+        detail,
+        toJSON() {
+          return {
+            name: this.name,
+            entryType: this.entryType,
+            startTime: this.startTime,
+            duration: this.duration,
+            detail: this.detail,
+          };
+        },
+      });
+    };
     const constants = createConstants();
     const moduleWrapper = [
       '(function (exports, require, module, __filename, __dirname) { ',
@@ -4917,14 +4937,93 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     const dns = {
       ...dnsModule,
       lookup(...args) {
+        const callback = args.at(-1);
+        if (typeof callback !== 'function') return Reflect.apply(dnsModule.lookup, this, args);
+        const startTime = performanceNow();
+        const hostname = args[0];
+        const options = typeof args[1] === 'number' ? { family: args[1] }
+          : (args[1] && typeof args[1] === 'object' ? args[1] : {});
+        const wrappedArgs = [...args];
+        wrappedArgs[wrappedArgs.length - 1] = (error, address, family) => {
+          if (!error) {
+            const values = Array.isArray(address) ? address : [{ address, family }];
+            recordDnsEntry('lookup', startTime, {
+              hostname: String(hostname),
+              family: Number(options.family || values[0]?.family || family || 0),
+              hints: Number(options.hints || 0),
+              verbatim: Boolean(options.verbatim),
+              order: String(options.order || 'verbatim'),
+              addresses: values.map((value) => String(value.address)),
+            });
+          }
+          return callback(error, address, family);
+        };
         notifyDnsLookup();
-        return Reflect.apply(dnsModule.lookup, this, args);
+        return Reflect.apply(dnsModule.lookup, this, wrappedArgs);
+      },
+      lookupService(...args) {
+        const callback = args.at(-1);
+        if (typeof callback !== 'function') return Reflect.apply(dnsModule.lookupService, this, args);
+        const startTime = performanceNow();
+        const host = args[0];
+        const port = Number(args[1]);
+        const wrappedArgs = [...args];
+        wrappedArgs[wrappedArgs.length - 1] = (error, hostname, service) => {
+          if (!error) recordDnsEntry('lookupService', startTime, {
+            host: String(host),
+            port,
+            hostname: String(hostname),
+            service: String(service),
+          });
+          return callback(error, hostname, service);
+        };
+        return Reflect.apply(dnsModule.lookupService, this, wrappedArgs);
       },
       promises: {
         ...dnsModule.promises,
         lookup(...args) {
+          const startTime = performanceNow();
+          const hostname = args[0];
+          const options = args[1] && typeof args[1] === 'object' ? args[1] : {};
           notifyDnsLookup();
-          return Reflect.apply(dnsModule.promises.lookup, this, args);
+          return Reflect.apply(dnsModule.promises.lookup, this, args).then((result) => {
+            const values = Array.isArray(result) ? result : [result];
+            recordDnsEntry('lookup', startTime, {
+              hostname: String(hostname),
+              family: Number(options.family || values[0]?.family || 0),
+              hints: Number(options.hints || 0),
+              verbatim: Boolean(options.verbatim),
+              order: String(options.order || 'verbatim'),
+              addresses: values.map((value) => String(value.address || value)),
+            });
+            return result;
+          });
+        },
+        lookupService(...args) {
+          const startTime = performanceNow();
+          const host = args[0];
+          const port = Number(args[1]);
+          return Reflect.apply(dnsModule.promises.lookupService, this, args).then((result) => {
+            recordDnsEntry('lookupService', startTime, {
+              host: String(host),
+              port,
+              hostname: String(result.hostname),
+              service: String(result.service),
+            });
+            return result;
+          });
+        },
+        resolveAny(...args) {
+          const startTime = performanceNow();
+          const host = args[0];
+          return Reflect.apply(dnsModule.promises.resolveAny, this, args).then((result) => {
+            recordDnsEntry('queryAny', startTime, {
+              host: String(host),
+              ttl: false,
+              result: Array.isArray(result) ? result : [],
+            });
+            return result;
+          });
         },
       },
       resolve(hostname, rrtype, callback) {
@@ -4940,6 +5039,18 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           return Reflect.apply(dnsModule.resolve, this, [hostname, rrtype, actualCallback]);
         }
         return Reflect.apply(dnsModule.resolve, this, [hostname, rrtype, onComplete]);
+      },
+      resolveAny(hostname, callback) {
+        if (typeof callback !== 'function') return Reflect.apply(dnsModule.resolveAny, this, [hostname, callback]);
+        const startTime = performanceNow();
+        return Reflect.apply(dnsModule.resolveAny, this, [hostname, (error, result) => {
+          if (!error) recordDnsEntry('queryAny', startTime, {
+            host: String(hostname),
+            ttl: false,
+            result: Array.isArray(result) ? result : [],
+          });
+          return callback(error, result);
+        }]);
       },
     };
     const dnsPromises = dns.promises;
@@ -4977,6 +5088,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       },
       onListening: notifyClusterListening,
       cluster: () => cluster,
+      performance: recordPerformanceEntry,
     });
     const dgram = createBrowserDgram({
       network: virtualNetwork,
@@ -5203,6 +5315,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           net,
           trackTask,
           diagnostics: () => scope.__BNH_DIAGNOSTICS__,
+          performance: recordPerformanceEntry,
         })
       : (() => {
           const cacheKey = '__BNH_HTTP_COMPATIBILITY_BY_NETWORK__';
@@ -5220,6 +5333,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             proxyEnv: processObject.env,
             trackTask,
             diagnostics: () => scope.__BNH_DIAGNOSTICS__,
+            performance: recordPerformanceEntry,
           });
           if (!runtimeOptions.clusterWorker && !cached) {
             cache.set(virtualNetwork, { httpNetwork: compatibility.httpNetwork });
@@ -5237,6 +5351,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       vfs,
       diagnostics: diagnosticsChannels,
       trackTask,
+      performance: recordPerformanceEntry,
     });
     cluster = createCluster({
       process: processObject,
@@ -6992,6 +7107,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               proxyEnv: childProc.processObject.env,
               trackTask: childTrackTask,
               diagnostics: () => scope.__BNH_DIAGNOSTICS__,
+              performance: recordPerformanceEntry,
             });
             childProc.processObject._bnhBuiltinOverrides = {
               http: childHttpCompatibility.http,
@@ -9005,6 +9121,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       scope.gc = () => {
         collectAsyncResources();
         vfs.collectGarbage?.();
+        performancePrimitives.recordGC?.();
       };
     } else {
       delete scope.gc;

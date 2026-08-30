@@ -229,6 +229,7 @@ export class Socket extends Duplex {
     this._handle = options.handle || null;
     if (this._handle && typeof this._handle === 'object') this._handle[ownerSymbol] = this;
     this._transport = internal.transport;
+    this._performance = internal.performance;
     this.allowHalfOpen = options.allowHalfOpen ?? true;
     this.connecting = false;
     this._pending = true;
@@ -281,6 +282,7 @@ export class Socket extends Duplex {
     this._pending = true;
     this._readyState = 'opening';
     this._connectOptions = { ...options, port, host, family };
+    this._performanceStart = this._performance ? (this._network.performance?.now?.() || globalThis.performance?.now?.() || 0) : 0;
     if (this._handle?.connect) {
       let status;
       try {
@@ -459,6 +461,29 @@ export class Socket extends Duplex {
       family: family ? (family === 6 ? 'IPv6' : 'IPv4') : undefined,
     };
     this.path = connection.path;
+    if (this._performance && !this._performanceRecorded && this._connectOptions?.path === undefined) {
+      this._performanceRecorded = true;
+      const now = globalThis.performance?.now?.() || this._performanceStart;
+      this._performance({
+        name: 'connect',
+        entryType: 'net',
+        startTime: this._performanceStart,
+        duration: Math.max(0, now - this._performanceStart),
+        detail: {
+          host: String(this._connectOptions.host || this._connectOptions.hostname || ''),
+          port: Number(this._connectOptions.port),
+        },
+        toJSON() {
+          return {
+            name: this.name,
+            entryType: this.entryType,
+            startTime: this.startTime,
+            duration: this.duration,
+            detail: this.detail,
+          };
+        },
+      });
+    }
     this._pipeResource = connection.pipeResource;
     this._pipeConnectResource = connection.pipeConnectResource;
     if (connection.transport) this._attachTransport(connection.transport);
@@ -1687,7 +1712,7 @@ Object.defineProperty(BrowserBlockList.prototype, blockListCloneMarker, {
 
 const defaultConfig = { network: sharedVirtualNetwork, dns: createBrowserDns() };
 
-export function createBrowserNet({ network = sharedVirtualNetwork, dns = createBrowserDns(), transport, BufferClass, trackTask, getTaskTracker = () => trackTask, currentProcess, runInProcessContext, onListening, cluster } = {}) {
+export function createBrowserNet({ network = sharedVirtualNetwork, dns = createBrowserDns(), transport, BufferClass, trackTask, getTaskTracker = () => trackTask, currentProcess, runInProcessContext, onListening, cluster, performance } = {}) {
   const configuredNetwork = transport && network === sharedVirtualNetwork ? createVirtualNetwork({ transport }) : network;
   const config = {
     network: configuredNetwork,
@@ -1700,6 +1725,7 @@ export function createBrowserNet({ network = sharedVirtualNetwork, dns = createB
     runInProcessContext,
     onListening,
     cluster,
+    performance,
   };
   const ConfiguredSocket = class BrowserNetSocket extends Socket {
     constructor(options = {}) { super(options, config); }

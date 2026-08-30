@@ -2129,9 +2129,41 @@ function appendBytes(previous, next) {
   return result;
 }
 
-function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diagnostics) {
+function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diagnostics, performanceRecord) {
   const bindings = [];
   let nextPort = 46000;
+
+  const recordHttpEntry = (name, startTime, request, response) => {
+    if (typeof performanceRecord !== 'function') return;
+    const now = Number(scope.performance?.now?.()) || startTime;
+    performanceRecord({
+      name,
+      entryType: 'http',
+      startTime,
+      duration: Math.max(0, now - startTime),
+      detail: {
+        req: {
+          method: String(request?.method || 'GET'),
+          url: String(request?.url || request?.path || '/'),
+          headers: request?.headers && typeof request.headers === 'object' ? request.headers : {},
+        },
+        res: {
+          statusCode: Number(response?.statusCode || response?._state?.statusCode || 200),
+          statusMessage: String(response?.statusMessage || 'OK'),
+          headers: response?.headers && typeof response.headers === 'object' ? response.headers : {},
+        },
+      },
+      toJSON() {
+        return {
+          name: this.name,
+          entryType: this.entryType,
+          startTime: this.startTime,
+          duration: this.duration,
+          detail: this.detail,
+        };
+      },
+    });
+  };
 
   function rawRequestFromBytes(bytes, binding) {
     let headerEnd = -1;
@@ -2392,6 +2424,15 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
       let responseDelivered = false;
       let responseBody;
       const finishResponse = (result) => {
+        if (!request.__bnhHttpPerformanceRecorded) {
+          request.__bnhHttpPerformanceRecorded = true;
+          recordHttpEntry(
+            'HttpRequest',
+            request.__bnhHttpPerformanceStart || (Number(scope.performance?.now?.()) || 0),
+            request,
+            response,
+          );
+        }
         publishDiagnostic(diagnostics, 'http.server.response.finish', {
           request,
           response,
@@ -2480,6 +2521,7 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
           request.socket._tcpResource = new AsyncResource('TCPWRAP',
             serverAsyncId === undefined ? {} : { triggerAsyncId: serverAsyncId });
           request.connection = request.socket;
+          request.__bnhHttpPerformanceStart = Number(scope.performance?.now?.()) || 0;
           publishDiagnostic(diagnostics, 'http.server.request.start', {
             request,
             response,
@@ -3614,7 +3656,7 @@ function proxyRequestOptions(url, init) {
   };
 }
 
-function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv, diagnostics, ownerProcess, trackTask) {
+function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv, diagnostics, ownerProcess, trackTask, performanceRecord) {
   const ClientRequest = class ClientRequest extends EventEmitter {
     constructor(url, options = {}) {
       super();
@@ -4007,6 +4049,7 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       if (this._started || this.destroyed) return;
       if (this._agentSocketAttempted && (this._agentSocket || this.destroyed)) return;
       this._started = true;
+      this._performanceStart = Number(scope.performance?.now?.()) || 0;
       this._taskRelease ||= trackTask?.() || null;
       this._ensureAsyncResources();
       publishDiagnostic(diagnostics, 'http.client.request.start', { request: this });
@@ -4282,6 +4325,37 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
         }
         this._agent.emit('free', this._agentSocket || { destroyed: false });
       }
+      if (typeof performanceRecord === 'function' && !this._performanceRecorded) {
+        this._performanceRecorded = true;
+        const response = this.response;
+        performanceRecord({
+          name: 'HttpClient',
+          entryType: 'http',
+          startTime: this._performanceStart || (Number(scope.performance?.now?.()) || 0),
+          duration: Math.max(0, (Number(scope.performance?.now?.()) || 0) - (this._performanceStart || 0)),
+          detail: {
+            req: {
+              method: String(this.method || 'GET'),
+              url: String(this.path || '/'),
+              headers: this._headers && typeof this._headers === 'object' ? this._headers : {},
+            },
+            res: {
+              statusCode: Number(response?.statusCode || 200),
+              statusMessage: String(response?.statusMessage || 'OK'),
+              headers: response?.headers && typeof response.headers === 'object' ? response.headers : {},
+            },
+          },
+          toJSON() {
+            return {
+              name: this.name,
+              entryType: this.entryType,
+              startTime: this.startTime,
+              duration: this.duration,
+              detail: this.detail,
+            };
+          },
+        });
+      }
       publishDiagnostic(diagnostics, 'http.client.response.finish', {
         request: this,
         response: this.response,
@@ -4379,13 +4453,14 @@ export function createHttpCompatibility(scope = globalThis, {
   httpNetwork: configuredHttpNetwork,
   trackTask,
   diagnostics,
+  performance: performanceRecord,
 } = {}) {
   BufferClass ||= typeof Buffer === 'function' ? Buffer : undefined;
   installEventInspectHook(scope);
   installEventTargetInspectHook(scope);
   const net = configuredNet || createBrowserNet({ BufferClass, trackTask });
   const virtualNetwork = configuredHttpNetwork
-    || createVirtualHttpNetwork(scope, BufferClass, net, trackTask, diagnostics);
+    || createVirtualHttpNetwork(scope, BufferClass, net, trackTask, diagnostics, performanceRecord);
   const proxy = configuredProxy
     ? (typeof configuredProxy.request === 'function' && configuredProxy.mode
       ? configuredProxy
@@ -4401,6 +4476,7 @@ export function createHttpCompatibility(scope = globalThis, {
     diagnostics,
     ownerProcess,
     trackTask,
+    performanceRecord,
   );
   const HttpServer = createServerClass(DEFAULT_HTTP_PROTOCOL, scope, virtualNetwork, BufferClass, trackTask, ownerProcess);
   const HttpsServer = createServerClass(DEFAULT_HTTPS_PROTOCOL, scope, virtualNetwork, BufferClass, trackTask, ownerProcess);

@@ -5,7 +5,7 @@ project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 config_path="${1:-harness.toml}"
 variant="${2:-${BNH_VARIANT:-v22}}"
 
-export PYTHONPATH="$project_dir/src${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$project_dir/harness${PYTHONPATH:+:$PYTHONPATH}"
 
 # The harness owns the 64-test target batches. Five target workers keep the
 # suite moving without creating one browser process per test.

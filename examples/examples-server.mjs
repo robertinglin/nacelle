@@ -7,22 +7,30 @@ import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const adapterRoot = path.resolve(__dirname, '..', 'adapters', 'playwright');
-const npmCacheDir = path.resolve(__dirname, '..', '.npm_cache');
+const repoRoot = path.resolve(__dirname, '..');
+const examplesDir = path.resolve(repoRoot, 'examples');
+const srcDir = path.resolve(repoRoot, 'src');
+const npmCacheDir = path.resolve(repoRoot, '.npm_cache');
 if (!fs.existsSync(npmCacheDir)) fs.mkdirSync(npmCacheDir, { recursive: true });
 
 async function getChromium() {
+  const candidatePaths = [
+    path.resolve(repoRoot, 'dev', 'adapters', 'playwright', 'node_modules', 'playwright', 'index.mjs'),
+    path.resolve(repoRoot, 'node_modules', 'playwright', 'index.mjs'),
+  ];
+  for (const pwPath of candidatePaths) {
+    if (fs.existsSync(pwPath)) {
+      try {
+        const { chromium } = await import(pathToFileURL(pwPath).href);
+        return chromium;
+      } catch { /* continue */ }
+    }
+  }
   try {
-    const pwPath = path.resolve(adapterRoot, 'node_modules', 'playwright', 'index.mjs');
-    const { chromium } = await import(pathToFileURL(pwPath).href);
+    const { chromium } = await import('playwright');
     return chromium;
   } catch {
-    try {
-      const { chromium } = await import('playwright');
-      return chromium;
-    } catch {
-      return null;
-    }
+    return null;
   }
 }
 
@@ -72,7 +80,7 @@ const server = createServer(async (req, res) => {
         const upstream = await fetch(targetUrl, {
           headers: {
             'Accept': 'application/vnd.npm.install-v1+json, application/json;q=0.9, */*;q=0.8',
-            'User-Agent': 'browser-node-harness',
+            'User-Agent': 'browser-node',
           },
         });
         if (!upstream.ok) {
@@ -94,14 +102,25 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    if (pathname === '/' || pathname === '/index.html') pathname = '/express-demo.html';
+    if (pathname === '/' || pathname === '/index.html') pathname = '/express.html';
+    if (pathname === '/express') pathname = '/express.html';
+    if (pathname === '/vite' || pathname === '/vite-react') pathname = '/vite-react.html';
+    if (pathname === '/wasm') pathname = '/wasm.html';
 
     const safeRelative = pathname.replace(/^\/+/, '');
-    const filePath = path.resolve(adapterRoot, safeRelative);
+    
+    // Resolve location: check examples/, src/, and versioned wasm
+    let filePath = path.resolve(examplesDir, safeRelative);
+    if (!fs.existsSync(filePath)) {
+      filePath = path.resolve(srcDir, safeRelative);
+    }
+    if (!fs.existsSync(filePath) && safeRelative.startsWith('wasm/')) {
+      filePath = path.resolve(srcDir, 'wasm', 'v22', safeRelative.slice('wasm/'.length));
+    }
 
-    if (!filePath.startsWith(adapterRoot)) {
-      res.writeHead(403);
-      res.end('Forbidden');
+    if (!fs.existsSync(filePath)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not Found: ' + req.url);
       return;
     }
 
@@ -114,8 +133,8 @@ const server = createServer(async (req, res) => {
     });
     res.end(data);
   } catch (err) {
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    res.end('Not Found: ' + req.url);
+    res.writeHead(500, { 'Content-Type': 'text/plain' });
+    res.end('Server Error: ' + err.message);
   }
 });
 
@@ -125,22 +144,22 @@ await new Promise((resolve, reject) => {
 });
 
 const port = server.address().port;
-const demoUrl = `http://127.0.0.1:${port}/express-demo.html`;
-const wasmDemoUrl = `http://127.0.0.1:${port}/wasm-demo.html`;
-const viteReactDemoUrl = `http://127.0.0.1:${port}/vite-react-demo.html`;
+const expressUrl = `http://127.0.0.1:${port}/express.html`;
+const wasmUrl = `http://127.0.0.1:${port}/wasm.html`;
+const viteReactUrl = `http://127.0.0.1:${port}/vite-react.html`;
 const targetUrl = process.argv.includes('--wasm')
-  ? wasmDemoUrl
+  ? wasmUrl
   : (process.argv.includes('--vite-react') || process.argv.includes('--vite'))
-    ? viteReactDemoUrl
-    : demoUrl;
+    ? viteReactUrl
+    : expressUrl;
 
 console.log('\n======================================================');
-console.log('  🚀 Browser Node Harness Dev Server');
+console.log('  🚀 browser-node Examples Server');
 console.log('======================================================');
-console.log(`\n  Express Demo:  \x1b[36m${demoUrl}\x1b[0m`);
-console.log(`  Vite + React:  \x1b[36m${viteReactDemoUrl}\x1b[0m`);
-console.log(`  WASM Demo:     \x1b[36m${wasmDemoUrl}\x1b[0m\n`);
-console.log(`  Launching browser at ${targetUrl}...\n`);
+console.log(`\n  Express Example:      \x1b[36m${expressUrl}\x1b[0m`);
+console.log(`  Vite + React Example: \x1b[36m${viteReactUrl}\x1b[0m`);
+console.log(`  WASM Addon Example:   \x1b[36m${wasmUrl}\x1b[0m\n`);
+console.log(`  Target URL:           \x1b[32m${targetUrl}\x1b[0m\n`);
 
 let browser = null;
 try {
@@ -148,38 +167,34 @@ try {
   if (!chromium) throw new Error('Playwright not found');
 
   browser = await chromium.launch({
-    headless: false, // Open real visible browser window for interactive use
+    headless: false,
     args: ['--enable-features=SharedArrayBuffer'],
   });
+
   const context = await browser.newContext();
   const page = await context.newPage();
 
-  page.on('console', (msg) => {
+  page.on('console', msg => {
+    const type = msg.type();
     const text = msg.text();
-    if (!text.includes('[vite]') && !text.includes('Download the Vue Devtools')) {
-      console.log(`  [Browser] ${text}`);
+    if (type === 'error') {
+      console.error(`  [Browser ${type}] ${text}`);
+    } else if (text.includes('Ready') || text.includes('listening') || text.includes('Server')) {
+      console.log(`  [Browser ${type}] \x1b[32m${text}\x1b[0m`);
     }
   });
 
-  await page.goto(targetUrl);
-  console.log('  ✓ Browser window opened successfully.');
-  console.log('  Press Ctrl+C to stop the dev server.\n');
-
-  // Keep server running until browser is closed or process killed
-  browser.on('disconnected', () => {
-    console.log('\nBrowser closed. Exiting dev server...');
-    server.close();
-    process.exit(0);
+  page.on('pageerror', err => {
+    console.error('  [Browser Uncaught Error]', err);
   });
-} catch (error) {
-  console.warn(`  ℹ️ Headed browser launch info: ${error.message}`);
-  console.log(`  👉 You can open the live demo directly in your browser at:\n     \x1b[36;1m${targetUrl}\x1b[0m\n`);
-  console.log('  Press Ctrl+C to stop the server.\n');
-}
 
-process.on('SIGINT', async () => {
-  console.log('\nShutting down dev server...');
-  if (browser) await browser.close().catch(() => {});
-  server.close();
-  process.exit(0);
-});
+  await page.goto(targetUrl, { waitUntil: 'load' });
+  console.log('  Browser launched. Press Ctrl+C to close and exit.\n');
+
+  await new Promise(() => {});
+} catch (err) {
+  console.log(`  (Note: automated browser launch skipped: ${err.message})`);
+  console.log(`  Open ${targetUrl} in your browser to view the demo.\n`);
+  console.log('  Server is running. Press Ctrl+C to stop.\n');
+  await new Promise(() => {});
+}

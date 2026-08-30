@@ -1,0 +1,12 @@
+dev/
+examples/
+docs/
+scripts/
+.bnh-state/
+.agents/
+.codex/
+.worktrees/
+.zcode/
+.maxtokens
+.maxtokens.d
+.npm_cache/

@@ -34,6 +34,62 @@
     }
     .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; }
     .badge { color: #e0f2fe; background: #0369a1; border-radius: 999px; padding: 3px 9px; font-size: .72rem; }
+    .hamburger-btn {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+      font-size: 1.1rem;
+      padding: 4px 9px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.15s ease;
+      line-height: 1;
+    }
+    .hamburger-btn:hover {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .nav-dropdown {
+      position: absolute;
+      top: 52px;
+      left: 14px;
+      background: #1e293b;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: 0 16px 32px rgba(0, 0, 0, 0.4);
+      padding: 6px;
+      min-width: 230px;
+      display: none;
+      flex-direction: column;
+      gap: 3px;
+      z-index: 1000;
+    }
+    .nav-dropdown.show { display: flex; }
+    .nav-dropdown a {
+      color: var(--text);
+      text-decoration: none;
+      padding: 8px 12px;
+      border-radius: 5px;
+      font-size: 0.82rem;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      transition: background 0.15s ease;
+    }
+    .nav-dropdown a:hover {
+      background: rgba(56, 189, 248, 0.12);
+      color: var(--accent);
+    }
+    .nav-dropdown a.active {
+      background: rgba(56, 189, 248, 0.2);
+      color: var(--accent);
+      font-weight: 700;
+    }
     .mode-controls { display: flex; gap: 8px; }
     button {
       border: 0;
@@ -70,7 +126,15 @@
 </head>
 <body>
   <header>
-    <div class="brand">⚡ Browser Node Harness <span class="badge">Vite + React</span></div>
+    <div style="display: flex; align-items: center; gap: 12px; position: relative;">
+      <button class="hamburger-btn" id="btn-hamburger" title="Switch Example">☰</button>
+      <div class="nav-dropdown" id="nav-dropdown">
+        <a href="/express.html">🚀 Express.js Server</a>
+        <a href="/vite-react.html" class="active">⚛️ Vite + React IDE</a>
+        <a href="/wasm.html">🧩 Native WASM Addons</a>
+      </div>
+      <div class="brand">⚡ browser-node <span class="badge">Vite + React Example</span></div>
+    </div>
     <div class="mode-controls">
       <button id="btn-dev">Run Dev Server</button>
       <button id="btn-production">Build Production</button>
@@ -419,6 +483,16 @@ server.listen(5173, () => console.log(mode === 'production'
       statusIndicator.style.color = 'var(--error)';
       log(termOutput, error.stack || error.message);
     }
+    const hamburgerBtn = document.getElementById('btn-hamburger');
+    const navDropdown = document.getElementById('nav-dropdown');
+    hamburgerBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      navDropdown?.classList.toggle('show');
+    });
+    document.addEventListener('click', () => {
+      navDropdown?.classList.remove('show');
+    });
+
     runServer('development').catch(reportError);
   </script>
 </body>

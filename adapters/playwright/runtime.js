@@ -2650,6 +2650,7 @@ function moduleArgumentTypeError(name, expected, value) {
           : `type ${typeof value} (${String(value)})`;
   const error = new TypeError(`The "${name}" argument must be of type ${expected}. Received ${received}`);
   error.code = 'ERR_INVALID_ARG_TYPE';
+  error.toString = () => `TypeError [ERR_INVALID_ARG_TYPE]: ${error.message}`;
   return error;
 }
 
@@ -2665,6 +2666,7 @@ function modulePropertyTypeError(name, expected, value) {
           : `type ${typeof value} (${String(value)})`;
   const error = new TypeError(`The "${name}" property must be of type ${expected}. Received ${received}`);
   error.code = 'ERR_INVALID_ARG_TYPE';
+  error.toString = () => `TypeError [ERR_INVALID_ARG_TYPE]: ${error.message}`;
   return error;
 }
 
@@ -5117,14 +5119,16 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           if (options === null || typeof options !== 'object' || Array.isArray(options)) {
             throw moduleArgumentTypeError('options', 'object', options);
           }
-          const nodeModules = options.nodeModules ?? false;
-          const generatedCode = options.generatedCode ?? false;
-          if (typeof nodeModules !== 'boolean') {
-            throw modulePropertyTypeError('options.nodeModules', 'boolean', nodeModules);
+          const nodeModulesOption = options.nodeModules;
+          const generatedCodeOption = options.generatedCode;
+          if (nodeModulesOption !== undefined && typeof nodeModulesOption !== 'boolean') {
+            throw modulePropertyTypeError('options.nodeModules', 'boolean', nodeModulesOption);
           }
-          if (typeof generatedCode !== 'boolean') {
-            throw modulePropertyTypeError('options.generatedCode', 'boolean', generatedCode);
+          if (generatedCodeOption !== undefined && typeof generatedCodeOption !== 'boolean') {
+            throw modulePropertyTypeError('options.generatedCode', 'boolean', generatedCodeOption);
           }
+          const nodeModules = nodeModulesOption ?? false;
+          const generatedCode = generatedCodeOption ?? false;
           sourceMapsSupport = Object.freeze({ enabled, nodeModules, generatedCode });
         },
         stripTypeScriptTypes: (code, options = {}) => {

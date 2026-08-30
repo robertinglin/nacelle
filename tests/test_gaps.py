@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from browser_node_harness.gap_cards import emit_gap_cards, emit_worklist_index
+from browser_node_harness.gap_cards import _runtime_surface, emit_gap_cards, emit_worklist_index
 from browser_node_harness.gaps import (
     HOST_NETWORK,
     MISSING_API,
@@ -63,6 +63,20 @@ class SurfaceTests(unittest.TestCase):
         self.assertIn("__BNH_SURFACE_JSON__", source)
         # The probe must run as plain CJS through both adapters.
         self.assertIn("require(", source)
+        self.assertIn("Object.getPrototypeOf", source)
+        self.assertIn("const collect = (value, allowNumeric = false, ancestors = new Set())", source)
+        self.assertIn("Object.getOwnPropertySymbols", source)
+        self.assertIn("const ownKeys = (value)", source)
+        self.assertIn("Array.isArray(value)", source)
+        self.assertIn("const shouldDescend", source)
+        self.assertIn("const prototypeSeen = new Set()", source)
+        self.assertIn("if (Array.isArray(value)) return []", source)
+        self.assertIn("!memberName.startsWith('_')", source)
+        self.assertIn("entry.symbols.push(memberName + '.' + nested)", source)
+        self.assertIn("typeof mod === 'function'", source)
+        self.assertIn("symbolLabel", source)
+        self.assertIn("isPublicSymbol", source)
+        self.assertIn("nodejs.asyncDispose", source)
 
     def test_module_list_source_uses_the_same_marker(self) -> None:
         self.assertIn("__BNH_SURFACE_JSON__", module_list_source())
@@ -343,6 +357,37 @@ class FormGapIntegrationTests(unittest.TestCase):
 
 
 class GapCardEmissionTests(unittest.TestCase):
+    def test_worker_surface_owns_both_worker_layers(self) -> None:
+        gap = Gap(
+            gap_id="worker",
+            kind=MISSING_API,
+            module="worker_threads",
+            symbols=("Worker.on",),
+            affected_count=1,
+        )
+        self.assertEqual(_runtime_surface(gap), "runtime/messaging.js + runtime.js")
+
+    def test_process_surfaces_own_runtime_export_layer(self) -> None:
+        for module in ("child_process", "process"):
+            gap = Gap(
+                gap_id=module,
+                kind=MISSING_API,
+                module=module,
+                symbols=("symbol",),
+                affected_count=1,
+            )
+            self.assertEqual(_runtime_surface(gap), "runtime.js")
+
+    def test_console_stream_surfaces_own_process_runtime_layer(self) -> None:
+        gap = Gap(
+            gap_id="console-stream",
+            kind=MISSING_API,
+            module="console",
+            symbols=("_stdout.setTimeout", "_stderr.rawListeners"),
+            affected_count=1,
+        )
+        self.assertEqual(_runtime_surface(gap), "runtime.js")
+
     def test_cards_carry_prompt_task_reference_and_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -387,6 +432,34 @@ class GapCardEmissionTests(unittest.TestCase):
             )
             emit_worklist_index([native], out_dir)
             self.assertIn("emsdk", (out_dir / "WORKLIST.md").read_text())
+
+    def test_worklist_index_reports_family_accounting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "worklist"
+            gaps = [
+                Gap(
+                    gap_id="http-a",
+                    kind=MISSING_API,
+                    module="http",
+                    symbols=("request", "get"),
+                    affected_count=2,
+                    affected_paths=("test/http-a.js", "test/http-b.js"),
+                ),
+                Gap(
+                    gap_id="http-b",
+                    kind=MISSING_API,
+                    module="_http_common",
+                    symbols=("HTTPParser",),
+                    affected_count=2,
+                    affected_paths=("test/http-b.js", "test/http-c.js"),
+                ),
+            ]
+            index = emit_worklist_index(gaps, out_dir)
+            text = index.read_text()
+            self.assertIn("Implementation families (runtime write surfaces): **1**", text)
+            self.assertIn("Evidence/build cards: **2**", text)
+            self.assertIn("Distinct missing obligations: **3**", text)
+            self.assertIn("| `runtime/http.js` | _http_common, http | 2 | 3 | 3 |", text)
 
 
 class ProbeResilienceTests(unittest.TestCase):

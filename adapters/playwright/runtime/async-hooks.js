@@ -43,6 +43,49 @@ for (const [index, name] of ASYNC_WRAP_PROVIDER_NAMES.entries()) {
 }
 export const ASYNC_WRAP_PROVIDERS = Object.freeze(asyncWrapProviders);
 
+function typeDescription(value) {
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  switch (typeof value) {
+    case 'bigint': return `type bigint (${value}n)`;
+    case 'number':
+      if (Number.isNaN(value)) return 'type number (NaN)';
+      if (value === Infinity) return 'type number (Infinity)';
+      if (value === -Infinity) return 'type number (-Infinity)';
+      if (Object.is(value, -0)) return 'type number (-0)';
+      return `type number (${value})`;
+    case 'boolean': return `type boolean (${value})`;
+    case 'symbol': return `type symbol (${String(value)})`;
+    case 'string': {
+      const short = value.length > 28 ? `${value.slice(0, 25)}...` : value;
+      return short.includes("'")
+        ? `type string (${JSON.stringify(short)})`
+        : `type string ('${short}')`;
+    }
+    case 'function': return `function ${value.name || ''}`;
+    case 'object': {
+      if (Object.getPrototypeOf(value) === null) return '[Object: null prototype] {}';
+      const constructorName = value.constructor?.name;
+      return constructorName ? `an instance of ${constructorName}` : 'an instance of Object';
+    }
+    default: return `type ${typeof value} (${String(value)})`;
+  }
+}
+
+function invalidArgumentType(name, expected, value) {
+  const error = new TypeError(
+    `The "${name}" argument must be of type ${expected}. Received ${typeDescription(value)}`,
+  );
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function invalidAsyncType(type) {
+  const error = new TypeError(`Invalid name for async "type": ${type}`);
+  error.code = 'ERR_ASYNC_TYPE';
+  return error;
+}
+
 export class BrowserAsyncContextFrame extends Map {
   static enabled = false;
 
@@ -180,8 +223,7 @@ function destroyResource(asyncId) {
   const record = resources.get(asyncId);
   if (!record || !record.destroyed || record.destroyEmitted) return;
   record.destroyEmitted = true;
-  const destroyObserved = record.initObserved
-    || [...hooks].some((hook) => hook.process === record.process);
+  const destroyObserved = record.initObserved;
   if (destroyObserved) withResourceProcess(asyncId, () => emit('destroy', asyncId));
   const relatedAsyncId = relatedAsyncIds.get(asyncId);
   if (relatedAsyncId !== undefined) {
@@ -233,7 +275,7 @@ export function collectAsyncResources() {
   }
 }
 
-function runInScope(asyncId, callback, thisArg, args, deferRestore = false) {
+function runInScope(asyncId, callback, thisArg, args, deferRestore = false, restoreAfterMicrotask = false) {
   const previous = executionId;
   const previousUserCode = globalThis.__bnhUserCode;
   executionId = asyncId;
@@ -249,10 +291,12 @@ function runInScope(asyncId, callback, thisArg, args, deferRestore = false) {
       try {
         return Reflect.apply(callback, thisArg, args);
       } finally {
-        // A hook can be enabled from inside the callback itself. Node still
-        // reports that callback's after event, even though its before event
-        // happened while hooks were disabled.
-        if (!dispatchAfter && [...hooks].some((hook) => hook.process === record?.process)) {
+        // Node only reports the after event for a resource whose init was
+        // observed by an enabled hook. A resource created before any hook was
+        // enabled never had its init emitted, so it must not receive a
+        // before/after pair either, even if a hook becomes enabled later.
+        if (!dispatchAfter && record?.initObserved
+            && [...hooks].some((hook) => hook.process === record?.process)) {
           dispatchAfter = true;
         }
         if (dispatchAfter) {
@@ -266,7 +310,11 @@ function runInScope(asyncId, callback, thisArg, args, deferRestore = false) {
     }
     throw error;
   } finally {
-    if (deferRestore && hostSetTimeout) {
+    if (restoreAfterMicrotask && hostQueueMicrotask) {
+      hostQueueMicrotask(() => {
+        if (executionId === asyncId) executionId = previous;
+      });
+    } else if (deferRestore && hostSetTimeout) {
       hostSetTimeout(() => {
         if (executionId === asyncId) executionId = previous;
       }, 0);
@@ -319,7 +367,7 @@ function installTaskHooks(scope) {
   const originalQueueMicrotask = scope.queueMicrotask;
   if (typeof originalQueueMicrotask === 'function') {
     scope.queueMicrotask = function patchedQueueMicrotask(callback) {
-      if (typeof callback !== 'function' || executionId !== 1) {
+      if (typeof callback !== 'function' || !isUserCodeActive()) {
         return originalQueueMicrotask.call(this, callback);
       }
       const resource = {};
@@ -454,7 +502,11 @@ class AsyncHook {
       this.enabled = true;
       hooks.add(this);
       installPromiseHooks();
-      if (this.destroy) promiseContextSwitchPending = true;
+      // Native async functions use an intrinsic promise continuation that is
+      // not observable through the patched Promise.prototype.then. Mark the
+      // next user promise boundary so Promise.resolve can recreate the
+      // visible async resource chain even for hooks that only observe init.
+      promiseContextSwitchPending = true;
       if (isBrowserRealm) installTaskHooks(globalThis);
     }
     return this;
@@ -545,6 +597,13 @@ function initHooksExist() {
   return false;
 }
 
+function enabledHooksExist() {
+  for (const hook of hooks) {
+    if (hook.process === globalThis.process) return true;
+  }
+  return false;
+}
+
 function createInternalAsyncHooks() {
   return Object.freeze({
     newAsyncId: internalNewAsyncId,
@@ -572,11 +631,7 @@ function createInternalAsyncHooks() {
 
 export class AsyncResource {
   constructor(type, options = {}) {
-    if (typeof type !== 'string') {
-      const error = new TypeError('type must be a string');
-      error.code = 'ERR_INVALID_ARG_TYPE';
-      throw error;
-    }
+    if (typeof type !== 'string') throw invalidArgumentType('type', 'string', type);
     const triggerAsyncId = typeof options === 'number'
       ? options
       : options?.triggerAsyncId !== undefined ? options.triggerAsyncId : executionId;
@@ -585,7 +640,11 @@ export class AsyncResource {
       error.code = 'ERR_INVALID_ASYNC_ID';
       throw error;
     }
+    if (initHooksExist() && enabledHooksExist() && type.length === 0) {
+      throw invalidAsyncType(type);
+    }
     this._asyncId = newAsyncId(type, triggerAsyncId, this, true, true);
+    this._type = type;
     // Browser DNS uses one GETADDRINFOREQWRAP for both lookup and c-ares-like
     // resolve calls. Preserve the visible Node QUERYWRAP boundary without
     // changing the underlying browser DNS operation or its public request id.
@@ -603,7 +662,12 @@ export class AsyncResource {
 
   runInAsyncScope(callback, thisArg, ...args) {
     if (typeof callback !== 'function') throw new TypeError('callback must be a function');
-    return runInScope(this._asyncId, callback, thisArg, args);
+    const retainTaskResource = this._type === 'Timeout'
+      || this._type === 'Interval'
+      || this._type === 'Immediate'
+      || this._type === 'TickObject'
+      || this._type === 'Microtask';
+    return runInScope(this._asyncId, callback, thisArg, args, false, retainTaskResource);
   }
 
   emitDestroy() {
@@ -628,11 +692,7 @@ export class AsyncResource {
   }
 
   bind(callback, thisArg) {
-    if (typeof callback !== 'function') {
-      const error = new TypeError('callback must be a function');
-      error.code = 'ERR_INVALID_ARG_TYPE';
-      throw error;
-    }
+    if (typeof callback !== 'function') throw invalidArgumentType('fn', 'Function', callback);
     const bound = function boundAsyncResource(...args) {
       const receiver = thisArg === undefined ? this : thisArg;
       return thisResource.runInAsyncScope(callback, receiver, ...args);
@@ -644,7 +704,7 @@ export class AsyncResource {
   }
 
   static bind(callback, type, thisArg) {
-    return new AsyncResource(type || callback?.name || 'bound-anonymous-fn').bind(callback, thisArg);
+    return new AsyncResource(type || callback.name || 'bound-anonymous-fn').bind(callback, thisArg);
   }
 }
 
@@ -693,6 +753,27 @@ function createAsyncLocalStorage() {
     constructor() {
       this._enabled = false;
       if (isBrowserRealm) installTaskHooks(globalThis);
+    }
+
+    _enable() {
+      if (!this._enabled) this._enabled = true;
+    }
+
+    _propagate(resource, triggerResource, type) {
+      if (!this._enabled) return;
+      let resourceAsyncId;
+      let triggerAsyncId;
+      for (const [asyncId, record] of resources) {
+        const value = resourceValue(record);
+        if (value === resource) resourceAsyncId = asyncId;
+        if (value === triggerResource) triggerAsyncId = asyncId;
+        if (resourceAsyncId !== undefined && triggerAsyncId !== undefined) break;
+      }
+      if (resourceAsyncId === undefined || triggerAsyncId === undefined) return;
+      const triggerContext = contexts.get(triggerAsyncId);
+      const context = contexts.get(resourceAsyncId) || new Map();
+      context.set(this, triggerContext?.get(this));
+      contexts.set(resourceAsyncId, context);
     }
 
     disable() {

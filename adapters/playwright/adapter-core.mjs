@@ -185,15 +185,15 @@ export async function collectBundle(request) {
       return true;
     }
     const targetCandidate = path.join(targetRoot, safe);
-    const useTargetLib = source === safe && safe.startsWith('lib/');
-    let absolute = useTargetLib ? targetCandidate : path.join(root, source);
+    const useTargetPath = source === safe && (safe.startsWith('lib/') || safe.startsWith('doc/'));
+    let absolute = useTargetPath ? targetCandidate : path.join(root, source);
     let size;
     if (override !== undefined) size = Buffer.byteLength(override);
     else {
       try {
         size = (await stat(absolute)).size;
       } catch (error) {
-        if (error?.code !== 'ENOENT' || !useTargetLib) return false;
+        if (error?.code !== 'ENOENT' || !useTargetPath) return false;
         absolute = path.join(root, source);
         try {
           size = (await stat(absolute)).size;
@@ -285,6 +285,12 @@ export async function collectBundle(request) {
     for (const asset of runtimeExternalAssets) {
       await add(asset.virtual, undefined, asset.source);
     }
+    // The runtime tests resolve their repository root from the candidate
+    // worktree, so keep the docs in the same VFS-backed bundle. Prefer the
+    // candidate copy and fall back to the configured Node checkout when the
+    // candidate is a sparse or otherwise incomplete worktree.
+    await add('doc/api/cli.md');
+    await add('doc/node.1');
   }
   if (bundleMode === 'full') {
     await walk(path.posix.dirname(entry));

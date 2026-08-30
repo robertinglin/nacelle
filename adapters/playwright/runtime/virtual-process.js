@@ -218,6 +218,26 @@ function createInMemoryProcess(options) {
     signalGrants: options.signalGrants,
     exit: () => {},
   });
+  ipcPair.child.unref?.();
+
+  // A forked entry can receive its first message while its module graph is
+  // still being evaluated. Node queues that IPC payload until the child has
+  // installed its message listener; retain the same behavior for the
+  // in-memory browser boundary.
+  const pendingChildMessages = [];
+  let childMessageFlushQueued = false;
+  const flushChildMessages = () => {
+    childMessageFlushQueued = false;
+    if (childProcess.listenerCount('message') === 0) return;
+    for (const [message, handle] of pendingChildMessages.splice(0)) {
+      childProcess.emit('message', message, handle);
+    }
+  };
+  childProcess.on('newListener', (name) => {
+    if (name !== 'message' || childMessageFlushQueued) return;
+    childMessageFlushQueued = true;
+    queueMicrotask(flushChildMessages);
+  });
 
   const finish = (kind, code = childProcess.getCode?.() || 0, signal = null, error = null, forced = false) => {
     if (terminal) return;
@@ -232,12 +252,17 @@ function createInMemoryProcess(options) {
     resolveCompletion(terminal);
   };
 
-  childProcess.on('message', (message, handle) => events.emit('child-message', message, handle));
+  emitDisconnect._bnhInternal = true;
   childProcess.on('disconnect', emitDisconnect);
   childProcess.on('exit', (code) => finish(pendingSignal ? 'signal' : (pendingFailure ? 'rejection' : 'exit'), pendingSignal ? null : code, pendingSignal, pendingFailure));
-  ipcPair.parent.on('message', (message, handle) => events.emit('message', message, handle));
+  ipcPair.parent.on('message', (message, handle) => {
+    events.emit('message', message, handle);
+  });
   ipcPair.parent.on('peerDisconnect', emitDisconnect);
-  ipcPair.child.on('message', (message, handle) => childProcess.emit('message', message, handle));
+  ipcPair.child.on('message', (message, handle) => {
+    if (childProcess.listenerCount('message') > 0) childProcess.emit('message', message, handle);
+    else pendingChildMessages.push([message, handle]);
+  });
   ipcPair.child.on('peerDisconnect', () => {
     if (!childProcess.connected) return;
     childProcess.connected = false;
@@ -271,8 +296,17 @@ function createInMemoryProcess(options) {
       return ipcPair.parent.sendWithHandle(value, sendHandle, undefined, callback);
     },
     disconnect() {
-      if (!ipcPair.parent.disconnect()) return false;
-      emitDisconnect();
+      if (!ipcPair.parent.connected) return false;
+      queueMicrotask(() => {
+        emitDisconnect();
+        queueMicrotask(() => {
+          if (!ipcPair.parent.connected || !ipcPair.parent.disconnect()) return;
+          if (options.clusterGroupId !== undefined) {
+            childProcess._markExited?.();
+            if (!terminal) finish('exit', childProcess.getCode?.() || 0);
+          }
+        });
+      });
       return true;
     },
     kill(signal = 'SIGTERM') {
@@ -321,6 +355,7 @@ function createInMemoryProcess(options) {
           signal: abortController?.signal || childProcess,
           cluster: options.cluster,
           clusterGroupId: options.clusterGroupId,
+          clusterWorkerId: options.clusterWorkerId,
         };
         runResult = typeof options.run === 'function' ? options.run(context) : runVfsEntry(options, context);
       } catch (error) {
@@ -334,6 +369,7 @@ function createInMemoryProcess(options) {
       }, (error) => {
         if (terminal) return;
         pendingFailure = error;
+        output.stderr?.(`${error?.stack || error}\n`);
         childProcess.exitCode = 1;
         childProcess._markExited();
       });

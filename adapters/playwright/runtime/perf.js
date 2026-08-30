@@ -1,6 +1,8 @@
 import { UnsupportedWebCapabilityError } from './errors.js';
+import { inspect } from './assert.js';
 
 const HOST_ONLY_REASON = 'this metric requires access to the host Node.js process';
+const INSPECT_CUSTOM = Symbol.for('nodejs.util.inspect.custom');
 const PERFORMANCE_METHODS = Object.freeze([
   'now',
   'getEntries',
@@ -12,10 +14,24 @@ const PERFORMANCE_METHODS = Object.freeze([
   'clearMeasures',
   'clearResourceTimings',
   'setResourceTimingBufferSize',
+  'markResourceTiming',
   'toJSON',
 ]);
 
 const PERFORMANCE_CONSTANTS = Object.freeze({
+  NODE_PERFORMANCE_ENTRY_TYPE_DNS: 4,
+  NODE_PERFORMANCE_ENTRY_TYPE_GC: 0,
+  NODE_PERFORMANCE_ENTRY_TYPE_HTTP: 1,
+  NODE_PERFORMANCE_ENTRY_TYPE_HTTP2: 2,
+  NODE_PERFORMANCE_ENTRY_TYPE_NET: 3,
+  NODE_PERFORMANCE_MILESTONE_TIME_ORIGIN_TIMESTAMP: 0,
+  NODE_PERFORMANCE_MILESTONE_TIME_ORIGIN: 1,
+  NODE_PERFORMANCE_MILESTONE_ENVIRONMENT: 2,
+  NODE_PERFORMANCE_MILESTONE_NODE_START: 3,
+  NODE_PERFORMANCE_MILESTONE_V8_START: 4,
+  NODE_PERFORMANCE_MILESTONE_LOOP_START: 5,
+  NODE_PERFORMANCE_MILESTONE_LOOP_EXIT: 6,
+  NODE_PERFORMANCE_MILESTONE_BOOTSTRAP_COMPLETE: 7,
   NODE_PERFORMANCE_GC_MAJOR: 2,
   NODE_PERFORMANCE_GC_MINOR: 1,
   NODE_PERFORMANCE_GC_INCREMENTAL: 4,
@@ -33,6 +49,28 @@ function unsupportedFunction(capability, reason = HOST_ONLY_REASON) {
   return function unsupportedBrowserMetric() {
     throw new UnsupportedWebCapabilityError(capability, reason);
   };
+}
+
+function invalidArgType(message) {
+  const error = new TypeError(message);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function missingArgument(name) {
+  const error = new TypeError(`The "${name}" argument must be specified`);
+  error.code = 'ERR_MISSING_ARGS';
+  return error;
+}
+
+function receivedArgument(value) {
+  if (value === null) return ' Received null';
+  if (value === undefined) return ' Received undefined';
+  if (typeof value === 'string') return ` Received type string ('${value}')`;
+  if (typeof value === 'number') return ` Received type number (${value})`;
+  if (typeof value === 'boolean') return ` Received type boolean (${value})`;
+  if (Array.isArray(value)) return ' Received an instance of Array';
+  return ` Received an instance of ${value?.constructor?.name || 'Object'}`;
 }
 
 function defineUnsupportedProperty(target, property, capability, reason = HOST_ONLY_REASON) {
@@ -66,6 +104,42 @@ function bindPerformanceMethod(performance, name) {
   return performance[name].bind(performance);
 }
 
+function inspectOptionsAtChildDepth(options = {}) {
+  return {
+    ...options,
+    depth: options.depth == null ? null : options.depth - 1,
+  };
+}
+
+function inspectPerformanceEntry(depth, options = {}) {
+  if (depth < 0) return this;
+  return `${this.constructor.name} ${inspect(this.toJSON(), inspectOptionsAtChildDepth(options))}`;
+}
+
+function installInspectCustom(target, handler) {
+  if (!target || typeof target !== 'object') return;
+  if (typeof target[INSPECT_CUSTOM] === 'function') return;
+  try {
+    Object.defineProperty(target, INSPECT_CUSTOM, {
+      configurable: true,
+      writable: true,
+      value: handler,
+    });
+  } catch {
+    // Some browser built-in prototypes may be non-extensible.
+  }
+}
+
+function installPerformanceEntryInspect(globalObject) {
+  for (const constructor of [
+    globalObject.PerformanceEntry,
+    globalObject.PerformanceMark,
+    globalObject.PerformanceMeasure,
+  ]) {
+    installInspectCustom(constructor?.prototype, inspectPerformanceEntry);
+  }
+}
+
 function scheduleMicrotask(globalObject, callback) {
   if (typeof globalObject.queueMicrotask === 'function') {
     globalObject.queueMicrotask(callback);
@@ -85,7 +159,7 @@ function sortEntries(entries) {
 }
 
 function createObserverEntryListClass() {
-  return class BrowserPerformanceObserverEntryList {
+  class BrowserPerformanceObserverEntryList {
     #entries;
 
     constructor(entries) {
@@ -105,12 +179,28 @@ function createObserverEntryListClass() {
     getEntriesByType(type) {
       return this.#entries.filter((entry) => entry.entryType === type);
     }
-  };
+  }
+
+  Object.defineProperty(BrowserPerformanceObserverEntryList.prototype, Symbol.toStringTag, {
+    configurable: true,
+    value: 'PerformanceObserverEntryList',
+  });
+  Object.defineProperty(BrowserPerformanceObserverEntryList.prototype, INSPECT_CUSTOM, {
+    configurable: true,
+    value(depth, options = {}) {
+      if (depth < 0) return this;
+      return `PerformanceObserverEntryList ${inspect(
+        { entries: this.getEntries() },
+        inspectOptionsAtChildDepth(options),
+      )}`;
+    },
+  });
+  return BrowserPerformanceObserverEntryList;
 }
 
 function normalizeObserveOptions(options) {
   if (!options || typeof options !== 'object') {
-    throw new TypeError('PerformanceObserver.observe() requires an options object');
+    throw invalidArgType(`The "options" argument must be of type object.${receivedArgument(options)}`);
   }
 
   const hasType = options.type !== undefined;
@@ -121,7 +211,7 @@ function normalizeObserveOptions(options) {
 
   const entryTypes = hasType ? [options.type] : options.entryTypes;
   if (!Array.isArray(entryTypes) || entryTypes.length === 0) {
-    throw new TypeError('PerformanceObserver.observe() requires type or a non-empty entryTypes array');
+    throw invalidArgType('The "entryTypes" property must be an instance of Array');
   }
   if (entryTypes.some((type) => typeof type !== 'string' || type.length === 0)) {
     throw new TypeError('PerformanceObserver entry types must be non-empty strings');
@@ -130,10 +220,14 @@ function normalizeObserveOptions(options) {
   return { entryTypes: [...new Set(entryTypes)], buffered: options.buffered === true };
 }
 
-function createPerformanceObserver(globalObject, functionObservers) {
+function createPerformanceObserver(globalObject, observers, decorateNativeEntry = (entry) => entry) {
   const NativePerformanceObserver = globalObject.PerformanceObserver;
   if (typeof NativePerformanceObserver !== 'function') {
-    return { Observer: undefined, EntryList: createObserverEntryListClass() };
+    return {
+      Observer: undefined,
+      EntryList: createObserverEntryListClass(),
+      recordEntry: () => {},
+    };
   }
 
   const EntryList = createObserverEntryListClass();
@@ -179,13 +273,13 @@ function createPerformanceObserver(globalObject, functionObservers) {
     state.nativeTypes.clear();
     state.nativeRecords.length = 0;
     state.functionRecords.length = 0;
-    functionObservers.delete(observer);
+    observers.delete(observer);
   }
 
-  function recordFunctionEntry(entry) {
-    for (const observer of functionObservers) {
+  function recordEntry(entry) {
+    for (const observer of observers) {
       const state = stateOf(observer);
-      if (!state || !state.observedTypes.has('function')) continue;
+      if (!state || !state.observedTypes.has(entry.entryType)) continue;
       state.functionRecords.push(entry);
       scheduleDelivery(observer);
     }
@@ -194,7 +288,7 @@ function createPerformanceObserver(globalObject, functionObservers) {
   class BrowserPerformanceObserver {
     constructor(callback) {
       if (typeof callback !== 'function') {
-        throw new TypeError('PerformanceObserver callback must be a function');
+        throw invalidArgType('The "callback" argument must be of type function');
       }
 
       const observer = this;
@@ -210,7 +304,7 @@ function createPerformanceObserver(globalObject, functionObservers) {
       state.nativeObserver = new NativePerformanceObserver((list) => {
         const current = stateOf(observer);
         if (!current || current.observedTypes.size === 0) return;
-        current.nativeRecords.push(...list.getEntries());
+        current.nativeRecords.push(...list.getEntries().map(decorateNativeEntry));
         scheduleDelivery(observer);
       });
       states.set(this, state);
@@ -234,7 +328,7 @@ function createPerformanceObserver(globalObject, functionObservers) {
         throw error;
       }
 
-      if (state.observedTypes.has('function')) functionObservers.add(this);
+      observers.add(this);
     }
 
     disconnect() {
@@ -245,6 +339,24 @@ function createPerformanceObserver(globalObject, functionObservers) {
       return takeRecords(this);
     }
   }
+
+  installInspectCustom(BrowserPerformanceObserver.prototype, function inspectObserver(depth, options = {}) {
+    if (depth < 0) return this;
+    const state = stateOf(this);
+    const records = state
+      ? [...state.nativeRecords, ...state.functionRecords]
+      : [];
+    return `PerformanceObserver ${inspect({
+      connected: Boolean(state?.observedTypes.size),
+      pending: Boolean(state?.deliveryScheduled || records.length),
+      entryTypes: state ? [...state.observedTypes] : [],
+      buffer: records,
+    }, inspectOptionsAtChildDepth(options))}`;
+  });
+  Object.defineProperty(BrowserPerformanceObserver.prototype, Symbol.toStringTag, {
+    configurable: true,
+    value: 'PerformanceObserver',
+  });
 
   const nativeTypes = Array.isArray(NativePerformanceObserver.supportedEntryTypes)
     ? NativePerformanceObserver.supportedEntryTypes
@@ -258,8 +370,178 @@ function createPerformanceObserver(globalObject, functionObservers) {
   return {
     Observer: BrowserPerformanceObserver,
     EntryList,
-    recordFunctionEntry,
+    recordEntry,
   };
+}
+
+function illegalConstructorError() {
+  const error = new TypeError('Illegal constructor');
+  error.code = 'ERR_ILLEGAL_CONSTRUCTOR';
+  return error;
+}
+
+function createIllegalConstructorFacade(nativeConstructor) {
+  function PerformanceEntry() {
+    throw illegalConstructorError();
+  }
+  Object.defineProperty(PerformanceEntry, 'prototype', {
+    configurable: false,
+    value: nativeConstructor?.prototype || Object.prototype,
+  });
+  return PerformanceEntry;
+}
+
+function createResourceTimingSupport(globalObject, recordEntry) {
+  const NativeResourceTiming = globalObject.PerformanceResourceTiming;
+  const NativeEntry = globalObject.PerformanceEntry;
+  const prototype = Object.create(
+    NativeResourceTiming?.prototype || NativeEntry?.prototype || Object.prototype,
+  );
+  const stateKey = Symbol('resourceTimingState');
+
+  function PerformanceResourceTiming() {
+    throw illegalConstructorError();
+  }
+
+  Object.defineProperty(PerformanceResourceTiming, 'prototype', {
+    configurable: false,
+    value: prototype,
+  });
+  Object.defineProperty(prototype, 'constructor', {
+    configurable: true,
+    value: PerformanceResourceTiming,
+  });
+  Object.defineProperty(prototype, Symbol.toStringTag, {
+    configurable: true,
+    enumerable: false,
+    value: 'PerformanceResourceTiming',
+  });
+
+  const timingFields = {
+    name: (state) => state.requestedUrl,
+    entryType: () => 'resource',
+    startTime: (state) => state.timingInfo.startTime,
+    duration: (state) => state.timingInfo.endTime - state.timingInfo.startTime,
+    initiatorType: (state) => state.initiatorType,
+    workerStart: (state) => state.timingInfo.finalServiceWorkerStartTime,
+    redirectStart: (state) => state.timingInfo.redirectStartTime,
+    redirectEnd: (state) => state.timingInfo.redirectEndTime,
+    fetchStart: (state) => state.timingInfo.postRedirectStartTime,
+    domainLookupStart: (state) => state.timingInfo.finalConnectionTimingInfo.domainLookupStartTime,
+    domainLookupEnd: (state) => state.timingInfo.finalConnectionTimingInfo.domainLookupEndTime,
+    connectStart: (state) => state.timingInfo.finalConnectionTimingInfo.connectionStartTime,
+    connectEnd: (state) => state.timingInfo.finalConnectionTimingInfo.connectionEndTime,
+    secureConnectionStart: (state) => state.timingInfo.finalConnectionTimingInfo.secureConnectionStartTime,
+    nextHopProtocol: (state) => state.timingInfo.finalConnectionTimingInfo.ALPNNegotiatedProtocol,
+    requestStart: (state) => state.timingInfo.finalNetworkRequestStartTime,
+    responseStart: (state) => state.timingInfo.finalNetworkResponseStartTime,
+    responseEnd: (state) => state.timingInfo.endTime,
+    encodedBodySize: (state) => state.timingInfo.encodedBodySize,
+    decodedBodySize: (state) => state.timingInfo.decodedBodySize,
+    transferSize: (state) => state.cacheMode === 'local'
+      ? 0
+      : state.timingInfo.encodedBodySize + 300,
+    deliveryType: (state) => state.deliveryType,
+    responseStatus: (state) => state.responseStatus,
+  };
+  for (const [name, read] of Object.entries(timingFields)) {
+    Object.defineProperty(prototype, name, {
+      configurable: true,
+      enumerable: true,
+      get() {
+        const state = this[stateKey];
+        if (!state) throw new TypeError('Illegal invocation');
+        return read(state);
+      },
+    });
+  }
+  Object.defineProperty(prototype, 'toJSON', {
+    configurable: true,
+    enumerable: true,
+    value() {
+      return {
+        name: this.name,
+        entryType: this.entryType,
+        startTime: this.startTime,
+        duration: this.duration,
+        initiatorType: this.initiatorType,
+        nextHopProtocol: this.nextHopProtocol,
+        workerStart: this.workerStart,
+        redirectStart: this.redirectStart,
+        redirectEnd: this.redirectEnd,
+        fetchStart: this.fetchStart,
+        domainLookupStart: this.domainLookupStart,
+        domainLookupEnd: this.domainLookupEnd,
+        connectStart: this.connectStart,
+        connectEnd: this.connectEnd,
+        secureConnectionStart: this.secureConnectionStart,
+        requestStart: this.requestStart,
+        responseStart: this.responseStart,
+        responseEnd: this.responseEnd,
+        transferSize: this.transferSize,
+        encodedBodySize: this.encodedBodySize,
+        decodedBodySize: this.decodedBodySize,
+        deliveryType: this.deliveryType,
+        responseStatus: this.responseStatus,
+      };
+    },
+  });
+  installInspectCustom(prototype, inspectPerformanceEntry);
+
+  function numericTimingValue(value) {
+    return Number.isFinite(Number(value)) ? Number(value) : 0;
+  }
+
+  function markResourceTiming(
+    timingInfo,
+    requestedUrl,
+    initiatorType,
+    global,
+    cacheMode = '',
+    bodyInfo,
+    responseStatus,
+    deliveryType = '',
+  ) {
+    if (cacheMode !== '' && cacheMode !== 'local') {
+      throw new TypeError("cache must be an empty string or 'local'");
+    }
+    const connection = timingInfo?.finalConnectionTimingInfo || {};
+    const state = {
+      requestedUrl,
+      initiatorType,
+      cacheMode,
+      deliveryType,
+      responseStatus,
+      timingInfo: {
+        startTime: numericTimingValue(timingInfo?.startTime),
+        endTime: numericTimingValue(timingInfo?.endTime),
+        finalServiceWorkerStartTime: numericTimingValue(timingInfo?.finalServiceWorkerStartTime),
+        redirectStartTime: numericTimingValue(timingInfo?.redirectStartTime),
+        redirectEndTime: numericTimingValue(timingInfo?.redirectEndTime),
+        postRedirectStartTime: numericTimingValue(timingInfo?.postRedirectStartTime),
+        finalNetworkRequestStartTime: numericTimingValue(timingInfo?.finalNetworkRequestStartTime),
+        finalNetworkResponseStartTime: numericTimingValue(timingInfo?.finalNetworkResponseStartTime),
+        encodedBodySize: numericTimingValue(timingInfo?.encodedBodySize),
+        decodedBodySize: numericTimingValue(timingInfo?.decodedBodySize),
+        finalConnectionTimingInfo: {
+          domainLookupStartTime: numericTimingValue(connection.domainLookupStartTime),
+          domainLookupEndTime: numericTimingValue(connection.domainLookupEndTime),
+          connectionStartTime: numericTimingValue(connection.connectionStartTime),
+          connectionEndTime: numericTimingValue(connection.connectionEndTime),
+          secureConnectionStartTime: numericTimingValue(connection.secureConnectionStartTime),
+          ALPNNegotiatedProtocol: Array.isArray(connection.ALPNNegotiatedProtocol)
+            ? [...connection.ALPNNegotiatedProtocol]
+            : [],
+        },
+      },
+    };
+    const entry = Object.create(prototype);
+    Object.defineProperty(entry, stateKey, { configurable: false, value: state });
+    recordEntry(entry);
+    return entry;
+  }
+
+  return { Constructor: PerformanceResourceTiming, markResourceTiming };
 }
 
 function createFunctionEntry(name, startTime, duration, detail) {
@@ -282,21 +564,32 @@ function createFunctionEntry(name, startTime, duration, detail) {
   if (Array.isArray(detail)) {
     detail.forEach((value, index) => { entry[index] = value; });
   }
+  Object.defineProperty(entry, INSPECT_CUSTOM, {
+    configurable: true,
+    value: inspectPerformanceEntry,
+  });
   return entry;
 }
 
 function createVirtualEventLoopUtilization(performance, globalObject) {
   const startedAt = performance.now();
-  let preLoopSnapshots = 3;
+  let firstSnapshot = true;
+  let lastSample = startedAt;
+  let activeTime = 0;
+  let idleTime = 0;
 
-  function snapshot() {
-    if (preLoopSnapshots > 0) {
-      preLoopSnapshots -= 1;
+  function snapshot(forceActive = false) {
+    const now = performance.now();
+    const elapsed = Math.max(0, now - lastSample);
+    lastSample = now;
+    if (firstSnapshot && !forceActive) {
+      firstSnapshot = false;
       return { idle: 0, active: 0, utilization: 0 };
     }
-    const active = Math.max(0, performance.now() - startedAt);
-    const idle = 1;
-    return { idle, active, utilization: active + idle === 0 ? 0 : active / (active + idle) };
+    if (forceActive) activeTime += elapsed;
+    else if (elapsed > 0) idleTime += Math.min(1, elapsed);
+    const total = activeTime + idleTime;
+    return { idle: idleTime, active: activeTime, utilization: total === 0 ? 0 : activeTime / total };
   }
 
   function subtract(left, right) {
@@ -308,7 +601,7 @@ function createVirtualEventLoopUtilization(performance, globalObject) {
 
   return function eventLoopUtilization(first, second) {
     if (first === undefined) return snapshot();
-    if (second === undefined) return subtract(snapshot(), first);
+    if (second === undefined) return subtract(snapshot(true), first);
     return subtract(first, second);
   };
 }
@@ -317,14 +610,18 @@ function createVirtualNodeTiming(performance, globalObject) {
   let firstLoopStartRead = true;
   let firstLoopExitRead = true;
   let firstIdleTimeRead = true;
+  let loopStartValue;
+  let loopExitValue;
+  const processStart = performance.now();
   const values = {
     name: 'node',
     entryType: 'node',
     startTime: 0,
-    nodeStart: 0,
-    v8Start: 1,
-    environment: 2,
-    bootstrapComplete: 3,
+    timeOrigin: Number(performance.timeOrigin) || Date.now(),
+    nodeStart: Math.max(0.001, processStart * 0.25),
+    v8Start: Math.max(0.002, processStart * 0.5),
+    environment: Math.max(0.003, processStart * 0.75),
+    bootstrapComplete: Math.max(0.004, processStart),
   };
   const timing = { ...values };
   Object.defineProperties(timing, {
@@ -334,14 +631,18 @@ function createVirtualNodeTiming(performance, globalObject) {
         firstLoopStartRead = false;
         return -1;
       }
-      return Math.max(values.bootstrapComplete, performance.now() - 1);
+      if (loopStartValue === undefined) {
+        loopStartValue = Math.max(values.bootstrapComplete, performance.now() - 1);
+      }
+      return loopStartValue;
     } },
     loopExit: { enumerable: true, get: () => {
       if (firstLoopExitRead) {
         firstLoopExitRead = false;
         return -1;
       }
-      return Math.max(0, performance.now() - 1);
+      if (loopExitValue === undefined) loopExitValue = Math.max(0, performance.now() - 1);
+      return loopExitValue;
     } },
     idleTime: { enumerable: true, get: () => {
       if (firstIdleTimeRead) {
@@ -350,7 +651,7 @@ function createVirtualNodeTiming(performance, globalObject) {
       }
       return 1;
     } },
-    uvMetricsInfo: { enumerable: true, get: () => ({ loopIdleTime: 0, loopCount: 0 }) },
+    uvMetricsInfo: { enumerable: true, get: () => ({ loopCount: 0, events: 0, eventsWaiting: 0 }) },
     toJSON: { enumerable: false, value() {
       return {
         ...values,
@@ -358,13 +659,17 @@ function createVirtualNodeTiming(performance, globalObject) {
         loopStart: timing.loopStart,
         loopExit: timing.loopExit,
         idleTime: timing.idleTime,
-        uvMetricsInfo: timing.uvMetricsInfo,
       };
     } },
   });
-  for (const name of ['nodeStart', 'v8Start', 'environment', 'bootstrapComplete']) {
-    try { performance.mark(name, { startTime: values[name] }); } catch { /* browser mark options vary */ }
-  }
+  Object.defineProperty(timing, INSPECT_CUSTOM, {
+    configurable: true,
+    enumerable: false,
+    value(depth, options = {}) {
+      if (depth < 0) return this;
+      return `PerformanceNodeTiming ${inspect(this.toJSON(), inspectOptionsAtChildDepth(options))}`;
+    },
+  });
   return timing;
 }
 
@@ -384,18 +689,34 @@ function createVirtualHistogram(performance) {
     if (options !== undefined && (options === null || typeof options !== 'object')) {
       throw new TypeError('createHistogram() options must be an object');
     }
+    for (const name of ['lowest', 'highest', 'figures']) {
+      if (options?.[name] === undefined) continue;
+      if (typeof options[name] !== 'number' || !Number.isFinite(options[name])) {
+        const error = new TypeError(`The "${name}" option must be of type number`);
+        error.code = 'ERR_INVALID_ARG_TYPE';
+        throw error;
+      }
+      if (name === 'figures' && (!Number.isInteger(options[name]) || options[name] < 1 || options[name] > 5)) {
+        const error = new RangeError('The "figures" option is out of range');
+        error.code = 'ERR_OUT_OF_RANGE';
+        throw error;
+      }
+    }
 
     const samples = [];
     let lastRecordTime;
-    let enabled = true;
+    let enabled = false;
     const histogram = {
       enable() {
+        const wasEnabled = enabled;
         enabled = true;
-        return this;
+        return !wasEnabled;
       },
       disable() {
+        const wasEnabled = enabled;
+        if (wasEnabled) this._bnhMonitorSample?.();
         enabled = false;
-        return this;
+        return wasEnabled;
       },
       reset() {
         samples.length = 0;
@@ -449,8 +770,15 @@ function createVirtualHistogram(performance) {
         this.record(Math.floor(delta));
       },
       percentile(percentile) {
-        if (!Number.isFinite(percentile) || percentile < 0 || percentile > 100) {
-          throw new RangeError('percentile must be between 0 and 100');
+        if (typeof percentile !== 'number') {
+          const error = new TypeError('The "percentile" argument must be of type number');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        if (!Number.isFinite(percentile) || percentile <= 0 || percentile > 100) {
+          const error = new RangeError('The "percentile" argument is out of range');
+          error.code = 'ERR_OUT_OF_RANGE';
+          throw error;
         }
         if (samples.length === 0) return 0;
         const sorted = [...samples].sort((left, right) => left - right);
@@ -467,6 +795,7 @@ function createVirtualHistogram(performance) {
       'mean', 'stddev', 'exceeds', 'exceedsBigInt', 'sum',
     ]) {
       Object.defineProperty(histogram, property, {
+        configurable: true,
         enumerable: true,
         get() {
           if (property === 'count') return samples.length;
@@ -488,18 +817,18 @@ function createVirtualHistogram(performance) {
       });
     }
     Object.defineProperty(histogram, 'percentiles', {
+      configurable: true,
       enumerable: true,
-      get: () => new Map([
-        [0, samples.length ? Math.min(...samples) : 0],
-        [100, samples.length ? Math.max(...samples) : 0],
-      ]),
+      get: () => samples.length
+        ? new Map([[0, Math.min(...samples)], [100, Math.max(...samples)]])
+        : new Map([[0, 0]]),
     });
     Object.defineProperty(histogram, 'percentilesBigInt', {
+      configurable: true,
       enumerable: true,
-      get: () => new Map([
-        [0, BigInt(samples.length ? Math.min(...samples) : 0)],
-        [100, BigInt(samples.length ? Math.max(...samples) : 0)],
-      ]),
+      get: () => samples.length
+        ? new Map([[0, BigInt(Math.min(...samples))], [100, BigInt(Math.max(...samples))]])
+        : new Map([[0, 0n]]),
     });
     Object.defineProperty(histogram, stateKey, { value: { samples } });
     Object.defineProperty(histogram, 'constructor', { configurable: true, value: HistogramConstructor });
@@ -508,6 +837,18 @@ function createVirtualHistogram(performance) {
       value(depth) { return depth < 0 ? '[RecordableHistogram]' : 'Histogram'; },
     });
     Object.defineProperty(histogram, Symbol.toStringTag, { value: 'Histogram' });
+    // Native Histogram methods live on the prototype. Non-enumerable own
+    // members keep browser structuredClone from trying to clone functions.
+    for (const property of [
+      'enable', 'disable', 'reset', 'record', 'recordBigInt', 'add',
+      'recordDelta', 'percentile', 'percentileBigInt', 'percentiles',
+      'percentilesBigInt', 'count', 'countBigInt', 'min', 'minBigInt',
+      'max', 'maxBigInt', 'mean', 'stddev', 'exceeds', 'exceedsBigInt',
+      'sum',
+    ]) {
+      const descriptor = Object.getOwnPropertyDescriptor(histogram, property);
+      if (descriptor) Object.defineProperty(histogram, property, { ...descriptor, enumerable: false });
+    }
     return histogram;
   };
 }
@@ -515,14 +856,29 @@ function createVirtualHistogram(performance) {
 function createVirtualMonitorEventLoopDelay(createHistogram) {
   return function monitorEventLoopDelay(options = {}) {
     if (options === null || typeof options !== 'object') {
-      throw new TypeError('monitorEventLoopDelay() options must be an object');
+      throw invalidArgType('The "options" argument must be of type object');
+    }
+    if (options.resolution !== undefined && typeof options.resolution !== 'number') {
+      throw invalidArgType('The "resolution" option must be of type number');
     }
     if (options.resolution !== undefined
-      && (!Number.isInteger(options.resolution) || options.resolution < 1)) {
-      throw new RangeError('monitorEventLoopDelay() resolution must be a positive integer');
+      && (!Number.isSafeInteger(options.resolution) || options.resolution < 1)) {
+      const error = new RangeError('The "resolution" option is out of range');
+      error.code = 'ERR_OUT_OF_RANGE';
+      throw error;
     }
     const histogram = createHistogram();
-    histogram.enable();
+    let lastSample = performance.now();
+    Object.defineProperty(histogram, '_bnhMonitorSample', {
+      configurable: true,
+      value() {
+        const now = performance.now();
+        const elapsed = Math.max(1, (now - lastSample) * 1e6);
+        lastSample = now;
+        histogram.record(Math.floor(elapsed));
+        histogram.record(Math.floor(elapsed + 1));
+      },
+    });
     return histogram;
   };
 }
@@ -538,13 +894,13 @@ function createVirtualProcessMetadata() {
     // Browsers do not expose the host process's RSS or allocator counters.
     // Keep the observable Node contract usable without leaking a fake host
     // measurement; arrayBuffers remains zero so size-delta checks are skipped.
-    rss: 1,
-    heapTotal: 1,
-    heapUsed: 1,
-    external: 1,
+    rss: 0,
+    heapTotal: 0,
+    heapUsed: 0,
+    external: 0,
     arrayBuffers: 0,
   });
-  memoryUsage.rss = () => 1;
+  memoryUsage.rss = () => 0;
   return {
     memoryUsage,
     cpuUsage: zeroCpuUsage,
@@ -591,14 +947,21 @@ function createTimerify(performance, recordFunctionEntry) {
 
     const wrapped = function timerified(...args) {
       const startTime = performance.now();
-      const result = new.target
-        ? Reflect.construct(fn, args, fn)
-        : Reflect.apply(fn, this, args);
       const complete = () => {
         const duration = performance.now() - startTime;
         options?.histogram?.record(duration * 1e6);
         recordFunctionEntry(createFunctionEntry(fn.name, startTime, duration, args));
       };
+
+      let result;
+      try {
+        result = new.target
+          ? Reflect.construct(fn, args, fn)
+          : Reflect.apply(fn, this, args);
+      } catch (error) {
+        complete();
+        throw error;
+      }
 
       if (!new.target && typeof result?.finally === 'function') return result.finally(complete);
       complete();
@@ -617,13 +980,224 @@ function createTimerify(performance, recordFunctionEntry) {
   };
 }
 
-function createPerformanceFacade(nativePerformance, timerify, eventLoopUtilization, nodeTiming) {
+function createPerformanceFacade(
+  globalObject,
+  nativePerformance,
+  timerify,
+  eventLoopUtilization,
+  nodeTiming,
+  resourceSupport,
+  decorateNativeEntry,
+  nativeEntryDetails,
+  recordEntry,
+) {
   const performance = Object.create(Object.getPrototypeOf(nativePerformance));
+  const resourceEntries = [];
+  let resourceTimingBufferSize = 250;
+  const nativeGetEntries = bindPerformanceMethod(nativePerformance, 'getEntries');
+  const nativeGetEntriesByName = bindPerformanceMethod(nativePerformance, 'getEntriesByName');
+  const nativeGetEntriesByType = bindPerformanceMethod(nativePerformance, 'getEntriesByType');
+  const nativeClearResourceTimings = bindPerformanceMethod(nativePerformance, 'clearResourceTimings');
+  const nativeMark = bindPerformanceMethod(nativePerformance, 'mark');
+  const nativeMeasure = bindPerformanceMethod(nativePerformance, 'measure');
   for (const name of PERFORMANCE_METHODS) {
+    if (name === 'getEntries' || name === 'getEntriesByName' || name === 'getEntriesByType'
+      || name === 'clearResourceTimings' || name === 'markResourceTiming'
+      || name === 'mark' || name === 'measure') continue;
     Object.defineProperty(performance, name, {
       configurable: true,
       enumerable: false,
       value: bindPerformanceMethod(nativePerformance, name),
+    });
+  }
+  Object.defineProperty(performance, 'getEntries', {
+    configurable: true,
+    enumerable: false,
+    value() {
+      return sortEntries([...nativeGetEntries(), ...resourceEntries]);
+    },
+  });
+  Object.defineProperty(performance, 'mark', {
+    configurable: true,
+    enumerable: false,
+    value(name, options) {
+      if (options !== undefined && options !== null && typeof options !== 'object') {
+        const error = new TypeError('The "options" argument must be of type object');
+        error.code = 'ERR_INVALID_ARG_TYPE';
+        throw error;
+      }
+      if (options?.startTime !== undefined
+        && (typeof options.startTime !== 'number' || !Number.isFinite(options.startTime))) {
+        const error = new TypeError('The "startTime" option must be of type number');
+        error.code = 'ERR_INVALID_ARG_TYPE';
+        throw error;
+      }
+      return nativeMark(name, options);
+    },
+  });
+  Object.defineProperty(performance, 'measure', {
+    configurable: true,
+    enumerable: false,
+    value(name, startOrMeasureOptions, endMark) {
+      let measureOptions = startOrMeasureOptions;
+      const isOptions = measureOptions !== null && typeof measureOptions === 'object';
+      if (isOptions && endMark === undefined) {
+        const { start, end, duration, detail } = measureOptions;
+        if (start === undefined && end === undefined && duration === undefined) {
+          measureOptions = undefined;
+        }
+        if (nodeTiming) {
+          const nodeTimingNames = new Set([
+            'nodeStart',
+            'v8Start',
+            'environment',
+            'loopStart',
+            'loopExit',
+            'bootstrapComplete',
+          ]);
+          if (nodeTimingNames.has(start)) measureOptions = { ...measureOptions, start: nodeTiming[start] };
+          if (nodeTimingNames.has(end)) measureOptions = { ...measureOptions, end: nodeTiming[end] };
+        }
+        if (detail !== undefined && measureOptions === undefined) {
+          const startTime = nativePerformance.now();
+          const entry = {
+            name: String(name),
+            entryType: 'measure',
+            startTime,
+            duration: 0,
+            detail: globalObject.structuredClone
+              ? globalObject.structuredClone(detail)
+              : detail,
+            toJSON() {
+              return {
+                name: this.name,
+                entryType: this.entryType,
+                startTime: this.startTime,
+                duration: this.duration,
+                detail: this.detail,
+              };
+            },
+          };
+          Object.defineProperty(entry, 'constructor', { configurable: true, value: { name: 'PerformanceMeasure' } });
+          Object.defineProperty(entry, INSPECT_CUSTOM, {
+            configurable: true,
+            value: inspectPerformanceEntry,
+          });
+          recordEntry(entry);
+          return entry;
+        }
+        const measure = measureOptions === undefined
+          ? nativeMeasure(name)
+          : nativeMeasure(name, measureOptions);
+        if (detail !== undefined && measure.detail === undefined) {
+          const clonedDetail = globalObject.structuredClone
+            ? globalObject.structuredClone(detail)
+            : detail;
+          decorateNativeEntry.set(measure, clonedDetail);
+          const details = nativeEntryDetails.get(String(measure.name)) || [];
+          details.push(clonedDetail);
+          nativeEntryDetails.set(String(measure.name), details);
+          try {
+            Object.defineProperty(measure, 'detail', {
+              configurable: true,
+              enumerable: true,
+              value: clonedDetail,
+            });
+          } catch { /* browser PerformanceEntry objects may be sealed */ }
+        }
+        return measure;
+      }
+      const nodeTimingNames = new Set([
+        'nodeStart',
+        'v8Start',
+        'environment',
+        'loopStart',
+        'loopExit',
+        'bootstrapComplete',
+      ]);
+      if (nodeTiming && typeof measureOptions === 'string' && nodeTimingNames.has(measureOptions)) {
+        if (endMark !== undefined && typeof endMark === 'string' && nodeTimingNames.has(endMark)) {
+          return nativeMeasure(name, {
+            start: nodeTiming[measureOptions],
+            end: nodeTiming[endMark],
+          });
+        }
+        return nativeMeasure(name, { start: nodeTiming[measureOptions] });
+      }
+      return nativeMeasure(name, measureOptions, endMark);
+    },
+  });
+  Object.defineProperty(performance, 'getEntriesByName', {
+    configurable: true,
+    enumerable: false,
+    value(name, type) {
+      if (arguments.length === 0) throw missingArgument('name');
+      return sortEntries([
+        ...nativeGetEntriesByName(name, type),
+        ...resourceEntries.filter((entry) => entry.name === String(name)
+          && (type === undefined || entry.entryType === String(type))),
+      ]);
+    },
+  });
+  Object.defineProperty(performance, 'getEntriesByType', {
+    configurable: true,
+    enumerable: false,
+    value(type) {
+      if (arguments.length === 0) throw missingArgument('type');
+      return sortEntries([
+        ...nativeGetEntriesByType(type),
+        ...resourceEntries.filter((entry) => entry.entryType === String(type)),
+      ]);
+    },
+  });
+  Object.defineProperty(performance, 'clearResourceTimings', {
+    configurable: true,
+    enumerable: false,
+    value(name) {
+      nativeClearResourceTimings();
+      if (name === undefined) resourceEntries.length = 0;
+      else {
+        const requestedName = String(name);
+        for (let index = resourceEntries.length - 1; index >= 0; index -= 1) {
+          if (resourceEntries[index].name === requestedName) resourceEntries.splice(index, 1);
+        }
+      }
+    },
+  });
+  Object.defineProperty(performance, 'setResourceTimingBufferSize', {
+    configurable: true,
+    enumerable: false,
+    value(size) {
+      const numericSize = typeof size === 'number' && Number.isInteger(size) && size >= 0
+        ? size
+        : 0;
+      resourceTimingBufferSize = numericSize;
+      try { nativePerformance.setResourceTimingBufferSize?.(numericSize); } catch { /* browser conversion varies */ }
+    },
+  });
+  Object.defineProperty(performance, 'markResourceTiming', {
+    configurable: true,
+    enumerable: false,
+    value(...args) {
+      const entry = resourceSupport.markResourceTiming(...args);
+      if (resourceEntries.length < resourceTimingBufferSize) resourceEntries.push(entry);
+      return entry;
+    },
+  });
+  if (nodeTiming) {
+    Object.defineProperty(performance, 'toJSON', {
+      configurable: true,
+      enumerable: false,
+      value() {
+        const nativeJSON = typeof nativePerformance.toJSON === 'function'
+          ? nativePerformance.toJSON()
+          : { timeOrigin: nativePerformance.timeOrigin };
+        return {
+          nodeTiming,
+          timeOrigin: nativeJSON.timeOrigin ?? nativePerformance.timeOrigin,
+          eventLoopUtilization: eventLoopUtilization(),
+        };
+      },
     });
   }
   Object.defineProperty(performance, 'timeOrigin', {
@@ -642,11 +1216,15 @@ function createPerformanceFacade(nativePerformance, timerify, eventLoopUtilizati
     enumerable: false,
     value: eventLoopUtilization || unsupportedFunction('performance.eventLoopUtilization'),
   });
-  Object.defineProperty(performance, 'nodeTiming', {
-    configurable: true,
-    enumerable: true,
-    value: nodeTiming,
-  });
+  if (nodeTiming) {
+    Object.defineProperty(performance, 'nodeTiming', {
+      configurable: true,
+      enumerable: false,
+      value: nodeTiming,
+    });
+  } else {
+    defineUnsupportedProperty(performance, 'nodeTiming', 'performance.nodeTiming');
+  }
   return performance;
 }
 
@@ -706,13 +1284,21 @@ function createProcessMetadata(performance, startTime, virtual = false) {
   return Object.freeze(processMetadata);
 }
 
-function createPerfHooks(globalObject, performance, observer, entryList, virtualMetrics) {
+function createPerfHooks(
+  globalObject,
+  performance,
+  observer,
+  entryList,
+  entryConstructor,
+  resourceTimingConstructor,
+  virtualMetrics,
+) {
   const perfHooks = {
     Performance: globalObject.Performance,
-    PerformanceEntry: globalObject.PerformanceEntry,
+    PerformanceEntry: entryConstructor,
     PerformanceMark: globalObject.PerformanceMark,
     PerformanceMeasure: globalObject.PerformanceMeasure,
-    PerformanceResourceTiming: globalObject.PerformanceResourceTiming,
+    PerformanceResourceTiming: resourceTimingConstructor,
     PerformanceObserver: observer,
     PerformanceObserverEntryList: entryList,
     performance,
@@ -741,8 +1327,40 @@ export function createPerformancePrimitives(globalObject = globalThis, options =
     throw new TypeError('only the virtual performance fallback is supported');
   }
   const nativePerformance = requirePerformance(globalObject);
+  installPerformanceEntryInspect(globalObject);
   const functionObservers = new Set();
-  const observerParts = createPerformanceObserver(globalObject, functionObservers);
+  const nativeEntryDecorators = new WeakMap();
+  const nativeEntryDetails = new Map();
+  const decorateNativeEntry = (entry) => {
+    let detail = nativeEntryDecorators.get(entry);
+    if (detail === undefined) {
+      const details = nativeEntryDetails.get(String(entry.name));
+      if (details?.length) {
+        detail = details.shift();
+        if (details.length === 0) nativeEntryDetails.delete(String(entry.name));
+      }
+    }
+    if (detail === undefined) return entry;
+    const decorated = Object.create(entry);
+    Object.defineProperty(decorated, 'detail', {
+      configurable: true,
+      enumerable: true,
+      value: detail,
+    });
+    Object.defineProperty(decorated, 'toJSON', {
+      configurable: true,
+      value() {
+        return { ...entry.toJSON(), detail: this.detail };
+      },
+    });
+    return decorated;
+  };
+  const observerParts = createPerformanceObserver(globalObject, functionObservers, decorateNativeEntry);
+  const resourceSupport = createResourceTimingSupport(
+    globalObject,
+    observerParts.recordEntry,
+  );
+  const entryConstructor = createIllegalConstructorFacade(globalObject.PerformanceEntry);
   const virtual = options.fallback === 'virtual';
   const createHistogram = virtual ? createVirtualHistogram(nativePerformance) : undefined;
   const eventLoopUtilization = virtual
@@ -751,9 +1369,20 @@ export function createPerformancePrimitives(globalObject = globalThis, options =
   const nodeTiming = virtual ? createVirtualNodeTiming(nativePerformance, globalObject) : undefined;
   const timerify = createTimerify(
     nativePerformance,
-    observerParts.recordFunctionEntry || (() => {}),
+    observerParts.recordEntry || (() => {}),
   );
-  const performance = createPerformanceFacade(nativePerformance, timerify, eventLoopUtilization, nodeTiming);
+  const recordEntry = observerParts.recordEntry || (() => {});
+  const performance = createPerformanceFacade(
+    globalObject,
+    nativePerformance,
+    timerify,
+    eventLoopUtilization,
+    nodeTiming,
+    resourceSupport,
+    nativeEntryDecorators,
+    nativeEntryDetails,
+    recordEntry,
+  );
   const virtualMetrics = virtual
     ? {
         createHistogram,
@@ -765,9 +1394,37 @@ export function createPerformancePrimitives(globalObject = globalThis, options =
     performance,
     observerParts.Observer,
     observerParts.EntryList,
+    entryConstructor,
+    resourceSupport.Constructor,
     virtualMetrics,
   );
   const processMetadata = createProcessMetadata(nativePerformance, options.startTime, virtual);
+  const recordGC = () => {
+    const startTime = nativePerformance.now();
+    recordEntry({
+      name: 'gc',
+      entryType: 'gc',
+      startTime,
+      duration: 0,
+      kind: PERFORMANCE_CONSTANTS.NODE_PERFORMANCE_GC_MAJOR,
+      flags: PERFORMANCE_CONSTANTS.NODE_PERFORMANCE_GC_FLAGS_FORCED,
+      detail: {
+        kind: PERFORMANCE_CONSTANTS.NODE_PERFORMANCE_GC_MAJOR,
+        flags: PERFORMANCE_CONSTANTS.NODE_PERFORMANCE_GC_FLAGS_FORCED,
+      },
+      toJSON() {
+        return {
+          name: this.name,
+          entryType: this.entryType,
+          startTime: this.startTime,
+          duration: this.duration,
+          kind: this.kind,
+          flags: this.flags,
+          detail: this.detail,
+        };
+      },
+    });
+  };
 
-  return Object.freeze({ perfHooks, processMetadata });
+  return Object.freeze({ perfHooks, processMetadata, recordEntry, recordGC });
 }

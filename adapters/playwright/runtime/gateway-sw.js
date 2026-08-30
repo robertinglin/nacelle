@@ -24,6 +24,16 @@ function isHarnessStaticPath(pathname) {
   return HARNESS_STATIC_PATTERNS.some((p) => p.test(pathname));
 }
 
+function gatewayResponseHeaders(headers = {}) {
+  const result = new Headers(headers);
+  // Virtual servers are run-scoped; cached responses can bypass a restarted server and its headers.
+  result.set('cache-control', 'no-store');
+  result.set('cross-origin-resource-policy', 'cross-origin');
+  result.set('cross-origin-embedder-policy', 'require-corp');
+  result.set('cross-origin-opener-policy', 'same-origin');
+  return result;
+}
+
 function parseVhostUrl(urlString, referrerString) {
   if (!urlString) return null;
   try {
@@ -34,7 +44,7 @@ function parseVhostUrl(urlString, referrerString) {
     if (directMatch) {
       const port = parseInt(directMatch[1], 10);
       const subPath = directMatch[2] || '/';
-      return { port, targetUrl: subPath + urlObj.search };
+      return { port, targetUrl: subPath + urlObj.search, source: 'direct' };
     }
 
     // 2. Referrer-based vhost URL (e.g. iframe navigating to root-relative /api/info)
@@ -43,7 +53,7 @@ function parseVhostUrl(urlString, referrerString) {
       const refMatch = refObj.pathname.match(/^\/(?:__vhost__|__bnh_vnet__)\/(\d+)/);
       if (refMatch) {
         const port = parseInt(refMatch[1], 10);
-        return { port, targetUrl: urlObj.pathname + urlObj.search };
+        return { port, targetUrl: urlObj.pathname + urlObj.search, source: 'referrer' };
       }
     }
   } catch {
@@ -54,9 +64,18 @@ function parseVhostUrl(urlString, referrerString) {
 }
 
 self.addEventListener('fetch', (event) => {
-  const directVhost = parseVhostUrl(event.request.url, event.request.referrer);
-  if (directVhost) {
-    event.respondWith(handleVirtualRequest(event.request, directVhost));
+  const virtualRequest = parseVhostUrl(event.request.url, event.request.referrer);
+  if (virtualRequest?.source === 'direct') {
+    event.respondWith(handleVirtualRequest(event.request, virtualRequest));
+    return;
+  }
+  if (virtualRequest?.source === 'referrer' && event.request.mode === 'navigate') {
+    event.respondWith(redirectToVirtualHost(event.request.url, virtualRequest.port));
+    return;
+  }
+
+  if (virtualRequest) {
+    event.respondWith(handleVirtualRequest(event.request, virtualRequest));
     return;
   }
 
@@ -70,6 +89,9 @@ self.addEventListener('fetch', (event) => {
           if (client && client.url) {
             const clientVhost = parseVhostUrl(client.url);
             if (clientVhost) {
+              if (event.request.mode === 'navigate') {
+                return redirectToVirtualHost(event.request.url, clientVhost.port);
+              }
               const targetUrl = urlObj.pathname + urlObj.search;
               return await handleVirtualRequest(event.request, { port: clientVhost.port, targetUrl });
             }
@@ -85,21 +107,33 @@ self.addEventListener('fetch', (event) => {
   }
 });
 
+function redirectToVirtualHost(urlString, port) {
+  const targetUrl = new URL(urlString);
+  targetUrl.pathname = `/__vhost__/${port}${targetUrl.pathname}`;
+  return new Response(null, {
+    status: 307,
+    headers: gatewayResponseHeaders({ location: targetUrl.href }),
+  });
+}
+
 async function handleVirtualRequest(request, { port, targetUrl }) {
   // Find an active window client to forward the request to
   const allClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
   if (!allClients || allClients.length === 0) {
     return new Response('No active Browser Node Harness page found to handle virtual request', {
       status: 502,
-      headers: {
+      headers: gatewayResponseHeaders({
         'content-type': 'text/plain; charset=utf-8',
-        'cross-origin-resource-policy': 'cross-origin',
-      },
+      }),
     });
   }
 
-  // Always route to the top-level host window containing the Node runtime
-  const targetClient = allClients.find((c) => c.frameType === 'top') || allClients[0];
+  // Always route to the top-level host window containing the Node runtime. The
+  // Service Worker Client API calls this frame type "top-level"; a navigating
+  // iframe may be the first client returned while its old document is closing.
+  const targetClient = allClients.find((c) => c.frameType === 'top-level')
+    || allClients.find((c) => c.frameType === 'top')
+    || allClients[0];
 
   const channel = new MessageChannel();
   const requestHeaders = {};
@@ -126,7 +160,7 @@ async function handleVirtualRequest(request, { port, targetUrl }) {
     const timeout = setTimeout(() => {
       resolve(new Response('Gateway Timeout: In-browser Node server did not respond in time', {
         status: 504,
-        headers: { 'content-type': 'text/plain; charset=utf-8' },
+        headers: gatewayResponseHeaders({ 'content-type': 'text/plain; charset=utf-8' }),
       }));
     }, 15000);
 
@@ -137,10 +171,7 @@ async function handleVirtualRequest(request, { port, targetUrl }) {
       if (message.type === 'bnh-vnet-response-start') {
         statusCode = message.statusCode || 200;
         statusText = message.statusText || 'OK';
-        headers = new Headers(message.headers || {});
-        if (!headers.has('cross-origin-resource-policy')) headers.set('cross-origin-resource-policy', 'cross-origin');
-        if (!headers.has('cross-origin-embedder-policy')) headers.set('cross-origin-embedder-policy', 'require-corp');
-        if (!headers.has('cross-origin-opener-policy')) headers.set('cross-origin-opener-policy', 'same-origin');
+        headers = gatewayResponseHeaders(message.headers || {});
         if (!headers.has('access-control-allow-origin')) headers.set('access-control-allow-origin', '*');
         if (!headers.has('access-control-expose-headers')) headers.set('access-control-expose-headers', '*');
       } else if (message.type === 'bnh-vnet-response-chunk') {
@@ -175,9 +206,8 @@ async function handleVirtualRequest(request, { port, targetUrl }) {
           offset += c.byteLength;
         }
         if (!headers) {
-          headers = new Headers({
+          headers = gatewayResponseHeaders({
             'content-type': 'text/html; charset=utf-8',
-            'cross-origin-resource-policy': 'cross-origin',
             'access-control-allow-origin': '*',
           });
         }
@@ -194,7 +224,7 @@ async function handleVirtualRequest(request, { port, targetUrl }) {
         channel.port1.close();
         resolve(new Response(`Virtual Network Error: ${message.error || 'Connection refused'}`, {
           status: 502,
-          headers: { 'content-type': 'text/plain; charset=utf-8' },
+          headers: gatewayResponseHeaders({ 'content-type': 'text/plain; charset=utf-8' }),
         }));
       }
     };

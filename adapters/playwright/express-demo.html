@@ -386,13 +386,13 @@ app.get('/', (req, res) => {
             display: inline-block;
           }
         </style>
-        <base href="/__vhost__/3000/">
+        <base href="/">
       </head>
       <body>
         <div class="card">
           <h1 id="greeting">Hello from Browser Express!</h1>
           <p id="status">⚡ Running directly in your browser's WebAssembly & JS engine</p>
-          <a class="btn" href="/__vhost__/3000/api/info">View JSON API</a>
+          <a class="btn" href="/api/info">View JSON API</a>
         </div>
       </body>
     </html>
@@ -412,11 +412,11 @@ app.get('/api/info', (req, res) => {
 app.get('/hello', (req, res) => {
   const name = req.query.name || 'Developer';
   res.send(`
-    <base href="/__vhost__/3000/">
+    <base href="/">
     <body style="font-family: system-ui; padding: 40px; background: #f8fafc; color: #0f172a;">
       <h1 style="color: #0284c7;">Hello, ${name}!</h1>
       <p>This page was generated dynamically by in-browser Express.</p>
-      <p><a href="/__vhost__/3000/" style="color: #6366f1; font-weight: 600;">← Back to Home</a></p>
+      <p><a href="/" style="color: #6366f1; font-weight: 600;">← Back to Home</a></p>
     </body>
   `);
 });
@@ -438,7 +438,7 @@ const server = app.listen(3000, () => {
         </div>
         <div class="address-bar">
           <span style="color: var(--text-muted); font-size: 0.78rem;">URL:</span>
-          <input class="address-input" id="url-input" value="/__vhost__/3000/" />
+          <input class="address-input" id="url-input" value="/" />
           <div class="url-quick-buttons">
             <button class="secondary" onclick="navigateFrame('/__vhost__/3000/')">/</button>
             <button class="secondary" onclick="navigateFrame('/__vhost__/3000/api/info')">/api/info</button>
@@ -614,17 +614,24 @@ const server = app.listen(3000, () => {
     async function initServiceWorker() {
       if (!('serviceWorker' in navigator)) return;
       logTerminal('Registering Service Worker HTTP Gateway...', 'system');
-      const reg = await navigator.serviceWorker.register('/runtime/gateway-sw.js', { scope: '/' });
+      const controllerChange = new Promise((resolve) => {
+        let timeout;
+        const finish = () => {
+          clearTimeout(timeout);
+          navigator.serviceWorker.removeEventListener('controllerchange', finish);
+          resolve();
+        };
+        navigator.serviceWorker.addEventListener('controllerchange', finish);
+        timeout = setTimeout(finish, 2000);
+      });
+      const reg = await navigator.serviceWorker.register('/runtime/gateway-sw.js', {
+        scope: '/',
+        updateViaCache: 'none',
+      });
+      await reg.update().catch(() => {});
       await navigator.serviceWorker.ready;
-      if (!navigator.serviceWorker.controller) {
-        await new Promise((resolve) => {
-          const onControllerChange = () => {
-            navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
-            resolve();
-          };
-          navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
-          setTimeout(resolve, 600);
-        });
+      if (!navigator.serviceWorker.controller || reg.installing || reg.waiting) {
+        await controllerChange;
       }
       logTerminal('✓ Service Worker HTTP Gateway active', 'system');
     }

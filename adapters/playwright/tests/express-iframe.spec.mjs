@@ -274,6 +274,7 @@ test.describe('Real Browser Test: NPM Install Express & Live Iframe Rendering', 
                 <body>
                   <h1 id="greeting">Hello from Browser Express!</h1>
                   <p id="status">Running in browser-native Node.js</p>
+                  <a href="/__vhost__/3000/api/info?linktest=1">View JSON API</a>
                 </body>
               </html>
             \`);
@@ -378,6 +379,58 @@ test.describe('Real Browser Test: NPM Install Express & Live Iframe Rendering', 
     expect(jsonResponse.poweredBy).toContain('Browser-Express');
     expect(jsonResponse.data.status).toBe('ok');
     expect(jsonResponse.data.framework).toBe('express');
+
+    const repeatedApiUrl = '/__vhost__/3000/api/info?linktest=1';
+    const repeatedApi = await page.evaluate(async (url) => {
+      const response = await fetch(url);
+      return {
+        status: response.status,
+        cacheControl: response.headers.get('cache-control'),
+      };
+    }, repeatedApiUrl);
+    expect(repeatedApi.status).toBe(200);
+    expect(repeatedApi.cacheControl).toBe('no-store');
+
+    const linkNavigation = page.waitForResponse(
+      (response) => response.url().endsWith(repeatedApiUrl) && response.request().resourceType() === 'document',
+      { timeout: 3000 },
+    );
+    await page.evaluate((url) => {
+      const link = document.getElementById('app-preview').contentDocument.querySelector('a[href]');
+      link.setAttribute('href', url);
+      link.click();
+    }, repeatedApiUrl);
+    const linkResponse = await linkNavigation;
+    expect(linkResponse.status()).toBe(200);
+    expect(linkResponse.headers()['cache-control']).toBe('no-store');
+
+    await page.evaluate(() => {
+      document.getElementById('app-preview').src = '/__vhost__/3000/';
+    });
+    await expect(iframe.locator('#greeting')).toHaveText('Hello from Browser Express!');
+
+    const publicApiUrl = '/api/info?linktest=2';
+    const publicRedirect = page.waitForResponse(
+      (response) => response.url().endsWith(publicApiUrl) && response.request().resourceType() === 'document',
+      { timeout: 3000 },
+    );
+    const virtualApiResponse = page.waitForResponse(
+      (response) => response.url().endsWith('/__vhost__/3000/api/info?linktest=2')
+        && response.request().resourceType() === 'document',
+      { timeout: 3000 },
+    );
+    await page.evaluate((url) => {
+      const link = document.getElementById('app-preview').contentDocument.querySelector('a[href]');
+      link.setAttribute('href', url);
+      link.click();
+    }, publicApiUrl);
+    const redirectResponse = await publicRedirect;
+    expect(redirectResponse.status()).toBe(307);
+    expect(redirectResponse.headers().location).toMatch(/\/__vhost__\/3000\/api\/info\?linktest=2$/);
+    const virtualResponse = await virtualApiResponse;
+    expect(virtualResponse.status()).toBe(200);
+    await expect.poll(() => page.locator('#app-preview').evaluate((frame) => frame.contentWindow.location.pathname))
+      .toBe('/__vhost__/3000/api/info');
 
     // 7. Verify Hot-Reloading: Reset runtime, re-mount updated code, and re-execute
     const hotEval = await page.evaluate(async () => {

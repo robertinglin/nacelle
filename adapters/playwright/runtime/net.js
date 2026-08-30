@@ -222,7 +222,7 @@ function reusePortGroupId(network, address, port) {
 /** A Node-shaped Duplex socket whose transport is entirely browser-local. */
 export class Socket extends Duplex {
   constructor(options = {}, internal = {}) {
-    super({ highWaterMark: options.highWaterMark });
+    super({ highWaterMark: options.highWaterMark, autoDestroy: false });
     this._network = internal.network || sharedVirtualNetwork;
     this._dns = internal.dns || createBrowserDns();
     this._bufferClass = internal.BufferClass;
@@ -651,7 +651,15 @@ export class Socket extends Duplex {
       return;
     }
     const peer = this._peer;
-    if (peer && !peer.destroyed) schedule(() => peer.push(null));
+    if (peer && !peer.destroyed) {
+      // A TLS wrapper can finish its raw socket while the connect event is
+      // still flushing a write queued by tlsSocket.end(data). Let that write
+      // dispatch before delivering the peer's EOF; otherwise the peer drops
+      // the application bytes as push-after-EOF.
+      schedule(() => schedule(() => {
+        if (!peer.destroyed) peer.push(null);
+      }));
+    }
     schedule(() => {
       if (this._tcpResource) this._tcpResource.runInAsyncScope(complete, this);
       else complete();
@@ -1298,6 +1306,9 @@ export class Server extends EventEmitter {
     accepted.server = this;
     accepted._server = this;
     accepted._peer = connection.client;
+    if (connection.client?._tlsClientOptions) {
+      accepted._tlsClientOptions = connection.client._tlsClientOptions;
+    }
     if (connection.client && !connection.client._transportPeer && !connection.client.destroyed) {
       connection.client._peer = accepted;
     }
@@ -1973,6 +1984,9 @@ export function createBrowserNet({ network = sharedVirtualNetwork, dns = createB
       for (const key of Reflect.ownKeys(instance)) {
         Object.defineProperty(receiver, key, Object.getOwnPropertyDescriptor(instance, key));
       }
+      receiver._writable._owner = receiver;
+      receiver._writable._write = (bytes, encoding, callback) => receiver._write(bytes, encoding, callback);
+      receiver._writable._final = (callback) => receiver._final(callback);
       return receiver;
     }
     return new ConfiguredSocket(...args);

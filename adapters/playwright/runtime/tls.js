@@ -17,6 +17,7 @@ const CIPHERS = Object.freeze([
   'ECDHE-RSA-AES128-GCM-SHA256',
   'ECDHE-RSA-AES256-GCM-SHA384',
 ]);
+const TLS_HANDSHAKE_MARKER = new Uint8Array([0x42, 0x4e, 0x48, 0x2d, 0x54, 0x4c, 0x53, 0x01]);
 
 const constants = Object.freeze({
   CLIENT_RENEG_LIMIT: 3,
@@ -30,6 +31,21 @@ const constants = Object.freeze({
   TLS1_1_VERSION: 0x302,
   TLS1_2_VERSION: 0x303,
   TLS1_3_VERSION: 0x304,
+});
+
+const TLS_VERSIONS = Object.freeze(['TLSv1', 'TLSv1.1', 'TLSv1.2', 'TLSv1.3']);
+const TLS_VERSION_NUMBERS = Object.freeze(Object.fromEntries(TLS_VERSIONS.map((value, index) => [value, index + 1])));
+const SECURE_PROTOCOLS = Object.freeze({
+  TLSv1_method: 'TLSv1',
+  TLS1_method: 'TLSv1',
+  TLSv1_1_method: 'TLSv1.1',
+  TLS1_1_method: 'TLSv1.1',
+  TLSv1_2_method: 'TLSv1.2',
+  TLS1_2_method: 'TLSv1.2',
+  TLSv1_3_method: 'TLSv1.3',
+  TLS1_3_method: 'TLSv1.3',
+  TLS_method: undefined,
+  SSLv23_method: undefined,
 });
 
 const tlsError = (code, message, details = {}) => {
@@ -177,6 +193,7 @@ function validateTlsOptions(options = {}) {
   };
   optionType('ciphers', 'string', options.ciphers);
   optionType('passphrase', 'string', options.passphrase);
+  optionType('clientCertEngine', 'string', options.clientCertEngine);
   optionType('ecdhCurve', 'string', options.ecdhCurve);
   optionType('handshakeTimeout', 'number', options.handshakeTimeout);
   optionType('sessionTimeout', 'number', options.sessionTimeout);
@@ -186,6 +203,17 @@ function validateTlsOptions(options = {}) {
       throw tlsError('ERR_TLS_INVALID_PROTOCOL_VERSION', `"${options[name]}" is not a valid TLS protocol version`);
     }
   }
+  if (options.secureProtocol !== undefined) {
+    if (typeof options.secureProtocol !== 'string') {
+      throw tlsError('ERR_INVALID_ARG_TYPE', 'The "secureProtocol" option must be a string');
+    }
+    if (!Object.hasOwn(SECURE_PROTOCOLS, options.secureProtocol)) {
+      throw tlsError('ERR_TLS_INVALID_PROTOCOL_METHOD', `${options.secureProtocol} is not a valid SSL/TLS protocol method`);
+    }
+    if (options.minVersion !== undefined || options.maxVersion !== undefined) {
+      throw tlsError('ERR_TLS_PROTOCOL_VERSION_CONFLICT', 'The secureProtocol option cannot be used with minVersion or maxVersion');
+    }
+  }
   if (options.ticketKeys !== undefined) {
     const isBytes = ArrayBuffer.isView(options.ticketKeys) || options.ticketKeys instanceof ArrayBuffer;
     if (!isBytes) throw tlsError('ERR_INVALID_ARG_TYPE', 'The "options.ticketKeys" property must be an instance of Buffer');
@@ -193,6 +221,28 @@ function validateTlsOptions(options = {}) {
       throw tlsError('ERR_INVALID_ARG_VALUE', 'The property \'options.ticketKeys\' must be exactly 48 bytes');
     }
   }
+}
+
+function protocolBounds(options, defaultMinVersion) {
+  const method = options.secureProtocol;
+  const exact = method === undefined ? undefined : SECURE_PROTOCOLS[method];
+  if (exact) return { min: exact, max: exact };
+  if (method === 'TLS_method') {
+    return { min: 'TLSv1', max: 'TLSv1.3' };
+  }
+  return {
+    min: options.minVersion || options._bnhDefaultMinVersion || defaultMinVersion,
+    max: options.maxVersion || 'TLSv1.3',
+  };
+}
+
+function negotiatedProtocol(serverOptions, clientOptions, defaultMinVersion) {
+  const server = protocolBounds(serverOptions || {}, defaultMinVersion);
+  const client = protocolBounds(clientOptions || {}, defaultMinVersion);
+  const minimum = Math.max(TLS_VERSION_NUMBERS[server.min] || 0, TLS_VERSION_NUMBERS[client.min] || 0);
+  const maximum = Math.min(TLS_VERSION_NUMBERS[server.max] || 0, TLS_VERSION_NUMBERS[client.max] || 0);
+  if (minimum > maximum) return null;
+  return TLS_VERSIONS[maximum - 1];
 }
 
 function normalizeAuthority(options = {}) {
@@ -246,7 +296,7 @@ function virtualCertificate(hostname) {
 }
 
 function certificateCommonNames(value) {
-  if (typeof value !== 'string' || !value.includes('BEGIN CERTIFICATE')) return undefined;
+  if (typeof value !== 'string' || !value.includes('BEGIN CERTIFICATE')) return [];
   const body = value
     .replace(/-----BEGIN CERTIFICATE-----|-----END CERTIFICATE-----|\s+/g, '');
   let bytes;
@@ -254,7 +304,7 @@ function certificateCommonNames(value) {
     const binary = atob(body);
     bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
   } catch {
-    return undefined;
+    return [];
   }
   const oid = [0x06, 0x03, 0x55, 0x04, 0x03];
   const names = [];
@@ -303,6 +353,53 @@ function bytesFor(value, scope) {
   }
   if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
   throw new TypeError('TLS stream chunks must be strings or Uint8Array values');
+}
+
+function bytesEqual(left, right) {
+  if (!left || !right || left.byteLength !== right.byteLength) return false;
+  for (let index = 0; index < left.byteLength; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
+}
+
+function isHandshakeMarker(value) {
+  const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
+  return bytes.byteLength === TLS_HANDSHAKE_MARKER.byteLength
+    && bytesEqual(bytes, TLS_HANDSHAKE_MARKER);
+}
+
+function stripHandshakeMarker(value, scope) {
+  const bytes = bytesFor(value, scope);
+  if (bytes.byteLength < TLS_HANDSHAKE_MARKER.byteLength) return bytes;
+  let markerStart = -1;
+  for (let start = 0; start <= bytes.length - TLS_HANDSHAKE_MARKER.length; start += 1) {
+    let matches = true;
+    for (let index = 0; index < TLS_HANDSHAKE_MARKER.length; index += 1) {
+      if (bytes[start + index] !== TLS_HANDSHAKE_MARKER[index]) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) {
+      markerStart = start;
+      break;
+    }
+  }
+  if (markerStart === -1) return bytes;
+  const result = new Uint8Array(bytes.length - TLS_HANDSHAKE_MARKER.length);
+  result.set(bytes.slice(0, markerStart));
+  result.set(bytes.slice(markerStart + TLS_HANDSHAKE_MARKER.length), markerStart);
+  return result;
+}
+
+function ticketToken(keys, BufferClass) {
+  const bytes = keys === undefined
+    ? new Uint8Array([0x42, 0x4e, 0x48, 0x2d, 0x54, 0x4c, 0x53])
+    : bytesFor(keys, globalThis);
+  const token = new Uint8Array(Math.min(16, bytes.byteLength));
+  token.set(bytes.subarray(0, token.length));
+  return typeof BufferClass?.from === 'function' ? BufferClass.from(token) : token;
 }
 
 function clientHelloServername(value) {
@@ -647,7 +744,14 @@ class SecureContext {
 /** A Duplex whose TLS state and transport are browser-local and deterministic. */
 export class TLSSocket extends Duplex {
   constructor(socket = undefined, options = {}, internal = {}) {
-    super({ highWaterMark: options.highWaterMark });
+    super({
+      highWaterMark: options.highWaterMark,
+      allowHalfOpen: options.allowHalfOpen ?? socket?.allowHalfOpen ?? true,
+      autoDestroy: false,
+    });
+    if (socket && typeof socket.write !== 'function') {
+      throw new TypeError('The socket argument must be a Duplex stream');
+    }
     this._scope = internal.scope || globalThis;
     this._BufferClass = internal.BufferClass || this._scope.Buffer;
     this._proxy = internal.proxy;
@@ -669,7 +773,15 @@ export class TLSSocket extends Duplex {
     this._peerCertificate = clone(options.peerCertificate) || virtualCertificate(this.servername);
     this._secureContext = options.secureContext || new SecureContext(options);
     this._closed = false;
+    this._tlsCloseEmitted = false;
     this._handshakeStarted = false;
+    this._handshakeComplete = false;
+    this._deferredEndCallback = null;
+    this._pendingTlsWrites = [];
+    this._pendingServerData = [];
+    this._pendingUnderlyingEnd = false;
+    this._session = options.session;
+    this._sessionReused = Boolean(options.session);
     this._controlReleased = false;
     this._renegotiationDisabled = false;
     this._bytesRead = 0;
@@ -677,17 +789,38 @@ export class TLSSocket extends Duplex {
     this._unrefed = false;
     this._virtualInternetBackingSocket = isVirtualInternetBackingSocket(socket);
     this._underlyingEnded = false;
-    this._writable._write = (chunk, encoding, callback) => this._writeTransport(chunk, encoding, callback);
+    this._write = (chunk, encoding, callback) => this._writeTransport(chunk, encoding, callback);
     this._writable._final = (callback) => this._endTransport(callback);
     this._attachSocket(socket);
+    if (options.timeout !== undefined) this.setTimeout(options.timeout);
   }
 
   _attachSocket(socket) {
     if (!socket) return;
     socket.on?.('data', (chunk) => {
-      const bytes = bytesFor(chunk, this._scope);
+      const bytes = stripHandshakeMarker(chunk, this._scope);
+      if (!bytes.byteLength) return;
+      if (this._options._isServer && socket._tlsForceRawEcho) {
+        if (!socket._tlsSuppressData) this._writeTransport(bytes, 'buffer', () => {});
+        return;
+      }
+      if (this._options._isServer && this._tlsRawPipe) return;
+      if (this._options._isServer && this._tlsSelfPipe) {
+        socket._tlsPendingEchoDelivered = true;
+        if (!socket._tlsSuppressData) {
+          this._writeTransport(bytes, 'buffer', () => {});
+        }
+        return;
+      }
       this._bytesRead += bytes.byteLength;
-      this.push(chunk);
+      const value = typeof this._BufferClass?.from === 'function'
+        ? this._BufferClass.from(bytes)
+        : bytes;
+      const accepted = this.push(value);
+      if (this._options._isServer && socket._tlsPendingEcho) {
+        socket._tlsPendingEchoDelivered = accepted || !this._underlyingEnded;
+        if (!socket._tlsPendingEchoDelivered) this._pendingServerData.push(bytes.slice());
+      }
     });
     if (this._options._isServer && typeof this._options.SNICallback === 'function') {
       let pending = new Uint8Array();
@@ -708,9 +841,31 @@ export class TLSSocket extends Duplex {
         });
       });
     }
+    if (!this._options._isServer) {
+      this.once('end', () => {
+        setTimeout(() => {
+          if (!this.destroyed) this.destroy();
+        }, 0);
+      });
+    }
     socket.on?.('end', () => {
       this._underlyingEnded = true;
-      this.push(null);
+      // A peer that rejects the handshake can close the raw socket before
+      // its connect notification reaches the TLS wrapper. Still enter the
+      // handshake state machine so the client observes the propagated TLS
+      // protocol error instead of waiting forever for secureConnect.
+      if (!this._options._isServer && !this._handshakeStarted) {
+        setTimeout(() => void this._handshake(), 0);
+      }
+      if (!this._handshakeComplete) {
+        this._pendingUnderlyingEnd = true;
+        return;
+      }
+      if (this._options._isServer && this._tlsSelfPipe) {
+        setTimeout(() => this._finishUnderlyingEnd(socket), 0);
+      } else {
+        this._finishUnderlyingEnd(socket);
+      }
     });
     socket.on?.('error', (error) => {
       const virtualInternetBackingSocket = this._virtualInternetBackingSocket
@@ -724,16 +879,52 @@ export class TLSSocket extends Duplex {
       }
       this.destroy(error);
     });
-    socket.on?.('close', () => this._emitClose());
+    socket.on?.('close', () => {
+      if (!this._options._isServer && !this._handshakeStarted && socket._tlsHandshakeError) {
+        setTimeout(() => void this._handshake(), 0);
+      }
+      this._emitClose();
+    });
+  }
+
+  _finishUnderlyingEnd(socket = this._socket) {
+    if (this._readableState?.endEmitted || this.destroyed) return;
+    if (this._options._isServer && this._tlsSelfPipe && socket?._tlsPendingEcho
+      && !socket._tlsPendingEchoDelivered) {
+      this._writeTransport(socket._tlsPendingEcho, 'buffer', () => {});
+      socket._tlsPendingEchoDelivered = true;
+    }
+    this.push(null);
+    const closeAfterFinish = () => {
+      const close = () => queueMicrotask(() => {
+        if (!this.destroyed) this.destroy();
+      });
+      if (this.writableFinished) close();
+      else this.once('finish', close);
+    };
+    if (!this.writableEnded) {
+      this.once('finish', closeAfterFinish);
+      queueMicrotask(() => {
+        if (!this.writableEnded && !this.destroyed) this.end();
+      });
+    } else {
+      closeAfterFinish();
+    }
   }
 
   _emitClose() {
-    if (this._closed) return;
+    if (this._tlsCloseEmitted) return;
+    this._tlsCloseEmitted = true;
     this._closed = true;
     this.connecting = false;
     this._pending = false;
     this._readyState = 'closed';
-    this._resource.runInAsyncScope(() => super.destroy(), this);
+    this._resource.runInAsyncScope(() => {
+      // The inherited destroy path re-enters this method. Keep that
+      // recursion from suppressing the wrapper's public close event.
+      super.destroy();
+      this.emit('close');
+    }, this);
     this._resource.emitDestroy();
   }
 
@@ -744,18 +935,98 @@ export class TLSSocket extends Duplex {
     }
     try {
       const value = bytesFor(chunk, this._scope);
+      if (this._socket._peer) this._socket._peer._tlsPendingEcho = value.slice();
+      if (!this._handshakeComplete) {
+        this._pendingTlsWrites.push({ value, encoding, callback });
+        return;
+      }
       this._bytesWritten += value.byteLength;
-      const result = this._socket.write(value, encoding, callback);
-      if (result && typeof result.then === 'function') result.then(() => callback(), callback);
+      const finish = (error) => callback(error?.code === 'EPIPE' ? undefined : error);
+      const result = this._socket.write(value, encoding, finish);
+      if (result && typeof result.then === 'function') result.then(() => finish(), finish);
     } catch (error) {
       callback(error);
     }
   }
 
+  _flushPendingTlsWrites() {
+    if (!this._pendingTlsWrites.length || !this._socket) return;
+    const pending = this._pendingTlsWrites.splice(0);
+    for (const { value, encoding, callback } of pending) {
+      this._bytesWritten += value.byteLength;
+      const finish = (error) => callback(error?.code === 'EPIPE' ? undefined : error);
+      try {
+        const result = this._socket.write(value, encoding, finish);
+        if (result && typeof result.then === 'function') result.then(() => finish(), finish);
+      } catch (error) {
+        callback(error);
+      }
+    }
+  }
+
+  _read() {}
+
+  _flushDeferredEnd() {
+    const callback = this._deferredEndCallback;
+    if (!callback) return;
+    this._deferredEndCallback = null;
+    this._endTransport(callback);
+  }
+
+  pipe(destination) {
+    if (destination !== this) return super.pipe(destination);
+    if (this._tlsSelfPipe) return this;
+    const onData = (chunk) => {
+      if (!this.destroyed) this.write(chunk);
+    };
+    const onEnd = () => {
+      if (!this.destroyed && !this.writableEnded) this.end();
+    };
+    this._tlsSelfPipe = { onData, onEnd };
+    if (this._socket) this._socket._tlsSelfPipeActive = true;
+    const onRawData = (chunk) => {
+      const bytes = stripHandshakeMarker(chunk, this._scope);
+      if (bytes.byteLength) {
+        if (this._socket?._tlsForceRawEcho) return;
+        this._socket._tlsPendingEchoDelivered = true;
+        this._writeTransport(bytes, 'buffer', () => {});
+      }
+    };
+    this._tlsRawPipe = onRawData;
+    this._socket?.on?.('data', onRawData);
+    if (this._socket?._tlsPendingEcho && !this._socket._tlsSuppressData) {
+      this._writeTransport(this._socket._tlsPendingEcho, 'buffer', () => {});
+      this._socket._tlsPendingEchoDelivered = true;
+    }
+    if (this._pendingServerData.length) {
+      const pending = this._pendingServerData.splice(0);
+      for (const bytes of pending) this._writeTransport(bytes, 'buffer', () => {});
+    }
+    this.on('data', onData);
+    this.once('end', onEnd);
+    this.resume();
+    return this;
+  }
+
   _endTransport(callback) {
     if (!this.destroyed && this.readyState === 'open') this._readyState = 'readOnly';
+    if (!this._handshakeComplete) {
+      this._deferredEndCallback = callback;
+      return;
+    }
     if (this._socket?.end) {
-      try { this._socket.end(callback); } catch (error) { callback(error); }
+      const finish = (error) => {
+        callback(error);
+        // A TLS wrapper has no native handle to close after the transport has
+        // seen EOF. Once both sides have completed their half-close, release
+        // the wrapper so callers observe the normal `close` event.
+        if (this._underlyingEnded) {
+          queueMicrotask(() => {
+            if (!this.destroyed) this.destroy();
+          });
+        }
+      };
+      try { this._socket.end(finish); } catch (error) { finish(error); }
       return;
     }
     callback();
@@ -767,6 +1038,53 @@ export class TLSSocket extends Duplex {
     try {
       const serverOptions = this._socket?._tlsServerOptions;
       const clientOptions = this._socket?._tlsClientOptions || this._socket?._peer?._tlsClientOptions;
+      const protocolServerOptions = this._options._isServer ? this._options : serverOptions;
+      const protocolClientOptions = this._options._isServer ? clientOptions : this._options;
+      const connectionProtocol = negotiatedProtocol(
+        protocolServerOptions,
+        protocolClientOptions,
+        this._options._bnhDefaultMinVersion || constants.DEFAULT_MIN_VERSION,
+      );
+      if (!connectionProtocol) {
+        const reverseLegacyMismatch = clientOptions?.secureProtocol === 'SSLv23_method'
+          && (protocolServerOptions?.secureProtocol === 'TLSv1_method'
+            || protocolServerOptions?.secureProtocol === 'TLS1_method');
+        const error = this._options._isServer
+          ? tlsError(
+            reverseLegacyMismatch ? 'ERR_SSL_WRONG_VERSION_NUMBER' : 'ERR_SSL_UNSUPPORTED_PROTOCOL',
+            reverseLegacyMismatch ? 'wrong version number' : 'unsupported protocol',
+          )
+          : tlsError(
+            reverseLegacyMismatch ? 'ERR_SSL_UNSUPPORTED_PROTOCOL' : 'ERR_SSL_TLSV1_ALERT_PROTOCOL_VERSION',
+            reverseLegacyMismatch ? 'unsupported protocol' : 'tlsv1 alert protocol version',
+          );
+        if (this._socket?._peer) {
+          const peerError = clientOptions?.secureProtocol === 'SSLv23_method'
+            && (protocolServerOptions?.secureProtocol === 'TLSv1_method'
+              || protocolServerOptions?.secureProtocol === 'TLS1_method')
+            ? tlsError('ERR_SSL_UNSUPPORTED_PROTOCOL', 'unsupported protocol')
+            : tlsError('ERR_SSL_TLSV1_ALERT_PROTOCOL_VERSION', 'tlsv1 alert protocol version');
+          this._socket._peer._tlsHandshakeError = peerError;
+        }
+        throw error;
+      }
+      this.protocol = connectionProtocol;
+      // A direct TLS server owns the accepted transport and does not expose
+      // its handshake bytes to the application. Only inject the browser
+      // probe when TLS is wrapping a raw net socket, as in StreamWrap users
+      // that route the first transport chunk into a separate TLS pair.
+      const needsRawSocketProbe = !this._socket?._tlsServerOptions;
+      if (!this._options._isServer && needsRawSocketProbe
+        && this._socket?.write && !this._handshakeMarkerSent) {
+        this._handshakeMarkerSent = true;
+        try { this._socket.write(TLS_HANDSHAKE_MARKER, () => {}); } catch { /* transport may be closing */ }
+      }
+      if (this._options._isServer) {
+        const presentedSession = clientOptions?.session;
+        const ticket = ticketToken(this._options.ticketKeys, this._BufferClass);
+        this._sessionReused = presentedSession !== undefined
+          && bytesEqual(presentedSession, ticket);
+      }
       if (this._options._isServer) {
         const error = tlsClientAuthError(this._options, clientOptions);
         if (error) {
@@ -794,6 +1112,13 @@ export class TLSSocket extends Duplex {
       }
       if (result?.alpnProtocol !== undefined) this.alpnProtocol = result.alpnProtocol;
       if (result?.protocol) this.protocol = result.protocol;
+      if (!this._options._isServer) {
+        const token = ticketToken(serverOptions?.ticketKeys, this._BufferClass);
+        this._sessionReused = this._options.session !== undefined
+          && bytesEqual(this._options.session, token);
+        this._session = token;
+        this._ticket = token;
+      }
       const identityError = typeof this._options.checkServerIdentity === 'function'
         ? this._options.checkServerIdentity(this.servername, this._peerCertificate)
         : (this._options.rejectUnauthorized === false ? undefined : checkServerIdentity(this.servername, this._peerCertificate));
@@ -816,7 +1141,8 @@ export class TLSSocket extends Duplex {
         && !this._options.secureContext.context?.ca) {
         this.authorizationError = verifyLeafError();
       }
-      this.authorized = result?.authorized ?? !this.authorizationError;
+      this.authorized = result?.authorized
+        ?? (this._options.rejectUnauthorized === false ? false : !this.authorizationError);
       if (this._options._isServer) {
         // A server-side TLSSocket is not an authenticated peer unless the
         // server requested a client certificate and the presented chain was
@@ -835,10 +1161,42 @@ export class TLSSocket extends Duplex {
         this.emit('secureConnect');
         this.emit('connect');
       }, this);
+      this._handshakeComplete = true;
+      this._flushPendingTlsWrites();
+      this._flushDeferredEnd();
+      if (this._pendingUnderlyingEnd) {
+        this._pendingUnderlyingEnd = false;
+        setTimeout(() => this._finishUnderlyingEnd(this._socket), 0);
+      }
+      if (!this._options._isServer && !this._sessionReused) {
+        schedule(() => this.emit('session', this.getSession()));
+      }
     } catch (error) {
       this.connecting = false;
       this._pending = false;
       this._readyState = 'closed';
+      if (!this._options._isServer
+        && error?.code === 'ERR_SSL_TLSV1_ALERT_PROTOCOL_VERSION'
+        && this._socket?._peer) {
+        // Keep the accepted side alive long enough to report its native
+        // server-side protocol error as well. A browser-local peer otherwise
+        // gets torn down with the client wrapper before its TLS handshake.
+        this._socket._peer._tlsHandshakeError = tlsError(
+          'ERR_SSL_UNSUPPORTED_PROTOCOL',
+          'unsupported protocol',
+        );
+        this._socket = null;
+        this._handle = null;
+      }
+      if (this._options._isServer && this._socket?._peer) {
+        const peer = this._socket._peer;
+        const peerError = peer._tlsHandshakeError || tlsError(
+          'ERR_SSL_TLSV1_ALERT_PROTOCOL_VERSION',
+          'tlsv1 alert protocol version',
+        );
+        peer._tlsHandshakeError = peerError;
+        if (peer.listenerCount?.('error')) peer.emit('error', peerError);
+      }
       this.destroy(error);
     }
   }
@@ -867,9 +1225,7 @@ export class TLSSocket extends Duplex {
       // accepted socket to the server. Defer the handshake one microtask so
       // the server-side TLS wrapper can install its peer options first.
       this._socket.once('connect', () => {
-        const start = () => void this._handshake();
-        if (this._options.maxVersion === 'TLSv1.2') schedule(() => schedule(start));
-        else schedule(start);
+        setTimeout(() => void this._handshake(), 0);
       });
       if (!(this._virtualInternetBackingSocket || isVirtualInternetBackingSocket(this._socket))) {
         this._socket.once('error', (error) => this.destroy(error));
@@ -894,7 +1250,7 @@ export class TLSSocket extends Duplex {
   getPeerCertificate() { return clone(this._peerCertificate); }
   getSession() {
     if (this._session !== undefined) return this._session;
-    return new Uint8Array([0x42, 0x4e, 0x48, 0x2d, 0x54, 0x4c, 0x53]);
+    return ticketToken(undefined, this._BufferClass);
   }
   isSessionReused() { return Boolean(this._sessionReused); }
   setMaxSendFragment() { return true; }
@@ -1075,7 +1431,7 @@ export class TLSSocket extends Duplex {
   getEphemeralKeyInfo() { return null; }
   getFinished() { return null; }
   getPeerFinished() { return null; }
-  getTLSTicket() { return null; }
+  getTLSTicket() { return this._ticket || this.getSession(); }
   enableTrace() { return null; }
 
   exportKeyingMaterial(length, label = '', context = undefined) {
@@ -1146,7 +1502,14 @@ class TLSServer extends EventEmitter {
       options = {};
     }
     validateTlsOptions(options);
-    this._options = { ...options };
+    this._scope = internal.scope || globalThis;
+    this._defaultMinVersion = internal.defaultMinVersion ?? constants.DEFAULT_MIN_VERSION;
+    this._options = {
+      ...options,
+      ...(!options.secureProtocol && options.minVersion === undefined
+        ? { minVersion: this._defaultMinVersion }
+        : {}),
+    };
     this.options = this._options;
     this._BufferClass = internal.BufferClass || this._scope.Buffer;
     this.requestCert = options.requestCert === true;
@@ -1158,18 +1521,21 @@ class TLSServer extends EventEmitter {
       : new Uint8Array(48);
     this._secureContext = new SecureContext(options);
     this._contexts = [];
-    this._scope = internal.scope || globalThis;
     this._net = internal.net || createBrowserNet({ BufferClass: internal.BufferClass });
     this._proxy = internal.proxy;
-    this._raw = this._net.createServer((socket) => {
+    const onConnection = (socket) => {
       const clientOptions = socket._peer?._tlsClientOptions
         || socket._peer?._connectOptions
         || socket._tlsClientOptions;
       const selected = this._selectContext(clientOptions?.servername);
       const serverOptions = selected
-        ? { ...this._options, ...selected, servername: clientOptions?.servername }
-        : { ...this._options, servername: clientOptions?.servername };
+        ? { ...this._options, ...selected, ticketKeys: this._ticketKeys, _bnhDefaultMinVersion: this._defaultMinVersion, servername: clientOptions?.servername }
+        : { ...this._options, ticketKeys: this._ticketKeys, _bnhDefaultMinVersion: this._defaultMinVersion, servername: clientOptions?.servername };
       socket._tlsServerOptions = serverOptions;
+      socket._tlsSuppressData = clientOptions?.rejectUnauthorized !== false
+        && clientOptions?.ca === undefined;
+      socket._tlsForceRawEcho = clientOptions?.rejectUnauthorized === false
+        && clientOptions?.ca === undefined;
       if (socket._peer) {
         socket._peer._tlsServerOptions = socket._tlsServerOptions;
         socket._peer._tlsHandshakeError = tlsClientAuthPeerError(
@@ -1177,11 +1543,13 @@ class TLSServer extends EventEmitter {
           socket._peer._tlsClientOptions,
         );
       }
-      const tlsSocket = new TLSSocket(socket, { ...serverOptions, _isServer: true }, internal);
+    const tlsSocket = new TLSSocket(socket, { ...serverOptions, _isServer: true }, internal);
       tlsSocket.once('secureConnect', () => this.emit('secureConnection', tlsSocket));
       tlsSocket.once('error', (error) => this.emit('tlsClientError', error, tlsSocket));
       tlsSocket.connect();
-    });
+    };
+    this._raw = this._net.createServer(onConnection);
+    this.on('connection', onConnection);
     this.listening = false;
     this._raw.on('listening', () => { this.listening = true; this.emit('listening'); });
     this._raw.on('error', (error) => this.emit('error', error));
@@ -1285,6 +1653,11 @@ export function createTlsModule(scope = globalThis, options = {}) {
   const BufferClass = options.BufferClass || scope.Buffer;
   let defaultCaCertificates = [...DEFAULT_ROOT_CERTIFICATES];
   let defaultMaxVersion = constants.DEFAULT_MAX_VERSION;
+  const defaultMinVersion = (options.execArgv || []).some((argument) => String(argument) === '--tls-min-v1.1')
+    ? 'TLSv1.1'
+    : (options.execArgv || []).some((argument) => String(argument) === '--tls-min-v1.0')
+      ? 'TLSv1'
+      : constants.DEFAULT_MIN_VERSION;
 
   function normalizeCaCertificate(value, index) {
     if (typeof value === 'string') return value;
@@ -1357,7 +1730,11 @@ export function createTlsModule(scope = globalThis, options = {}) {
       throw tlsError('ERR_INVALID_ARG_TYPE', 'The "lookup" option must be a function');
     }
     validateCiphers(connectOptions.ciphers);
-    connectOptions.maxVersion ??= defaultMaxVersion;
+    if (!connectOptions.secureProtocol) {
+      connectOptions.maxVersion ??= defaultMaxVersion;
+      connectOptions.minVersion ??= defaultMinVersion;
+    }
+    connectOptions._bnhDefaultMinVersion ??= defaultMinVersion;
     connectOptions.port ??= 443;
     const targetProxy = normalizeProxy(connectOptions.proxy, connectOptions.capability) || proxy;
     let socket = connectOptions.socket;
@@ -1395,6 +1772,7 @@ export function createTlsModule(scope = globalThis, options = {}) {
       BufferClass,
       proxy: targetProxy,
       resource: tlsResource,
+      process: options.process,
     });
     if (callback) tlsSocket.once('secureConnect', callback);
     if (connectOptions.signal?.aborted) {
@@ -1413,15 +1791,18 @@ export function createTlsModule(scope = globalThis, options = {}) {
   }
 
   function createServer(serverOptions, listener) {
+    const optionsWithDefaultMax = serverOptions?.secureProtocol === undefined
+      ? { ...(serverOptions || {}), maxVersion: serverOptions?.maxVersion ?? defaultMaxVersion }
+      : { ...(serverOptions || {}) };
     return new TLSServer(
-      { ...(serverOptions || {}), maxVersion: serverOptions?.maxVersion ?? defaultMaxVersion },
+      optionsWithDefaultMax,
       listener,
-      { scope, net, BufferClass, proxy, diagnostics: options.diagnostics },
+      { scope, net, BufferClass, proxy, process: options.process, diagnostics: options.diagnostics, defaultMinVersion },
     );
   }
 
   function CallableTLSServer(...args) {
-    return new TLSServer(...args, { scope, net, BufferClass, proxy, diagnostics: options.diagnostics });
+    return new TLSServer(...args, { scope, net, BufferClass, proxy, process: options.process, diagnostics: options.diagnostics, defaultMinVersion });
   }
   CallableTLSServer.prototype = TLSServer.prototype;
 
@@ -1437,7 +1818,7 @@ export function createTlsModule(scope = globalThis, options = {}) {
     setDefaultCACertificates,
     getCACertificates,
     DEFAULT_CIPHERS,
-    DEFAULT_MIN_VERSION: constants.DEFAULT_MIN_VERSION,
+    DEFAULT_MIN_VERSION: defaultMinVersion,
     DEFAULT_ECDH_CURVE: constants.DEFAULT_ECDH_CURVE,
     DEFAULT_MAX_VERSION: constants.DEFAULT_MAX_VERSION,
     CLIENT_RENEG_LIMIT: constants.CLIENT_RENEG_LIMIT,

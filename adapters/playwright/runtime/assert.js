@@ -236,7 +236,7 @@ function inspect(value, options = {}, state = { seen: new Map(), nextReference: 
     const keys = Reflect.ownKeys(value)
       .filter((key) => Object.prototype.propertyIsEnumerable.call(value, key))
       .sort((a, b) => String(a).localeCompare(String(b)));
-    if (keys.length === 0) return `[${label}${value.message ? `: ${value.message}` : ''}]`;
+    if (keys.length === 0) return value.stack || `[${label}${value.message ? `: ${value.message}` : ''}]`;
     const entries = keys.map((key) => {
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
       if (descriptor && (descriptor.get || descriptor.set)) {

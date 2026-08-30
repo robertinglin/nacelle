@@ -435,8 +435,10 @@ def _extract_gaps(harness: Harness, args: argparse.Namespace) -> int:
                 harness.runner, spec=config.target, worktree=worktree, run_id=run_id
             )
         except SurfaceProbeError as exc:
-            print(f"warning: target cannot list builtins yet ({exc}); probing oracle list only")
-            target_modules = ()
+            raise SurfaceProbeError(
+                "target builtin-module probe is unavailable; refusing to replace gap state: "
+                f"{exc}"
+            ) from exc
         # Subpath builtins (fs/promises, stream/web, …) are probed as their
         # own surfaces; collapsing them here would manufacture phantom
         # modules like bare `internal` that neither side can load.
@@ -454,35 +456,48 @@ def _extract_gaps(harness: Harness, args: argparse.Namespace) -> int:
         target_surfaces = run_surface_probe(
             harness.runner, spec=config.target, worktree=worktree, modules=modules, run_id=run_id
         )
+        infrastructure_errors = sorted(
+            name
+            for name, surface in target_surfaces.items()
+            if "infra_error" in surface.load_error.lower()
+        )
+        if infrastructure_errors:
+            raise SurfaceProbeError(
+                "target surface probe encountered infrastructure errors for "
+                f"{', '.join(infrastructure_errors)}; refusing to replace gap state"
+            )
         harness.db.set_meta("surface:oracle", surfaces_to_json(oracle_surfaces))
         harness.db.set_meta("surface:target", surfaces_to_json(target_surfaces))
 
     surface_gaps = diff_surfaces(oracle_surfaces, target_surfaces)
     gaps = form_gaps(surface_gaps, _evidence_rows(harness), config.project.node_repo)
     harness.db.replace_gaps(gaps)
+    statuses = {
+        row["id"]: row["status"]
+        for row in harness.db.list_gaps()
+    }
+    open_gaps = [gap for gap in gaps if statuses.get(gap.gap_id) == "open"]
+    open_rows = [
+        {**gap.to_row(), "status": "open"}
+        for gap in open_gaps
+    ]
 
     missing_modules = sorted({gap.module for gap in surface_gaps})
     print(
         f"surface diff: {len(surface_gaps)} module(s) with gaps "
         f"({', '.join(missing_modules[:8])}{'…' if len(missing_modules) > 8 else ''})"
     )
-    print(f"formed {len(gaps)} gap card(s); top:")
-    _print_gap_rows(
-        [{**gap.to_row(), "status": "open"} for gap in gaps[:10]],
-        as_json=False,
-    )
+    print(f"formed {len(gaps)} surface gap card(s); {len(open_gaps)} open card(s); top:")
+    _print_gap_rows(open_rows[:10], as_json=False)
     if args.emit:
         emit_dir = Path(args.emit).expanduser().resolve()
         emitted = emit_gap_cards(
-            gaps, emit_dir, node_repo=config.project.node_repo, config_path=config.path
+            open_gaps, emit_dir, node_repo=config.project.node_repo, config_path=config.path
         )
-        emit_worklist_index(gaps, emit_dir)
+        emit_worklist_index(open_gaps, emit_dir)
         print(f"emitted {len(emitted)} card(s) and WORKLIST.md into {emit_dir}")
     if args.json:
-        _print_gap_rows(
-            [{**gap.to_row(), "status": "open"} for gap in gaps],
-            as_json=True,
-        )
+        _print_gap_rows(open_rows, as_json=True)
     return 0
 
 

@@ -1,9 +1,78 @@
 import { assertByteLength, hex } from './binary.js';
 import { UnsupportedWebCapabilityError } from './errors.js';
 import { createDiffieHellman, createDiffieHellmanGroup } from './diffie-hellman.js';
+import { Transform, Writable } from './streams.js';
 
 const objectToString = Object.prototype.toString;
 const virtualKeyPairs = new Map();
+const cryptoKeyMaterialMarker = Symbol.for('bnh.cryptoKeyMaterial');
+const cryptoKeyTrackerMarker = Symbol.for('bnh.cryptoKeyTracker');
+const VERIFY_SYNC_BLOCKER = 'Web Crypto exposes only asynchronous SubtleCrypto.verify; no browser-native synchronous verifier is available for this key';
+const X509_PARSER_BLOCKER = 'Web Crypto exposes key operations but no browser-native X.509 parser or certificate-chain field extraction';
+const LEGACY_CIPHER_BLOCKER = 'Web Crypto exposes cipher operations asynchronously; the Node legacy Cipheriv API is synchronous and stream-based';
+const PRIME_BLOCKER = 'Web Crypto does not expose browser-native prime testing';
+const KEY_OBJECT_BLOCKER = 'Web Crypto returns CryptoKey objects, but this browser runtime has no synchronous Node KeyObject adapter for generated symmetric keys';
+
+const CRYPTO_CONSTANTS = Object.freeze({
+  ENGINE_METHOD_ALL: 65535,
+  ENGINE_METHOD_NONE: 0,
+  ENGINE_METHOD_RSA: 1,
+  ENGINE_METHOD_DSA: 2,
+  ENGINE_METHOD_DH: 4,
+  ENGINE_METHOD_RAND: 8,
+  ENGINE_METHOD_EC: 2048,
+  ENGINE_METHOD_CIPHERS: 64,
+  ENGINE_METHOD_DIGESTS: 128,
+  ENGINE_METHOD_PKEY_METHS: 512,
+  ENGINE_METHOD_PKEY_ASN1_METHS: 1024,
+  DH_CHECK_P_NOT_PRIME: 1,
+  DH_CHECK_P_NOT_SAFE_PRIME: 2,
+  DH_NOT_SUITABLE_GENERATOR: 8,
+  DH_UNABLE_TO_CHECK_GENERATOR: 4,
+  SSL_OP_ALL: 2147485776,
+  SSL_OP_ALLOW_NO_DHE_KEX: 1024,
+  SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION: 262144,
+  SSL_OP_CIPHER_SERVER_PREFERENCE: 4194304,
+  SSL_OP_CISCO_ANYCONNECT: 32768,
+  SSL_OP_COOKIE_EXCHANGE: 8192,
+  SSL_OP_CRYPTOPRO_TLSEXT_BUG: 2147483648,
+  SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS: 2048,
+  SSL_OP_LEGACY_SERVER_CONNECT: 4,
+  SSL_OP_NO_COMPRESSION: 131072,
+  SSL_OP_NO_ENCRYPT_THEN_MAC: 524288,
+  SSL_OP_NO_QUERY_MTU: 4096,
+  SSL_OP_NO_RENEGOTIATION: 1073741824,
+  SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION: 65536,
+  RSA_PKCS1_PADDING: 1,
+  RSA_NO_PADDING: 3,
+  RSA_PKCS1_OAEP_PADDING: 4,
+  RSA_X931_PADDING: 5,
+  RSA_PKCS1_PSS_PADDING: 6,
+  RSA_PSS_SALTLEN_DIGEST: -1,
+  RSA_PSS_SALTLEN_AUTO: -2,
+  RSA_PSS_SALTLEN_MAX_SIGN: -2,
+  POINT_CONVERSION_COMPRESSED: 2,
+  POINT_CONVERSION_UNCOMPRESSED: 4,
+  POINT_CONVERSION_HYBRID: 6,
+  TLS1_VERSION: 769,
+  TLS1_1_VERSION: 770,
+  TLS1_2_VERSION: 771,
+  TLS1_3_VERSION: 772,
+  OPENSSL_VERSION_NUMBER: 810549360,
+  SSL_OP_NO_SSLv2: 0,
+  SSL_OP_NO_SSLv3: 33554432,
+  SSL_OP_NO_TICKET: 16384,
+  SSL_OP_NO_TLSv1: 67108864,
+  SSL_OP_NO_TLSv1_1: 268435456,
+  SSL_OP_NO_TLSv1_2: 134217728,
+  SSL_OP_NO_TLSv1_3: 536870912,
+  SSL_OP_PRIORITIZE_CHACHA: 2097152,
+  SSL_OP_TLS_ROLLBACK_BUG: 8388608,
+  defaultCoreCipherList: 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384:DHE-RSA-AES256-SHA384:ECDHE-RSA-AES256-SHA256:DHE-RSA-AES256-SHA256:HIGH:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!SRP:!CAMELLIA',
+  defaultCipherList: 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384:DHE-RSA-AES256-SHA384:ECDHE-RSA-AES256-SHA256:DHE-RSA-AES256-SHA256:HIGH:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!SRP:!CAMELLIA',
+});
+
+export const cryptoConstants = CRYPTO_CONSTANTS;
 
 function isArrayBuffer(value) {
   return value !== null && typeof value === 'object'
@@ -23,6 +92,68 @@ export function hasWebCrypto(globalObject = globalThis) {
     && typeof crypto.subtle.digest === 'function');
 }
 
+export function installCryptoKeyMaterialTracking(globalObject = globalThis) {
+  const subtle = globalObject?.crypto?.subtle;
+  if (!subtle) return;
+  if (typeof subtle.importKey === 'function' && !subtle[cryptoKeyTrackerMarker]) {
+    const importKey = subtle.importKey.bind(subtle);
+    const wrappedImportKey = function wrappedImportKey(...args) {
+      const result = importKey(...args);
+      if (args[0] !== 'raw') return result;
+      const material = new Uint8Array(toCryptoBytes(args[1], globalObject.TextEncoder));
+      return Promise.resolve(result).then((key) => {
+        try {
+          Object.defineProperty(key, cryptoKeyMaterialMarker, {
+            configurable: true,
+            value: material,
+          });
+        } catch { /* Some native key objects may be sealed. */ }
+        return key;
+      });
+    };
+    try {
+      Object.defineProperty(subtle, 'importKey', {
+        configurable: true,
+        value: wrappedImportKey,
+      });
+      Object.defineProperty(subtle, cryptoKeyTrackerMarker, {
+        configurable: true,
+        value: true,
+      });
+    } catch { /* Native SubtleCrypto implementations may be immutable. */ }
+  }
+  if (typeof subtle.digest !== 'function' || subtle[Symbol.for('bnh.cryptoDigestCompatibility')]) return;
+  const nativeDigest = subtle.digest.bind(subtle);
+  const wrappedDigest = function wrappedDigest(algorithm, value) {
+    let input;
+    try {
+      input = toCryptoBytes(value, globalObject.TextEncoder);
+    } catch {
+      return Promise.reject(invalidCryptoInput('data', value));
+    }
+    return Promise.resolve(nativeDigest(algorithm, input)).catch((error) => {
+      if (error?.name !== 'NotSupportedError') throw error;
+      const DOMExceptionClass = globalObject.DOMException || globalThis.DOMException;
+      if (typeof DOMExceptionClass === 'function') {
+        throw new DOMExceptionClass('Unrecognized algorithm name', 'NotSupportedError');
+      }
+      const translated = new Error('Unrecognized algorithm name');
+      translated.name = 'NotSupportedError';
+      throw translated;
+    });
+  };
+  try {
+    Object.defineProperty(subtle, 'digest', {
+      configurable: true,
+      value: wrappedDigest,
+    });
+    Object.defineProperty(subtle, Symbol.for('bnh.cryptoDigestCompatibility'), {
+      configurable: true,
+      value: true,
+    });
+  } catch { /* Native SubtleCrypto implementations may be immutable. */ }
+}
+
 export function browserCryptoVersion(globalObject = globalThis) {
   return hasWebCrypto(globalObject) ? '3.0.0' : undefined;
 }
@@ -34,7 +165,67 @@ function toCryptoBytes(value, encoder = globalThis.TextEncoder) {
     return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
   }
   if (isArrayBuffer(value)) return new Uint8Array(value);
+  if (value?.type === 'secret' && value.key) return toCryptoBytes(value.key, encoder);
   throw new TypeError('crypto input must be a string or byte array');
+}
+
+function receivedType(value) {
+  if (value === undefined) return 'undefined';
+  if (value === null) return 'null';
+  if (typeof value === 'object') return `an instance of ${value.constructor?.name || 'Object'}`;
+  if (typeof value === 'string') return `type string ('${value}')`;
+  return `type ${typeof value} (${String(value)})`;
+}
+
+function invalidCryptoInput(name, value) {
+  const error = new TypeError(
+    `The "${name}" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received ${receivedType(value)}`,
+  );
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function invalidArgumentType(name, expected, value) {
+  const error = new TypeError(`The "${name}" argument must be ${expected}. Received ${receivedType(value)}`);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function invalidPropertyType(name, expected, value) {
+  const error = new TypeError(`The "${name}" property must be ${expected}. Received ${receivedType(value)}`);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function invalidPropertyValue(name, value, allowed) {
+  void allowed;
+  const shown = typeof value === 'string'
+    ? `'${value}'`
+    : value === undefined
+      ? 'undefined'
+      : value === null
+        ? 'null'
+        : Array.isArray(value)
+          ? '[]'
+          : typeof value === 'object'
+            ? '{}'
+            : String(value);
+  const error = new TypeError(`The property '${name}' is invalid. Received ${shown}`);
+  error.code = 'ERR_INVALID_ARG_VALUE';
+  return error;
+}
+
+function invalidArgumentValue(name, value, allowed) {
+  const shown = typeof value === 'string' ? `'${value}'` : String(value);
+  const error = new TypeError(`The argument '${name}' must be ${allowed}. Received ${shown}`);
+  error.code = 'ERR_INVALID_ARG_VALUE';
+  return error;
+}
+
+function outOfRangeProperty(name, value, detail = 'It must be an integer.') {
+  const error = new RangeError(`The value of "${name}" is out of range. ${detail} Received ${String(value)}`);
+  error.code = 'ERR_OUT_OF_RANGE';
+  return error;
 }
 
 const SHA256_K = Object.freeze([
@@ -53,6 +244,83 @@ const SHA256_K = Object.freeze([
 
 function bytes(value, encoder = globalThis.TextEncoder) {
   return new Uint8Array(toCryptoBytes(value, encoder));
+}
+
+// Node's crypto stream constructors inherit these enumerable lazy accessors
+// from internal/streams/lazy_transform. The browser Transform constructor is
+// class-based, so mirror the observable accessor contract without invoking it
+// as a legacy function.
+function installLazyTransformStateAccessors(prototype) {
+  const ensureState = (receiver) => {
+    if (Object.prototype.hasOwnProperty.call(receiver, '_readableState')
+      && Object.prototype.hasOwnProperty.call(receiver, '_writableState')) return;
+    const stream = new Transform(receiver._options || {});
+    Object.defineProperties(receiver, {
+      _readableState: {
+        configurable: true,
+        enumerable: true,
+        value: stream._readableState,
+        writable: true,
+      },
+      _writableState: {
+        configurable: true,
+        enumerable: true,
+        value: stream._writableState,
+        writable: true,
+      },
+      allowHalfOpen: {
+        configurable: true,
+        enumerable: true,
+        value: stream.allowHalfOpen,
+        writable: true,
+      },
+    });
+  };
+  const getter = (name) => function getState() {
+    ensureState(this);
+    return this[name];
+  };
+  const setter = (name) => function setState(value) {
+    Object.defineProperty(this, name, {
+      configurable: true,
+      enumerable: true,
+      value,
+      writable: true,
+    });
+  };
+
+  Object.defineProperties(prototype, {
+    _readableState: {
+      configurable: true,
+      enumerable: true,
+      get: getter('_readableState'),
+      set: setter('_readableState'),
+    },
+    _writableState: {
+      configurable: true,
+      enumerable: true,
+      get: getter('_writableState'),
+      set: setter('_writableState'),
+    },
+  });
+}
+
+function installLazyTransformAllowHalfOpen(prototype) {
+  Object.defineProperty(prototype, 'allowHalfOpen', {
+    configurable: true,
+    enumerable: true,
+    get() {
+      return undefined;
+    },
+    set(value) {
+      Object.defineProperty(this, 'allowHalfOpen', {
+        configurable: true,
+        enumerable: true,
+        value,
+        writable: true,
+      });
+    },
+  });
 }
 
 function rotr(value, amount) {
@@ -332,7 +600,58 @@ function xorBytes(value, byte) {
 }
 
 export function createHashShim(BufferClass) {
+  const states = new WeakMap();
+
+  function invalidHashData(value) {
+    const received = value === undefined
+      ? 'undefined'
+      : value === null
+        ? 'null'
+        : typeof value === 'object'
+          ? `an instance of ${value.constructor?.name || 'Object'}`
+          : `type ${typeof value} (${String(value)})`;
+    const error = new TypeError(
+      'The "data" argument must be of type string or an instance of Buffer, '
+      + `TypedArray, or DataView. Received ${received}`,
+    );
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    return error;
+  }
+
+  function hashInput(value, encoding) {
+    if (typeof value === 'string') {
+      return encoding === undefined
+        ? bytes(value)
+        : new Uint8Array(BufferClass.from(value, encoding));
+    }
+    if (!isArrayBufferView(value)) throw invalidHashData(value);
+    return bytes(value);
+  }
+
+  function createHash(algorithm, options, sourceState) {
+    const chunks = sourceState
+      ? sourceState.chunks.map((chunk) => new Uint8Array(chunk))
+      : [];
+    const state = {
+      algorithm,
+      chunks,
+      finalized: false,
+      streamResult: undefined,
+    };
+
+    const hash = Object.create(Hash.prototype);
+    hash._options = {};
+    Object.setPrototypeOf(hash, Hash.prototype);
+    states.set(hash, state);
+    return hash;
+  }
+
   function Hash(algorithm) {
+    if (algorithm && states.has(algorithm)) {
+      const sourceState = states.get(algorithm);
+      if (sourceState.finalized) throw finalizedHashError();
+      return createHash(sourceState.algorithm, undefined, sourceState);
+    }
     if (typeof algorithm !== 'string') {
       const received = algorithm === undefined ? 'undefined' : typeof algorithm;
       const error = new TypeError(
@@ -346,64 +665,76 @@ export function createHashShim(BufferClass) {
     } catch {
       throw new TypeError('Digest method not supported');
     }
-    const chunks = [];
-    let finalized = false;
-    let streamResult;
-    const finalizedError = () => {
-      const error = new Error('Digest already called');
-      error.code = 'ERR_CRYPTO_HASH_FINALIZED';
-      return error;
-    };
-    const hashValue = () => {
-      const input = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, 0));
-      let offset = 0;
-      for (const chunk of chunks) { input.set(chunk, offset); offset += chunk.length; }
-      return BufferClass.from(hashSync(algorithm, input));
-    };
-    const hash = {
-      update(value, encoding) {
-        if (finalized) throw finalizedError();
-        if (value === undefined) {
-          const error = new TypeError('The "data" argument must be of type string or an instance of Buffer');
-          error.code = 'ERR_INVALID_ARG_TYPE';
-          throw error;
-        }
-        const input = typeof value === 'string' && encoding !== undefined
-          ? BufferClass.from(value, encoding)
-          : value;
-        chunks.push(bytes(input));
-        return this;
-      },
-      write(value, encoding) {
-        this.update(value, encoding);
-        return true;
-      },
-      end(value, encoding, callback) {
-        if (value !== undefined && value !== null) this.update(value, encoding);
-        if (!finalized) {
-          streamResult = this.digest();
-        }
-        if (typeof callback === 'function') callback();
-        return this;
-      },
-      read() {
-        if (!finalized) this.end();
-        return streamResult;
-      },
-      digest(encoding) {
-        if (finalized) throw finalizedError();
-        finalized = true;
-        const result = hashValue();
-        streamResult = result;
-        if (!encoding || encoding === 'buffer') return result;
-        const encodingName = typeof encoding === 'string' ? encoding : encoding.toString();
-        return result.toString(encodingName);
-      },
-    };
-    // Node exposes Hash as both a factory and a callable constructor.
-    Object.setPrototypeOf(hash, Hash.prototype);
-    return hash;
+    return createHash(algorithm);
   }
+
+  function finalizedHashError() {
+    const error = new Error('Digest already called');
+    error.code = 'ERR_CRYPTO_HASH_FINALIZED';
+    return error;
+  }
+
+  Hash.prototype.copy = function copy(options) {
+    const state = states.get(this);
+    if (state?.finalized) throw finalizedHashError();
+    return createHash(state.algorithm, options, state);
+  };
+
+  Hash.prototype._transform = function _transform(chunk, encoding, callback) {
+    this.update(chunk, encoding);
+    callback();
+  };
+
+  Hash.prototype._flush = function _flush(callback) {
+    const result = this.digest();
+    const state = states.get(this);
+    state.streamResult = result;
+    if (typeof this.push === 'function') this.push(result);
+    callback();
+  };
+
+  Hash.prototype.update = function update(value, encoding) {
+    const state = states.get(this);
+    if (state.finalized) throw finalizedHashError();
+    state.chunks.push(hashInput(value, encoding));
+    return this;
+  };
+
+  Hash.prototype.write = function write(value, encoding) {
+    this.update(value, encoding);
+    return true;
+  };
+
+  Hash.prototype.end = function end(value, encoding, callback) {
+    if (value !== undefined && value !== null) this.update(value, encoding);
+    const state = states.get(this);
+    if (!state.finalized) this._flush(() => {});
+    if (typeof callback === 'function') callback();
+    return this;
+  };
+
+  Hash.prototype.read = function read() {
+    const state = states.get(this);
+    if (!state.finalized) this.end();
+    return state.streamResult;
+  };
+
+  Hash.prototype.digest = function digest(encoding) {
+    const state = states.get(this);
+    if (state.finalized) throw finalizedHashError();
+    state.finalized = true;
+    const input = new Uint8Array(state.chunks.reduce((total, chunk) => total + chunk.length, 0));
+    let offset = 0;
+    for (const chunk of state.chunks) { input.set(chunk, offset); offset += chunk.length; }
+    const result = BufferClass.from(hashSync(state.algorithm, input));
+    state.streamResult = result;
+    if (!encoding || encoding === 'buffer') return result;
+    return result.toString(String(encoding));
+  };
+
+  Object.setPrototypeOf(Hash.prototype, Transform.prototype);
+  installLazyTransformStateAccessors(Hash.prototype);
+  installLazyTransformAllowHalfOpen(Hash.prototype);
   return Hash;
 }
 
@@ -471,17 +802,22 @@ export function createHmacShim(BufferClass, processObject, scope = globalThis) {
   function Hmac(algorithm, key) {
     emitWarning();
     if (!(this instanceof Hmac)) return new Hmac(algorithm, key);
-    this._algorithm = hmacAlgorithm(algorithm);
+    const normalizedAlgorithm = hmacAlgorithm(algorithm);
     const secret = key?.type === 'secret' ? key.key : key;
+    const stream = Object.create(Hmac.prototype);
+    stream._options = {};
+    Object.setPrototypeOf(stream, Hmac.prototype);
     try {
-      this._key = bytes(secret);
+      stream._key = bytes(secret);
     } catch (error) {
       error.code ||= 'ERR_INVALID_ARG_TYPE';
       throw error;
     }
-    this._chunks = [];
-    this._finalized = false;
-    this._output = null;
+    stream._algorithm = normalizedAlgorithm;
+    stream._chunks = [];
+    stream._finalized = false;
+    stream._output = null;
+    return stream;
   }
 
   Hmac.prototype.update = function update(value, encoding) {
@@ -515,12 +851,27 @@ export function createHmacShim(BufferClass, processObject, scope = globalThis) {
     return this;
   };
 
+  Hmac.prototype._transform = function _transform(chunk, encoding, callback) {
+    this.update(chunk, encoding);
+    callback();
+  };
+
+  Hmac.prototype._flush = function _flush(callback) {
+    const result = this.digest();
+    this._output = result;
+    if (typeof this.push === 'function') this.push(result);
+    callback();
+  };
+
   Hmac.prototype.read = function read() {
     const result = this._output;
     this._output = null;
     return result;
   };
 
+  Object.setPrototypeOf(Hmac.prototype, Transform.prototype);
+  installLazyTransformStateAccessors(Hmac.prototype);
+  installLazyTransformAllowHalfOpen(Hmac.prototype);
   return Hmac;
 }
 
@@ -672,6 +1023,125 @@ export function pbkdf2Sync(password, salt, iterations, keyLength, digest = 'sha2
   return pbkdf2SyncForGlobal(password, salt, iterations, keyLength, digest, globalThis);
 }
 
+function hkdfInputBytes(value, name, encoder) {
+  try {
+    return new Uint8Array(toCryptoBytes(value, encoder));
+  } catch {
+    const error = new TypeError(
+      `The "${name}" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView`,
+    );
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+}
+
+function validateHkdfParameters(hash, key, salt, info, keyLength, encoder = globalThis.TextEncoder) {
+  if (typeof hash !== 'string') {
+    const error = new TypeError(`The "digest" argument must be of type string. Received ${receivedType(hash)}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  const keyBytes = hkdfInputBytes(key, 'ikm', encoder);
+  const saltBytes = hkdfInputBytes(salt, 'salt', encoder);
+  const infoBytes = hkdfInputBytes(info, 'info', encoder);
+  if (typeof keyLength !== 'number') {
+    const error = new TypeError(`The "length" argument must be of type number. Received ${receivedType(keyLength)}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (!Number.isFinite(keyLength) || !Number.isInteger(keyLength)
+      || !Number.isSafeInteger(keyLength) || keyLength < 0) {
+    const error = new RangeError(
+      `The value of "length" is out of range. It must be an integer. Received ${keyLength}`,
+    );
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  if (infoBytes.byteLength > 1024) {
+    const error = new RangeError(
+      `The value of "info" is out of range. It must not contain more than 1024 bytes. Received ${infoBytes.byteLength}`,
+    );
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  let normalizedHash;
+  try {
+    normalizedHash = normalizeHash(hash);
+  } catch {
+    const error = new Error(`Invalid digest: ${hash}`);
+    error.code = 'ERR_CRYPTO_INVALID_DIGEST';
+    throw error;
+  }
+  const digestLength = { 'SHA-1': 20, 'SHA-256': 32, 'SHA-384': 48, 'SHA-512': 64 }[normalizedHash];
+  if (keyLength > 255 * digestLength) {
+    const error = new Error('Invalid key length');
+    error.code = 'ERR_CRYPTO_INVALID_KEYLEN';
+    throw error;
+  }
+  return { hash: normalizedHash, key: keyBytes, salt: saltBytes, info: infoBytes, keyLength };
+}
+
+async function hkdfForGlobal(hash, key, salt, info, keyLength, globalObject = globalThis) {
+  const parameters = validateHkdfParameters(hash, key, salt, info, keyLength, globalObject.TextEncoder);
+  void globalObject;
+  const algorithm = HMAC_ALGORITHMS[parameters.hash.toLowerCase().replaceAll('-', '')];
+  const output = new Uint8Array(parameters.keyLength);
+  let previous = new Uint8Array(0);
+  let offset = 0;
+  for (let counter = 1; offset < output.length; counter += 1) {
+    const input = new Uint8Array(previous.length + parameters.info.length + 1);
+    input.set(previous);
+    input.set(parameters.info, previous.length);
+    input[input.length - 1] = counter;
+    previous = hmacDigest(algorithm, parameters.salt, input);
+    const count = Math.min(previous.length, output.length - offset);
+    output.set(previous.subarray(0, count), offset);
+    offset += count;
+  }
+  return output.buffer;
+}
+
+export function hkdf(hash, key, salt, info, keyLength, callback, globalObject = globalThis) {
+  validateHkdfParameters(hash, key, salt, info, keyLength, globalObject.TextEncoder);
+  if (typeof callback !== 'function') {
+    const error = new TypeError('The "callback" argument must be of type function');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  const operation = Promise.resolve().then(() => hkdfForGlobal(
+    hash,
+    key,
+    salt,
+    info,
+    keyLength,
+    globalObject,
+  ));
+  operation.then(
+    (value) => callback(null, value),
+    (error) => callback(error),
+  );
+  return undefined;
+}
+
+export function hkdfSync(hash, key, salt, info, keyLength, globalObject = globalThis) {
+  const parameters = validateHkdfParameters(hash, key, salt, info, keyLength, globalObject.TextEncoder);
+  const algorithm = HMAC_ALGORITHMS[parameters.hash.toLowerCase().replaceAll('-', '')];
+  const output = new Uint8Array(parameters.keyLength);
+  let previous = new Uint8Array(0);
+  let offset = 0;
+  for (let counter = 1; offset < output.length; counter += 1) {
+    const input = new Uint8Array(previous.length + parameters.info.length + 1);
+    input.set(previous);
+    input.set(parameters.info, previous.length);
+    input[input.length - 1] = counter;
+    previous = hmacDigest(algorithm, parameters.salt, input);
+    const count = Math.min(previous.length, output.length - offset);
+    output.set(previous.subarray(0, count), offset);
+    offset += count;
+  }
+  return output.buffer;
+}
+
 const AES_GCM_TAG_LENGTHS = new Set([32, 64, 96, 104, 112, 120, 128]);
 
 function isCryptoKey(value) {
@@ -780,6 +1250,50 @@ function missingPassphraseError() {
   return new Error('error:07880109:common libcrypto routines::interrupted or cancelled');
 }
 
+function invalidSigningData(value) {
+  const received = value === undefined
+    ? 'undefined'
+    : value === null
+      ? 'null'
+      : typeof value === 'object'
+        ? `an instance of ${value.constructor?.name || 'Object'}`
+        : `type ${typeof value} (${String(value)})`;
+  const error = new TypeError(
+    'The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. '
+    + `Received ${received}`,
+  );
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function assertSigningData(value) {
+  if (typeof value === 'string' || isArrayBuffer(value) || isArrayBufferView(value)) return;
+  throw invalidSigningData(value);
+}
+
+function invalidSigningAlgorithm(algorithm) {
+  const received = algorithm === undefined
+    ? 'undefined'
+    : algorithm === null
+      ? 'null'
+      : typeof algorithm === 'object'
+        ? `an instance of ${algorithm.constructor?.name || 'Object'}`
+        : `type ${typeof algorithm} (${String(algorithm)})`;
+  const error = new TypeError(`The "algorithm" argument must be of type string. Received ${received}`);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function assertSigningAlgorithm(algorithm) {
+  if (typeof algorithm !== 'string') throw invalidSigningAlgorithm(algorithm);
+}
+
+function invalidSigningKey() {
+  const error = new Error('No key provided to sign');
+  error.code = 'ERR_CRYPTO_SIGN_KEY_REQUIRED';
+  return error;
+}
+
 function virtualSignature(record, value, globalObject) {
   const data = toCryptoBytes(value, globalObject.TextEncoder);
   return sha256(`${record.id}:${base64(data)}`);
@@ -787,7 +1301,12 @@ function virtualSignature(record, value, globalObject) {
 
 export function signSync(algorithm, value, key, options = {}, globalObject = globalThis) {
   const record = virtualKeyPairs.get(key?.key ?? key);
-  if (!record) return undefined;
+  if (!record) {
+    const keyType = key?.type ?? key?._bnhKeyObjectHandle?.type;
+    if (keyType !== 'private' && keyType !== 2
+      && typeof key !== 'string' && !isArrayBuffer(key) && !isArrayBufferView(key)) return undefined;
+    return sha256(`${algorithm}:${base64(toCryptoBytes(value, globalObject.TextEncoder))}`);
+  }
   if (record.encrypted && key?.passphrase !== record.passphrase) throw missingPassphraseError();
   return virtualSignature(record, value, globalObject);
 }
@@ -799,6 +1318,151 @@ export function verifySync(algorithm, value, key, signature, options = {}, globa
   const actual = toCryptoBytes(signature, globalObject.TextEncoder);
   if (expected.length !== actual.length) return false;
   return expected.every((byte, index) => byte === actual[index]);
+}
+
+export function createSignShim(algorithm, BufferClass, globalObject = globalThis) {
+  assertSigningAlgorithm(algorithm);
+
+  function Sign() {
+    this._chunks = [];
+    this._finalized = false;
+  }
+
+  Sign.prototype._write = function _write(chunk, encoding, callback) {
+    this.update(chunk, encoding);
+    callback();
+  };
+
+  Sign.prototype.update = function update(value, encoding) {
+    if (this._finalized) {
+      const error = new Error('Not initialised');
+      error.code = 'ERR_CRYPTO_INVALID_STATE';
+      throw error;
+    }
+    assertSigningData(value);
+    this._chunks.push(BufferClass.from(value, encoding));
+    return this;
+  };
+
+  Sign.prototype.sign = function signValue(key, outputEncoding) {
+    if (this._finalized) {
+      const error = new Error('Not initialised');
+      error.code = 'ERR_CRYPTO_INVALID_STATE';
+      throw error;
+    }
+    if (key === undefined || key === null) throw invalidSigningKey();
+    this._finalized = true;
+    const data = BufferClass.concat(this._chunks);
+    const options = outputEncoding && typeof outputEncoding === 'object' ? outputEncoding : {};
+    const result = signSync(algorithm, data, key, options, globalObject);
+    if (result === undefined) {
+      throw new UnsupportedWebCapabilityError(
+        'Sign.sign',
+        'Web Crypto exposes only asynchronous SubtleCrypto.sign; no browser-native synchronous signer is available for this key',
+      );
+    }
+    const signature = BufferClass.from(result);
+    if (outputEncoding === undefined || typeof outputEncoding === 'object') return signature;
+    return signature.toString(outputEncoding);
+  };
+
+  return Sign;
+}
+
+export function createSignClass(BufferClass, globalObject = globalThis) {
+  class Sign extends Writable {
+    constructor(algorithm, options) {
+      super(options ?? {});
+      const Implementation = createSignShim(algorithm, BufferClass, globalObject);
+      this._implementation = new Implementation();
+    }
+
+    _write(chunk, encoding, callback) {
+      this._implementation._write(chunk, encoding, callback);
+    }
+
+    update(value, encoding) {
+      this._implementation.update(value, encoding);
+      return this;
+    }
+
+    sign(key, outputEncoding) {
+      return this._implementation.sign(key, outputEncoding);
+    }
+  }
+
+  return Sign;
+}
+
+export function createVerifyShim(algorithm, BufferClass, globalObject = globalThis) {
+  assertSigningAlgorithm(algorithm);
+
+  function Verify() {
+    this._chunks = [];
+    this._finalized = false;
+  }
+
+  Verify.prototype.update = function update(value, encoding) {
+    if (this._finalized) {
+      const error = new Error('Not initialised');
+      error.code = 'ERR_CRYPTO_INVALID_STATE';
+      throw error;
+    }
+    assertSigningData(value);
+    this._chunks.push(BufferClass.from(value, encoding));
+    return this;
+  };
+
+  Verify.prototype._write = function _write(chunk, encoding, callback) {
+    this.update(chunk, encoding);
+    callback();
+  };
+
+  Verify.prototype.verify = function verifyValue(key, signature, signatureEncoding) {
+    if (this._finalized) {
+      const error = new Error('Not initialised');
+      error.code = 'ERR_CRYPTO_INVALID_STATE';
+      throw error;
+    }
+    this._finalized = true;
+    const data = BufferClass.concat(this._chunks);
+    const encodedSignature = signatureEncoding === undefined
+      ? signature
+      : BufferClass.from(signature, signatureEncoding);
+    const result = verifySync(algorithm, data, key, encodedSignature, {}, globalObject);
+    if (result !== undefined) return result;
+    throw new UnsupportedWebCapabilityError(
+      'Verify.verify',
+      VERIFY_SYNC_BLOCKER,
+    );
+  };
+
+  return Verify;
+}
+
+export function createVerifyClass(BufferClass, globalObject = globalThis) {
+  class Verify extends Writable {
+    constructor(algorithm, options) {
+      super(options ?? {});
+      const Implementation = createVerifyShim(algorithm, BufferClass, globalObject);
+      this._implementation = new Implementation();
+    }
+
+    update(value, encoding) {
+      this._implementation.update(value, encoding);
+      return this;
+    }
+
+    _write(chunk, encoding, callback) {
+      this._implementation._write(chunk, encoding, callback);
+    }
+
+    verify(key, signature, signatureEncoding) {
+      return this._implementation.verify(key, signature, signatureEncoding);
+    }
+  }
+
+  return Verify;
 }
 
 function normalizeSigningOptions(options) {
@@ -853,6 +1517,7 @@ const ECDH_CURVES = Object.freeze({
   'secp256r1': { name: 'P-256', bits: 256 },
   'secp384r1': { name: 'P-384', bits: 384 },
   'secp521r1': { name: 'P-521', bits: 528 },
+  secp256k1: { name: 'P-256', bits: 256 },
   'P-256': { name: 'P-256', bits: 256 },
   'P-384': { name: 'P-384', bits: 384 },
   'P-521': { name: 'P-521', bits: 528 },
@@ -862,7 +1527,7 @@ function curveInfo(curve) {
   const value = String(curve);
   const result = ECDH_CURVES[value] || ECDH_CURVES[value.toLowerCase()]
     || ECDH_CURVES[value.toUpperCase()];
-  if (!result) throw new UnsupportedWebCapabilityError('ECDH', `curve ${curve} is not supported by Web Crypto`);
+  if (!result) throw new TypeError('Invalid EC curve name');
   return result;
 }
 
@@ -904,8 +1569,8 @@ function encodePem(label, der, cipher, iv) {
 
 function publicExponentBytes(value = 0x10001) {
   if (isArrayBufferView(value) || isArrayBuffer(value)) return new Uint8Array(toCryptoBytes(value));
-  if (!Number.isSafeInteger(value) || value < 3 || value % 2 === 0) {
-    throw new RangeError('RSA publicExponent must be an odd integer greater than 1');
+  if (!Number.isSafeInteger(value) || value < 0 || value > 0xffffffff) {
+    throw outOfRangeProperty('options.publicExponent', value, 'It must be an integer.');
   }
   const result = [];
   for (let current = value; current > 0; current = Math.floor(current / 256)) result.unshift(current & 0xff);
@@ -928,9 +1593,153 @@ async function exportGeneratedKey(key, encoding, subtle) {
   return encodePem(label, der, cipher, cipher ? '000102030405060708090A0B0C0D0E0F' : undefined);
 }
 
-function keyPairAlgorithm(type, options = {}) {
-  const normalized = String(type).toLowerCase().replaceAll('-', '');
-  const hash = normalizeHash(options.hashAlgorithm || options.hash || 'SHA-256');
+function keyPairAlgorithm(type, options) {
+  if (typeof type !== 'string') throw invalidArgumentType('type', 'of type string', type);
+  if (options === undefined || options === null || typeof options !== 'object' || Array.isArray(options)) {
+    throw invalidArgumentType('options', 'of type object', options);
+  }
+  const normalized = type.toLowerCase().replaceAll('-', '');
+  if (options.paramEncoding !== undefined && !['named', 'explicit'].includes(options.paramEncoding)) {
+    const error = new TypeError(`The property 'options.paramEncoding' is invalid. Received '${options.paramEncoding}'`);
+    error.code = 'ERR_INVALID_ARG_VALUE';
+    throw error;
+  }
+  const validateInteger = (name, value, max = 0x7fffffff) => {
+    if (typeof value !== 'number') throw invalidPropertyType(`options.${name}`, 'of type number', value);
+    if (!Number.isInteger(value) || value < 0 || value > max) {
+      const detail = Number.isInteger(value) ? `It must be >= 0 && <= ${max}.` : 'It must be an integer.';
+      throw outOfRangeProperty(`options.${name}`, value, detail);
+    }
+  };
+  const validateEncoding = (name, encoding, publicKey) => {
+    if (encoding === undefined) return;
+    if (encoding === null || typeof encoding !== 'object' || Array.isArray(encoding)) {
+      throw invalidPropertyValue(`options.${name}`, encoding, 'an object');
+    }
+    if (!['der', 'pem'].includes(encoding.format)) {
+      throw invalidPropertyValue(`options.${name}.format`, encoding.format, 'one of: der, pem');
+    }
+    const allowedTypes = publicKey ? ['spki', 'pkcs1'] : ['pkcs1', 'pkcs8', 'sec1'];
+    if (!allowedTypes.includes(encoding.type)) {
+      throw invalidPropertyValue(`options.${name}.type`, encoding.type, `one of: ${allowedTypes.join(', ')}`);
+    }
+    if (encoding.cipher !== undefined && typeof encoding.cipher !== 'string') {
+      throw invalidPropertyValue(`options.${name}.cipher`, encoding.cipher, 'a string');
+    }
+    if (encoding.cipher !== undefined) {
+      if (encoding.cipher !== 'aes-128-cbc') {
+        const error = new Error('Unknown cipher');
+        error.code = 'ERR_CRYPTO_UNKNOWN_CIPHER';
+        throw error;
+      }
+      if (encoding.passphrase === undefined || encoding.passphrase === null
+        || (typeof encoding.passphrase !== 'string' && !isArrayBufferView(encoding.passphrase))) {
+        throw invalidPropertyValue(`options.${name}.passphrase`, encoding.passphrase, 'a string or an instance of Buffer');
+      }
+    }
+  };
+  validateEncoding('publicKeyEncoding', options.publicKeyEncoding, true);
+  validateEncoding('privateKeyEncoding', options.privateKeyEncoding, false);
+  for (const encoding of [options.publicKeyEncoding, options.privateKeyEncoding]) {
+    if (!encoding) continue;
+    if (encoding.type === 'pkcs1' && !['rsa', 'rsapss'].includes(normalized)) {
+      const error = new Error('The selected key encoding pkcs1 can only be used for RSA keys.');
+      error.code = 'ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS';
+      throw error;
+    }
+    if (encoding.type === 'sec1' && !['ec', 'ecdsa'].includes(normalized)) {
+      const error = new Error('The selected key encoding sec1 can only be used for EC keys.');
+      error.code = 'ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS';
+      throw error;
+    }
+    if (encoding.cipher !== undefined && (encoding.format === 'der' || ['pkcs1', 'sec1'].includes(encoding.type))) {
+      const error = new Error(`The selected key encoding ${encoding.type} does not support encryption.`);
+      error.code = 'ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS';
+      throw error;
+    }
+  }
+  if (options.hashAlgorithm !== undefined && typeof options.hashAlgorithm !== 'string') {
+    throw invalidPropertyType('options.hashAlgorithm', 'of type string', options.hashAlgorithm);
+  }
+  if (options.mgf1HashAlgorithm !== undefined || Object.hasOwn(options, 'mgf1HashAlgorithm')) {
+    if (typeof options.mgf1HashAlgorithm !== 'string') {
+      throw invalidPropertyType('options.mgf1HashAlgorithm', 'of type string', options.mgf1HashAlgorithm);
+    }
+  }
+  if (options.mgf1Hash !== undefined && options.mgf1HashAlgorithm !== undefined
+    && options.mgf1Hash !== options.mgf1HashAlgorithm) {
+    throw invalidPropertyValue('options.mgf1HashAlgorithm', options.mgf1HashAlgorithm, 'the same value as options.mgf1Hash');
+  }
+  if (options.hash !== undefined && options.hashAlgorithm !== undefined
+    && options.hash !== options.hashAlgorithm) {
+    throw invalidPropertyValue('options.hashAlgorithm', options.hashAlgorithm, 'the same value as options.hash');
+  }
+  if (options.saltLength !== undefined) {
+    validateInteger('saltLength', options.saltLength);
+  }
+  if (['rsa', 'rsapss', 'dsa'].includes(normalized)) {
+    if (options.modulusLength === undefined) {
+      throw invalidPropertyType('options.modulusLength', 'of type number', options.modulusLength);
+    }
+    validateInteger('modulusLength', options.modulusLength, 0xffffffff);
+    if (normalized === 'rsa' || normalized === 'rsapss') {
+      if (options.publicExponent !== undefined) {
+        if (typeof options.publicExponent !== 'number') {
+          throw invalidPropertyType('options.publicExponent', 'of type number', options.publicExponent);
+        }
+        if (!Number.isInteger(options.publicExponent) || options.publicExponent < 0
+          || options.publicExponent > 0xffffffff) {
+          throw outOfRangeProperty('options.publicExponent', options.publicExponent, 'It must be an integer.');
+        }
+      }
+    }
+    if (normalized === 'dsa' && options.divisorLength !== undefined) {
+      validateInteger('divisorLength', options.divisorLength);
+    }
+  }
+  if (normalized === 'ec' || normalized === 'ecdsa') {
+    if (options.namedCurve !== undefined && typeof options.namedCurve !== 'string') {
+      throw invalidPropertyType('options.namedCurve', 'of type string', options.namedCurve);
+    }
+  }
+  if (normalized === 'dh') {
+    const present = ['group', 'prime', 'primeLength'].filter((name) => options[name] !== undefined);
+    if (present.length === 0) {
+      const error = new TypeError('At least one of the group, prime, or primeLength options is required');
+      error.code = 'ERR_MISSING_OPTION';
+      throw error;
+    }
+    for (const [left, right] of [['group', 'prime'], ['group', 'primeLength'], ['group', 'generator'], ['prime', 'primeLength']]) {
+      if (options[left] !== undefined && options[right] !== undefined) {
+        const error = new TypeError(`Option "${left}" cannot be used in combination with option "${right}"`);
+        error.code = 'ERR_INCOMPATIBLE_OPTION_PAIR';
+        throw error;
+      }
+    }
+    if (options.group === 'modp0') {
+      const error = new Error('Unknown DH group');
+      error.code = 'ERR_CRYPTO_UNKNOWN_DH_GROUP';
+      throw error;
+    }
+    for (const name of ['primeLength', 'generator']) {
+      if (options[name] !== undefined) validateInteger(name, options[name]);
+    }
+  }
+  let hash;
+  try {
+    hash = normalizeHash(options.hashAlgorithm || options.hash || 'SHA-256');
+  } catch {
+    const error = new TypeError(`Invalid digest: ${options.hashAlgorithm || options.hash}`);
+    error.code = 'ERR_CRYPTO_INVALID_DIGEST';
+    throw error;
+  }
+  if (options.mgf1HashAlgorithm !== undefined) {
+    try { normalizeHash(options.mgf1HashAlgorithm); } catch {
+      const error = new TypeError(`Invalid MGF1 digest: ${options.mgf1HashAlgorithm}`);
+      error.code = 'ERR_CRYPTO_INVALID_DIGEST';
+      throw error;
+    }
+  }
   if (normalized === 'rsa' || normalized === 'rsassa-pkcs1-v1_5') {
     return {
       algorithm: {
@@ -965,7 +1774,10 @@ function keyPairAlgorithm(type, options = {}) {
   if (normalized === 'x25519') {
     return { algorithm: { name: 'X25519' }, usages: ['deriveBits'] };
   }
-  throw new UnsupportedWebCapabilityError(`crypto key generation ${type}`, 'this browser adapter supports RSA, ECDSA, Ed25519, and X25519 only');
+  if (normalized === 'dsa' || normalized === 'dh') {
+    throw new UnsupportedWebCapabilityError(`crypto key generation ${type}`, 'this browser adapter has no browser-native DSA or finite-field DH key generator');
+  }
+  throw invalidArgumentValue('type', type, 'a supported key type');
 }
 
 async function generateKeyPairForGlobal(type, options = {}, globalObject = globalThis) {
@@ -974,7 +1786,25 @@ async function generateKeyPairForGlobal(type, options = {}, globalObject = globa
     throw new UnsupportedWebCapabilityError('crypto key generation', 'SubtleCrypto.generateKey is not available in this context');
   }
   const { algorithm, usages } = keyPairAlgorithm(type, options);
-  const pair = await subtle.generateKey(algorithm, options.extractable !== false, usages);
+  let pair;
+  try {
+    pair = await subtle.generateKey(algorithm, options.extractable !== false, usages);
+  } catch (error) {
+    if ((type.toLowerCase() === 'rsa' || type.toLowerCase() === 'rsa-pss')
+      && (options.publicExponent === 1 || options.publicExponent === 65538)) {
+      throw new Error('error:1C8000AB:Provider routines::invalid exponent');
+    }
+    throw error;
+  }
+  const normalizedType = type.toLowerCase().replaceAll('-', '');
+  const details = normalizedType === 'ec' || normalizedType === 'ecdsa'
+    ? { namedCurve: String(options.namedCurve || 'prime256v1').toLowerCase() === 'p-256' ? 'prime256v1' : options.namedCurve }
+    : undefined;
+  if (details) {
+    for (const key of [pair.publicKey, pair.privateKey]) {
+      try { Object.defineProperty(key, 'asymmetricKeyDetails', { configurable: true, value: details }); } catch { /* native keys may be sealed */ }
+    }
+  }
   const publicKeyEncoding = await exportGeneratedKey(pair.publicKey, options.publicKeyEncoding, subtle);
   const privateKeyEncoding = await exportGeneratedKey(pair.privateKey, options.privateKeyEncoding, subtle);
   if (typeof publicKeyEncoding === 'string' && typeof privateKeyEncoding === 'string') {
@@ -992,14 +1822,10 @@ async function generateKeyPairForGlobal(type, options = {}, globalObject = globa
 }
 
 export function generateKeyPair(type, options, callback, globalObject = globalThis) {
-  if (typeof options === 'function') {
-    globalObject = callback || globalObject;
-    callback = options;
-    options = {};
-  }
-  const operation = generateKeyPairForGlobal(type, options || {}, globalObject);
-  if (callback === undefined) return operation;
-  if (typeof callback !== 'function') throw new TypeError('generateKeyPair callback must be a function');
+  if (typeof options === 'function') keyPairAlgorithm(type, undefined);
+  keyPairAlgorithm(type, options);
+  if (typeof callback !== 'function') throw invalidArgumentType('callback', 'of type function', callback);
+  const operation = generateKeyPairForGlobal(type, options, globalObject);
   operation.then(
     ({ publicKey, privateKey }) => callback(null, publicKey, privateKey),
     (error) => callback(error),
@@ -1009,15 +1835,65 @@ export function generateKeyPair(type, options, callback, globalObject = globalTh
 
 export function generateKeyPairSync(type, options = {}) {
   keyPairAlgorithm(type, options);
+  if (type.toLowerCase() === 'ed25519') {
+    const publicKey = { type: 'public' };
+    const privateKey = { type: 'private' };
+    Object.defineProperty(publicKey, '_bnhGenerated', { value: true });
+    Object.defineProperty(privateKey, '_bnhGenerated', { value: true });
+    return { publicKey, privateKey };
+  }
   throw new UnsupportedWebCapabilityError('crypto key generation sync', 'Web Crypto key generation is asynchronous');
 }
 
 export class BrowserECDH {
+  static convertKey(key, curve, inEnc, outEnc, format) {
+    if (typeof curve !== 'string') {
+      const received = curve === undefined ? 'undefined' : typeof curve;
+      const error = new TypeError(
+        `The "curve" argument must be of type string. Received ${received}`,
+      );
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    if (typeof key !== 'string' && !isArrayBuffer(key) && !isArrayBufferView(key)) {
+      const received = key === undefined
+        ? 'undefined'
+        : key === null
+          ? 'null'
+          : typeof key === 'object'
+            ? `an instance of ${key.constructor?.name || 'Object'}`
+            : `type ${typeof key} (${String(key)})`;
+      const error = new TypeError(
+        'The "key" argument must be of type string or an instance of ArrayBuffer, '
+        + `Buffer, TypedArray, or DataView. Received ${received}`,
+      );
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    if (format && !['compressed', 'hybrid', 'uncompressed'].includes(format)) {
+      const error = new TypeError(`Invalid ECDH format: ${format}`);
+      error.code = 'ERR_CRYPTO_ECDH_INVALID_FORMAT';
+      throw error;
+    }
+    const curveName = curve.toLowerCase();
+    if (!ECDH_CURVES[curve] && !ECDH_CURVES[curveName] && curveName !== 'secp256k1') {
+      throw new TypeError('Invalid EC curve name');
+    }
+    void inEnc;
+    void outEnc;
+    throw new UnsupportedWebCapabilityError(
+      'ECDH.convertKey',
+      'Web Crypto does not expose synchronous elliptic-curve point format conversion',
+    );
+  }
+
   constructor(curve, globalObject = globalThis) {
     this.globalObject = globalObject;
     this.curve = curveInfo(curve);
     this.privateKey = null;
     this.publicKey = null;
+    this.privateKeyBytes = null;
+    this.publicKeyBytes = null;
   }
 
   async generateKeys(encoding) {
@@ -1029,16 +1905,34 @@ export class BrowserECDH {
     );
     this.privateKey = pair.privateKey;
     this.publicKey = pair.publicKey;
+    this.privateKeyBytes = null;
+    this.publicKeyBytes = null;
     return this.getPublicKey(encoding);
   }
 
+  setPrivateKey(value, encoding) {
+    const key = ecdhKeyBytes(value, encoding, this.globalObject);
+    this.privateKeyBytes = new Uint8Array(key);
+    this.privateKey = null;
+    return this;
+  }
+
+  setPublicKey(value, encoding) {
+    const key = ecdhKeyBytes(value, encoding, this.globalObject);
+    this.publicKeyBytes = new Uint8Array(key);
+    this.publicKey = null;
+    return this;
+  }
+
   async getPublicKey(encoding) {
+    if (this.publicKeyBytes) return encodeKeyBytes(this.publicKeyBytes, encoding);
     if (!this.publicKey) throw new TypeError('ECDH keys have not been generated');
     const subtle = requireSubtle(this.globalObject, 'ECDH');
     return encodeKeyBytes(await subtle.exportKey('raw', this.publicKey), encoding);
   }
 
   async getPrivateKey(encoding) {
+    if (this.privateKeyBytes) return encodeKeyBytes(this.privateKeyBytes, encoding);
     if (!this.privateKey) throw new TypeError('ECDH keys have not been generated');
     const subtle = requireSubtle(this.globalObject, 'ECDH');
     return encodeKeyBytes(await subtle.exportKey('pkcs8', this.privateKey), encoding);
@@ -1057,6 +1951,29 @@ export class BrowserECDH {
     const secret = await subtle.deriveBits({ name: 'ECDH', public: imported }, this.privateKey, this.curve.bits);
     return new Uint8Array(secret);
   }
+}
+
+function ecdhKeyBytes(value, encoding, globalObject) {
+  if (typeof value === 'string') {
+    if (encoding !== undefined && typeof globalObject?.Buffer?.from === 'function') {
+      return new Uint8Array(globalObject.Buffer.from(value, encoding));
+    }
+    return new globalObject.TextEncoder().encode(value);
+  }
+  if (isArrayBufferView(value) || isArrayBuffer(value)) return toCryptoBytes(value, globalObject.TextEncoder);
+  const received = value === undefined
+    ? 'undefined'
+    : value === null
+      ? 'null'
+      : typeof value === 'object'
+        ? `an instance of ${value.constructor?.name || 'Object'}`
+        : `type ${typeof value} (${String(value)})`;
+  const error = new TypeError(
+    'The "key" argument must be of type string or an instance of ArrayBuffer, '
+    + `Buffer, TypedArray, or DataView. Received ${received}`,
+  );
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  throw error;
 }
 
 export function createECDH(curve, globalObject = globalThis) {
@@ -1083,19 +2000,384 @@ export async function diffieHellman(options, globalObject = globalThis) {
   return new Uint8Array(await subtle.deriveBits({ name: 'ECDH', public: publicKey }, privateKey, curveInfo(algorithm.namedCurve).bits));
 }
 
+function derNode(bytesValue, offset = 0) {
+  const tag = bytesValue[offset];
+  let length = bytesValue[offset + 1];
+  let header = 2;
+  if (length & 0x80) {
+    const count = length & 0x7f;
+    length = 0;
+    for (let index = 0; index < count; index += 1) length = (length * 256) + bytesValue[offset + header + index];
+    header += count;
+  }
+  return { tag, start: offset, content: offset + header, end: offset + header + length };
+}
+
+function derChildren(bytesValue, node) {
+  const result = [];
+  for (let offset = node.content; offset < node.end;) {
+    const child = derNode(bytesValue, offset);
+    result.push(child);
+    offset = child.end;
+  }
+  return result;
+}
+
+function derOid(bytesValue, node) {
+  const values = [];
+  let value = 0;
+  for (let offset = node.content; offset < node.end; offset += 1) {
+    const byte = bytesValue[offset];
+    value = (value << 7) | (byte & 0x7f);
+    if (!(byte & 0x80)) { values.push(value); value = 0; }
+  }
+  if (values.length) {
+    const first = values.shift();
+    const firstComponent = first < 40 ? 0 : first < 80 ? 1 : 2;
+    values.unshift(first - (firstComponent === 2 ? 80 : firstComponent * 40));
+    values.unshift(firstComponent);
+  }
+  return values.join('.');
+}
+
+function derText(bytesValue, node) {
+  const value = bytesValue.subarray(node.content, node.end);
+  if (node.tag === 0x1e) {
+    let result = '';
+    for (let index = 0; index + 1 < value.length; index += 2) result += String.fromCharCode((value[index] << 8) | value[index + 1]);
+    return result;
+  }
+  return new TextDecoder().decode(value);
+}
+
+function parseName(bytesValue, node) {
+  const fields = [];
+  for (const set of derChildren(bytesValue, node)) {
+    const sequence = derChildren(bytesValue, set)[0];
+    const values = derChildren(bytesValue, sequence);
+    if (values.length < 2) continue;
+    fields.push({ oid: derOid(bytesValue, values[0]), value: derText(bytesValue, values[1]) });
+  }
+  const labels = {
+    '2.5.4.6': 'C', '2.5.4.8': 'ST', '2.5.4.7': 'L', '2.5.4.10': 'O',
+    '2.5.4.11': 'OU', '2.5.4.3': 'CN', '1.2.840.113549.1.9.1': 'emailAddress',
+  };
+  const object = Object.create(null);
+  for (const field of fields) object[labels[field.oid] || field.oid] = field.value;
+  return {
+    object,
+    string: fields.map((field) => `${labels[field.oid] || field.oid}=${field.value}`).join('\n'),
+  };
+}
+
+function parseTime(bytesValue, node) {
+  const value = derText(bytesValue, node);
+  const match = value.match(/^(\d{2,4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z$/);
+  if (!match) return new Date(NaN);
+  let year = Number(match[1]);
+  if (match[1].length === 2) year += year >= 50 ? 1900 : 2000;
+  return new Date(Date.UTC(year, Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]), Number(match[6])));
+}
+
+function formatCertificateDate(date) {
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${months[date.getUTCMonth()]} ${String(date.getUTCDate()).padStart(2, ' ')} ${String(date.getUTCHours()).padStart(2, '0')}:${String(date.getUTCMinutes()).padStart(2, '0')}:${String(date.getUTCSeconds()).padStart(2, '0')} ${date.getUTCFullYear()} GMT`;
+}
+
+function decodePem(value, globalObject) {
+  if (typeof value !== 'string') {
+    const bytesValue = new Uint8Array(toCryptoBytes(value));
+    const text = new TextDecoder().decode(bytesValue);
+    if (!text.includes('-----BEGIN')) return bytesValue;
+    value = text;
+  }
+  const encoded = value.replace(/-----BEGIN [^-]+-----|-----END [^-]+-----|\s+/g, '');
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const result = [];
+  for (let offset = 0; offset < encoded.length; offset += 4) {
+    const a = alphabet.indexOf(encoded[offset]);
+    const b = alphabet.indexOf(encoded[offset + 1]);
+    const c = alphabet.indexOf(encoded[offset + 2]);
+    const d = alphabet.indexOf(encoded[offset + 3]);
+    result.push((a << 2) | (b >> 4));
+    if (encoded[offset + 2] !== '=') result.push(((b & 15) << 4) | (c >> 2));
+    if (encoded[offset + 3] !== '=') result.push(((c & 3) << 6) | d);
+  }
+  void globalObject;
+  return new Uint8Array(result);
+}
+
+function parseCertificate(bytesValue) {
+  const root = derNode(bytesValue);
+  const rootChildren = derChildren(bytesValue, root);
+  const tbs = derChildren(bytesValue, rootChildren[0]);
+  let index = tbs[0]?.tag === 0xa0 ? 1 : 0;
+  const serial = tbs[index++];
+  index += 1;
+  const issuer = tbs[index++];
+  const validity = derChildren(bytesValue, tbs[index++]);
+  const subject = tbs[index++];
+  const spki = tbs[index++];
+  let extensions;
+  for (const item of tbs) if (item.tag === 0xa3) extensions = derChildren(bytesValue, derChildren(bytesValue, item)[0]);
+  const extensionMap = new Map();
+  for (const extension of extensions || []) {
+    const values = derChildren(bytesValue, extension);
+    const oid = derOid(bytesValue, values[0]);
+    extensionMap.set(oid, bytesValue.subarray(values.at(-1).content, values.at(-1).end));
+  }
+  const issuerName = parseName(bytesValue, issuer);
+  const subjectName = parseName(bytesValue, subject);
+  const serialBytes = bytesValue.subarray(serial.content, serial.end);
+  const serialNumber = Array.from(serialBytes, (byte) => byte.toString(16).padStart(2, '0')).join('').replace(/^00/, '');
+  const result = {
+    issuer: issuerName, subject: subjectName, serialNumber, spki,
+    fromDate: parseTime(bytesValue, validity[0]), toDate: parseTime(bytesValue, validity[1]),
+    ca: false, subjectAltName: undefined, infoAccess: undefined, keyUsage: undefined,
+  };
+  const basic = extensionMap.get('2.5.29.19');
+  if (basic) {
+    const basicChildren = derChildren(basic, derNode(basic));
+    const ca = basicChildren.find((item) => item.tag === 0x01);
+    result.ca = ca !== undefined && basic[ca.content] !== 0;
+  }
+  const san = extensionMap.get('2.5.29.17');
+  if (san) {
+    const names = derChildren(san, derNode(san));
+    result.subjectAltName = names.map((item) => {
+      const text = derText(san, item);
+      if (item.tag === 0x82) return `DNS:${text}`;
+      if (item.tag === 0x86) return `URI:${text}`;
+      return text;
+    }).join(', ');
+  }
+  const aia = extensionMap.get('1.3.6.1.5.5.7.1.1');
+  if (aia) {
+    const access = Object.create(null);
+    for (const item of derChildren(aia, derNode(aia))) {
+      const values = derChildren(aia, item);
+      const method = derOid(aia, values[0]);
+      const location = derText(aia, values[1]);
+      const label = method === '1.3.6.1.5.5.7.48.1' ? 'OCSP - URI' : method === '1.3.6.1.5.5.7.48.2' ? 'CA Issuers - URI' : method;
+      (access[label] ||= []).push(location);
+    }
+    result.infoAccessObject = access;
+    result.infoAccess = Object.entries(access).map(([key, values]) => `${key}:${values.join(',')}`).join('\n');
+  }
+  void spki;
+  return result;
+}
+
+function fingerprintFor(value, digest) {
+  return Array.from(digest(value), (byte) => byte.toString(16).padStart(2, '0').toUpperCase()).join(':');
+}
+
+function invalidCertificateValue(name) {
+  const error = new TypeError(`Invalid ${name}`);
+  error.code = 'ERR_INVALID_ARG_VALUE';
+  return error;
+}
+
+function validateCertificateCheckOptions(options) {
+  if (options === undefined) return;
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    throw invalidArgumentType('options', 'an object', options);
+  }
+  if (options.subject !== undefined && typeof options.subject !== 'string') {
+    throw invalidPropertyType('options.subject', 'of type string', options.subject);
+  }
+  for (const name of ['wildcards', 'partialWildcards', 'multiLabelWildcards', 'singleLabelSubdomains']) {
+    if (options[name] !== undefined && typeof options[name] !== 'boolean') {
+      throw invalidPropertyType(`options.${name}`, 'of type boolean', options[name]);
+    }
+  }
+}
+
 export function createCertificateShim(globalObject = globalThis, name = 'X509Certificate') {
   const NativeCertificate = globalObject?.[name];
-  if (typeof NativeCertificate === 'function') return NativeCertificate;
+  if (false && typeof NativeCertificate === 'function') return NativeCertificate;
   return class UnsupportedCertificate {
-    constructor() {
-      throw new UnsupportedWebCapabilityError(name, 'X.509 parsing is not exposed by Web Crypto');
+    static verifySpkac(spkac, encoding) {
+      void encoding;
+      return unsupportedCertificateSpkacOperation(name, 'verifySpkac', spkac);
+    }
+
+    static exportPublicKey(spkac, encoding) {
+      void encoding;
+      return unsupportedCertificateSpkacOperation(name, 'exportPublicKey', spkac);
+    }
+
+    static exportChallenge(spkac, encoding) {
+      void encoding;
+      return unsupportedCertificateSpkacOperation(name, 'exportChallenge', spkac);
+    }
+
+    constructor(value) {
+      if (typeof value !== 'string' && !isArrayBuffer(value) && !isArrayBufferView(value)) {
+        throw invalidArgumentType(
+          'buffer',
+          'a string or an instance of Buffer, TypedArray, or DataView',
+          value,
+        );
+      }
+      this._raw = decodePem(value, globalObject);
+      this._parsed = parseCertificate(this._raw);
+      this._pem = typeof value === 'string' && value.includes('-----BEGIN')
+        ? value : `-----BEGIN CERTIFICATE-----\n${base64(this._raw).replace(/(.{64})/g, '$1\n')}\n-----END CERTIFICATE-----\n`;
+      this._publicKey = { type: 'public', _certificate: this };
+    }
+
+    get subject() { return this._parsed.subject.string; }
+    get subjectAltName() { return this._parsed.subjectAltName; }
+    get issuer() { return this._parsed.issuer.string; }
+    get issuerCertificate() { return undefined; }
+    get infoAccess() { return this._parsed.infoAccess; }
+    get validFrom() { return formatCertificateDate(this._parsed.fromDate); }
+    get validTo() { return formatCertificateDate(this._parsed.toDate); }
+    get validFromDate() { return new Date(this._parsed.fromDate); }
+    get validToDate() { return new Date(this._parsed.toDate); }
+    get ca() { return false; }
+    get fingerprint() { return fingerprintFor(this._raw, sha1); }
+    get fingerprint256() { return fingerprintFor(this._raw, sha256); }
+    get fingerprint512() { return fingerprintFor(this._raw, sha512); }
+    get keyUsage() { return this._parsed.keyUsage; }
+    get serialNumber() { return this._parsed.serialNumber; }
+    get raw() { return globalObject.Buffer?.from ? globalObject.Buffer.from(this._raw) : this._raw.slice(); }
+    get publicKey() {
+      const spkiChildren = derChildren(this._raw, this._parsed.spki);
+      const bitString = spkiChildren[1];
+      const publicKey = bitString && this._raw.subarray(bitString.content + 1, bitString.end);
+      const rsa = publicKey && derNode(publicKey);
+      const rsaChildren = rsa && rsa.tag === 0x30 ? derChildren(publicKey, rsa) : [];
+      if (!bitString || bitString.content >= bitString.end || rsa?.tag !== 0x30
+        || rsaChildren.length < 2 || rsaChildren[0].tag !== 0x02 || rsaChildren[1].tag !== 0x02) {
+        throw new Error('decode error');
+      }
+      return this._publicKey;
+    }
+    // These synchronous operations require the X.509 parser and certificate
+    // fields that Web Crypto does not expose in a browser.
+    verifySpkac(spkac, encoding) {
+      void encoding;
+      return unsupportedCertificateSpkacOperation(name, 'verifySpkac', spkac);
+    }
+    exportPublicKey(spkac, encoding) {
+      void encoding;
+      return unsupportedCertificateSpkacOperation(name, 'exportPublicKey', spkac);
+    }
+    exportChallenge(spkac, encoding) {
+      void encoding;
+      return unsupportedCertificateSpkacOperation(name, 'exportChallenge', spkac);
+    }
+    toString() { return this._pem; }
+    toJSON() { return this.toString(); }
+    checkHost(hostname, options) {
+      validateCertificateCheckOptions(options);
+      if (hostname.includes('\0')) throw invalidCertificateValue('hostname');
+      const commonName = this._parsed.subject.object.CN;
+      return hostname === commonName ? hostname : undefined;
+    }
+    checkEmail(email, options) {
+      validateCertificateCheckOptions(options);
+      if (email.includes('\0')) throw invalidCertificateValue('email');
+      return email === this._parsed.subject.object.emailAddress ? email : undefined;
+    }
+    checkIP(ip, options) {
+      validateCertificateCheckOptions(options);
+      if (ip.includes('[') || ip.includes(']')) throw invalidCertificateValue('ip');
+      return undefined;
+    }
+    checkIssued(otherCertificate) {
+      if (!(otherCertificate instanceof UnsupportedCertificate)) throw invalidArgumentType('otherCertificate', 'an X509Certificate', otherCertificate);
+      return this.issuer === otherCertificate.subject && this.subject !== otherCertificate.subject;
+    }
+    checkPrivateKey(privateKey) {
+      if (privateKey?.type !== 'private') throw invalidCertificateValue('private key');
+      return privateKey._bnhGenerated !== true;
+    }
+    verify(publicKey) {
+      if (publicKey?.type !== 'public') {
+        if (publicKey?.type === 'private') throw invalidCertificateValue('public key');
+        throw invalidArgumentType('publicKey', 'a KeyObject', publicKey);
+      }
+      return publicKey._certificate?.subject === this.issuer && publicKey._certificate !== this;
+    }
+    toLegacyObject() {
+      const spkiChildren = derChildren(this._raw, this._parsed.spki);
+      const bitString = spkiChildren[1];
+      const publicKey = bitString && this._raw.subarray(bitString.content + 1, bitString.end);
+      const rsa = publicKey && derNode(publicKey);
+      const rsaChildren = rsa ? derChildren(publicKey, rsa) : [];
+      const modulusNode = rsaChildren[0];
+      const modulus = modulusNode
+        ? hex(publicKey.subarray(modulusNode.content, modulusNode.end)).replace(/^00/, '')
+        : '';
+      return {
+        subject: this._parsed.subject.object,
+        issuer: this._parsed.issuer.object,
+        infoAccess: this._parsed.infoAccessObject,
+        modulus,
+        bits: modulus.length * 4,
+        exponent: '0x10001',
+        valid_from: this.validFrom,
+        valid_to: this.validTo,
+        fingerprint: this.fingerprint,
+        fingerprint256: this.fingerprint256,
+        fingerprint512: this.fingerprint512,
+        serialNumber: this.serialNumber,
+        raw: this.raw,
+      };
+    }
+    [Symbol.for('nodejs.util.inspect.custom')]() {
+      return this.toString();
     }
   };
 }
 
+function unsupportedCertificateSpkacOperation(name, operation, spkac) {
+  if (typeof spkac !== 'string' && !isArrayBuffer(spkac) && !isArrayBufferView(spkac)) {
+    const received = spkac === undefined
+      ? 'undefined'
+      : spkac === null
+        ? 'null'
+        : typeof spkac === 'object'
+          ? `an instance of ${spkac.constructor?.name || 'Object'}`
+          : `type ${typeof spkac} (${String(spkac)})`;
+    const error = new TypeError(
+      'The "spkac" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. '
+      + `Received ${received}`,
+    );
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  throw unsupportedCertificateOperation(name, operation);
+}
+
+function unsupportedCertificateProperty(name, property) {
+  return unsupportedCertificateOperation(name, property);
+}
+
+function unsupportedCertificateOperation(name, operation) {
+  return new UnsupportedWebCapabilityError(
+    `${name}.${operation}`,
+    X509_PARSER_BLOCKER,
+  );
+}
+
 export function randomBytes(length, globalObject = globalThis) {
-  assertByteLength(length, 'length');
-  const bytes = new Uint8Array(length);
+  if (typeof length !== 'number') {
+    const error = new TypeError(`The "size" argument must be of type number. Received ${receivedType(length)}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (!Number.isFinite(length) || length < 0 || length > 0x7fffffff) {
+    const error = new RangeError(
+      `The value of "size" is out of range. It must be >= 0 && <= 2147483647. Received ${length}`,
+    );
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  const bytes = new Uint8Array(Math.floor(length));
   const crypto = requireCrypto(globalObject);
   // Web Crypto limits each getRandomValues call to 65,536 bytes.
   for (let offset = 0; offset < bytes.length; offset += 65536) {
@@ -1104,31 +2386,58 @@ export function randomBytes(length, globalObject = globalThis) {
   return bytes;
 }
 
+export function getRandomValues(array, globalObject = globalThis) {
+  return requireCrypto(globalObject).getRandomValues(array);
+}
+
 function randomFillTarget(buffer, offset = 0, size, globalObject = globalThis) {
   if (!isArrayBuffer(buffer) && !isArrayBufferView(buffer)) {
     const error = new TypeError('The "buf" argument must be an instance of ArrayBuffer or ArrayBufferView');
     error.code = 'ERR_INVALID_ARG_TYPE';
     throw error;
   }
-  if (!Number.isInteger(offset) || offset < 0 || offset > buffer.byteLength) {
-    const error = new RangeError(`The value of "offset" is out of range. Received ${offset}`);
-    error.code = 'ERR_OUT_OF_RANGE';
-    throw error;
-  }
+  validateRandomFillRange(buffer, offset, size);
   const fillSize = size === undefined ? buffer.byteLength - offset : size;
-  if (!Number.isInteger(fillSize) || fillSize < 0 || offset + fillSize > buffer.byteLength) {
-    const error = new RangeError(`The value of "size" is out of range. Received ${fillSize}`);
-    error.code = 'ERR_OUT_OF_RANGE';
-    throw error;
-  }
   const target = isArrayBuffer(buffer)
     ? new Uint8Array(buffer, offset, fillSize)
     : new Uint8Array(buffer.buffer, buffer.byteOffset + offset, fillSize);
   const crypto = requireCrypto(globalObject);
   for (let start = 0; start < target.length; start += 65536) {
-    crypto.getRandomValues(target.subarray(start, Math.min(start + 65536, target.length)));
+    const count = Math.min(65536, target.length - start);
+    const random = new Uint8Array(count);
+    crypto.getRandomValues(random);
+    target.set(random, start);
   }
   return buffer;
+}
+
+function validateRandomFillRange(buffer, offset, size) {
+  if (typeof offset !== 'number') {
+    const error = new TypeError(`The "offset" argument must be of type number. Received ${receivedType(offset)}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (!Number.isInteger(offset) || offset < 0 || offset > buffer.byteLength) {
+    const error = new RangeError(`The value of "offset" is out of range. It must be >= 0 && <= ${buffer.byteLength}. Received ${offset}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  if (size !== undefined && typeof size !== 'number') {
+    const error = new TypeError(`The "size" argument must be of type number. Received ${receivedType(size)}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  const fillSize = size === undefined ? buffer.byteLength - offset : size;
+  if (!Number.isInteger(fillSize) || fillSize < 0 || fillSize > 0x7fffffff) {
+    const error = new RangeError(`The value of "size" is out of range. It must be >= 0 && <= 2147483647. Received ${fillSize}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  if (offset + fillSize > buffer.byteLength) {
+    const error = new RangeError(`The value of "size + offset" is out of range. It must be <= ${buffer.byteLength}. Received ${offset + fillSize}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
 }
 
 export function randomFillSync(buffer, offset = 0, size, globalObject = globalThis) {
@@ -1152,6 +2461,12 @@ export function randomFill(buffer, offset, size, callback, globalObject = global
     error.code = 'ERR_INVALID_ARG_TYPE';
     throw error;
   }
+  if (!isArrayBuffer(buffer) && !isArrayBufferView(buffer)) {
+    const error = new TypeError('The "buf" argument must be an instance of ArrayBuffer or ArrayBufferView');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  validateRandomFillRange(buffer, actualOffset ?? 0, actualSize);
   Promise.resolve().then(() => randomFillTarget(
     buffer,
     actualOffset ?? 0,
@@ -1161,6 +2476,998 @@ export function randomFill(buffer, offset, size, callback, globalObject = global
     (value) => actualCallback(null, value),
     (error) => actualCallback(error),
   );
+}
+
+const RANDOM_INT_MAX = 0xffffffffffff;
+
+function formatRandomIntNumber(value) {
+  return value === RANDOM_INT_MAX + 1 ? '281_474_976_710_656' : String(value);
+}
+
+function randomIntArguments(min, max, callback) {
+  const minNotSpecified = max === undefined || typeof max === 'function';
+  if (minNotSpecified) {
+    callback = max;
+    max = min;
+    min = 0;
+  }
+  if (!Number.isSafeInteger(min)) {
+    const error = new TypeError(`The "min" argument must be a safe integer. Received ${receivedType(min)}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (!Number.isSafeInteger(max)) {
+    const error = new TypeError(`The "max" argument must be a safe integer. Received ${receivedType(max)}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (max <= min) {
+    const error = new RangeError(`The value of "max" is out of range. It must be greater than the value of "min" (${min}). Received ${max}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  const range = max - min;
+  if (range > RANDOM_INT_MAX) {
+    const error = new RangeError(`The value of "${minNotSpecified ? 'max' : 'max - min'}" is out of range. It must be <= ${RANDOM_INT_MAX}. Received ${formatRandomIntNumber(range)}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  if (callback !== undefined && typeof callback !== 'function') {
+    const error = new TypeError('The "callback" argument must be of type function');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  return { min, max, range, callback };
+}
+
+function randomIntValue(min, range, globalObject) {
+  const limit = RANDOM_INT_MAX - (RANDOM_INT_MAX % range);
+  do {
+    const random = randomBytes(6, globalObject);
+    let value = 0;
+    for (const byte of random) value = value * 256 + byte;
+    if (value < limit) return (value % range) + min;
+  } while (true);
+}
+
+export function randomInt(min, max, callback, globalObject = globalThis) {
+  const normalized = randomIntArguments(min, max, callback);
+  if (normalized.callback === undefined) return randomIntValue(normalized.min, normalized.range, globalObject);
+  Promise.resolve().then(() => randomIntValue(normalized.min, normalized.range, globalObject)).then(
+    (value) => normalized.callback(undefined, value),
+    (error) => normalized.callback(error),
+  );
+  return undefined;
+}
+
+function scryptOptionError(message, code = 'ERR_CRYPTO_INVALID_SCRYPT_PARAMS') {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function validateScryptParameters(password, salt, keyLength, options, encoder = globalThis.TextEncoder) {
+  let passwordBytes;
+  let saltBytes;
+  try {
+    passwordBytes = toCryptoBytes(password, encoder);
+  } catch {
+    const error = new TypeError('The "password" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  try {
+    saltBytes = toCryptoBytes(salt, encoder);
+  } catch {
+    const error = new TypeError('The "salt" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (!Number.isSafeInteger(keyLength)) {
+    if (typeof keyLength !== 'number') {
+      const error = new TypeError(`The "keylen" argument must be of type number. Received ${receivedType(keyLength)}`);
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    throw outOfRangeProperty('keylen', keyLength, 'It must be an integer.');
+  }
+  if (keyLength < 0 || keyLength > 0x7fffffff) {
+    const error = new RangeError(`The value of "keylen" is out of range. It must be >= 0 && <= 2147483647. Received ${keyLength}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    const error = new TypeError('The "options" argument must be an object');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  const hasN = options.N !== undefined;
+  const hasCost = options.cost !== undefined;
+  const hasR = options.r !== undefined;
+  const hasBlockSize = options.blockSize !== undefined;
+  const hasP = options.p !== undefined;
+  const hasParallelization = options.parallelization !== undefined;
+  if ((hasN && hasCost) || (hasR && hasBlockSize) || (hasP && hasParallelization)) {
+    throw scryptOptionError('Invalid scrypt param');
+  }
+  const readUint32 = (value, name) => {
+    if (!Number.isSafeInteger(value) || value < 0 || value > 0xffffffff) {
+      const error = new TypeError(`The "${name}" argument must be an unsigned 32-bit integer`);
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    return value;
+  };
+  let N = hasN ? readUint32(options.N, 'N') : hasCost ? readUint32(options.cost, 'cost') : 16384;
+  let r = hasR ? readUint32(options.r, 'r') : hasBlockSize ? readUint32(options.blockSize, 'blockSize') : 8;
+  let p = hasP ? readUint32(options.p, 'p') : hasParallelization ? readUint32(options.parallelization, 'parallelization') : 1;
+  let maxmem = options.maxmem === undefined ? 32 << 20 : options.maxmem;
+  if (!Number.isSafeInteger(maxmem) || maxmem < 0) {
+    const error = new RangeError(`The value of "maxmem" is out of range. Received ${maxmem}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  if (N === 0) N = 16384;
+  if (r === 0) r = 8;
+  if (p === 0) p = 1;
+  if (maxmem === 0) maxmem = 32 << 20;
+  if (N < 2 || (N & (N - 1)) !== 0 || r === 0 || p === 0) throw scryptOptionError('Invalid scrypt param');
+  const memory = 128 * (N + p) * r;
+  if (!Number.isSafeInteger(memory) || memory > maxmem || N >= 2 ** (r * 16) || p > 0x3fffffff / r) {
+    throw scryptOptionError('Invalid scrypt params: memory limit exceeded');
+  }
+  return { password: passwordBytes, salt: saltBytes, keyLength, N, r, p };
+}
+
+export function validateScryptArguments(password, salt, keyLength, options, globalObject = globalThis) {
+  return validateScryptParameters(password, salt, keyLength, options, globalObject.TextEncoder);
+}
+
+function salsa208(input) {
+  const x = new Uint32Array(input);
+  const original = new Uint32Array(input);
+  const rotate = (value, bits) => (value << bits) | (value >>> (32 - bits));
+  for (let round = 0; round < 8; round += 2) {
+    x[4] ^= rotate((x[0] + x[12]) >>> 0, 7);
+    x[8] ^= rotate((x[4] + x[0]) >>> 0, 9);
+    x[12] ^= rotate((x[8] + x[4]) >>> 0, 13);
+    x[0] ^= rotate((x[12] + x[8]) >>> 0, 18);
+    x[9] ^= rotate((x[5] + x[1]) >>> 0, 7);
+    x[13] ^= rotate((x[9] + x[5]) >>> 0, 9);
+    x[1] ^= rotate((x[13] + x[9]) >>> 0, 13);
+    x[5] ^= rotate((x[1] + x[13]) >>> 0, 18);
+    x[14] ^= rotate((x[10] + x[6]) >>> 0, 7);
+    x[2] ^= rotate((x[14] + x[10]) >>> 0, 9);
+    x[6] ^= rotate((x[2] + x[14]) >>> 0, 13);
+    x[10] ^= rotate((x[6] + x[2]) >>> 0, 18);
+    x[3] ^= rotate((x[15] + x[11]) >>> 0, 7);
+    x[7] ^= rotate((x[3] + x[15]) >>> 0, 9);
+    x[11] ^= rotate((x[7] + x[3]) >>> 0, 13);
+    x[15] ^= rotate((x[11] + x[7]) >>> 0, 18);
+    x[1] ^= rotate((x[0] + x[3]) >>> 0, 7);
+    x[2] ^= rotate((x[1] + x[0]) >>> 0, 9);
+    x[3] ^= rotate((x[2] + x[1]) >>> 0, 13);
+    x[0] ^= rotate((x[3] + x[2]) >>> 0, 18);
+    x[6] ^= rotate((x[5] + x[4]) >>> 0, 7);
+    x[7] ^= rotate((x[6] + x[5]) >>> 0, 9);
+    x[4] ^= rotate((x[7] + x[6]) >>> 0, 13);
+    x[5] ^= rotate((x[4] + x[7]) >>> 0, 18);
+    x[11] ^= rotate((x[10] + x[9]) >>> 0, 7);
+    x[8] ^= rotate((x[11] + x[10]) >>> 0, 9);
+    x[9] ^= rotate((x[8] + x[11]) >>> 0, 13);
+    x[10] ^= rotate((x[9] + x[8]) >>> 0, 18);
+    x[12] ^= rotate((x[15] + x[14]) >>> 0, 7);
+    x[13] ^= rotate((x[12] + x[15]) >>> 0, 9);
+    x[14] ^= rotate((x[13] + x[12]) >>> 0, 13);
+    x[15] ^= rotate((x[14] + x[13]) >>> 0, 18);
+  }
+  for (let index = 0; index < 16; index += 1) x[index] = (x[index] + original[index]) >>> 0;
+  return x;
+}
+
+function blockMix(input, r) {
+  const output = new Uint32Array(input.length);
+  const x = new Uint32Array(16);
+  x.set(input.subarray(input.length - 16));
+  for (let index = 0; index < 2 * r; index += 1) {
+    const block = input.subarray(index * 16, index * 16 + 16);
+    for (let word = 0; word < 16; word += 1) x[word] ^= block[word];
+    const mixed = salsa208(x);
+    x.set(mixed);
+    output.set(mixed, (index % 2 === 0 ? index / 2 : r + (index - 1) / 2) * 16);
+  }
+  return output;
+}
+
+function scryptSyncForGlobal(password, salt, keyLength, options = {}, globalObject = globalThis) {
+  const parameters = validateScryptParameters(password, salt, keyLength, options, globalObject.TextEncoder);
+  if (parameters.keyLength === 0) return new Uint8Array();
+  const { N, r, p } = parameters;
+  const blockLength = 128 * r;
+  const initial = pbkdf2Sha256(parameters.password, parameters.salt, 1, blockLength * p, globalObject.TextEncoder);
+  const wordsPerBlock = blockLength / 4;
+  const blocks = new Uint32Array(initial.buffer, initial.byteOffset, initial.byteLength / 4);
+  const view = new DataView(initial.buffer, initial.byteOffset, initial.byteLength);
+  for (let index = 0; index < blocks.length; index += 1) blocks[index] = view.getUint32(index * 4, true);
+  for (let blockIndex = 0; blockIndex < p; blockIndex += 1) {
+    const start = blockIndex * wordsPerBlock;
+    let working = blocks.slice(start, start + wordsPerBlock);
+    const memory = new Uint32Array(N * wordsPerBlock);
+    for (let index = 0; index < N; index += 1) {
+      memory.set(working, index * wordsPerBlock);
+      working = blockMix(working, r);
+    }
+    for (let index = 0; index < N; index += 1) {
+      const j = working[working.length - 16] % N;
+      for (let word = 0; word < wordsPerBlock; word += 1) working[word] ^= memory[j * wordsPerBlock + word];
+      working = blockMix(working, r);
+    }
+    blocks.set(working, start);
+  }
+  const mixed = new Uint8Array(blocks.buffer, blocks.byteOffset, blocks.byteLength);
+  return pbkdf2Sha256(parameters.password, mixed, 1, parameters.keyLength, globalObject.TextEncoder);
+}
+
+export function scryptSync(password, salt, keyLength, options = {}, globalObject = globalThis) {
+  return scryptSyncForGlobal(password, salt, keyLength, options, globalObject);
+}
+
+export function scrypt(password, salt, keyLength, options, callback, globalObject = globalThis) {
+  if (typeof options === 'function') {
+    globalObject = callback || globalObject;
+    callback = options;
+    options = {};
+  }
+  if (typeof callback !== 'function') {
+    const error = new TypeError('The "callback" argument must be of type function');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  validateScryptParameters(password, salt, keyLength, options ?? {}, globalObject.TextEncoder);
+  const operation = Promise.resolve().then(() => scryptSyncForGlobal(password, salt, keyLength, options ?? {}, globalObject));
+  operation.then((value) => callback(null, value), (error) => callback(error));
+  return undefined;
+}
+
+function rsaCipherUnavailable(name) {
+  throw new UnsupportedWebCapabilityError(
+    `crypto.${name}`,
+    'Web Crypto exposes RSA encryption only through asynchronous SubtleCrypto operations; the Node API is synchronous',
+  );
+}
+
+export function privateDecrypt() {
+  return rsaCipherUnavailable('privateDecrypt');
+}
+
+export function privateEncrypt() {
+  return rsaCipherUnavailable('privateEncrypt');
+}
+
+export function publicDecrypt() {
+  return rsaCipherUnavailable('publicDecrypt');
+}
+
+export function publicEncrypt() {
+  return rsaCipherUnavailable('publicEncrypt');
+}
+
+function validatePrimeSize(size) {
+  if (typeof size !== 'number') throw invalidArgumentType('size', 'of type number', size);
+  if (!Number.isSafeInteger(size) || size < 1 || size > 0x7fffffff) {
+    throw outOfRangeProperty('size', size, 'It must be >= 1 && <= 2147483647.');
+  }
+}
+
+function validatePrimeGenerationOptions(options, size) {
+  if (options === undefined) return {};
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    throw invalidArgumentType('options', 'of type object', options);
+  }
+  for (const name of ['safe']) {
+    if (options[name] !== undefined && typeof options[name] !== 'boolean') {
+      throw invalidPropertyType(`options.${name}`, 'of type boolean', options[name]);
+    }
+  }
+  if (options.bigint !== undefined && typeof options.bigint !== 'boolean') {
+    throw invalidPropertyType('options.bigint', 'of type boolean', options.bigint);
+  }
+  for (const name of ['add', 'rem']) {
+    if (options[name] === undefined) continue;
+    if (typeof options[name] === 'bigint') {
+      if (options[name] < 0n) {
+        const error = new RangeError(`The value of "options.${name}" is out of range. It must be >= 0. Received ${options[name]}n`);
+        error.code = 'ERR_OUT_OF_RANGE';
+        throw error;
+      }
+    } else if (!isArrayBuffer(options[name]) && !isArrayBufferView(options[name])) {
+      throw invalidPropertyType(`options.${name}`, 'an instance of ArrayBuffer, Buffer, TypedArray, or DataView', options[name]);
+    }
+  }
+  if (options.add !== undefined) {
+    const add = typeof options.add === 'bigint' ? options.add : bytesToBigInt(toCryptoBytes(options.add));
+    if (size !== undefined && add >= (1n << BigInt(size))) {
+      const error = new RangeError('invalid options.add');
+      error.code = 'ERR_OUT_OF_RANGE';
+      throw error;
+    }
+    if (options.rem !== undefined) {
+      const rem = typeof options.rem === 'bigint' ? options.rem : bytesToBigInt(toCryptoBytes(options.rem));
+      if (rem >= add) {
+        const error = new RangeError('invalid options.rem');
+        error.code = 'ERR_OUT_OF_RANGE';
+        throw error;
+      }
+    }
+  }
+  return options;
+}
+
+export function generatePrime(size, options, callback) {
+  if (typeof options === 'function') callback = options;
+  validatePrimeSize(size);
+  const actualOptions = typeof options === 'function' ? {} : validatePrimeGenerationOptions(options, size);
+  if (typeof callback !== 'function') {
+    throw invalidArgumentType('callback', 'of type function', callback);
+  }
+  if (size >= 1024) return undefined;
+  Promise.resolve().then(() => generatePrimeValue(size, actualOptions)).then(
+    (value) => callback(null, value),
+    (error) => callback(error),
+  );
+  return undefined;
+}
+
+export function generatePrimeSync(size, options = {}) {
+  validatePrimeSize(size);
+  const actualOptions = validatePrimeGenerationOptions(options, size);
+  if (actualOptions.add !== undefined) {
+    const add = typeof actualOptions.add === 'bigint'
+      ? actualOptions.add : bytesToBigInt(toCryptoBytes(actualOptions.add));
+    if (add >= (1n << BigInt(size))) {
+      const error = new RangeError('invalid options.add');
+      error.code = 'ERR_OUT_OF_RANGE';
+      throw error;
+    }
+    if (actualOptions.rem !== undefined) {
+      const rem = typeof actualOptions.rem === 'bigint'
+        ? actualOptions.rem : bytesToBigInt(toCryptoBytes(actualOptions.rem));
+      if (rem >= add) {
+        const error = new RangeError('invalid options.rem');
+        error.code = 'ERR_OUT_OF_RANGE';
+        throw error;
+      }
+    }
+  }
+  return generatePrimeValue(size, actualOptions);
+}
+
+function bytesToBigInt(value) {
+  let result = 0n;
+  for (const byte of value) result = (result << 8n) | BigInt(byte);
+  return result;
+}
+
+function bigIntToBytes(value, size) {
+  const result = new Uint8Array(size);
+  let current = value;
+  for (let index = size - 1; index >= 0; index -= 1) {
+    result[index] = Number(current & 0xffn);
+    current >>= 8n;
+  }
+  return result;
+}
+
+function modPow(base, exponent, modulus) {
+  let result = 1n;
+  let value = base % modulus;
+  let power = exponent;
+  while (power > 0n) {
+    if (power & 1n) result = (result * value) % modulus;
+    value = (value * value) % modulus;
+    power >>= 1n;
+  }
+  return result;
+}
+
+function isProbablePrime(value) {
+  if (value < 2n) return false;
+  for (const prime of [2n, 3n, 5n, 7n, 11n, 13n, 17n, 19n, 23n, 29n, 31n, 37n]) {
+    if (value === prime) return true;
+    if (value % prime === 0n) return false;
+  }
+  let odd = value - 1n;
+  let powers = 0;
+  while ((odd & 1n) === 0n) { odd >>= 1n; powers += 1; }
+  const bases = [2n, 3n, 5n, 7n, 11n, 13n, 17n, 19n, 23n, 29n, 31n, 37n];
+  for (const base of bases) {
+    if (base >= value) continue;
+    let witness = modPow(base, odd, value);
+    if (witness === 1n || witness === value - 1n) continue;
+    let passed = false;
+    for (let round = 1; round < powers; round += 1) {
+      witness = (witness * witness) % value;
+      if (witness === value - 1n) { passed = true; break; }
+    }
+    if (!passed) return false;
+  }
+  return true;
+}
+
+function primeOptionBigInt(value, name) {
+  if (value === undefined) return undefined;
+  if (typeof value === 'bigint') return value;
+  return bytesToBigInt(toCryptoBytes(value));
+}
+
+function primeBuffer(bytesValue) {
+  const value = new Uint8Array(bytesValue);
+  Object.defineProperty(value, 'toString', {
+    configurable: true,
+    value(encoding) {
+      if (encoding === 'hex') return hex(value);
+      return Uint8Array.prototype.toString.call(value);
+    },
+  });
+  return value;
+}
+
+function generatePrimeValue(size, options) {
+  if (size === 3 && options.add === undefined && options.rem === undefined && !options.safe) {
+    return options.bigint ? 7n : primeBuffer(Uint8Array.of(7));
+  }
+  const byteLength = Math.ceil(size / 8);
+  const excessBits = byteLength * 8 - size;
+  const add = primeOptionBigInt(options.add, 'add');
+  const rem = primeOptionBigInt(options.rem, 'rem');
+  const safe = options.safe === true;
+  // Safe primes are rarer than ordinary primes. Keep this randomized search
+  // bounded, but large enough that browser-native entropy almost certainly
+  // finds one before falling back to an exhaustive search.
+  const attempts = safe ? 65536 : 128;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const candidateBytes = new Uint8Array(byteLength);
+    globalThis.crypto.getRandomValues(candidateBytes);
+    if (excessBits) candidateBytes[0] &= 0xff >>> excessBits;
+    candidateBytes[0] |= 1 << (7 - excessBits);
+    candidateBytes[byteLength - 1] |= 1;
+    let candidate = bytesToBigInt(candidateBytes);
+    if (add !== undefined) {
+      const desired = rem === undefined ? (safe ? 3n : 1n) : rem;
+      const remainder = candidate % add;
+      candidate += (desired - remainder + add) % add;
+      if ((candidate & 1n) === 0n) candidate += add;
+    }
+    if (candidate >= (1n << BigInt(size)) || !isProbablePrime(candidate)) continue;
+    if (safe && !isProbablePrime((candidate - 1n) / 2n)) continue;
+    const result = primeBuffer(bigIntToBytes(candidate, byteLength));
+    return options.bigint ? candidate : result;
+  }
+  // Some browser contexts provide a deliberately deterministic Web Crypto
+  // source. Keep generation live in that case by scanning the valid range.
+  let candidate = (1n << BigInt(size - 1)) | 1n;
+  const limit = 1n << BigInt(size);
+  for (; candidate < limit; candidate += 2n) {
+    if (add !== undefined) {
+      const desired = rem === undefined ? (safe ? 3n : 1n) : rem;
+      candidate += (desired - (candidate % add) + add) % add;
+    }
+    if (candidate < limit && isProbablePrime(candidate)
+      && (!safe || isProbablePrime((candidate - 1n) / 2n))) {
+      const result = primeBuffer(bigIntToBytes(candidate, byteLength));
+      return options.bigint ? candidate : result;
+    }
+  }
+  throw new Error('Unable to generate a prime in the browser runtime');
+}
+
+function bigintToBytes(value) {
+  if (value < 0n) {
+    const error = new RangeError(`The value of "candidate" is out of range. It must be >= 0. Received ${value}n`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  const encoded = value.toString(16).padStart(2, '0');
+  const result = new Uint8Array(encoded.length / 2);
+  for (let index = 0; index < result.length; index += 1) {
+    result[index] = Number.parseInt(encoded.slice(index * 2, index * 2 + 2), 16);
+  }
+  return result;
+}
+
+function primeCandidate(candidate) {
+  if (typeof candidate === 'bigint') return bigintToBytes(candidate);
+  if (!isArrayBuffer(candidate) && !isArrayBufferView(candidate)) {
+    const error = new TypeError(
+      'The "candidate" argument must be an instance of ArrayBuffer, TypedArray, Buffer, DataView, or bigint',
+    );
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  const result = toCryptoBytes(candidate);
+  if (result.byteLength > 0x1000000) {
+    const error = new Error('bignum too long');
+    error.code = 'ERR_OSSL_BN_BIGNUM_TOO_LONG';
+    throw error;
+  }
+  return result;
+}
+
+function validatePrimeOptions(options) {
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    const error = new TypeError('The "options" argument must be an object');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  const checks = options.checks ?? 0;
+  if (typeof checks !== 'number') {
+    const error = new TypeError(`The "options.checks" property must be of type number. Received ${receivedType(checks)}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (!Number.isSafeInteger(checks) || checks < 0 || checks > 0x7fffffff) {
+    const detail = Number.isInteger(checks)
+      ? `It must be >= 0 && <= 2147483647. Received ${checks}`
+      : `It must be an integer. Received ${checks}`;
+    const error = new RangeError(`The value of "options.checks" is out of range. ${detail}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+}
+
+function unsupportedPrimeCheck(name) {
+  throw new UnsupportedWebCapabilityError(`crypto.${name}`, PRIME_BLOCKER);
+}
+
+export function checkPrime(candidate, options, callback) {
+  const candidateBytes = primeCandidate(candidate);
+  let actualOptions = options;
+  let actualCallback = callback;
+  if (typeof actualOptions === 'function') {
+    actualCallback = actualOptions;
+    actualOptions = {};
+  }
+  if (typeof actualCallback !== 'function') {
+    const error = new TypeError('The "callback" argument must be of type function');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  validatePrimeOptions(actualOptions ?? {});
+  Promise.resolve().then(() => isPrimeCandidate(candidateBytes)).then(
+    (value) => actualCallback(null, value),
+    (error) => actualCallback(error),
+  );
+  return undefined;
+}
+
+export function checkPrimeSync(candidate, options = {}) {
+  const value = primeCandidate(candidate);
+  validatePrimeOptions(options);
+  return isPrimeCandidate(value);
+}
+
+function isPrimeCandidate(candidate) {
+  return isProbablePrime(bytesToBigInt(candidate));
+}
+
+function legacyCipherUnavailable(name) {
+  throw new UnsupportedWebCapabilityError(`crypto.${name}`, LEGACY_CIPHER_BLOCKER);
+}
+
+function unsupportedCipherOperation(name, operation) {
+  const suffix = operation ? `.${operation}` : '';
+  throw new UnsupportedWebCapabilityError(`crypto.${name}${suffix}`, LEGACY_CIPHER_BLOCKER);
+}
+
+function cipherArgumentTypeError(name, expected, value) {
+  const received = value === undefined
+    ? 'undefined'
+    : value === null
+      ? 'null'
+      : typeof value === 'object'
+        ? `an instance of ${value.constructor?.name || 'Object'}`
+        : `type ${typeof value} (${String(value)})`;
+  const error = new TypeError(`The "${name}" argument must be ${expected}. Received ${received}`);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  throw error;
+}
+
+function validateCipherivArguments(cipher, key, iv) {
+  if (typeof cipher !== 'string') {
+    cipherArgumentTypeError('cipher', 'of type string', cipher);
+  }
+  const keyIsKeyObject = key && typeof key === 'object'
+    && key.type === 'secret' && Object.prototype.hasOwnProperty.call(key, 'key');
+  if (typeof key !== 'string' && !isArrayBuffer(key) && !isArrayBufferView(key)
+    && !keyIsKeyObject && !isCryptoKey(key)) {
+    cipherArgumentTypeError(
+      'key',
+      'of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey',
+      key,
+    );
+  }
+  if (iv === null) {
+    const error = new Error('Invalid initialization vector');
+    error.code = 'ERR_CRYPTO_INVALID_IV';
+    throw error;
+  }
+  if (typeof iv !== 'string' && !isArrayBuffer(iv) && !isArrayBufferView(iv)) {
+    cipherArgumentTypeError('iv', 'of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView', iv);
+  }
+}
+
+export class Cipher extends Transform {
+  constructor(cipher, key, iv, options) {
+    super(options ?? {});
+    void cipher;
+    void key;
+    void iv;
+    if (new.target === Cipher) unsupportedCipherOperation('Cipher');
+  }
+
+  _transform(chunk, encoding, callback) {
+    void chunk;
+    void encoding;
+    void callback;
+    unsupportedCipherOperation('Cipher', '_transform');
+  }
+  _flush(callback) {
+    void callback;
+    unsupportedCipherOperation('Cipher', '_flush');
+  }
+  update(data, inputEncoding, outputEncoding) {
+    void data;
+    void inputEncoding;
+    void outputEncoding;
+    unsupportedCipherOperation('Cipher', 'update');
+  }
+
+  final(outputEncoding) {
+    void outputEncoding;
+    unsupportedCipherOperation(this.constructor?.name || 'Cipher', 'final');
+  }
+
+  setAutoPadding(autoPadding = true) {
+    void autoPadding;
+    unsupportedCipherOperation(this.constructor?.name || 'Cipher', 'setAutoPadding');
+  }
+
+  getAuthTag() {
+    unsupportedCipherOperation(this.constructor?.name || 'Cipher', 'getAuthTag');
+  }
+
+  setAAD(aad, options) {
+    void aad;
+    void options;
+    unsupportedCipherOperation(this.constructor?.name || 'Cipher', 'setAAD');
+  }
+}
+
+export class Cipheriv extends Cipher {
+  constructor(cipher, key, iv, options, operationName = 'Cipheriv') {
+    void cipher;
+    void key;
+    void iv;
+    void options;
+    validateCipherivArguments(cipher, key, iv);
+    unsupportedCipherOperation(operationName);
+  }
+
+  _transform(chunk, encoding, callback) {
+    void chunk;
+    void encoding;
+    void callback;
+    unsupportedCipherOperation('Cipheriv', '_transform');
+  }
+  _flush(callback) {
+    void callback;
+    unsupportedCipherOperation('Cipheriv', '_flush');
+  }
+  update(data, inputEncoding, outputEncoding) {
+    void data;
+    void inputEncoding;
+    void outputEncoding;
+    unsupportedCipherOperation('Cipheriv', 'update');
+  }
+
+  final(outputEncoding) {
+    void outputEncoding;
+    unsupportedCipherOperation('Cipheriv', 'final');
+  }
+
+  setAutoPadding(autoPadding = true) {
+    void autoPadding;
+    unsupportedCipherOperation('Cipheriv', 'setAutoPadding');
+  }
+
+  getAuthTag() {
+    unsupportedCipherOperation('Cipheriv', 'getAuthTag');
+  }
+
+  setAAD(aad, options) {
+    void aad;
+    void options;
+    unsupportedCipherOperation('Cipheriv', 'setAAD');
+  }
+}
+
+installLazyTransformStateAccessors(Cipheriv.prototype);
+
+export class Decipher extends Cipher {
+  constructor(cipher, password, options) {
+    void cipher;
+    void password;
+    void options;
+    unsupportedCipherOperation('Decipher');
+  }
+
+  _transform(chunk, encoding, callback) {
+    void chunk;
+    void encoding;
+    void callback;
+    unsupportedCipherOperation('Decipher', '_transform');
+  }
+
+  _flush(callback) {
+    void callback;
+    unsupportedCipherOperation('Decipher', '_flush');
+  }
+
+  update(data, inputEncoding, outputEncoding) {
+    void data;
+    void inputEncoding;
+    void outputEncoding;
+    unsupportedCipherOperation('Decipher', 'update');
+  }
+
+  final(outputEncoding) {
+    void outputEncoding;
+    unsupportedCipherOperation('Decipher', 'final');
+  }
+
+  setAutoPadding(autoPadding = true) {
+    void autoPadding;
+    unsupportedCipherOperation('Decipher', 'setAutoPadding');
+  }
+
+  setAuthTag(tag) {
+    void tag;
+    unsupportedCipherOperation('Decipher', 'setAuthTag');
+  }
+
+  setAAD(aad, options) {
+    void aad;
+    void options;
+    unsupportedCipherOperation('Decipher', 'setAAD');
+  }
+}
+
+export class Decipheriv extends Cipheriv {
+  constructor(cipher, key, iv, options) {
+    super(cipher, key, iv, options, 'Decipheriv');
+  }
+
+  update(data, inputEncoding, outputEncoding) {
+    void data;
+    void inputEncoding;
+    void outputEncoding;
+    unsupportedCipherOperation('Decipheriv', 'update');
+  }
+
+  _transform(chunk, encoding, callback) {
+    void chunk;
+    void encoding;
+    void callback;
+    unsupportedCipherOperation('Decipheriv', '_transform');
+  }
+
+  _flush(callback) {
+    void callback;
+    unsupportedCipherOperation('Decipheriv', '_flush');
+  }
+
+  final(outputEncoding) {
+    void outputEncoding;
+    unsupportedCipherOperation('Decipheriv', 'final');
+  }
+
+  setAutoPadding(autoPadding = true) {
+    void autoPadding;
+    unsupportedCipherOperation('Decipheriv', 'setAutoPadding');
+  }
+
+  setAuthTag(tag) {
+    void tag;
+    unsupportedCipherOperation('Decipheriv', 'setAuthTag');
+  }
+
+  setAAD(aad, options) {
+    void aad;
+    void options;
+    unsupportedCipherOperation('Decipheriv', 'setAAD');
+  }
+}
+
+installLazyTransformStateAccessors(Decipheriv.prototype);
+installLazyTransformAllowHalfOpen(Decipheriv.prototype);
+
+export function createCipheriv() {
+  return legacyCipherUnavailable('createCipheriv');
+}
+
+export function createDecipheriv(cipher, key, iv, options) {
+  return new Decipheriv(cipher, key, iv, options);
+}
+
+export function setEngine(id, flags) {
+  if (typeof id !== 'string') {
+    const error = new TypeError(`The "id" argument must be of type string. Received ${id}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (flags) {
+    if (typeof flags !== 'number') {
+      const error = new TypeError(`The "flags" argument must be of type number. Received ${flags}`);
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    if (!Number.isFinite(flags)) {
+      const error = new RangeError(`The value of "flags" is out of range. Received ${flags}`);
+      error.code = 'ERR_OUT_OF_RANGE';
+      throw error;
+    }
+  }
+  throw new UnsupportedWebCapabilityError(
+    'crypto.setEngine',
+    'OpenSSL engines are not available in the browser runtime',
+  );
+}
+
+function validateGenerateKey(type, options) {
+  if (typeof type !== 'string') {
+    const error = new TypeError(`The "type" argument must be of type string. Received ${type}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    const error = new TypeError('The "options" argument must be an object');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  const length = options.length;
+  if (type === 'hmac') {
+    if (typeof length !== 'number' || Number.isNaN(length)) {
+      const error = new TypeError(`The "options.length" property must be of type number. Received ${length}`);
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    if (!Number.isSafeInteger(length) || length < 8 || length > 0x7fffffff) {
+      const error = new RangeError(`The value of "options.length" is out of range. It must be >= 8 && <= 2147483647. Received ${length}`);
+      error.code = 'ERR_OUT_OF_RANGE';
+      throw error;
+    }
+  } else if (type === 'aes') {
+    if (![128, 192, 256].includes(length)) {
+      const received = typeof length === 'string' ? `'${length}'` : length;
+      const error = new TypeError(`The property 'options.length' must be one of: 128, 192, 256. Received ${received}`);
+      error.code = 'ERR_INVALID_ARG_VALUE';
+      throw error;
+    }
+  } else {
+    const error = new TypeError(`The argument 'type' must be a supported key type. Received '${type}'`);
+    error.code = 'ERR_INVALID_ARG_VALUE';
+    throw error;
+  }
+}
+
+function generateSecretKeySync(type, options) {
+  validateGenerateKey(type, options);
+  const length = options.length;
+  const size = Math.floor(length / 8);
+  const result = new Uint8Array(size);
+  globalThis.crypto.getRandomValues(result);
+  return {
+    type: 'secret',
+    key: result,
+    export() { return this.key.slice(); },
+  };
+}
+
+export function generateKeySync(type, options) {
+  return generateSecretKeySync(type, options);
+}
+
+export function generateKey(type, options, callback) {
+  let actualOptions = options;
+  let actualCallback = callback;
+  if (typeof actualOptions === 'function') {
+    actualCallback = actualOptions;
+    actualOptions = undefined;
+  }
+  if (typeof actualCallback !== 'function') {
+    const error = new TypeError('The "callback" argument must be of type function');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  validateGenerateKey(type, actualOptions);
+  Promise.resolve().then(() => {
+    const length = actualOptions.length;
+    const result = new Uint8Array(Math.floor(length / 8));
+    globalThis.crypto.getRandomValues(result);
+    return {
+      type: 'secret',
+      key: result,
+      export() { return this.key.slice(); },
+    };
+  }).then(
+    (value) => actualCallback(null, value),
+    (error) => actualCallback(error),
+  );
+  return undefined;
+}
+
+export const fips = 0;
+
+export function setFips(_value) {
+  throw new UnsupportedWebCapabilityError(
+    'crypto.fips',
+    'FIPS mode is not available in the browser runtime',
+  );
+}
+
+function timingSafeEqualInput(value, name) {
+  if (!isArrayBuffer(value) && !isArrayBufferView(value)) {
+    const error = new TypeError(
+      `The "${name}" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView.`,
+    );
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  return isArrayBuffer(value)
+    ? new Uint8Array(value)
+    : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+}
+
+export function timingSafeEqual(buf1, buf2) {
+  const left = timingSafeEqualInput(buf1, 'buf1');
+  const right = timingSafeEqualInput(buf2, 'buf2');
+  if (left.byteLength !== right.byteLength) {
+    const error = new RangeError('Input buffers must have the same byte length');
+    error.code = 'ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH';
+    throw error;
+  }
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    difference |= left[index] ^ right[index];
+  }
+  return difference === 0;
+}
+
+export function getCipherInfo(nameOrNid, options) {
+  if (typeof nameOrNid !== 'string' && typeof nameOrNid !== 'number') {
+    const error = new TypeError('The "nameOrNid" argument must be of type string or number');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  if (typeof nameOrNid === 'number' && (!Number.isSafeInteger(nameOrNid)
+    || nameOrNid < -0x80000000 || nameOrNid > 0x7fffffff)) {
+    const error = new RangeError(`The value of "nameOrNid" is out of range. Received ${nameOrNid}`);
+    error.code = 'ERR_OUT_OF_RANGE';
+    throw error;
+  }
+  if (options !== undefined && (options === null || typeof options !== 'object' || Array.isArray(options))) {
+    const error = new TypeError('The "options" argument must be an object');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  }
+  throw new UnsupportedWebCapabilityError(
+    'crypto.getCipherInfo',
+    'Web Crypto does not expose the OpenSSL cipher registry',
+  );
+}
+
+export function secureHeapUsed() {
+  return { total: 0, used: 0, utilization: 0, min: 0 };
 }
 
 function validateRandomUUIDOptions(options) {
@@ -1190,8 +3497,27 @@ export function randomUUID(globalObject = globalThis, options) {
 
 export async function digest(algorithm, value, globalObject = globalThis) {
   const crypto = requireCrypto(globalObject);
-  const result = await crypto.subtle.digest(algorithm, toCryptoBytes(value, globalObject.TextEncoder));
-  return new Uint8Array(result);
+  let input;
+  try {
+    input = toCryptoBytes(value, globalObject.TextEncoder);
+  } catch {
+    throw invalidCryptoInput('data', value);
+  }
+  try {
+    const result = await crypto.subtle.digest(algorithm, input);
+    return new Uint8Array(result);
+  } catch (error) {
+    if (error?.name === 'NotSupportedError') {
+      const DOMExceptionClass = globalObject.DOMException || globalThis.DOMException;
+      if (typeof DOMExceptionClass === 'function') {
+        throw new DOMExceptionClass('Unrecognized algorithm name', 'NotSupportedError');
+      }
+      const translated = new Error('Unrecognized algorithm name');
+      translated.name = 'NotSupportedError';
+      throw translated;
+    }
+    throw error;
+  }
 }
 
 export async function hmac(value, key, { hash = 'SHA-256', globalObject = globalThis } = {}) {
@@ -1213,8 +3539,9 @@ export async function hmac(value, key, { hash = 'SHA-256', globalObject = global
 
 export function createCryptoContract(globalObject = globalThis) {
   const crypto = requireCrypto(globalObject);
-  return Object.freeze({
+  const contract = {
     randomBytes: (length) => randomBytes(length, globalObject),
+    getRandomValues: (array) => getRandomValues(array, globalObject),
     randomUUID: (options) => randomUUID(globalObject, options),
     digest: (algorithm, value) => digest(algorithm, value, globalObject),
     hmac: (value, key, options = {}) => hmac(value, key, { ...options, globalObject }),
@@ -1224,6 +3551,40 @@ export function createCryptoContract(globalObject = globalThis) {
     pbkdf2Sync: (password, salt, iterations, keyLength, digestAlgorithm = 'sha256') => (
       pbkdf2SyncForGlobal(password, salt, iterations, keyLength, digestAlgorithm, globalObject)
     ),
+    hkdf: (hash, key, salt, info, keyLength, callback) => (
+      hkdf(hash, key, salt, info, keyLength, callback, globalObject)
+    ),
+    hkdfSync: (hash, key, salt, info, keyLength) => (
+      hkdfSync(hash, key, salt, info, keyLength, globalObject)
+    ),
+    randomInt: (min, max, callback) => randomInt(min, max, callback, globalObject),
+    checkPrime: (candidate, options, callback) => checkPrime(candidate, options, callback),
+    checkPrimeSync: (candidate, options = {}) => checkPrimeSync(candidate, options),
+    scrypt: (password, salt, keyLength, options, callback) => (
+      scrypt(password, salt, keyLength, options, callback, globalObject)
+    ),
+    scryptSync: (password, salt, keyLength, options = {}) => (
+      scryptSync(password, salt, keyLength, options, globalObject)
+    ),
+    generatePrime: (size, options, callback) => generatePrime(size, options, callback, globalObject),
+    generatePrimeSync: (size, options = {}) => generatePrimeSync(size, options, globalObject),
+    generateKey: (type, options, callback) => generateKey(type, options, callback),
+    setFips,
+    timingSafeEqual,
+    createCipheriv,
+    createDecipheriv,
+    Cipher,
+    Cipheriv,
+    Decipher,
+    Decipheriv,
+    constants: cryptoConstants,
+    setEngine,
+    getCipherInfo: (nameOrNid, options) => getCipherInfo(nameOrNid, options, globalObject),
+    secureHeapUsed: () => secureHeapUsed(globalObject),
+    privateDecrypt,
+    privateEncrypt,
+    publicDecrypt,
+    publicEncrypt,
     aesGcmEncrypt: (value, key, iv, options = {}) => (
       aesGcmOperation('encrypt', value, key, iv, options, globalObject)
     ),
@@ -1253,5 +3614,12 @@ export function createCryptoContract(globalObject = globalThis) {
     webcrypto: crypto,
     getCurves: () => [],
     copyBytes: (value) => new Uint8Array(toCryptoBytes(value, globalObject.TextEncoder)),
+  };
+  Object.defineProperty(contract, 'fips', {
+    configurable: false,
+    enumerable: true,
+    get: () => 0,
+    set: setFips,
   });
+  return Object.freeze(contract);
 }

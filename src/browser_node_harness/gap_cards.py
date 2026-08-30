@@ -9,10 +9,11 @@ capability; the tests verify it, not define it.
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from pathlib import Path
 from typing import Sequence
 
-from .gaps import Gap, MISSING_VALIDATION, NATIVE_ADDON_WASM
+from .gaps import Gap, HOST_NETWORK, MISSING_VALIDATION, NATIVE_ADDON_WASM
 
 _CONSTRAINTS = """\
 ## Constraints
@@ -23,6 +24,78 @@ _CONSTRAINTS = """\
 - Extend the shared runtime in `runtime.js` / `runtime/` rather than adding a parallel layer.
 - Keep unrelated passing behavior unchanged.
 """
+
+
+# Several builtin names are views onto the same browser runtime file.  Keep
+# this map deliberately explicit: it is used for scheduling ownership and
+# conflict avoidance, not as a claim that every Node internal has a separate
+# source file.
+_RUNTIME_SURFACES = {
+    "assert": "runtime/assert.js",
+    "assert/strict": "runtime/assert.js",
+    "buffer": "runtime/buffer.js",
+    "child_process": "runtime.js",
+    "cluster": "runtime/cluster.js",
+    "console": "runtime/compat.js",
+    "constants": "runtime.js",
+    "crypto": "runtime/crypto.js",
+    "diagnostics_channel": "runtime/diagnostics.js",
+    "dgram": "runtime/dgram.js",
+    "dns": "runtime/dns.js",
+    "dns/promises": "runtime/dns.js",
+    "events": "runtime/events.js",
+    "fs": "runtime/vfs.js",
+    "fs/promises": "runtime/vfs.js",
+    "http": "runtime/http.js",
+    "https": "runtime/http.js",
+    "_http_client": "runtime/http.js",
+    "_http_common": "runtime/http.js",
+    "_http_outgoing": "runtime/http.js",
+    "_http_server": "runtime/http.js",
+    "http2": "runtime/http2.js",
+    "net": "runtime/net.js",
+    "os": "runtime/os-platform.js",
+    "path": "runtime.js",
+    "perf_hooks": "runtime/perf.js",
+    "process": "runtime.js",
+    "stream": "runtime/streams.js",
+    "stream/promises": "runtime/streams.js",
+    "stream/web": "runtime/web-streams.js",
+    "stream/consumers": "runtime/streams.js",
+    "_stream_duplex": "runtime/streams.js",
+    "_stream_readable": "runtime/streams.js",
+    "_stream_writable": "runtime/streams.js",
+    "string_decoder": "runtime/compat.js",
+    "timers": "runtime/timers.js",
+    "timers/promises": "runtime/timers.js",
+    "tls": "runtime/tls.js",
+    "url": "runtime/url.js",
+    "util": "runtime/compat.js",
+    "util/types": "runtime/compat.js",
+    "v8": "runtime/v8.js",
+    "vm": "runtime/vm.js",
+    # Worker instances are assembled across the browser-event adapter and the
+    # RuntimeWorker wrapper; keep them as one ownership unit for scheduling.
+    "worker_threads": "runtime/messaging.js + runtime.js",
+    "zlib": "runtime/zlib.js",
+}
+
+
+def _runtime_surface(gap: Gap) -> str:
+    if gap.kind == NATIVE_ADDON_WASM:
+        return f"native-addon:{gap.module}"
+    if gap.kind == HOST_NETWORK:
+        return f"network:{gap.module}"
+    # The console export is a facade over process stdout/stderr.  These
+    # nested socket members are installed at the process-stream boundary in
+    # runtime.js, not in the console formatter module; keep them out of the
+    # compat family so scheduling does not place a runtime.js edit in parallel
+    # with process cards.
+    if gap.module == "console" and any(
+        symbol.startswith(("_stdout.", "_stderr.")) for symbol in gap.symbols
+    ):
+        return "runtime.js"
+    return _RUNTIME_SURFACES.get(gap.module, f"module:{gap.module}")
 
 
 def _reference_files(gap: Gap, node_repo: Path) -> list[Path]:
@@ -196,19 +269,57 @@ def emit_worklist_index(
     """Write WORKLIST.md: the ranked entry point for the emitted cards."""
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    families: dict[str, dict[str, object]] = defaultdict(
+        lambda: {"modules": set(), "cards": 0, "obligations": set(), "affected": set()}
+    )
+    for gap in gaps:
+        surface = _runtime_surface(gap)
+        family = families[surface]
+        family["modules"].add(gap.module)
+        family["cards"] += 1
+        family["obligations"].update((gap.kind, gap.module, symbol) for symbol in gap.symbols)
+        family["affected"].update(gap.affected_paths)
+
+    family_rows = sorted(
+        families.items(),
+        key=lambda item: (-len(item[1]["affected"]), item[0]),
+    )
+    obligation_count = sum(len(family["obligations"]) for family in families.values())
     lines = [
         "# Gap worklist",
         "",
         "Finite, spec-first build tasks derived from the surface diff and failure",
-        "evidence. Work top-down; each card is self-contained.",
+        "evidence. Cards remain bounded; the family index is the assignment view.",
         "",
-        "| rank | gap | kind | module | symbols | affected tests |",
-        "|---|---|---|---|---|---|",
+        "## Work accounting",
+        "",
+        f"- Implementation families (runtime write surfaces): **{len(families)}**",
+        f"- Evidence/build cards: **{len(gaps)}**",
+        f"- Distinct missing obligations: **{obligation_count}**",
+        "",
+        "One family may own multiple bounded evidence cards. Assign one builder",
+        "per write surface; merge or serialize cards within a family.",
+        "",
+        "| rank | runtime write surface | modules | cards | obligations | affected tests |",
+        "|---|---|---|---:|---:|---:|",
+    ]
+    for rank, (surface, family) in enumerate(family_rows, start=1):
+        modules = ", ".join(sorted(family["modules"]))
+        lines.append(
+            f"| {rank} | `{surface}` | {modules} | {family['cards']} "
+            f"| {len(family['obligations'])} | {len(family['affected'])} |"
+        )
+    lines += [
+        "",
+        "## Evidence/build cards",
+        "",
+        "| rank | gap | kind | module | runtime write surface | symbols | affected tests |",
+        "|---|---|---|---|---|---|---|",
     ]
     for rank, gap in enumerate(gaps, start=1):
         lines.append(
             f"| {rank} | gap-{gap.gap_id} | {gap.kind} | {gap.module} "
-            f"| {len(gap.symbols)} | {gap.affected_count} |"
+            f"| `{_runtime_surface(gap)}` | {len(gap.symbols)} | {gap.affected_count} |"
         )
     native = [gap for gap in gaps if gap.kind == NATIVE_ADDON_WASM]
     if native:

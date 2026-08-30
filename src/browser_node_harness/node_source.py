@@ -121,8 +121,29 @@ def _update(project: ProjectConfig) -> None:
             f"configured Node source checkout has local changes: {project.node_repo}; "
             "commit or remove them before automatic update"
         )
-    _run_git(["fetch", "--depth", "1", "origin", project.node_repo_ref], cwd=project.node_repo)
+    try:
+        _run_git(["fetch", "--depth", "1", "origin", project.node_repo_ref], cwd=project.node_repo)
+    except NodeSourceError as exc:
+        if not _has_local_remote_ref(project.node_repo, project.node_repo_ref):
+            raise
+        print(
+            f"warning: Node source fetch unavailable; using existing origin/{project.node_repo_ref} "
+            f"in {project.node_repo}: {exc}"
+        )
+        _run_git(["checkout", "--detach", f"origin/{project.node_repo_ref}"], cwd=project.node_repo)
+        return
     _run_git(["checkout", "--detach", "FETCH_HEAD"], cwd=project.node_repo)
+
+
+def _has_local_remote_ref(repository: Path, ref: str) -> bool:
+    result = run_process(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{ref}"],
+        cwd=repository,
+        env=os.environ,
+        timeout_seconds=15,
+        max_output_chars=2_000,
+    )
+    return not result.timed_out and result.exit_code == 0
 
 
 def prepare_node_source(project: ProjectConfig) -> Path:
@@ -182,5 +203,13 @@ def prepare_target_repository(project: ProjectConfig) -> Path:
                 f"configured target checkout has local changes: {project.target_repo}; "
                 "commit or remove them before automatic update"
             )
-        _run_git(["fetch", "--depth", "1", "origin", project.target_repo_ref], cwd=project.target_repo)
+        try:
+            _run_git(["fetch", "--depth", "1", "origin", project.target_repo_ref], cwd=project.target_repo)
+        except NodeSourceError as exc:
+            if not _has_local_remote_ref(project.target_repo, project.target_repo_ref):
+                raise
+            print(
+                f"warning: target fetch unavailable; using existing origin/{project.target_repo_ref} "
+                f"in {project.target_repo}: {exc}"
+            )
         return project.target_repo

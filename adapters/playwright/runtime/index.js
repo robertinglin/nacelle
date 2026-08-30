@@ -257,7 +257,12 @@ export function createBrowserRuntimeContracts({ globalObject = globalThis, platf
   });
 }
 
-export { BrowserEventEmitter, EventEmitter, getEventListeners } from './events.js';
+export {
+  BrowserEventEmitter,
+  EventEmitter,
+  getEventListeners,
+  getMaxListeners,
+} from './events.js';
 export {
   createNetworkPrimitives,
   createBrowserNetworkGlobals,
@@ -268,6 +273,9 @@ export {
   createMessageChannel,
   createMessageEvent,
   markAsUncloneable,
+  markAsUntransferable,
+  isMarkedAsUntransferable,
+  SHARE_ENV,
   prepareTransferPayload,
   createWorkerFactory,
   createBroadcastChannelFactory,
@@ -280,6 +288,13 @@ export {
   Transform,
   PassThrough,
   pipeline,
+  compose,
+  isDestroyed,
+  isDisturbed,
+  isErrored,
+  isReadable,
+  isWritable,
+  promises,
 } from './streams.js';
 export {
   readableStreamFrom,

@@ -7,28 +7,176 @@ function requirePerformance(globalObject) {
   return globalObject.performance;
 }
 
-export function createDiagnosticsChannel(name) {
-  if (typeof name !== 'string' || name.length === 0) throw new TypeError('channel name must be non-empty');
-  const listeners = new Set();
-  const channel = {
-    name,
-    get hasSubscribers() { return listeners.size > 0; },
-    subscribe(listener) {
-      if (typeof listener !== 'function') throw new TypeError('listener must be a function');
-      listeners.add(listener);
-    },
-    unsubscribe(listener) {
-      return listeners.delete(listener);
-    },
-    publish(message) {
-      const snapshot = [...listeners];
-      for (let index = 0; index < snapshot.length; index += 1) snapshot[index](message);
-    },
-    clear() {
-      listeners.clear();
-    },
+function receivedValue(value) {
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  if (Array.isArray(value)) return 'an instance of Array';
+  if (typeof value === 'object') return `an instance of ${value.constructor?.name || 'Object'}`;
+  return `type ${typeof value} (${String(value)})`;
+}
+
+function invalidArgType(name, expected, value) {
+  const error = new TypeError(`The "${name}" argument must be of type ${expected}. Received ${receivedValue(value)}`);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  error.toString = () => `TypeError [ERR_INVALID_ARG_TYPE]: ${error.message}`;
+  return error;
+}
+
+function validateChannelName(name) {
+  if (typeof name !== 'string' && typeof name !== 'symbol') {
+    throw invalidArgType('channel', 'one of type string or symbol', name);
+  }
+  return name;
+}
+
+function activeProcess() {
+  const processObject = globalThis?.process;
+  if (!processObject || typeof processObject.nextTick !== 'function'
+    || typeof processObject.getCode !== 'function') return null;
+  return processObject;
+}
+
+function deferUncaughtException(error) {
+  const processObject = activeProcess();
+  const dispatch = () => {
+    if (typeof processObject?._bnhDispatchUncaughtException === 'function') {
+      processObject._bnhDispatchUncaughtException(error, false);
+      return;
+    }
+    throw error;
   };
-  return Object.freeze(channel);
+  if (processObject) processObject.nextTick(dispatch);
+  else if (typeof globalThis.queueMicrotask === 'function') globalThis.queueMicrotask(dispatch);
+  else globalThis.setTimeout(dispatch, 0);
+}
+
+function markChannelActive(channel) {
+  if (!channel._subscribers) channel._subscribers = [];
+  if (!channel._stores) channel._stores = new Map();
+}
+
+function maybeMarkChannelInactive(channel) {
+  if (!channel._subscribers?.length && !channel._stores?.size) {
+    channel._subscribers = undefined;
+    channel._stores = undefined;
+  }
+}
+
+function defaultTransform(data) {
+  return data;
+}
+
+function wrapStoreRun(store, data, next, transform = defaultTransform) {
+  return () => {
+    let context;
+    try {
+      context = transform(data);
+    } catch (error) {
+      deferUncaughtException(error);
+      return next();
+    }
+    return store.run(context, next);
+  };
+}
+
+class DiagnosticsChannel {
+  constructor(name) {
+    this._subscribers = undefined;
+    this._stores = undefined;
+    this.name = name;
+  }
+
+  subscribe(subscription) {
+    if (typeof subscription !== 'function') throw invalidArgType('subscription', 'function', subscription);
+    markChannelActive(this);
+    // Publish iterates a stable snapshot. Copy before adding so a
+    // subscription made from a callback is deferred until the next publish.
+    this._subscribers = this._subscribers.slice();
+    this._subscribers.push(subscription);
+  }
+
+  unsubscribe(subscription) {
+    const index = this._subscribers?.indexOf(subscription) ?? -1;
+    if (index === -1) return false;
+    const subscribers = this._subscribers.slice();
+    subscribers.splice(index, 1);
+    this._subscribers = subscribers;
+    maybeMarkChannelInactive(this);
+    return true;
+  }
+
+  bindStore(store, transform) {
+    markChannelActive(this);
+    this._stores.set(store, transform);
+  }
+
+  unbindStore(store) {
+    if (!this._stores?.has(store)) return false;
+    this._stores.delete(store);
+    maybeMarkChannelInactive(this);
+    return true;
+  }
+
+  get hasSubscribers() {
+    return Boolean(this._subscribers?.length || this._stores?.size);
+  }
+
+  publish(data) {
+    const subscribers = this._subscribers;
+    for (let index = 0; index < (subscribers?.length || 0); index += 1) {
+      try {
+        subscribers[index](data, this.name);
+      } catch (error) {
+        deferUncaughtException(error);
+      }
+    }
+  }
+
+  runStores(data, fn, thisArg, ...args) {
+    if (!this.hasSubscribers) return Reflect.apply(fn, thisArg, args);
+    let run = () => {
+      this.publish(data);
+      return Reflect.apply(fn, thisArg, args);
+    };
+    for (const [store, transform] of this._stores || []) {
+      run = wrapStoreRun(store, data, run, transform);
+    }
+    return run();
+  }
+
+  clear() {
+    this._subscribers?.splice(0);
+    this._stores?.clear();
+    maybeMarkChannelInactive(this);
+  }
+}
+
+export function createDiagnosticsChannel(name) {
+  return new DiagnosticsChannel(validateChannelName(name));
+}
+
+function inspectConsoleValue(value, seen = new Set()) {
+  if (typeof value === 'string') return `'${value.replaceAll("'", "\\'")}'`;
+  if (typeof value === 'number' || typeof value === 'boolean' || value === null) return String(value);
+  if (value === undefined) return 'undefined';
+  if (typeof value === 'bigint') return `${value}n`;
+  if (typeof value === 'symbol') return String(value);
+  if (value instanceof RegExp) return String(value);
+  if (seen.has(value)) return '[Circular]';
+  seen.add(value);
+  if (Array.isArray(value)) return `[ ${value.map((item) => inspectConsoleValue(item, seen)).join(', ')} ]`;
+  if (typeof value === 'function') return `[Function: ${value.name || 'anonymous'}]`;
+  const entries = Object.keys(value).map((key) => {
+    const property = /^[A-Za-z_$][\w$]*$/.test(key) ? key : inspectConsoleValue(key);
+    return `${property}: ${inspectConsoleValue(value[key], seen)}`;
+  });
+  return `{ ${entries.join(', ')} }`;
+}
+
+function formatConsoleArguments(values) {
+  return values.map((value) => (typeof value === 'string'
+    ? value
+    : inspectConsoleValue(value, new Set())));
 }
 
 export function createPerformanceContract(globalObject = globalThis) {
@@ -113,8 +261,45 @@ export function createDiagnosticsChannelRegistry() {
 
 export function createDiagnosticsModule() {
   const channels = new Map();
+  const instrumentedConsoleMethods = new WeakMap();
+  const instrumentConsoleMethod = (name, channel) => {
+    const consoleObject = globalThis?.console;
+    const method = consoleObject?.[name];
+    if (!consoleObject || typeof method !== 'function') return;
+    let methods = instrumentedConsoleMethods.get(consoleObject);
+    if (!methods) {
+      methods = new Set();
+      instrumentedConsoleMethods.set(consoleObject, methods);
+    }
+    if (methods.has(name)) return;
+    methods.add(name);
+    consoleObject[name] = function diagnosticsConsoleMethod(...args) {
+      channel.publish(args);
+      return method.apply(this, formatConsoleArguments(args));
+    };
+  };
+
+  class Channel extends DiagnosticsChannel {
+    constructor(name) {
+      super(name);
+      channels.set(this.name, this);
+    }
+
+    static [Symbol.hasInstance](instance) {
+      return Object.getPrototypeOf(instance) === Channel.prototype;
+    }
+
+    subscribe(subscription) {
+      super.subscribe(subscription);
+      if (typeof this.name === 'string' && this.name.startsWith('console.')) {
+        instrumentConsoleMethod(this.name.slice('console.'.length), this);
+      }
+    }
+  }
+
   const getChannel = (name) => {
-    if (!channels.has(name)) channels.set(name, createDiagnosticsChannel(name));
+    validateChannelName(name);
+    if (!channels.has(name)) channels.set(name, new Channel(name));
     return channels.get(name);
   };
   return {
@@ -199,18 +384,7 @@ export function createDiagnosticsModule() {
       });
       return tracing;
     },
-    Channel: class Channel {
-      constructor(name) {
-        const ch = createDiagnosticsChannel(name);
-        this.name = ch.name;
-        this.subscribe = ch.subscribe;
-        this.unsubscribe = ch.unsubscribe;
-        this.publish = ch.publish;
-        Object.defineProperty(this, 'hasSubscribers', {
-          get: () => ch.hasSubscribers,
-        });
-      }
-    },
+    Channel,
   };
 }
 

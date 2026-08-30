@@ -1,5 +1,13 @@
 import { createAssert, inspect as nodeInspect } from './runtime/assert.js';
-import { createBufferClass, isAscii, isUtf8 } from './runtime/buffer.js';
+import {
+  createBufferClass,
+  createTranscode,
+  createFileClass,
+  installBlobCompatibility,
+  installBlobStreamClass,
+  isAscii,
+  isUtf8,
+} from './runtime/buffer.js';
 import {
   createAsyncLocalStorage,
   assembleBrowserCapabilities,
@@ -19,11 +27,12 @@ import {
   collectAsyncResources,
   createAsyncHooksModule,
 } from './runtime/async-hooks.js';
-import { EventEmitter, addAbortListener, getEventListeners, once } from './runtime/events.js';
+import { EventEmitter, addAbortListener, getEventListeners, getMaxListeners, once } from './runtime/events.js';
 import { createVfs, fileURLToPath, pathToFileURL } from './runtime/vfs.js';
 import { path } from './runtime/path.js';
 import {
   Readable, Writable, Duplex, Transform, PassThrough, Stream, duplexPair, pipeline, destroy,
+  compose, isDestroyed, isDisturbed, isErrored, isReadable, isWritable, promises as streamPromises,
   setDefaultHighWaterMark, getDefaultHighWaterMark,
 } from './runtime/streams.js';
 import { createPlatformContract } from './runtime/os-platform.js';
@@ -31,40 +40,77 @@ import { createHttpCompatibility } from './runtime/http.js';
 import { createTlsModule } from './runtime/tls.js';
 import { createHttp2Module } from './runtime/http2.js';
 import { createPerformancePrimitives } from './runtime/perf.js';
+import { createWasmContract } from './runtime/wasm.js';
 import {
   aesGcmDecrypt,
   aesGcmEncrypt,
   createHashShim,
   createHmacShim,
+  createSignClass,
+  createVerifyClass,
   createSecretKeyShim,
+  installCryptoKeyMaterialTracking,
+  checkPrime,
+  checkPrimeSync,
   browserCryptoVersion,
   BrowserECDH,
   createCertificateShim,
+  Cipher,
+  Cipheriv,
+  Decipher,
+  Decipheriv,
+  createCipheriv,
+  createDecipheriv,
   createECDH,
   diffieHellman,
+  cryptoConstants,
+  generatePrime,
+  generatePrimeSync,
+  generateKey,
+  generateKeySync,
+  getCipherInfo,
+  getRandomValues as createRandomValues,
+  hkdf as createHkdf,
+  hkdfSync,
   generateKeyPair,
   generateKeyPairSync,
   hashSync,
+  privateDecrypt,
+  privateEncrypt,
   pbkdf2,
   pbkdf2Sync,
   randomBytes as createRandomBytes,
   randomFill,
   randomFillSync,
+  randomInt as createRandomInt,
   randomUUID as createRandomUUID,
+  publicDecrypt,
+  publicEncrypt,
+  secureHeapUsed,
+  setEngine,
+  setFips,
   sign,
   signSync,
+  scryptSync as createScryptSync,
+  validateScryptArguments,
+  timingSafeEqual,
   verify,
+  scrypt as createScrypt,
   verifySync,
 } from './runtime/crypto.js';
 import { createDiffieHellman, createDiffieHellmanGroup } from './runtime/diffie-hellman.js';
+import { createZlibShim as createZlibShimModule } from './runtime/zlib.js';
 import {
   createConsoleModule,
-  createConstants,
+  installConsoleErrorHandlers,
+  createConstants as createBaseConstants,
   createPromisify,
   createQuerystring,
   createStreamConsumers,
   createStringDecoder,
+  createUtilModule,
   createUtilTypes,
+  installTextEncoderInspect,
   createInternalEventTarget,
   installBrowserAbortSignalCompatibility,
   createAborted,
@@ -82,30 +128,211 @@ import { kConnectionsCheckingInterval } from './runtime/http.js';
 import { createVirtualNetwork, getSharedVirtualNetwork, replaceSharedVirtualNetwork } from './runtime/virtual-network.js';
 import { createCluster } from './runtime/cluster.js';
 import { createVirtualProcess } from './runtime/virtual-process.js';
-import { createBrowserProcess } from './runtime/process.js';
+import { createBrowserExecve, createBrowserProcess } from './runtime/process.js';
 import { createProxyCapability } from './runtime/proxy.js';
 import { createV8Module } from './runtime/v8.js';
 import { createProcessReport } from './runtime/report.js';
+import { installProcessFinalization } from './runtime/finalization.js';
 import { createModuleLoader } from './runtime/module-loader.js';
 import { createPrimordials } from './runtime/primordials.js';
 import { createBrowserInternalBindings } from './runtime/internal-bindings.js';
 import { createUrlModule } from './runtime/url.js';
 import { installWarningContract } from './runtime/warnings.js';
 import { nativeAddonDisabledError, unsupportedNativeAddon } from './runtime/errors.js';
+import { createSqliteModule } from './runtime/sqlite.js';
+import { createInspectorModule, createInspectorPromisesModule } from './runtime/inspector.js';
+import { createTraceEventsModule, traceEventsUnavailableError } from './runtime/trace-events.js';
+import { createSeaModule } from './runtime/sea.js';
 
 const BUILTIN_NAMES = Object.freeze([
   'assert', 'assert/strict', 'buffer', 'console', 'constants', 'crypto', 'domain', 'events', 'fs', 'fs/promises', 'http', 'https', 'module', 'os',
   'path', 'path/posix', 'path/win32', 'process', 'querystring', 'stream', 'stream/consumers', 'stream/promises', 'stream/web',
-  'string_decoder', 'timers', 'timers/promises', 'url', 'util', 'util/types', 'worker_threads', 'zlib', 'perf_hooks', 'async_hooks', 'diagnostics_channel',
-  'child_process', 'cluster', 'dgram', 'dns', 'dns/promises', 'http2', 'net', 'repl', 'tls', 'test', 'v8', 'vm', '_http_server',
-  'sea', 'sqlite', 'test/reporters', '_http_common', '_http_outgoing',
+  'string_decoder', 'timers', 'timers/promises', 'url', 'util', 'sys', 'util/types', 'worker_threads', 'zlib', 'perf_hooks', 'async_hooks', 'diagnostics_channel', 'punycode',
+  'child_process', 'cluster', 'dgram', 'dns', 'dns/promises', 'http2', 'inspector', 'inspector/promises', 'net', 'readline', 'readline/promises', 'repl', 'tls', 'test', 'v8', 'vm', '_http_server',
+  'sea', 'sqlite', 'test/reporters', '_http_common', '_http_outgoing', 'trace_events',
   'internal/event_target', 'internal/async_context_frame', 'internal/async_hooks', 'internal/test/binding', 'internal/test/transfer',
   'internal/bootstrap/realm', 'internal/modules/cjs/loader', 'internal/modules/esm/utils', 'internal/vm/module',
-  'internal/util', 'internal/util/debuglog', 'internal/util/types', 'internal/options', 'internal/dgram',
+  'internal/util', 'internal/util/debuglog', 'internal/util/types', 'internal/options', 'internal/dgram', 'internal/crypto/x509',
 ]);
 
 function builtinName(name) {
   return name.startsWith('node:') ? name.slice(5) : name;
+}
+
+function ensureReplDispose(replModule) {
+  const prototype = replModule?.REPLServer?.prototype;
+  if (!prototype) return replModule;
+  const disposeSymbol = Symbol.for('nodejs.dispose');
+  if (typeof prototype[disposeSymbol] === 'function') return replModule;
+  const nativeDispose = Symbol.dispose;
+  const dispose = nativeDispose && typeof prototype[nativeDispose] === 'function'
+    ? prototype[nativeDispose]
+    : function dispose() { this.close(); };
+  Object.defineProperty(prototype, disposeSymbol, {
+    configurable: true,
+    value: dispose,
+    writable: true,
+  });
+  return replModule;
+}
+
+const BROWSER_SIGNAL_CONSTANTS = Object.freeze({
+  SIGCHLD: 17,
+  SIGCONT: 18,
+  SIGFPE: 8,
+  SIGHUP: 1,
+  SIGILL: 4,
+  SIGIO: 29,
+  SIGIOT: 6,
+  SIGPOLL: 29,
+  SIGPROF: 27,
+  SIGPWR: 30,
+  SIGQUIT: 3,
+  SIGSEGV: 11,
+  SIGSTKFLT: 16,
+  SIGSTOP: 19,
+  SIGSYS: 31,
+  SIGTRAP: 5,
+  SIGTSTP: 20,
+  SIGTTIN: 21,
+  SIGTTOU: 22,
+  SIGURG: 23,
+  SIGUSR1: 10,
+  SIGUSR2: 12,
+  SIGVTALRM: 26,
+  SIGWINCH: 28,
+  SIGXCPU: 24,
+  SIGXFSZ: 25,
+});
+
+function createConstants() {
+  const { crypto, ...baseConstants } = createBaseConstants();
+  return Object.freeze({
+    ...baseConstants,
+    ...BROWSER_SIGNAL_CONSTANTS,
+    ...crypto,
+    ENGINE_METHOD_RSA: 1,
+    RSA_NO_PADDING: 3,
+    RSA_PKCS1_OAEP_PADDING: 4,
+    RSA_PKCS1_PADDING: 1,
+    RSA_PKCS1_PSS_PADDING: 6,
+    RSA_PSS_SALTLEN_AUTO: -2,
+    RSA_PSS_SALTLEN_DIGEST: -1,
+    RSA_PSS_SALTLEN_MAX_SIGN: -2,
+    RSA_X931_PADDING: 5,
+    POINT_CONVERSION_UNCOMPRESSED: 4,
+    POINT_CONVERSION_HYBRID: 6,
+    PRIORITY_LOW: 19,
+    PRIORITY_BELOW_NORMAL: 10,
+    PRIORITY_NORMAL: 0,
+    PRIORITY_ABOVE_NORMAL: -7,
+    PRIORITY_HIGH: -14,
+    PRIORITY_HIGHEST: -20,
+    EACCES: 13,
+    EADDRINUSE: 98,
+    EADDRNOTAVAIL: 99,
+    EAFNOSUPPORT: 97,
+    EAGAIN: 11,
+    EALREADY: 114,
+    EBADF: 9,
+    EBADMSG: 74,
+    E2BIG: 7,
+    EBUSY: 16,
+    ECANCELED: 125,
+    ECHILD: 10,
+    ECONNABORTED: 103,
+    ECONNREFUSED: 111,
+    ECONNRESET: 104,
+    EDEADLK: 35,
+    EDESTADDRREQ: 89,
+    EDOM: 33,
+    EDQUOT: 122,
+    EEXIST: 17,
+    EFAULT: 14,
+    EFBIG: 27,
+    EHOSTUNREACH: 113,
+    EIDRM: 43,
+    EILSEQ: 84,
+    ENOBUFS: 105,
+    ENODATA: 61,
+    ENODEV: 19,
+    ENOENT: 2,
+    ENOEXEC: 8,
+    ENOLCK: 37,
+    ENOLINK: 67,
+    EINPROGRESS: 115,
+    EINTR: 4,
+    EINVAL: 22,
+    EIO: 5,
+    EISCONN: 106,
+    ELOOP: 40,
+    EMFILE: 24,
+    EMLINK: 31,
+    EMSGSIZE: 90,
+    EMULTIHOP: 72,
+    ENAMETOOLONG: 36,
+    ENETDOWN: 100,
+    ENETRESET: 102,
+    ENETUNREACH: 101,
+    ENFILE: 23,
+    ENOTDIR: 20,
+    ENOTEMPTY: 39,
+    ENOTSOCK: 88,
+    ENOTSUP: 95,
+    ENOTTY: 25,
+    ENXIO: 6,
+    EROFS: 30,
+    ESPIPE: 29,
+    ENOMEM: 12,
+    ENOMSG: 42,
+    ENOPROTOOPT: 92,
+    ENOSPC: 28,
+    ENOSR: 63,
+    ENOSTR: 60,
+    ENOSYS: 38,
+    ENOTCONN: 107,
+    EISDIR: 21,
+    EOPNOTSUPP: 95,
+    EOVERFLOW: 75,
+    EPERM: 1,
+    EPIPE: 32,
+    EPROTO: 71,
+    EPROTONOSUPPORT: 93,
+    EPROTOTYPE: 91,
+    ERANGE: 34,
+    ESRCH: 3,
+    ESTALE: 116,
+    ETIME: 62,
+    ETIMEDOUT: 110,
+    ETXTBSY: 26,
+    EWOULDBLOCK: 11,
+    EXDEV: 18,
+  });
+}
+
+const ERRNO_CONSTANT_NAMES = Object.freeze([
+  'EACCES', 'EADDRINUSE', 'EADDRNOTAVAIL', 'EAFNOSUPPORT', 'EAGAIN', 'EALREADY', 'EBADF', 'EBADMSG',
+  'E2BIG', 'EBUSY', 'ECANCELED', 'ECHILD', 'ECONNABORTED', 'ECONNREFUSED', 'ECONNRESET', 'EDEADLK',
+  'EDESTADDRREQ', 'EDOM', 'EDQUOT', 'EEXIST', 'EFAULT', 'EFBIG', 'EHOSTUNREACH', 'EIDRM', 'EILSEQ',
+  'ENOBUFS', 'ENODATA', 'ENODEV', 'ENOENT', 'ENOEXEC', 'ENOLCK', 'ENOLINK',
+  'EINPROGRESS', 'EINTR', 'EINVAL', 'EIO', 'EISCONN', 'ELOOP', 'EMFILE', 'EMLINK',
+  'EMSGSIZE', 'EMULTIHOP', 'ENAMETOOLONG', 'ENETDOWN',
+  'ENETRESET', 'ENETUNREACH', 'ENFILE', 'ENOTDIR', 'ENOTEMPTY', 'ENOTSOCK', 'ENOTSUP', 'ENOTTY',
+  'ENXIO', 'EROFS', 'ESPIPE', 'EISDIR', 'EOPNOTSUPP', 'EOVERFLOW', 'EPERM', 'EPIPE',
+  'ENOMEM', 'ENOMSG', 'ENOPROTOOPT', 'ENOSPC', 'ENOSR', 'ENOSTR', 'ENOSYS', 'ENOTCONN',
+  'EPROTO', 'EPROTONOSUPPORT', 'EPROTOTYPE', 'ERANGE', 'ESRCH', 'ESTALE',
+  'ETIME', 'ETIMEDOUT', 'ETXTBSY', 'EWOULDBLOCK', 'EXDEV',
+]);
+
+function installErrnoConstants(target, constants) {
+  for (const name of ERRNO_CONSTANT_NAMES) {
+    Object.defineProperty(target, name, {
+      configurable: false,
+      enumerable: true,
+      value: constants[name],
+      writable: false,
+    });
+  }
 }
 
 function nativeMessagePort(value, scope) {
@@ -191,6 +418,89 @@ function createDeprecate(processObject) {
   };
 }
 
+const BROWSER_ALLOWED_NODE_ENVIRONMENT_FLAGS = Object.freeze([
+  '--abort-on-uncaught-exception', '--allow-addons', '--allow-child-process', '--allow-fs-read',
+  '--allow-fs-write', '--allow-wasi', '--allow-worker', '--conditions', '--debug-port',
+  '--disable-proto', '--disable-wasm-trap-handler', '--enable-source-maps', '--experimental-default-type',
+  '--experimental-fetch', '--experimental-import-meta-resolve', '--experimental-loader',
+  '--experimental-require-module', '--experimental-specifier-resolution', '--experimental-vm-modules',
+  '--experimental-wasm-modules', '--expose-gc', '--frozen-intrinsics', '--heap-prof', '--import',
+  '--input-type', '--inspect', '--inspect-brk', '--inspect-port', '--jitless', '--loader',
+  '--max-http-header-size', '--max-old-space-size', '--max-semi-space-size', '--no-addons',
+  '--no-enable-source-maps', '--no-experimental-fetch', '--no-experimental-import-meta-resolve',
+  '--no-experimental-require-module', '--no-experimental-vm-modules', '--no-experimental-wasm-modules',
+  '--no-frozen-intrinsics', '--no-warnings', '--openssl-config', '--openssl-legacy-provider',
+  '--pending-deprecation', '--perf-basic-prof', '--perf-prof', '--preserve-symlinks',
+  '--preserve-symlinks-main', '--prof-process', '--report-compact', '--report-dir',
+  '--report-exclude-env', '--report-exclude-network', '--report-filename', '--report-on-fatalerror',
+  '--report-on-signal', '--report-uncaught-exception', '--require', '--stack-trace-limit', '--title',
+  '--trace-deprecation', '--trace-events-enabled', '--trace-exit', '--trace-uncaught',
+  '--trace-warnings', '--unhandled-rejections', '--use-bundled-ca', '--use-openssl-ca', '--warnings',
+  '-C', '-r',
+]);
+
+const nodeEnvironmentFlagName = (flag) => String(flag).replaceAll('_', '-');
+
+function createAllowedNodeEnvironmentFlags() {
+  const flags = [...BROWSER_ALLOWED_NODE_ENVIRONMENT_FLAGS];
+  const states = new WeakMap();
+  class NodeEnvironmentFlagsSet extends Set {
+    constructor(values) {
+      super();
+      states.set(this, { values, normalizedValues: values.map((flag) => flag.replace(/^-+/, '')) });
+    }
+
+    add() { return this; }
+    delete() { return false; }
+    clear() {}
+    has(value) {
+      if (typeof value !== 'string') return false;
+      const flag = nodeEnvironmentFlagName(value).replace(/=.*$/, '');
+      const state = states.get(this);
+      if (flag.startsWith('-')) return state.values.includes(flag);
+      return state.normalizedValues.includes(flag);
+    }
+    entries() { return new Set(states.get(this).values).entries(); }
+    forEach(callback, thisArg = undefined) {
+      for (const flag of states.get(this).values) Reflect.apply(callback, thisArg, [flag, flag, this]);
+    }
+    get size() { return states.get(this).values.length; }
+    values() { return new Set(states.get(this).values).values(); }
+    keys() { return this.values(); }
+    [Symbol.iterator]() { return this.values(); }
+  }
+  Object.freeze(NodeEnvironmentFlagsSet.prototype);
+  return Object.freeze(new NodeEnvironmentFlagsSet(flags));
+}
+
+function formatProcessDebug(...values) {
+  if (!values.length) return '';
+  let first = String(values[0]);
+  let index = 1;
+  first = first.replace(/%[sdifjoOc%]/g, (token) => {
+    if (token === '%%') return '%';
+    if (index >= values.length) return token;
+    const value = values[index++];
+    if (token === '%s') return typeof value === 'object' ? nodeInspect(value) : String(value);
+    if (token === '%d') return String(Number(value));
+    if (token === '%i') return String(Number.parseInt(value, 10));
+    if (token === '%f') return String(Number.parseFloat(value));
+    if (token === '%j') {
+      try { return JSON.stringify(value); } catch { return '[Circular]'; }
+    }
+    if (token === '%c') return '';
+    return nodeInspect(value);
+  });
+  return [first, ...values.slice(index).map((value) => typeof value === 'string' ? value : nodeInspect(value))].join(' ');
+}
+
+function processAssertion(value, message) {
+  if (value) return;
+  const error = new Error(message || 'assertion error');
+  error.code = 'ERR_ASSERTION';
+  throw error;
+}
+
 function onceCallback(callback, { preserveReturnValue = false } = {}) {
   let called = false;
   let returnValue;
@@ -203,7 +513,7 @@ function onceCallback(callback, { preserveReturnValue = false } = {}) {
   };
 }
 
-function createNodeWebStreamModule(runtimeRequire) {
+function createNodeWebStreamModule(runtimeRequire, scope = globalThis) {
   const module = {};
   const exports = [
     ['ReadableStream', 'internal/webstreams/readablestream'],
@@ -225,15 +535,190 @@ function createNodeWebStreamModule(runtimeRequire) {
     ['DecompressionStream', 'internal/webstreams/compression'],
   ];
   const cache = new Map();
-  const load = (path) => {
+  const readableStreamWrappers = new WeakMap();
+  const inspectCustom = Symbol.for('nodejs.util.inspect.custom');
+  const wrapReadableStream = (NativeReadableStream) => {
+    if (typeof NativeReadableStream !== 'function') return NativeReadableStream;
+    const existing = readableStreamWrappers.get(NativeReadableStream);
+    if (existing) return existing;
+    class NodeReadableStream extends NativeReadableStream {
+      constructor(source, strategy) {
+        if (source !== undefined && (source === null || typeof source !== 'object')) {
+          const error = new TypeError('The "source" argument must be of type object');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        if (strategy !== undefined && strategy !== null && typeof strategy !== 'object') {
+          const error = new TypeError('The "strategy" argument must be of type object');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        if (strategy && strategy.size !== undefined && typeof strategy.size !== 'function') {
+          const error = new TypeError('The "strategy.size" property must be of type function');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        if (strategy && strategy.highWaterMark !== undefined
+            && (typeof strategy.highWaterMark !== 'number'
+              || Number.isNaN(strategy.highWaterMark) || strategy.highWaterMark < 0)) {
+          const error = new TypeError('The property "strategy.highWaterMark" is invalid');
+          error.code = 'ERR_INVALID_ARG_VALUE';
+          throw error;
+        }
+        super(source, Array.isArray(strategy) || strategy === null ? undefined : strategy);
+      }
+      getReader(options) {
+        if (options !== undefined) {
+          if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+            const error = new TypeError('The "options" argument must be of type object');
+            error.code = 'ERR_INVALID_ARG_TYPE';
+            throw error;
+          }
+          if (options.mode !== undefined && options.mode !== 'byob') {
+            const error = new TypeError(`The property 'options.mode' is invalid. Received ${options.mode}`);
+            error.code = 'ERR_INVALID_ARG_VALUE';
+            throw error;
+          }
+        }
+        return super.getReader(options);
+      }
+      tee() {
+        const branches = super.tee();
+        for (const branch of branches) {
+          if (!(branch instanceof NodeReadableStream)) {
+            Object.setPrototypeOf(branch, NodeReadableStream.prototype);
+          }
+        }
+        return branches;
+      }
+    }
+    readableStreamWrappers.set(NativeReadableStream, NodeReadableStream);
+    return NodeReadableStream;
+  };
+  const patchCompressionInspect = (StreamClass, name) => {
+    if (typeof StreamClass !== 'function' || !StreamClass.prototype
+      || typeof StreamClass.prototype[inspectCustom] === 'function') return;
+    Object.defineProperty(StreamClass.prototype, inspectCustom, {
+      configurable: true,
+      value() { return `${name} { readable: ReadableStream, writable: WritableStream }`; },
+    });
+  };
+  const load = (path, name) => {
+    if (path.startsWith('internal/webstreams/')) {
+      if (!cache.has(path)) cache.set(path, runtimeRequire(path));
+      const value = cache.get(path);
+      if (name === 'ReadableStream' && typeof value[name] === 'function') {
+        const prototype = value[name].prototype;
+        const originalTee = prototype.tee;
+        if (typeof originalTee === 'function'
+            && !prototype[Symbol.for('bnh.streamTeeCompatibility')]) {
+          Object.defineProperty(prototype, 'tee', {
+            configurable: true,
+            enumerable: false,
+            writable: true,
+            value() {
+              const branches = originalTee.call(this);
+              for (const branch of branches) {
+                if (!(branch instanceof value[name])) {
+                  Object.setPrototypeOf(branch, value[name].prototype);
+                }
+              }
+              return branches;
+            },
+          });
+          Object.defineProperty(prototype, Symbol.for('bnh.streamTeeCompatibility'), {
+            configurable: true,
+            value: true,
+          });
+        }
+        const original = prototype[inspectCustom];
+        if (typeof original === 'function' && !prototype[Symbol.for('bnh.streamInspectCompatibility')]) {
+          Object.defineProperty(prototype, inspectCustom, {
+            configurable: true,
+            value(depth, options) {
+              const result = original.call(this, depth, options);
+              return typeof result === 'string' && result.includes('\n')
+                ? result.replace(/\s*\n\s*/g, ' ')
+                : result;
+            },
+          });
+          Object.defineProperty(prototype, Symbol.for('bnh.streamInspectCompatibility'), {
+            configurable: true,
+            value: true,
+          });
+        }
+        const originalValues = prototype.values;
+        if (typeof originalValues === 'function'
+            && !prototype[Symbol.for('bnh.streamValuesCompatibility')]) {
+          Object.defineProperty(prototype, 'values', {
+            configurable: true,
+            enumerable: false,
+            writable: true,
+            value(options) {
+              const iterator = originalValues.call(this, options);
+              if (options?.preventCancel !== true || typeof iterator?.return !== 'function') {
+                return iterator;
+              }
+              const stream = this;
+              const originalReturn = iterator.return;
+              iterator.return = function returnWithoutCancel(value) {
+                return Promise.resolve(originalReturn.call(this, value)).then((result) => {
+                  const streamState = runtimeRequire('internal/webstreams/util')?.kState;
+                  const state = streamState ? stream[streamState] : undefined;
+                  if (state?.state === 'closed') state.state = 'readable';
+                  return result;
+                });
+              };
+              return iterator;
+            },
+          });
+          Object.defineProperty(prototype, Symbol.for('bnh.streamValuesCompatibility'), {
+            configurable: true,
+            value: true,
+          });
+        }
+      }
+      if (name.endsWith('Controller') && typeof value[name] === 'function') {
+        const prototype = value[name].prototype;
+        const original = prototype[inspectCustom];
+        if (!prototype[Symbol.for('bnh.controllerInspectCompatibility')]) {
+          Object.defineProperty(prototype, inspectCustom, {
+            configurable: true,
+            value(depth, options) {
+              if (depth === 0) return `${name} {}`;
+              if (typeof original === 'function') {
+                const result = original.call(this, depth, options);
+                return result === `${name} [Object]` ? `${name} {}` : result;
+              }
+              return `${name} {}`;
+            },
+          });
+          Object.defineProperty(prototype, Symbol.for('bnh.controllerInspectCompatibility'), {
+            configurable: true,
+            value: true,
+          });
+        }
+      }
+      return value;
+    }
+    if (typeof scope[name] === 'function') {
+      const value = name === 'ReadableStream' ? wrapReadableStream(scope[name]) : scope[name];
+      if (name === 'CompressionStream' || name === 'DecompressionStream') {
+        patchCompressionInspect(value, name);
+      }
+      return { [name]: value };
+    }
     if (!cache.has(path)) cache.set(path, runtimeRequire(path));
-    return cache.get(path);
+    const value = cache.get(path);
+    return name === 'ReadableStream'
+      ? { ...value, [name]: wrapReadableStream(value[name]) }
+      : value;
   };
   for (const [name, path] of exports) {
     Object.defineProperty(module, name, {
       configurable: true,
       enumerable: true,
-      get: () => load(path)[name],
+      get: () => load(path, name)[name],
     });
   }
   return module;
@@ -297,6 +782,1258 @@ function normalizeOutputChunk(value) {
   return String(value);
 }
 
+function createTestReportersModule(processObject) {
+  class LcovReporter extends Transform {
+    constructor(options) {
+      super({ ...options, writableObjectMode: true, __proto__: null });
+    }
+
+    _transform(event, _encoding, callback) {
+      if (event.type !== 'test:coverage') return callback(null);
+      let output = 'TN:\n';
+      const {
+        data: {
+          summary: { workingDirectory },
+        },
+      } = event;
+      try {
+        for (const file of event.data.summary.files) {
+          output += `SF:${path.relative(workingDirectory, file.path)}\n`;
+          let functionData = '';
+          for (let index = 0; index < file.functions.length; index += 1) {
+            const func = file.functions[index];
+            const name = func.name || `anonymous_${index}`;
+            output += `FN:${func.line},${name}\n`;
+            functionData += `FNDA:${func.count},${name}\n`;
+          }
+          output += functionData;
+          output += `FNF:${file.totalFunctionCount}\n`;
+          output += `FNH:${file.coveredFunctionCount}\n`;
+          for (let index = 0; index < file.branches.length; index += 1) {
+            const branch = file.branches[index];
+            output += `BRDA:${branch.line},${index},0,${branch.count}\n`;
+          }
+          output += `BRF:${file.totalBranchCount}\n`;
+          output += `BRH:${file.coveredBranchCount}\n`;
+          const lines = file.lines.toSorted((a, b) => a.line - b.line);
+          for (const line of lines) output += `DA:${line.line},${line.count}\n`;
+          output += `LH:${file.coveredLineCount}\n`;
+          output += `LF:${file.totalLineCount}\n`;
+          output += 'end_of_record\n';
+        }
+      } catch (error) {
+        callback(error);
+        return;
+      }
+      callback(null, output);
+    }
+  }
+
+  async function* dot(source) {
+    let count = 0;
+    let columns = Math.max(Number(processObject.stdout?.columns) || 20, 20);
+    const failures = [];
+    for await (const event of source) {
+      if (event.type === 'test:pass') yield '.';
+      if (event.type === 'test:fail') {
+        yield 'X';
+        failures.push(event.data);
+      }
+      if ((event.type === 'test:pass' || event.type === 'test:fail') && ++count === columns) {
+        yield '\n';
+        columns = Math.max(Number(processObject.stdout?.columns) || 20, 20);
+        count = 0;
+      }
+    }
+    yield '\n';
+    if (failures.length) yield `\nFailed tests:\n\n${failures.map((item) => `${item.name}\n`).join('')}`;
+  }
+
+  async function* tap(source) {
+    yield 'TAP version 13\n';
+    for await (const event of source) {
+      if (event.type === 'test:start') yield `${'    '.repeat(event.data.nesting)}# Subtest: ${event.data.name}\n`;
+      else if (event.type === 'test:pass' || event.type === 'test:fail') {
+        const indent = '    '.repeat(event.data.nesting);
+        yield `${indent}${event.type === 'test:pass' ? 'ok' : 'not ok'} ${event.data.testNumber || ''}${event.data.name ? ` - ${event.data.name}` : ''}\n`;
+      } else if (event.type === 'test:plan') {
+        yield `${'    '.repeat(event.data.nesting)}1..${event.data.count}\n`;
+      } else if (event.type === 'test:diagnostic') {
+        yield `${'    '.repeat(event.data.nesting)}# ${event.data.message}\n`;
+      }
+    }
+  }
+
+  class SpecReporter extends Transform {
+    constructor(options) {
+      super({ ...(options || {}), writableObjectMode: true });
+    }
+
+    _transform(event, _encoding, callback) {
+      if (event?.type === 'test:pass' || event?.type === 'test:fail') {
+        const symbol = event.type === 'test:pass' ? '✔ ' : '✖ ';
+        callback(null, `${'  '.repeat(event.data.nesting || 0)}${symbol}${event.data.name}\n`);
+      } else if (event?.type === 'test:stdout' || event?.type === 'test:stderr') {
+        callback(null, event.data.message);
+      } else {
+        callback(null);
+      }
+    }
+  }
+
+  // Node exposes spec as a callable factory, while lcov is a freshly
+  // constructed Transform instance. Returning the instance gives callers the
+  // stream surface inherited from Transform (including iterator, map, and
+  // EventEmitter methods).
+  function spec(...args) {
+    return new SpecReporter(...args);
+  }
+
+  return Object.defineProperties({}, {
+    dot: { configurable: true, enumerable: true, get: () => dot },
+    junit: { configurable: true, enumerable: true, get: () => dot },
+    spec: { configurable: true, enumerable: true, value: spec },
+    tap: { configurable: true, enumerable: true, get: () => tap },
+    lcov: { configurable: true, enumerable: true, get: () => new LcovReporter() },
+  });
+}
+
+function installProcessStdoutIterableSurface(stream, processObject) {
+  if (!stream || stream.__BNH_STDOUT_ITERABLE_SURFACE__) return;
+  Object.defineProperty(stream, '__BNH_STDOUT_ITERABLE_SURFACE__', {
+    configurable: false,
+    enumerable: false,
+    value: true,
+  });
+  let bytesDispatched = 0;
+  let stdioHandle = null;
+  const outputWrite = stream.write;
+  const byteLength = (value) => {
+    if (typeof value === 'string') return new TextEncoder().encode(value).byteLength;
+    if (value instanceof ArrayBuffer) return value.byteLength;
+    if (ArrayBuffer.isView(value)) return value.byteLength;
+    return new TextEncoder().encode(normalizeOutputChunk(value)).byteLength;
+  };
+
+  stream.write = function writeStdout(value, encoding, callback) {
+    bytesDispatched += byteLength(value);
+    const result = outputWrite.call(this, value, encoding);
+    if (typeof callback === 'function') callback();
+    return result;
+  };
+
+  const readable = new Readable({ read() {}, readable: false });
+  const iterablePrototype = Object.create(Object.getPrototypeOf(stream));
+  for (const name of ['every', 'filter', 'flatMap', 'forEach', 'reduce', 'toArray', 'some', 'find']) {
+    Object.defineProperty(iterablePrototype, name, {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable[name](...args); },
+    });
+  }
+  Object.defineProperty(iterablePrototype, Symbol.for('nodejs.asyncDispose'), {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value: async function asyncDispose() {},
+  });
+  Object.defineProperty(iterablePrototype, Symbol.asyncIterator, {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value() { return readable[Symbol.asyncIterator](); },
+  });
+  Object.defineProperties(stream, {
+    _host: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    _isStdio: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: true,
+    },
+    _parent: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    _pendingData: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    _pendingEncoding: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: '',
+    },
+    _hadError: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: false,
+    },
+    _readableState: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: readable._readableState,
+    },
+    _server: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    server: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    _sockname: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    _type: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: 'pipe',
+    },
+    connecting: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: false,
+    },
+    destroySoon: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    fd: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: 1,
+    },
+    allowHalfOpen: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: false,
+    },
+    _closeAfterHandlingError: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: false,
+    },
+  });
+  Object.defineProperties(iterablePrototype, {
+    push: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) { return readable.push(...args); },
+    },
+    read: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) { return readable.read(...args); },
+    },
+    _handle: {
+      configurable: false,
+      enumerable: false,
+      get: () => stdioHandle,
+      set: (value) => { stdioHandle = value; },
+    },
+    unpipe: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(destination) { readable.unpipe(destination); return this; },
+    },
+    unref: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    unshift: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) { return readable.unshift(...args); },
+    },
+    wrap: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(source) { readable.wrap(source); return this; },
+    },
+    address: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return {}; },
+    },
+    _writeGeneric: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(writev, data, encoding, callback) {
+        const chunks = writev ? data || [] : [data];
+        for (const item of chunks) this.write(writev ? item?.chunk : item, encoding);
+        if (typeof callback === 'function') callback();
+      },
+    },
+    _getpeername: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return {}; },
+    },
+    remoteAddress: {
+      configurable: false,
+      enumerable: true,
+      get: () => stream._getpeername().address,
+    },
+    remoteFamily: {
+      configurable: false,
+      enumerable: true,
+      get: () => stream._getpeername().family,
+    },
+    remotePort: {
+      configurable: false,
+      enumerable: true,
+      get: () => stream._getpeername().port,
+    },
+    _getsockname: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return {}; },
+    },
+    localAddress: {
+      configurable: false,
+      enumerable: true,
+      get: () => undefined,
+    },
+    localFamily: {
+      configurable: false,
+      enumerable: true,
+      get: () => undefined,
+    },
+    localPort: {
+      configurable: false,
+      enumerable: true,
+      get: () => undefined,
+    },
+    _bytesDispatched: {
+      configurable: false,
+      enumerable: true,
+      get: () => bytesDispatched,
+    },
+    bytesRead: {
+      configurable: false,
+      enumerable: true,
+      get: () => 0,
+    },
+    bytesWritten: {
+      configurable: false,
+      enumerable: true,
+      get: () => bytesDispatched,
+    },
+    compose: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) { return readable.compose(...args); },
+    },
+    connect: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    ref: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    drop: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.drop(...args); },
+    },
+    isPaused: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value() { return readable.isPaused(); },
+    },
+    iterator: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.iterator(...args); },
+    },
+    map: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.map(...args); },
+    },
+    pause: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { readable.pause(); return this; },
+    },
+    _reset: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    resetAndDestroy: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    resume: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { readable.resume(); return this; },
+    },
+    setEncoding: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) { readable.setEncoding(...args); return this; },
+    },
+    take: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.take(...args); },
+    },
+    bufferSize: {
+      configurable: false,
+      enumerable: false,
+      get: () => stream.writableLength || 0,
+    },
+    readable: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readable,
+      set: (value) => { readable.readable = value; },
+    },
+    readableDidRead: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableDidRead,
+    },
+    readableLength: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableLength,
+    },
+    readableObjectMode: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableObjectMode,
+    },
+    readableEncoding: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableEncoding,
+    },
+    readableAborted: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableAborted,
+    },
+    readableEnded: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableEnded,
+    },
+    readableHighWaterMark: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableHighWaterMark,
+    },
+    readableBuffer: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableBuffer,
+    },
+    readableFlowing: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableFlowing,
+      set: (value) => {
+        readable._flowing = value;
+        readable._readableState.flowing = value;
+      },
+    },
+    readyState: {
+      configurable: false,
+      enumerable: false,
+      get() {
+        if (this.connecting) return 'opening';
+        const writable = this.writable === undefined ? true : this.writable;
+        if (this.readable && writable) return 'open';
+        if (this.readable && !writable) return 'readOnly';
+        if (!this.readable && writable) return 'writeOnly';
+        return 'closed';
+      },
+    },
+    readableLength: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableLength,
+    },
+    pending: {
+      configurable: true,
+      enumerable: false,
+      get: () => false,
+    },
+    readableObjectMode: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableObjectMode,
+    },
+    _unrefTimer: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { this._timeout?.refresh?.(); },
+    },
+    _connecting: {
+      configurable: false,
+      enumerable: false,
+      get: () => false,
+    },
+    _read: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() {},
+    },
+    _final: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(callback) { callback?.(); },
+    },
+    setTimeout: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(milliseconds, callback) {
+        if (typeof milliseconds !== 'number') {
+          const error = new TypeError('The "msecs" argument must be of type number');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        if (!Number.isFinite(milliseconds) || milliseconds < 0) {
+          const error = new RangeError(`The value of "msecs" is out of range. It must be >= 0 && <= ${Number.MAX_SAFE_INTEGER}. Received ${milliseconds}`);
+          error.code = 'ERR_OUT_OF_RANGE';
+          throw error;
+        }
+        if (callback !== undefined && typeof callback !== 'function') {
+          const error = new TypeError('The "callback" argument must be of type function');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        this.timeout = milliseconds;
+        if (this._timeout) processObject?._bnhClearTimer?.(this._timeout);
+        this._timeout = null;
+        if (milliseconds === 0) {
+          if (callback) this.removeListener?.('timeout', callback);
+          return this;
+        }
+        if (callback) this.once?.('timeout', callback);
+        this._timeout = processObject?._bnhSetTimer?.(
+          () => { this._timeout = null; this._onTimeout(); },
+          milliseconds,
+          false,
+          'Timeout',
+        );
+        this._timeout?.unref?.();
+        return this;
+      },
+    },
+    _onTimeout: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { processObject?.emit?.('timeout'); },
+    },
+    setNoDelay: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(enable = true) { this._noDelay = Boolean(enable); return this; },
+    },
+    setKeepAlive: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(enable = false, initialDelayMsecs = 0) {
+        this._keepAlive = Boolean(enable);
+        this._keepAliveInitialDelay = ~~(initialDelayMsecs / 1000);
+        return this;
+      },
+    },
+  });
+  Object.setPrototypeOf(stream, iterablePrototype);
+}
+
+function installProcessStderrSocketSurface(stream, processObject) {
+  if (!stream || stream.__BNH_STDERR_SOCKET_SURFACE__) return;
+  Object.defineProperty(stream, '__BNH_STDERR_SOCKET_SURFACE__', {
+    configurable: false,
+    enumerable: false,
+    value: true,
+  });
+  let bytesDispatched = 0;
+  const outputWrite = stream.write;
+  const byteLength = (value) => {
+    if (typeof value === 'string') return new TextEncoder().encode(value).byteLength;
+    if (value instanceof ArrayBuffer) return value.byteLength;
+    if (ArrayBuffer.isView(value)) return value.byteLength;
+    return new TextEncoder().encode(normalizeOutputChunk(value)).byteLength;
+  };
+
+  stream.write = function writeStderr(value, encoding, callback) {
+    bytesDispatched += byteLength(value);
+    const result = outputWrite.call(this, value, encoding);
+    if (typeof callback === 'function') callback();
+    return result;
+  };
+
+  const readable = new Readable({ read() {}, readable: false });
+
+  Object.defineProperties(stream, {
+    _host: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    _isStdio: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: true,
+    },
+    _parent: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    _pendingData: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    _pendingEncoding: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: '',
+    },
+    _readableState: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: readable._readableState,
+    },
+    _closeAfterHandlingError: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: false,
+    },
+    _hadError: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: false,
+    },
+    _server: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    server: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    _sockname: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    _type: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: 'pipe',
+    },
+    connecting: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: false,
+    },
+    destroySoon: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    fd: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: 2,
+    },
+    allowHalfOpen: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: false,
+    },
+  });
+
+  const socketPrototype = Object.create(Object.getPrototypeOf(stream));
+  Object.defineProperty(socketPrototype, Symbol.asyncIterator, {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value() { return new Readable({ read() {}, readable: false })[Symbol.asyncIterator](); },
+  });
+  Object.defineProperties(socketPrototype, {
+    push: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(chunk, encoding) { return readable.push(chunk, encoding); },
+    },
+    read: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(size) { return readable.read(size); },
+    },
+    localAddress: {
+      configurable: false,
+      enumerable: true,
+      get: () => undefined,
+    },
+    localPort: {
+      configurable: false,
+      enumerable: true,
+      get: () => undefined,
+    },
+    localFamily: {
+      configurable: false,
+      enumerable: true,
+      get: () => undefined,
+    },
+    _writeGeneric: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(writev, data, encoding, callback) {
+        const chunks = writev ? data || [] : [data];
+        for (const item of chunks) this.write(writev ? item?.chunk : item, encoding);
+        if (typeof callback === 'function') callback();
+      },
+    },
+    _getpeername: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return {}; },
+    },
+    remoteAddress: {
+      configurable: false,
+      enumerable: true,
+      get: () => stream._getpeername().address,
+    },
+    remoteFamily: {
+      configurable: false,
+      enumerable: true,
+      get: () => stream._getpeername().family,
+    },
+    remotePort: {
+      configurable: false,
+      enumerable: true,
+      get: () => stream._getpeername().port,
+    },
+    _getsockname: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return {}; },
+    },
+    _bytesDispatched: {
+      configurable: false,
+      enumerable: true,
+      get: () => bytesDispatched,
+    },
+    bytesRead: {
+      configurable: false,
+      enumerable: true,
+      get: () => 0,
+    },
+    bytesWritten: {
+      configurable: false,
+      enumerable: true,
+      get: () => bytesDispatched,
+    },
+    compose: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) { return readable.compose(...args); },
+    },
+    connect: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    ref: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    rawListeners: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) { return processObject?.rawListeners?.(...args) || []; },
+    },
+    _unrefTimer: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { this._timeout?.refresh?.(); },
+    },
+    address: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return {}; },
+    },
+    _reset: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    resetAndDestroy: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    resume: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { readable.resume(); return this; },
+    },
+    pause: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { readable.pause(); return this; },
+    },
+    isPaused: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return readable.isPaused(); },
+    },
+    iterator: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) { return readable.iterator(...args); },
+    },
+    forEach: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.forEach(...args); },
+    },
+    drop: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.drop(...args); },
+    },
+    every: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.every(...args); },
+    },
+    filter: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.filter(...args); },
+    },
+    find: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.find(...args); },
+    },
+    flatMap: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.flatMap(...args); },
+    },
+    map: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.map(...args); },
+    },
+    setEncoding: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) { readable.setEncoding(...args); return this; },
+    },
+    _connecting: {
+      configurable: false,
+      enumerable: false,
+      get: () => false,
+    },
+    _handle: {
+      configurable: false,
+      enumerable: false,
+      get: () => null,
+    },
+    _read: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() {},
+    },
+    pending: {
+      configurable: true,
+      enumerable: false,
+      get: () => false,
+    },
+    bufferSize: {
+      configurable: false,
+      enumerable: false,
+      get: () => stream.writableLength || 0,
+    },
+    readable: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readable,
+      set: (value) => { readable.readable = value; },
+    },
+    readableAborted: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableAborted,
+    },
+    readableBuffer: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableBuffer,
+    },
+    readableDidRead: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableDidRead,
+    },
+    readableLength: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableLength,
+    },
+    readableObjectMode: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableObjectMode,
+    },
+    readableEncoding: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableEncoding,
+    },
+    readableEnded: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableEnded,
+    },
+    readableFlowing: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableFlowing,
+      set(value) {
+        if (value === null) {
+          readable._flowing = null;
+          readable._readableState.flowing = null;
+          readable._readableState.paused = false;
+        } else if (value) readable.resume();
+        else readable.pause();
+      },
+    },
+    readableHighWaterMark: {
+      configurable: false,
+      enumerable: false,
+      get: () => readable.readableHighWaterMark,
+    },
+    some: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.some(...args); },
+    },
+    reduce: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.reduce(...args); },
+    },
+    toArray: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.toArray(...args); },
+    },
+    unpipe: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(destination) { readable.unpipe(destination); return this; },
+    },
+    unref: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    unshift: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) { return readable.unshift(...args); },
+    },
+    wrap: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(source) { readable.wrap(source); return this; },
+    },
+    take: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.take(...args); },
+    },
+    readyState: {
+      configurable: false,
+      enumerable: false,
+      get() {
+        if (this.connecting) return 'opening';
+        if (this.readable && this.writable) return 'open';
+        if (this.readable && !this.writable) return 'readOnly';
+        if (!this.readable && this.writable) return 'writeOnly';
+        return 'closed';
+      },
+    },
+    setTimeout: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(milliseconds, callback) {
+        if (typeof milliseconds !== 'number') {
+          const error = new TypeError('The "msecs" argument must be of type number');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        if (!Number.isFinite(milliseconds) || milliseconds < 0) {
+          const error = new RangeError(`The value of "msecs" is out of range. It must be >= 0 && <= ${Number.MAX_SAFE_INTEGER}. Received ${milliseconds}`);
+          error.code = 'ERR_OUT_OF_RANGE';
+          throw error;
+        }
+        if (callback !== undefined && typeof callback !== 'function') {
+          const error = new TypeError('The "callback" argument must be of type function');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        this.timeout = milliseconds;
+        if (this._timeout) processObject?._bnhClearTimer?.(this._timeout);
+        this._timeout = null;
+        if (milliseconds === 0) {
+          if (callback) this.removeListener?.('timeout', callback);
+          return this;
+        }
+        if (callback) this.once?.('timeout', callback);
+        this._timeout = processObject?._bnhSetTimer?.(
+          () => { this._timeout = null; this._onTimeout(); },
+          milliseconds,
+          false,
+          'Timeout',
+        );
+        this._timeout?.unref?.();
+        return this;
+      },
+    },
+    _onTimeout: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { processObject?.emit?.('timeout'); },
+    },
+    setNoDelay: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(enable = true) { this._noDelay = Boolean(enable); return this; },
+    },
+    setKeepAlive: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(enable = false, initialDelayMsecs = 0) {
+        this._keepAlive = Boolean(enable);
+        this._keepAliveInitialDelay = ~~(initialDelayMsecs / 1000);
+        return this;
+      },
+    },
+  });
+  Object.setPrototypeOf(stream, socketPrototype);
+}
+
+function installProcessStdinSurface(stream) {
+  if (!stream || stream.__BNH_STDIN_SURFACE__) return;
+  Object.defineProperty(stream, '__BNH_STDIN_SURFACE__', {
+    configurable: false,
+    enumerable: false,
+    value: true,
+  });
+  if (!('fd' in stream)) stream.fd = 0;
+  Object.defineProperties(stream, {
+    bytesRead: {
+      configurable: true,
+      enumerable: true,
+      get: () => 0,
+    },
+    autoClose: {
+      configurable: true,
+      enumerable: false,
+      get: () => stream._readableState?.autoDestroy,
+      set: (value) => { if (stream._readableState) stream._readableState.autoDestroy = value; },
+    },
+    open: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() {},
+    },
+    _construct: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(callback) { callback?.(); },
+    },
+    close: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(callback) {
+        if (typeof callback === 'function') this.once?.('close', callback);
+        this.fd = null;
+        this.destroy?.();
+      },
+    },
+    pending: {
+      configurable: true,
+      enumerable: false,
+      get: () => stream.fd === null,
+    },
+    end: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(_chunk, _encoding, callback) {
+        if (typeof _encoding === 'function') callback = _encoding;
+        callback?.();
+        return this;
+      },
+    },
+    start: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: undefined,
+    },
+    pos: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: undefined,
+    },
+  });
+  Object.defineProperty(stream, Symbol.for('nodejs.asyncDispose'), {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value() {
+      if (stream.destroyed || stream.closed) return Promise.resolve();
+      return new Promise((resolve) => {
+        stream.once?.('close', resolve);
+        stream.destroy?.();
+        if (typeof stream.once !== 'function') resolve();
+      });
+    },
+  });
+}
+
 function browserHeapSnapshot(scope) {
   const dnsState = Number(scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ || 0);
   const hasDnsChannel = dnsState > 0;
@@ -323,22 +2060,211 @@ function browserHeapSnapshot(scope) {
   return JSON.stringify({ snapshot: { meta: { node_fields: nodeFields, node_types: nodeTypes, edge_fields: edgeFields, edge_types: edgeTypes } }, nodes, edges, strings });
 }
 
+function createWorkerHeapSnapshot(scope) {
+  let snapshot = browserHeapSnapshot(scope);
+  return {
+    pause() { return this; },
+    resume() { return this; },
+    destroy() { snapshot = ''; return this; },
+    read() {
+      const value = snapshot;
+      snapshot = '';
+      return value;
+    },
+  };
+}
+
+function workerMethodError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function cloneForWorker(value, scope) {
+  if (typeof scope.structuredClone === 'function') return scope.structuredClone(value);
+  return adaptWorkerData(value, scope);
+}
+
+function workerHeapStatistics() {
+  const memory = {
+    total_heap_size: 1,
+    total_heap_size_executable: 0,
+    total_physical_size: 1,
+    total_available_size: Number.MAX_SAFE_INTEGER,
+    used_heap_size: 1,
+    heap_size_limit: Number.MAX_SAFE_INTEGER,
+    malloced_memory: 0,
+    peak_malloced_memory: 0,
+    does_zap_garbage: false,
+    number_of_native_contexts: 1,
+    number_of_detached_contexts: 0,
+    total_global_handles_size: 0,
+    used_global_handles_size: 0,
+    external_memory: 0,
+    total_allocated_bytes: 1,
+  };
+  return Object.assign(Object.create(null), memory);
+}
+
+function createPunycodeModule() {
+  const maxInt = 2147483647;
+  const base = 36;
+  const tMin = 1;
+  const tMax = 26;
+  const skew = 38;
+  const damp = 700;
+  const initialBias = 72;
+  const initialN = 128;
+  const delimiter = '-';
+  const baseMinusTMin = base - tMin;
+  const regexPunycode = /^xn--/;
+  const regexNonASCII = /[^\0-\x7F]/;
+  const regexSeparators = /[\x2E\u3002\uFF0E\uFF61]/g;
+  const errors = {
+    overflow: 'Overflow: input needs wider integers to process',
+    'not-basic': 'Illegal input >= 0x80 (not a basic code point)',
+    'invalid-input': 'Invalid input',
+  };
+  const fail = (type) => { throw new RangeError(errors[type]); };
+  const basicToDigit = (codePoint) => {
+    if (codePoint >= 0x30 && codePoint < 0x3A) return 26 + codePoint - 0x30;
+    if (codePoint >= 0x41 && codePoint < 0x5B) return codePoint - 0x41;
+    if (codePoint >= 0x61 && codePoint < 0x7B) return codePoint - 0x61;
+    return base;
+  };
+  const digitToBasic = (digit, flag) => digit + 22 + 75 * (digit < 26) - ((flag !== 0) << 5);
+  const adapt = (delta, numPoints, firstTime) => {
+    let k = 0;
+    delta = firstTime ? Math.floor(delta / damp) : delta >> 1;
+    delta += Math.floor(delta / numPoints);
+    for (; delta > ((baseMinusTMin * tMax) >> 1); k += base) delta = Math.floor(delta / baseMinusTMin);
+    return Math.floor(k + (baseMinusTMin + 1) * delta / (delta + skew));
+  };
+  const ucs2decode = (string) => {
+    const output = [];
+    let counter = 0;
+    while (counter < string.length) {
+      const value = string.charCodeAt(counter++);
+      if (value >= 0xD800 && value <= 0xDBFF && counter < string.length) {
+        const extra = string.charCodeAt(counter++);
+        if ((extra & 0xFC00) === 0xDC00) {
+          output.push(((value & 0x3FF) << 10) + (extra & 0x3FF) + 0x10000);
+        } else {
+          output.push(value);
+          counter--;
+        }
+      } else output.push(value);
+    }
+    return output;
+  };
+  const ucs2encode = (codePoints) => String.fromCodePoint(...codePoints);
+  const decode = (input) => {
+    const output = [];
+    let i = 0;
+    let n = initialN;
+    let bias = initialBias;
+    let basic = input.lastIndexOf(delimiter);
+    if (basic < 0) basic = 0;
+    for (let j = 0; j < basic; ++j) {
+      if (input.charCodeAt(j) >= 0x80) fail('not-basic');
+      output.push(input.charCodeAt(j));
+    }
+    for (let index = basic > 0 ? basic + 1 : 0; index < input.length;) {
+      const oldi = i;
+      for (let w = 1, k = base;; k += base) {
+        if (index >= input.length) fail('invalid-input');
+        const digit = basicToDigit(input.charCodeAt(index++));
+        if (digit >= base) fail('invalid-input');
+        if (digit > Math.floor((maxInt - i) / w)) fail('overflow');
+        i += digit * w;
+        const t = k <= bias ? tMin : k >= bias + tMax ? tMax : k - bias;
+        if (digit < t) break;
+        const baseMinusT = base - t;
+        if (w > Math.floor(maxInt / baseMinusT)) fail('overflow');
+        w *= baseMinusT;
+      }
+      const out = output.length + 1;
+      bias = adapt(i - oldi, out, oldi === 0);
+      if (Math.floor(i / out) > maxInt - n) fail('overflow');
+      n += Math.floor(i / out);
+      i %= out;
+      output.splice(i++, 0, n);
+    }
+    return String.fromCodePoint(...output);
+  };
+  const encode = (input) => {
+    const output = [];
+    const codePoints = ucs2decode(input);
+    const inputLength = codePoints.length;
+    let n = initialN;
+    let delta = 0;
+    let bias = initialBias;
+    for (const currentValue of codePoints) if (currentValue < 0x80) output.push(String.fromCharCode(currentValue));
+    const basicLength = output.length;
+    let handledCPCount = basicLength;
+    if (basicLength) output.push(delimiter);
+    while (handledCPCount < inputLength) {
+      let m = maxInt;
+      for (const currentValue of codePoints) if (currentValue >= n && currentValue < m) m = currentValue;
+      const handledCPCountPlusOne = handledCPCount + 1;
+      if (m - n > Math.floor((maxInt - delta) / handledCPCountPlusOne)) fail('overflow');
+      delta += (m - n) * handledCPCountPlusOne;
+      n = m;
+      for (const currentValue of codePoints) {
+        if (currentValue < n && ++delta > maxInt) fail('overflow');
+        if (currentValue === n) {
+          let q = delta;
+          for (let k = base;; k += base) {
+            const t = k <= bias ? tMin : k >= bias + tMax ? tMax : k - bias;
+            if (q < t) break;
+            const qMinusT = q - t;
+            const baseMinusT = base - t;
+            output.push(String.fromCharCode(digitToBasic(t + qMinusT % baseMinusT, 0)));
+            q = Math.floor(qMinusT / baseMinusT);
+          }
+          output.push(String.fromCharCode(digitToBasic(q, 0)));
+          bias = adapt(delta, handledCPCountPlusOne, handledCPCount === basicLength);
+          delta = 0;
+          ++handledCPCount;
+        }
+      }
+      ++delta;
+      ++n;
+    }
+    return output.join('');
+  };
+  const mapDomain = (domain, callback) => {
+    const parts = domain.split('@');
+    let result = '';
+    if (parts.length > 1) {
+      result = parts[0] + '@';
+      domain = parts[1];
+    }
+    const labels = domain.replace(regexSeparators, '\x2E').split('.');
+    return result + labels.map(callback).join('.');
+  };
+  const toUnicode = (input) => mapDomain(input, (string) => (
+    regexPunycode.test(string) ? decode(string.slice(4).toLowerCase()) : string
+  ));
+  const toASCII = (input) => mapDomain(input, (string) => (
+    regexNonASCII.test(string) ? `xn--${encode(string)}` : string
+  ));
+  return {
+    version: '2.1.0',
+    ucs2: { decode: ucs2decode, encode: ucs2encode },
+    decode,
+    encode,
+    toASCII,
+    toUnicode,
+  };
+}
+
 function createBrowserV8Module(processObject, scope) {
-  const v8 = createV8Module(processObject);
+  const v8 = createV8Module(processObject, scope);
   return {
     ...v8,
     getHeapSnapshot() {
-      let snapshot = browserHeapSnapshot(scope);
-      return {
-        pause() { return this; },
-        resume() { return this; },
-        destroy() { snapshot = ''; return this; },
-        read() {
-          const value = snapshot;
-          snapshot = '';
-          return value;
-        },
-      };
+      return createWorkerHeapSnapshot(scope);
     },
   };
 }
@@ -409,6 +2335,390 @@ function moduleSearchPaths(filename) {
   return result;
 }
 
+function createSourceMapClass() {
+  let base64Map;
+  const base64Digits = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const vlqBaseShift = 5;
+  const vlqBaseMask = (1 << vlqBaseShift) - 1;
+  const vlqContinuationMask = 1 << vlqBaseShift;
+
+  class StringCharIterator {
+    constructor(string) {
+      this.string = string;
+      this.position = 0;
+    }
+
+    next() {
+      return this.string.charAt(this.position++);
+    }
+
+    peek() {
+      return this.string.charAt(this.position);
+    }
+
+    hasNext() {
+      return this.position < this.string.length;
+    }
+  }
+
+  const cloneSourceMapV3 = (payload) => {
+    if (payload === null || typeof payload !== 'object') {
+      const error = new TypeError('The "payload" argument must be of type object');
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    const clone = { ...payload };
+    for (const key of Object.keys(clone)) {
+      if (Array.isArray(clone[key])) clone[key] = clone[key].slice();
+    }
+    return clone;
+  };
+
+  const isSeparator = (character) => character === ',' || character === ';';
+  const decodeVLQ = (iterator) => {
+    let result = 0;
+    let shift = 0;
+    let digit;
+    do {
+      digit = base64Map[iterator.next()];
+      result += (digit & vlqBaseMask) << shift;
+      shift += vlqBaseShift;
+    } while (digit & vlqContinuationMask);
+    const negative = result & 1;
+    result >>>= 1;
+    if (!negative) return result;
+    return -result | (1 << 31);
+  };
+
+  class SourceMap {
+    #payload;
+    #mappings = [];
+    #sources = {};
+    #sourceContentByURL = {};
+    #lineLengths;
+
+    constructor(payload, { lineLengths } = {}) {
+      if (!base64Map) {
+        base64Map = {};
+        for (let index = 0; index < base64Digits.length; index += 1) {
+          base64Map[base64Digits[index]] = index;
+        }
+      }
+      this.#payload = cloneSourceMapV3(payload);
+      this.#parseMappingPayload();
+      if (Array.isArray(lineLengths) && lineLengths.length) this.#lineLengths = lineLengths;
+    }
+
+    get payload() {
+      return cloneSourceMapV3(this.#payload);
+    }
+
+    get lineLengths() {
+      return this.#lineLengths ? this.#lineLengths.slice() : undefined;
+    }
+
+    #parseMappingPayload() {
+      if (this.#payload.sections) {
+        for (const section of this.#payload.sections) {
+          this.#parseMap(section.map, section.offset.line, section.offset.column);
+        }
+      } else {
+        this.#parseMap(this.#payload, 0, 0);
+      }
+      this.#mappings.sort((left, right) => left[0] - right[0] || left[1] - right[1]);
+    }
+
+    #parseMap(map, lineNumber, columnNumber) {
+      let sourceIndex = 0;
+      let sourceLineNumber = 0;
+      let sourceColumnNumber = 0;
+      let nameIndex = 0;
+      const sources = [];
+      for (let index = 0; index < map.sources.length; index += 1) {
+        const url = map.sources[index];
+        sources.push(url);
+        this.#sources[url] = true;
+        if (map.sourcesContent?.[index]) this.#sourceContentByURL[url] = map.sourcesContent[index];
+      }
+
+      const iterator = new StringCharIterator(map.mappings);
+      let sourceURL = sources[sourceIndex];
+      while (true) {
+        if (iterator.peek() === ',') iterator.next();
+        else {
+          while (iterator.peek() === ';') {
+            lineNumber += 1;
+            columnNumber = 0;
+            iterator.next();
+          }
+          if (!iterator.hasNext()) break;
+        }
+
+        columnNumber += decodeVLQ(iterator);
+        if (isSeparator(iterator.peek())) {
+          this.#mappings.push([lineNumber, columnNumber]);
+          continue;
+        }
+
+        const sourceIndexDelta = decodeVLQ(iterator);
+        if (sourceIndexDelta) {
+          sourceIndex += sourceIndexDelta;
+          sourceURL = sources[sourceIndex];
+        }
+        sourceLineNumber += decodeVLQ(iterator);
+        sourceColumnNumber += decodeVLQ(iterator);
+        let name;
+        if (!isSeparator(iterator.peek())) {
+          nameIndex += decodeVLQ(iterator);
+          name = map.names?.[nameIndex];
+        }
+        this.#mappings.push([
+          lineNumber,
+          columnNumber,
+          sourceURL,
+          sourceLineNumber,
+          sourceColumnNumber,
+          name,
+        ]);
+      }
+    }
+
+    findEntry(lineOffset, columnOffset) {
+      let first = 0;
+      let count = this.#mappings.length;
+      while (count > 1) {
+        const step = count >> 1;
+        const middle = first + step;
+        const mapping = this.#mappings[middle];
+        if (lineOffset < mapping[0]
+          || (lineOffset === mapping[0] && columnOffset < mapping[1])) {
+          count = step;
+        } else {
+          first = middle;
+          count -= step;
+        }
+      }
+      const entry = this.#mappings[first];
+      if (!entry || (!first && (lineOffset < entry[0]
+        || (lineOffset === entry[0] && columnOffset < entry[1])))) return {};
+      return {
+        generatedLine: entry[0],
+        generatedColumn: entry[1],
+        originalSource: entry[2],
+        originalLine: entry[3],
+        originalColumn: entry[4],
+        name: entry[5],
+      };
+    }
+
+    findOrigin(lineNumber, columnNumber) {
+      const range = this.findEntry(lineNumber - 1, columnNumber - 1);
+      if (range.originalSource === undefined
+        || range.originalLine === undefined
+        || range.originalColumn === undefined
+        || range.generatedLine === undefined
+        || range.generatedColumn === undefined) {
+        return {};
+      }
+      const lineOffset = lineNumber - range.generatedLine;
+      const columnOffset = columnNumber - range.generatedColumn;
+      return {
+        name: range.name,
+        fileName: range.originalSource,
+        lineNumber: range.originalLine + lineOffset,
+        columnNumber: range.originalColumn + columnOffset,
+      };
+    }
+  }
+
+  return SourceMap;
+}
+
+function moduleHasStaticEsmSyntax(source) {
+  return /(?:^|[;\n])\s*export\s+(?:default\b|(?:const|let|var|function|class)\b|[*{])/.test(source);
+}
+
+function cjsStaticExportNames(source) {
+  const names = new Set();
+  const add = (name) => {
+    if (typeof name !== 'string' || !name) return;
+    for (let index = 0; index < name.length; index += 1) {
+      const code = name.charCodeAt(index);
+      if (code >= 0xD800 && code <= 0xDBFF) {
+        const next = name.charCodeAt(index + 1);
+        if (Number.isNaN(next) || next < 0xDC00 || next > 0xDFFF) return;
+        index += 1;
+      } else if (code >= 0xDC00 && code <= 0xDFFF) return;
+    }
+    if (/^[^\u0000-\u001F]+$/u.test(name)) names.add(name);
+  };
+  for (const match of String(source).matchAll(/\b(?:exports|module\.exports)\s*\.\s*([$_A-Za-z][$_\w]*)/g)) add(match[1]);
+  for (const match of String(source).matchAll(/\b(?:exports|module\.exports)\s*\[\s*(['\"])(.*?)\1\s*\]/g)) {
+    add(match[2]
+      .replace(/\\u\{([0-9a-f]+)\}/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)))
+      .replace(/\\u([0-9a-f]{4})/gi, (_, code) => String.fromCharCode(parseInt(code, 16))));
+  }
+  for (const match of String(source).matchAll(/Object\.defineProperty\(\s*exports\s*,\s*(['\"])(.*?)\1/g)) add(match[2]);
+  return names;
+}
+
+function moduleSynchronousEsmSource(source, filename = '/node/index.mjs') {
+  let transformed = String(source);
+  const prelude = "Object.defineProperty(module.exports, Symbol.toStringTag, { value: 'Module' });\n";
+  let reexportIndex = 0;
+  let namespaceIndex = 0;
+  const importBindings = (clause, request, namespace = false) => {
+    const trimmed = clause.trim();
+    if (trimmed.startsWith('{')) {
+      const bindings = trimmed.slice(1, -1).split(',').map((part) => part.trim()).filter(Boolean).map((part) => {
+        const [imported, local = imported] = part.split(/\s+as\s+/);
+        return `${JSON.stringify(imported)}: ${local}`;
+      }).join(', ');
+      return `const { ${bindings} } = ${request};`;
+    }
+    if (trimmed.startsWith('*')) {
+      const local = trimmed.match(/\bas\s+([$_A-Za-z][$_\w]*)/)?.[1];
+      if (!namespace) return `const ${local} = ${request};`;
+      const binding = `__bnhNamespace${namespaceIndex++}`;
+      const keys = `[...(globalThis.__BNH_CJS_EXPORT_METADATA__?.get(${binding}) || Object.keys(${binding})), ...(${binding}[Symbol.toStringTag] === 'Module' ? [] : ['default'])].sort()`;
+      return `const ${binding} = ${request}; const ${local} = Object.fromEntries(${keys}.map((name) => [name, name === 'default' ? ${binding} : ${binding}[name]]));`;
+    }
+    const comma = trimmed.indexOf(',');
+    const defaultName = comma < 0 ? trimmed : trimmed.slice(0, comma).trim();
+    let result = `const ${defaultName} = ${request};`;
+    if (comma >= 0) result += `\n${importBindings(trimmed.slice(comma + 1), request)}`;
+    return result;
+  };
+  transformed = transformed.replace(
+    /(^|[;\n])\s*import\s+([\s\S]*?)\s+from\s+(['\"])([^'\"]+)\3\s*;?/g,
+    (_, prefix, clause, quote, specifier) => `${prefix}${importBindings(clause, `require(${JSON.stringify(specifier)})`, clause.trim().startsWith('*'))}`,
+  );
+  transformed = transformed.replace(
+    /(^|[;\n])\s*import\s+(['\"])([^'\"]+)\2\s*;?/g,
+    (_, prefix, quote, specifier) => `${prefix}require(${JSON.stringify(specifier)});`,
+  );
+  transformed = transformed.replace(/\bconst\s+(require|exports|module)\s*=/g, 'var $1 =');
+  transformed = transformed.replace(
+    /(^|[;\n])\s*export\s+default\s+([^;]+);?/g,
+    (_, prefix, expression) => `${prefix}Object.defineProperty(module.exports, '__esModule', { value: true, enumerable: true }); module.exports.default = (${expression});`,
+  );
+  transformed = transformed.replace(
+    /(^|[;\n])\s*export\s+(const|let|var)\s+([$_A-Za-z][$_\w]*)\s*=\s*([^;\n]+);?/g,
+    (_, prefix, declaration, name, expression) => `${prefix}${declaration} ${name} = ${expression}; module.exports.${name} = ${name};`,
+  );
+  transformed = transformed.replace(
+    /(^|[;\n])\s*export\s+\{([^}]+)\}(?!\s+from\b)\s*;?/g,
+    (_, prefix, names) => `${prefix}${names.split(',').map((part) => part.trim()).filter(Boolean).map((part) => {
+      const [local, exported = local] = part.trim().split(/\s+as\s+/);
+      return `module.exports[${JSON.stringify(exported)}] = ${local};`;
+    }).join('\n')}`,
+  );
+  transformed = transformed.replace(
+    /(^|[;\n])\s*export\s+\{([^}]+)\}\s+from\s+(['\"])([^'\"]+)\3\s*;?/g,
+    (_, prefix, names, quote, specifier) => {
+      const request = `require(${JSON.stringify(specifier)})`;
+      const binding = `__bnhReexport${reexportIndex++}`;
+      return `${prefix}const ${binding} = ${request};\n${names.split(',').map((part) => {
+        const [local, exported = local] = part.trim().split(/\s+as\s+/);
+        return `module.exports[${JSON.stringify(exported)}] = ${binding}[${JSON.stringify(local)}];`;
+      }).join('\n')}`;
+    },
+  );
+  transformed = transformed.replace(
+    /(^|[;\n])\s*export\s+(async\s+)?(function|class)\s+([$_A-Za-z][$_\w]*)/g,
+    (_, prefix, asyncKeyword = '', declaration, name) => `${prefix}${asyncKeyword}${declaration} ${name}`,
+  );
+  const exportedDeclarations = [...String(source).matchAll(/\bexport\s+(?:async\s+)?(?:function|class)\s+([$_A-Za-z][$_\w]*)/g)];
+  if (exportedDeclarations.length) {
+    transformed += `\n${exportedDeclarations.map(([, name]) => `module.exports.${name} = ${name};`).join('\n')}`;
+  }
+  transformed = transformed.replace(
+    /(^|[;\n])\s*export\s+\*\s+from\s+(['\"])([^'\"]+)\2\s*;?/g,
+    (_, prefix, quote, specifier) => `${prefix}Object.assign(module.exports, require(${JSON.stringify(specifier)}));`,
+  );
+  transformed = transformed.replace(/\bimport\.meta\.url\b/g, JSON.stringify(pathToFileURL(filename).href));
+  return `${prelude}${transformed}`;
+}
+
+function moduleArgumentTypeError(name, expected, value) {
+  const received = value === null
+    ? 'null'
+    : value === undefined
+      ? 'undefined'
+      : Array.isArray(value)
+        ? 'an instance of Array'
+        : typeof value === 'object'
+          ? `an instance of ${value.constructor?.name || 'Object'}`
+          : `type ${typeof value} (${String(value)})`;
+  const error = new TypeError(`The "${name}" argument must be of type ${expected}. Received ${received}`);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  error.toString = () => `TypeError [ERR_INVALID_ARG_TYPE]: ${error.message}`;
+  return error;
+}
+
+function modulePropertyTypeError(name, expected, value) {
+  const received = value === null
+    ? 'null'
+    : value === undefined
+      ? 'undefined'
+      : Array.isArray(value)
+        ? 'an instance of Array'
+        : typeof value === 'object'
+          ? `an instance of ${value.constructor?.name || 'Object'}`
+          : `type ${typeof value} (${String(value)})`;
+  const error = new TypeError(`The "${name}" property must be of type ${expected}. Received ${received}`);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  error.toString = () => `TypeError [ERR_INVALID_ARG_TYPE]: ${error.message}`;
+  return error;
+}
+
+const runtimeChildSignalNames = new Set([
+  'SIGHUP', 'SIGINT', 'SIGQUIT', 'SIGILL', 'SIGTRAP', 'SIGABRT', 'SIGBUS',
+  'SIGFPE', 'SIGKILL', 'SIGUSR1', 'SIGSEGV', 'SIGUSR2', 'SIGPIPE', 'SIGALRM',
+  'SIGTERM', 'SIGCHLD', 'SIGCONT', 'SIGSTOP', 'SIGTSTP', 'SIGTTIN', 'SIGTTOU',
+  'SIGURG', 'SIGXCPU', 'SIGXFSZ', 'SIGVTALRM', 'SIGPROF', 'SIGWINCH', 'SIGIO',
+  'SIGPWR', 'SIGSYS',
+]);
+const runtimeChildSignalNumbers = new Set([
+  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21,
+  22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+]);
+
+function blankTypeScriptText(value) {
+  return String(value).replace(/[^\r\n]/g, ' ');
+}
+
+function stripTypeScriptSource(source) {
+  let result = String(source);
+
+  // Declarations which have no JavaScript representation are blanked rather
+  // than removed so that generated stack locations remain stable.
+  result = result.replace(
+    /(^|[;\n])([ \t]*(?:(?:declare|export)\s+)*(?:interface|type)\s+[A-Za-z_$][\w$]*(?:\s+extends[^\{=]+)?\s*(?:\{[\s\S]*?\}\s*;?|=[\s\S]*?;))/g,
+    (_, prefix, declaration) => `${prefix}${blankTypeScriptText(declaration)}`,
+  );
+  result = result.replace(
+    /\b(?:import|export)\s+type\b[^;\n]*(?:;|(?=\n|$))/g,
+    (declaration) => blankTypeScriptText(declaration),
+  );
+
+  // Type annotations are recognized at JavaScript delimiters so ordinary
+  // object-literal properties and strings are left untouched.
+  result = result.replace(
+    /[!?]?\s*:\s*[A-Za-z_$][\w$]*(?:\s*<[^>\n]*>)?(?:\s*\[\s*\])?(?:\s*\|\s*[A-Za-z_$][\w$]*(?:\s*<[^>\n]*>)?(?:\s*\[\s*\])?)*(?=\s*(?:[,)=;{]|=>|$))/g,
+    (annotation) => blankTypeScriptText(annotation),
+  );
+  result = result.replace(
+    /\s+as\s+(?:const\b|[A-Za-z_$][\w$]*(?:\s*<[^>\n]*>)?(?:\s*\[\s*\])?)/g,
+    (assertion) => blankTypeScriptText(assertion),
+  );
+  result = result.replace(
+    /([A-Za-z_$][\w$]*)!\s*(?=[,.;)=])/g,
+    '$1 ',
+  );
+  return result;
+}
+
 function installAbortSignalCompatibility(scope) {
   const AbortSignalClass = scope.AbortSignal;
   if (typeof AbortSignalClass?.any !== 'function') return;
@@ -465,15 +2775,62 @@ function rejectNativeAddon(pathname, processObject) {
 }
 
 function createConsole(stdout, stderr, nativeConsole) {
-  const write = (sink, values) => sink(values.map((value) => typeof value === 'string' ? value : String(value)).join(' ') + '\n');
-  return {
-    ...nativeConsole,
-    log: (...values) => write(stdout, values),
-    info: (...values) => write(stdout, values),
-    warn: (...values) => write(stderr, values),
-    error: (...values) => write(stderr, values),
-    debug: (...values) => write(stdout, values),
+  const formatValue = (value) => {
+    if (value && typeof value === 'object' && Object.getPrototypeOf(value) === null
+      && value[Symbol.toStringTag] === 'Module') {
+      return `[Module: null prototype] { ${Object.keys(value)
+        .map((key) => `${key}: ${nodeInspect(value[key])}`).join(', ')} }`;
+    }
+    return typeof value === 'object' || typeof value === 'function'
+      ? nodeInspect(value)
+      : String(value);
   };
+  const write = (instance, fallback, values) => {
+    const indentation = ' '.repeat(instance._groupIndent * instance._groupIndentation);
+    const output = `${indentation}${values.map(formatValue).join(' ').replaceAll('\n', `\n${indentation}`)}\n`;
+    const stream = instance._stdout;
+    if (stream && typeof stream.write === 'function') {
+      stream.write(output);
+      return;
+    }
+    fallback(output);
+  };
+  const writeError = (instance, fallback, values) => {
+    const indentation = ' '.repeat(instance._groupIndent * instance._groupIndentation);
+    const output = `${indentation}${values.map(formatValue).join(' ').replaceAll('\n', `\n${indentation}`)}\n`;
+    const stream = instance._stderr;
+    if (stream && typeof stream.write === 'function') {
+      stream.write(output);
+      return;
+    }
+    fallback(output);
+  };
+  const consoleObject = {
+    ...nativeConsole,
+    _stdout: { write: (value) => stdout(value) },
+    _stderr: { write: (value) => stderr(value) },
+    log: (...values) => write(consoleObject, stdout, values),
+    info: (...values) => write(consoleObject, stdout, values),
+    warn: (...values) => writeError(consoleObject, stderr, values),
+    error: (...values) => writeError(consoleObject, stderr, values),
+    debug: (...values) => write(consoleObject, stdout, values),
+    dirxml: (...values) => write(consoleObject, stdout, values),
+    group(...values) {
+      if (values.length) consoleObject.log(...values);
+      consoleObject._groupIndent += 1;
+    },
+    groupCollapsed(...values) { consoleObject.group(...values); },
+    groupEnd() { consoleObject._groupIndent = Math.max(0, consoleObject._groupIndent - 1); },
+    _groupIndentation: 2,
+    _groupIndent: 0,
+  };
+  Object.defineProperty(consoleObject, Symbol.toStringTag, {
+    configurable: true,
+    enumerable: false,
+    value: 'console',
+    writable: false,
+  });
+  return consoleObject;
 }
 
 // These values describe the browser runtime, not the machine running the
@@ -495,8 +2852,18 @@ const BROWSER_PROCESS_CONFIG = Object.freeze({
 });
 
 const BROWSER_PROCESS_FEATURES = Object.freeze({
-  inspector: false,
+  inspector: true,
   debug: false,
+  uv: false,
+  ipv6: true,
+  openssl_is_boringssl: false,
+  tls_alpn: true,
+  tls_sni: true,
+  tls_ocsp: true,
+  tls: true,
+  cached_builtins: false,
+  require_module: false,
+  typescript: false,
 });
 
 const DEFAULT_RUNTIME_CAPABILITIES = Object.freeze({
@@ -512,6 +2879,7 @@ const BROWSER_PROCESS_VERSIONS = Object.freeze({
   node: '22.0.0',
   acorn: '8.16.0',
   ada: '2.7.8',
+  amaro: '1.1.8',
   ares: '1.33.1',
   brotli: '1.1.0',
   cjs_module_lexer: '2.2.0',
@@ -526,7 +2894,9 @@ const BROWSER_PROCESS_VERSIONS = Object.freeze({
   openssl: '3.0.0',
   simdjson: '3.9.3',
   simdutf: '5.2.4',
+  sqlite: '3.51.3',
   tz: '2024a',
+  undici: '6.28.0',
   unicode: '15.1',
   uv: '1.48.0',
   uvwasi: '0.0.20',
@@ -551,6 +2921,8 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
   const nativeClearTimeout = nativeTimers?.clearTimeout || scope.clearTimeout.bind(scope);
   const nativeSetInterval = nativeTimers?.setInterval || scope.setInterval.bind(scope);
   const nativeClearInterval = nativeTimers?.clearInterval || scope.clearInterval.bind(scope);
+  const immediateQueue = new Map();
+  let nextImmediateId = 0;
   let exitCode = 0;
   let exitSignal = null;
   let umask = 0o022;
@@ -558,14 +2930,24 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
   let gid = 1000;
   let exited = false;
   let exitRequested = false;
+  let exiting = false;
   let exitEventEmitted = false;
   let beforeExitEventEmitted = false;
+  const stdin = new Readable({ read() {} });
+  stdin.isTTY = false;
+  installProcessStdinSurface(stdin);
   const terminateBySignal = (signal) => {
     if (exited) return;
     exitSignal = signal;
     exitRequested = true;
     exited = true;
-    options.onSignal?.(signal);
+    try {
+      for (const server of processObject._bnhHttpServers || []) server.close?.();
+    } finally {
+      processObject._bnhHttpServers?.clear?.();
+      processObject._bnhReleaseTasks?.();
+      options.onSignal?.(signal);
+    }
   };
   const dispatchUncaughtException = (error, origin = 'uncaughtException') => {
     const dispatch = () => {
@@ -582,8 +2964,12 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       if (!handled) {
         stderr(`${error?.stack || error}\n`);
         if (options.abortOnUncaughtException) terminateBySignal('SIGABRT');
-        else exitCode ||= 1;
+        else {
+          exitCode ||= 1;
+        }
+        return false;
       }
+      return true;
     };
     // The timer callback has already unwound when process dispatches the error.
     // Re-enter its recorded async resource while user error handlers run.
@@ -592,6 +2978,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     else dispatch();
   };
   const setTimer = (callback, delay, repeat = false, type = repeat ? 'Timeout' : 'Timeout') => {
+    const useImmediateChannel = type === 'Immediate';
     const resource = new AsyncResource(type);
     const handle = {
       id: null,
@@ -600,6 +2987,8 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       _idleStart: Date.now(),
       _onTimeout: callback,
       _refed: true,
+      _run: null,
+      _immediateChannel: Boolean(useImmediateChannel),
       resource,
       ref() { this._refed = true; return this; },
       unref() { this._refed = false; return this; },
@@ -636,6 +3025,20 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
         resource.emitDestroy();
         return;
       }
+      if (useImmediateChannel) {
+        try {
+          resource.runInAsyncScope(() => {
+            try { callback.call(handle); } catch (error) {
+              dispatchUncaughtException(error);
+            }
+          });
+        } finally {
+          resource.emitDestroy();
+        }
+        timers.delete(handle);
+        timerHandles.delete(String(handle.id));
+        return;
+      }
       const previousProcess = scope.process;
       const previousTimers = {
         setTimeout: scope.setTimeout,
@@ -667,7 +3070,19 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
         timerHandles.delete(String(handle.id));
       }
     };
-    handle.id = repeat ? nativeSetInterval(run, delay) : nativeSetTimeout(run, delay);
+    handle._run = run;
+    if (useImmediateChannel) {
+      handle.id = ++nextImmediateId;
+      immediateQueue.set(handle.id, handle);
+      queueMicrotask(() => {
+        const queued = immediateQueue.get(handle.id);
+        if (!queued) return;
+        immediateQueue.delete(handle.id);
+        queued._run?.();
+      });
+    } else {
+      handle.id = repeat ? nativeSetInterval(run, delay) : nativeSetTimeout(run, delay);
+    }
     timers.add(handle);
     timerHandles.set(String(handle.id), handle);
     return handle;
@@ -677,6 +3092,13 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       ? handle
       : timerHandles.get(String(handle));
     if (!resolved) return;
+    if (resolved._immediateChannel) {
+      immediateQueue.delete(resolved.id);
+      timers.delete(resolved);
+      timerHandles.delete(String(resolved.id));
+      resolved.resource?.emitDestroy?.();
+      return;
+    }
     if (resolved.repeat) nativeClearInterval(resolved.id);
     else nativeClearTimeout(resolved.id);
     timers.delete(resolved);
@@ -684,6 +3106,39 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     resolved.resource?.emitDestroy?.();
   };
   const processObject = new EventEmitter();
+  const processEvents = Object.create(null);
+  const syncProcessEvents = () => {
+    for (const key of Reflect.ownKeys(processEvents)) delete processEvents[key];
+    for (const [name, listeners] of processObject._listeners) {
+      if (!listeners.size) continue;
+      const values = [...listeners];
+      Object.defineProperty(processEvents, name, {
+        configurable: true,
+        enumerable: typeof name === 'string',
+        writable: true,
+        value: values.length === 1 ? values[0] : values,
+      });
+    }
+    processObject._eventsCount = processObject._listeners.size;
+  };
+  Object.defineProperty(processObject, '_events', {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: processEvents,
+  });
+  Object.defineProperty(processObject, '_eventsCount', {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: 0,
+  });
+  Object.defineProperty(processObject, '_exiting', {
+    configurable: true,
+    enumerable: true,
+    get: () => exiting,
+    set: (value) => { exiting = Boolean(value); },
+  });
   installWarningContract(processObject, { synchronous: options.synchronousWarnings });
   const signalResources = new Map();
   const isSignalEvent = (name) => typeof name === 'string' && /^SIG[A-Z0-9]+$/.test(name);
@@ -704,15 +3159,30 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
         ?? 1;
       signalResources.set(name, new AsyncResource('SIGNALWRAP', { triggerAsyncId }));
     }
-    return originalProcessOn(name, listener);
+    const result = originalProcessOn(name, listener);
+    syncProcessEvents();
+    return result;
+  };
+  processObject.addListener = processObject.on;
+  processObject.prependListener = (name, listener) => {
+    const result = EventEmitter.prototype.prependListener.call(processObject, name, listener);
+    syncProcessEvents();
+    return result;
+  };
+  processObject.prependOnceListener = (name, listener) => {
+    const result = EventEmitter.prototype.prependOnceListener.call(processObject, name, listener);
+    syncProcessEvents();
+    return result;
   };
   processObject.removeListener = (name, listener) => {
     const result = originalProcessRemoveListener(name, listener);
+    syncProcessEvents();
     if (isSignalEvent(name) && processObject.listenerCount(name) === 0) destroySignalResource(name);
     return result;
   };
   processObject.removeAllListeners = (name) => {
     const result = originalProcessRemoveAllListeners(name);
+    syncProcessEvents();
     if (name === undefined) {
       for (const signal of signalResources.keys()) destroySignalResource(signal);
     } else if (isSignalEvent(name)) {
@@ -720,18 +3190,28 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     }
     return result;
   };
+  processObject.off = processObject.removeListener;
   processObject.emit = (name, ...args) => {
     const resource = signalResources.get(name);
     if (!resource) return originalProcessEmit(name, ...args);
     return resource.runInAsyncScope(() => originalProcessEmit(name, ...args));
   };
-  const normalizeCredential = (value, kind) => {
+  const validateCredentialType = (value, argumentName = 'id') => {
     if (typeof value !== 'number' && typeof value !== 'string') {
-      const received = value === null ? 'null' : value?.constructor?.name || typeof value;
-      const error = new TypeError(`The "id" argument must be one of type number or string. Received ${received === 'Object' ? 'an instance of Object' : `type ${received}`}`);
+      const received = value === null || value === undefined
+        ? String(value)
+        : typeof value === 'function'
+          ? `function ${value.name || ''}`
+          : typeof value === 'object'
+            ? `an instance of ${value.constructor?.name || 'Object'}`
+            : `type ${typeof value} (${nodeInspect(value, { colors: false })})`;
+      const error = new TypeError(`The "${argumentName}" argument must be one of type number or string. Received ${received}`);
       error.code = 'ERR_INVALID_ARG_TYPE';
       throw error;
     }
+  };
+  const normalizeCredential = (value, kind, argumentName = 'id') => {
+    validateCredentialType(value, argumentName);
     if (typeof value === 'string' && !/^[0-9]+$/.test(value)) {
       const error = new Error(`${kind} identifier does not exist: ${value}`);
       error.code = 'ERR_UNKNOWN_CREDENTIAL';
@@ -744,6 +3224,57 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       throw error;
     }
     return numeric;
+  };
+  const normalizeGroupId = (value, name) => {
+    if (typeof value === 'number') {
+      if (!Number.isInteger(value)) {
+        const error = new RangeError(`The value of "${name}" is out of range. It must be an integer. Received ${value}`);
+        error.code = 'ERR_OUT_OF_RANGE';
+        throw error;
+      }
+      if (value < 0 || value > 0xffffffff) {
+        const error = new RangeError(`The value of "${name}" is out of range. It must be >= 0 && <= 4294967295. Received ${value}`);
+        error.code = 'ERR_OUT_OF_RANGE';
+        throw error;
+      }
+      return value;
+    }
+    if (typeof value === 'string') {
+      const error = new Error(`Group identifier does not exist: ${value}`);
+      error.code = 'ERR_UNKNOWN_CREDENTIAL';
+      throw error;
+    }
+    const received = value === null
+      ? 'null'
+      : value === undefined
+        ? 'undefined'
+        : Array.isArray(value)
+          ? 'an instance of Array'
+          : typeof value === 'object'
+            ? `an instance of ${value.constructor?.name || 'Object'}`
+            : typeof value === 'function'
+              ? `function ${value.name || ''}`
+              : `type ${typeof value} (${String(value)})`;
+    const error = new TypeError(`The "${name}" argument must be one of type number or string. Received ${received}`);
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  };
+  const validateGroups = (groups) => {
+    if (!Array.isArray(groups)) {
+      const received = groups === null
+        ? 'null'
+        : groups === undefined
+          ? 'undefined'
+          : typeof groups === 'object'
+            ? `an instance of ${groups.constructor?.name || 'Object'}`
+            : typeof groups === 'function'
+              ? `function ${groups.name || ''}`
+              : `type ${typeof groups} (${String(groups)})`;
+      const error = new TypeError(`The "groups" argument must be an instance of Array. Received ${received}`);
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    for (let index = 0; index < groups.length; index += 1) normalizeGroupId(groups[index], `groups[${index}]`);
   };
   const parseUmask = (mask) => {
     if (typeof mask === 'string') {
@@ -768,6 +3299,29 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
   };
   const memoryUsage = () => ({ rss: 0, heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0 });
   memoryUsage.rss = () => 0;
+  const nextTickQueue = [];
+  let nextTickScheduled = false;
+  const runNextTicks = () => {
+    while (nextTickQueue.length) {
+      const { callback, args, resource, release } = nextTickQueue.shift();
+      try { resource.runInAsyncScope(callback, processObject, ...args); }
+      finally {
+        resource.emitDestroy();
+        release?.();
+      }
+    }
+  };
+  const nextTick = (callback, ...args) => {
+    const resource = new AsyncResource('TickObject');
+    nextTickQueue.push({ callback, args, resource, release: trackTask() });
+    if (!nextTickScheduled) {
+      nextTickScheduled = true;
+      scope.queueMicrotask(() => {
+        nextTickScheduled = false;
+        runNextTicks();
+      });
+    }
+  };
   Object.assign(processObject, {
     argv: [...(options.argv || ['node'])],
     argv0: options.argv0 ?? 'node',
@@ -775,6 +3329,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     moduleLoadList: [],
     pid: 1,
     ppid: 0,
+    debugPort: 9229,
     platform: 'linux',
     arch: 'x64',
     version: 'v22.0.0-browser',
@@ -783,34 +3338,17 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     features: BROWSER_PROCESS_FEATURES,
     versions: browserProcessVersions(scope),
     title: 'browser-node',
-    execPath: '/browser/node',
+    execPath: options.execPath || '/browser/node',
     execArgv: [],
-    stdin: {
-      isTTY: false,
-      on(...args) { processObject.on(...args); return this; },
-      once(...args) { processObject.once(...args); return this; },
-      removeListener(...args) { processObject.removeListener(...args); return this; },
-      off(...args) { processObject.off(...args); return this; },
-      listenerCount: (...args) => processObject.listenerCount(...args),
-      listeners: (...args) => processObject.listeners(...args),
-      push(value) {
-        if (value === null) processObject.emit('end');
-        else processObject.emit('data', value);
-        return true;
-      },
-      end(_value, _encoding, callback) {
-        if (typeof _encoding === 'function') callback = _encoding;
-        callback?.();
-        return this;
-      },
-      resume() {},
-      pause() {},
-    },
+    execve: createBrowserExecve(processObject),
+    stdin,
     openStdin: () => processObject.stdin,
     stdout: {
       isTTY: false,
       write: (value) => { stdout(normalizeOutputChunk(value)); return true; },
       end: () => {},
+      ref() { return this; },
+      unref() { return this; },
       on(...args) { processObject.on(...args); return this; },
       once(...args) { processObject.once(...args); return this; },
       removeListener(...args) { processObject.removeListener(...args); return this; },
@@ -820,6 +3358,8 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       isTTY: false,
       write: (value) => { stderr(normalizeOutputChunk(value)); return true; },
       end: () => {},
+      ref() { return this; },
+      unref() { return this; },
       on(...args) { processObject.on(...args); return this; },
       once(...args) { processObject.once(...args); return this; },
       removeListener(...args) { processObject.removeListener(...args); return this; },
@@ -838,34 +3378,80 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     geteuid: () => uid,
     getgid: () => gid,
     getegid: () => gid,
+    getgroups: () => [gid],
+    initgroups: (user, extraGroup) => {
+      validateCredentialType(user, 'user');
+      validateCredentialType(extraGroup, 'extraGroup');
+      normalizeCredential(extraGroup, 'Group', 'extraGroup');
+      normalizeCredential(user, 'User', 'user');
+    },
     setuid: (value) => { uid = normalizeCredential(value, 'User'); },
     seteuid: (value) => { uid = normalizeCredential(value, 'User'); },
     setgid: (value) => { gid = normalizeCredential(value, 'Group'); },
     setegid: (value) => { gid = normalizeCredential(value, 'Group'); },
-    nextTick: (callback, ...args) => {
-      const resource = new AsyncResource('TickObject');
-      const release = trackTask();
-      scope.queueMicrotask(() => {
-        try { resource.runInAsyncScope(callback, processObject, ...args); }
-        finally {
-          resource.emitDestroy();
-          release?.();
-        }
-      });
+    ref(maybeRefable) {
+      if (maybeRefable == null) return;
+      const ref = maybeRefable[Symbol.for('nodejs.ref')] || maybeRefable.ref;
+      if (typeof ref === 'function') Reflect.apply(ref, maybeRefable, []);
     },
+    unref(maybeRefable) {
+      if (maybeRefable == null) return;
+      const unref = maybeRefable[Symbol.for('nodejs.unref')] || maybeRefable.unref;
+      if (typeof unref === 'function') Reflect.apply(unref, maybeRefable, []);
+    },
+    setgroups(groups) { validateGroups(groups); },
+    nextTick,
+    _tickCallback: runNextTicks,
+    _startProfilerIdleNotifier: () => {},
+    _stopProfilerIdleNotifier: () => {},
+    _rawDebug: (...args) => { processObject.stderr.write(`${formatProcessDebug(...args)}\n`); },
+    _linkedBinding: (module) => {
+      const error = new Error(`No such binding was linked: ${String(module)}`);
+      error.code = 'ERR_INVALID_MODULE';
+      throw error;
+    },
+    assert: createDeprecate(processObject)(processAssertion, 'process.assert() is deprecated. Please use the `assert` module instead.', 'DEP0100'),
     uptime: () => (scope.performance?.now?.() || 0) / 1000,
     hrtime: (previous) => { const now = Math.floor((scope.performance?.now?.() || 0) * 1e6); const result = [Math.floor(now / 1e9), now % 1e9]; return previous ? [result[0] - previous[0], result[1] - previous[1]] : result; },
     memoryUsage,
     exit: (code = 0) => {
       exitCode = Number(code) || 0;
       exitRequested = true;
+      exiting = true;
       if (!exitEventEmitted) {
         exitEventEmitted = true;
         processObject.emit('exit', exitCode);
       }
       exited = true;
     },
+    reallyExit: () => {
+      exitCode = Number(processObject.exitCode) || 0;
+      exitRequested = true;
+      exitEventEmitted = true;
+      exited = true;
+    },
     abort: () => terminateBySignal('SIGABRT'),
+    _debugEnd: function _debugEnd() {},
+    _debugProcess: function _debugProcess() {},
+    _fatalException: (error, fromPromise) => {
+      const handled = dispatchUncaughtException(error, fromPromise ? 'unhandledRejection' : 'uncaughtException');
+      if (!handled) {
+        if (!exiting) {
+          exiting = true;
+          exitRequested = true;
+          exitCode = 1;
+          if (!exitEventEmitted) {
+            exitEventEmitted = true;
+            processObject.emit('exit', exitCode);
+          }
+        }
+      } else {
+        processObject._bnhSetTimer?.(() => {}, 0, false, 'Immediate');
+      }
+      return handled;
+    },
+    _getActiveHandles: function _getActiveHandles() { return []; },
+    _kill: function _kill() { return 0; },
     kill: (pid, signal = 'SIGTERM') => {
       const targetPid = Number(pid);
       const requestedSignal = String(signal || 'SIGTERM').toUpperCase();
@@ -882,7 +3468,11 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     dlopen: (_module, filename) => rejectNativeAddon(normalizePath(filename, options.cwd || '/node'), processObject),
     getCode: () => exitCode,
     getSignal: () => exitSignal,
-    _bnhAbort: (signal = 'SIGABRT') => terminateBySignal(signal),
+    _bnhAbort: (signal = 'SIGABRT', message = undefined) => {
+      if (message !== undefined) stderr(normalizeOutputChunk(message));
+      terminateBySignal(signal);
+      processObject._bnhReleaseTasks?.();
+    },
     _timers: timers,
     _bnhSetTimer: setTimer,
     _bnhClearTimer: clearTimer,
@@ -898,6 +3488,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       return true;
     },
     _markExited: () => {
+      exiting = true;
       if (!exitEventEmitted && !exitSignal) {
         exitEventEmitted = true;
         exitRequested = true;
@@ -909,12 +3500,58 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       for (const handle of timers) clearTimer(handle);
     },
   });
+  Object.defineProperty(processObject, Symbol.toStringTag, {
+    configurable: false,
+    enumerable: false,
+    writable: true,
+    value: 'process',
+  });
+  installProcessStdoutIterableSurface(processObject.stdout, processObject);
+  installProcessStderrSocketSurface(processObject.stderr, processObject);
+  const preloads = [];
+  const execArgv = options.execArgv || [];
+  for (let index = 0; index < execArgv.length; index += 1) {
+    const argument = String(execArgv[index]);
+    if (argument === '-r' || argument === '--require') preloads.push(String(execArgv[++index]));
+    else if (argument.startsWith('--require=')) preloads.push(argument.slice('--require='.length));
+  }
+  Object.defineProperty(processObject, '_preload_modules', {
+    configurable: true,
+    enumerable: true,
+    writable: false,
+    value: preloads,
+  });
+  Object.defineProperty(processObject, 'allowedNodeEnvironmentFlags', {
+    configurable: true,
+    enumerable: true,
+    get() {
+      const flags = createAllowedNodeEnvironmentFlags();
+      Object.defineProperty(this, 'allowedNodeEnvironmentFlags', {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: flags,
+      });
+      return flags;
+    },
+    set(value) {
+      Object.defineProperty(this, 'allowedNodeEnvironmentFlags', {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value,
+      });
+    },
+  });
   Object.defineProperty(processObject, 'exitCode', {
     configurable: true,
     enumerable: true,
     get: () => exitCode,
-    set: (value) => { exitCode = Number(value) || 0; },
+    set: (value) => {
+      exitCode = Number(value) || 0;
+    },
   });
+  installProcessFinalization(processObject);
   return { processObject, setTimer, clearTimer };
 }
 
@@ -922,6 +3559,8 @@ function createCryptoShim(scope, Buffer, processObject) {
   const crypto = scope.crypto;
   const Hmac = createHmacShim(Buffer, processObject, scope);
   const Hash = createHashShim(Buffer);
+  const Sign = createSignClass(Buffer, scope);
+  const Verify = createVerifyClass(Buffer, scope);
   const wrapBuffer = (operation) => (...args) => operation(...args).then((value) => Buffer.from(value));
   const runCallback = (resource, callback, ...args) => {
     resource.runInAsyncScope(() => {
@@ -953,9 +3592,15 @@ function createCryptoShim(scope, Buffer, processObject) {
     if (typeof callback !== 'function') return operation.then((value) => Buffer.from(value));
     callbackOperation('PBKDF2REQUEST', operation, callback, (value) => Buffer.from(value));
   };
-  const nodeRandomBytes = (size, callback) => {
-    if (typeof callback !== 'function') return Buffer.from(createRandomBytes(size, scope));
-    const operation = Promise.resolve().then(() => createRandomBytes(size, scope));
+  const nodeRandomBytes = function nodeRandomBytes(size, callback) {
+    if (arguments.length > 1 && typeof callback !== 'function') {
+      const error = new TypeError('The "callback" argument must be of type function');
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    const generated = createRandomBytes(size, scope);
+    if (typeof callback !== 'function') return Buffer.from(generated);
+    const operation = Promise.resolve(generated);
     callbackOperation('RANDOMBYTESREQUEST', operation, callback, (value) => Buffer.from(value));
   };
   const nodeRandomFillSync = (buffer, offset = 0, size) => (
@@ -964,6 +3609,37 @@ function createCryptoShim(scope, Buffer, processObject) {
   const nodeRandomFill = (buffer, offset, size, callback) => (
     randomFill(buffer, offset, size, callback, scope)
   );
+  const nodeRandomInt = (min, max, callback) => createRandomInt(min, max, callback, scope);
+  let pseudoRandomWarningEmitted = false;
+  const nodePseudoRandomBytes = function nodePseudoRandomBytes(size, callback) {
+    if (!pseudoRandomWarningEmitted) {
+      pseudoRandomWarningEmitted = true;
+      processObject.emitWarning?.('crypto.pseudoRandomBytes is deprecated.', {
+        code: 'DEP0115',
+        type: 'DeprecationWarning',
+      });
+    }
+    return nodeRandomBytes.apply(this, arguments);
+  };
+  const nodeScrypt = (password, salt, keyLength, options, callback) => {
+    const actualOptions = typeof options === 'function' ? {} : options;
+    const actualCallback = typeof options === 'function' ? options : callback;
+    validateScryptArguments(password, salt, keyLength, actualOptions ?? {}, scope);
+    if (typeof actualCallback !== 'function') {
+      const error = new TypeError('The "callback" argument must be of type function');
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    const operation = Promise.resolve().then(() => createScryptSync(
+      password,
+      salt,
+      keyLength,
+      actualOptions ?? {},
+      scope,
+    ));
+    callbackOperation('SCRYPTREQUEST', operation, actualCallback, (value) => Buffer.from(value));
+    return undefined;
+  };
   const nodeSign = (...args) => {
     const value = signSync(args[0], args[1], args[2], args[3], scope);
     return value === undefined ? wrapBuffer(sign)(...args) : Buffer.from(value);
@@ -972,17 +3648,8 @@ function createCryptoShim(scope, Buffer, processObject) {
     const value = verifySync(args[0], args[1], args[2], args[3], args[4], scope);
     return value === undefined ? verify(...args) : value;
   };
-  const nodeGenerateKeySync = (type, options = {}) => {
-    if (String(type).toLowerCase() !== 'aes') {
-      throw new Error(`synchronous ${type} key generation is unavailable in the browser runtime`);
-    }
-    const length = Number(options.length) || 256;
-    if (![128, 192, 256].includes(length)) {
-      const error = new RangeError('AES key length must be 128, 192, or 256 bits');
-      error.code = 'ERR_CRYPTO_INVALID_KEYLEN';
-      throw error;
-    }
-    return createSecretKeyShim(Buffer)(createRandomBytes(length / 8, scope));
+  const nodeGenerateKeySync = (type, options) => {
+    return generateKeySync(type, options);
   };
   const nodeHash = (algorithm, value, outputEncoding) => {
     if (typeof algorithm !== 'string') {
@@ -1009,31 +3676,9 @@ function createCryptoShim(scope, Buffer, processObject) {
     const result = Buffer.from(hashSync(algorithm, value));
     return encoding && encoding !== 'buffer' ? result.toString(encoding) : result;
   };
-  const createSign = (algorithm) => {
-    const chunks = [];
-    return {
-      update(value, encoding) {
-        chunks.push(Buffer.from(value, encoding));
-        return this;
-      },
-      sign(key) {
-        return nodeSign(algorithm, Buffer.concat(chunks), key);
-      },
-    };
-  };
-  const createVerify = (algorithm) => {
-    const chunks = [];
-    return {
-      update(value, encoding) {
-        chunks.push(Buffer.from(value, encoding));
-        return this;
-      },
-      verify(key, signature) {
-        return nodeVerify(algorithm, Buffer.concat(chunks), key, signature);
-      },
-    };
-  };
-  return {
+  const createSign = (algorithm, options) => new Sign(algorithm, options);
+  const createVerify = (algorithm, options) => new Verify(algorithm, options);
+  const nodeCrypto = {
     webcrypto: crypto,
     subtle: crypto?.subtle,
     randomUUID: (options) => createRandomUUID(scope, options),
@@ -1041,24 +3686,72 @@ function createCryptoShim(scope, Buffer, processObject) {
     getHashes: () => ['md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512'],
     getCurves: () => [],
     randomBytes: nodeRandomBytes,
-    pseudoRandomBytes: nodeRandomBytes,
+    getRandomValues: (array) => createRandomValues(array, scope),
     randomFill: nodeRandomFill,
     randomFillSync: nodeRandomFillSync,
+    randomInt: nodeRandomInt,
+    privateDecrypt,
+    privateEncrypt,
+    publicDecrypt,
+    publicEncrypt,
+    checkPrime,
+    checkPrimeSync,
+    createCipheriv,
+    createDecipheriv,
+    Cipher,
+    Cipheriv,
+    Decipher,
+    Decipheriv,
+    constants: cryptoConstants,
+    generateKey,
+    setEngine,
     createHash: Hash,
     Hash,
     Hmac,
     createHmac: (...args) => new Hmac(...args),
     createSecretKey: createSecretKeyShim(Buffer),
     getFips: () => 0,
+    setFips,
+    timingSafeEqual,
     // Web Crypto does not expose OpenSSL's cipher registry. Returning an
     // empty list preserves Node's capability-gated skip behavior.
     getCiphers: () => [],
     pbkdf2: nodePbkdf2,
     pbkdf2Sync: (...args) => Buffer.from(pbkdf2Sync(...args)),
+    hkdf: (hash, key, salt, info, keyLength, callback) => {
+      if (typeof callback !== 'function') return createHkdf(hash, key, salt, info, keyLength, callback, scope);
+      return createHkdf(
+        hash,
+        key,
+        salt,
+        info,
+        keyLength,
+        (error, value) => callback(error, value),
+        scope,
+      );
+    },
+    hkdfSync: (hash, key, salt, info, keyLength) => hkdfSync(
+      hash,
+      key,
+      salt,
+      info,
+      keyLength,
+      scope,
+    ),
+    scrypt: nodeScrypt,
+    scryptSync: (password, salt, keyLength, options = {}) => Buffer.from(
+      createScryptSync(password, salt, keyLength, options, scope),
+    ),
+    generatePrime: (size, options, callback) => generatePrime(size, options, callback, scope),
+    generatePrimeSync: (size, options = {}) => generatePrimeSync(size, options, scope),
+    getCipherInfo: (nameOrNid, options) => getCipherInfo(nameOrNid, options, scope),
+    secureHeapUsed: () => secureHeapUsed(scope),
     aesGcmEncrypt: wrapBuffer(aesGcmEncrypt),
     aesGcmDecrypt: wrapBuffer(aesGcmDecrypt),
     sign: nodeSign,
     verify: nodeVerify,
+    Sign,
+    Verify,
     createSign,
     createVerify,
     generateKeyPair: (type, options, callback) => generateKeyPair(type, options, callback, scope),
@@ -1068,6 +3761,7 @@ function createCryptoShim(scope, Buffer, processObject) {
     ECDH: (() => {
       function ECDH(curve) { return createECDH(curve, scope); }
       ECDH.prototype = BrowserECDH.prototype;
+      ECDH.convertKey = BrowserECDH.convertKey;
       return ECDH;
     })(),
     diffieHellman: (options) => diffieHellman(options, scope),
@@ -1079,9 +3773,68 @@ function createCryptoShim(scope, Buffer, processObject) {
     Certificate: createCertificateShim(scope, 'Certificate'),
     X509Certificate: createCertificateShim(scope, 'X509Certificate'),
   };
+  Object.defineProperties(nodeCrypto, {
+    pseudoRandomBytes: { configurable: true, enumerable: false, value: nodePseudoRandomBytes, writable: true },
+    prng: { configurable: true, enumerable: false, value: nodeRandomBytes, writable: true },
+    rng: { configurable: true, enumerable: false, value: nodeRandomBytes, writable: true },
+    fips: {
+      enumerable: true,
+      get: () => 0,
+      set: setFips,
+    },
+  });
+  return nodeCrypto;
 }
 
 function createZlibShim(scope, BufferClass) {
+  const constants = Object.freeze({
+    Z_NO_FLUSH: 0,
+    Z_PARTIAL_FLUSH: 1,
+    Z_SYNC_FLUSH: 2,
+    Z_FULL_FLUSH: 3,
+    Z_FINISH: 4,
+    Z_BLOCK: 5,
+    ZSTD_error_init_missing: 62,
+    ZSTD_error_literals_headerWrong: 24,
+    ZSTD_error_maxSymbolValue_tooLarge: 46,
+    ZSTD_error_maxSymbolValue_tooSmall: 48,
+    ZSTD_error_memory_allocation: 64,
+    ZSTD_error_noForwardProgress_destFull: 80,
+    ZSTD_error_noForwardProgress_inputEmpty: 82,
+    ZSTD_error_no_error: 0,
+    ZSTD_error_parameter_combination_unsupported: 41,
+    ZSTD_error_parameter_outOfBound: 42,
+    ZSTD_error_parameter_unsupported: 40,
+    ZSTD_error_prefix_unknown: 10,
+    ZSTD_error_srcSize_wrong: 72,
+    ZSTD_error_stabilityCondition_notRespected: 50,
+    ZSTD_error_stage_wrong: 60,
+    ZSTD_error_tableLog_tooLarge: 44,
+    ZSTD_c_compressionLevel: 100,
+    ZSTD_c_contentSizeFlag: 200,
+    ZSTD_c_dictIDFlag: 202,
+    ZSTD_c_enableLongDistanceMatching: 160,
+    ZSTD_c_hashLog: 102,
+    ZSTD_c_jobSize: 401,
+    ZSTD_c_ldmBucketSizeLog: 163,
+    ZSTD_c_ldmHashLog: 161,
+    ZSTD_c_nbWorkers: 400,
+    ZSTD_c_overlapLog: 402,
+    ZSTD_c_searchLog: 104,
+    ZSTD_c_strategy: 107,
+    ZSTD_c_targetLength: 106,
+    ZSTD_c_windowLog: 101,
+    ZSTD_d_windowLogMax: 100,
+    ZSTD_dfast: 2,
+    Z_DEFAULT_CHUNK: 16384,
+    Z_DEFAULT_COMPRESSION: -1,
+    Z_DEFAULT_LEVEL: -1,
+    Z_DEFAULT_MEMLEVEL: 8,
+    Z_DEFAULT_STRATEGY: 0,
+    Z_DEFAULT_WINDOWBITS: 15,
+    Z_ERRNO: -1,
+    Z_FILTERED: 1,
+  });
   class Zlib {
     constructor() { this._resource = new AsyncResource('ZLIB'); }
     getAsyncId() { return this._resource.asyncId(); }
@@ -1194,8 +3947,8 @@ function createZlibShim(scope, BufferClass) {
     if (typeof callback !== 'function') return result.then((output) => new BufferClass(output));
     return result.then((output) => callback(null, new BufferClass(output)), (error) => callback(error));
   };
-  return {
-    constants: Object.freeze({ Z_NO_FLUSH: 0, Z_PARTIAL_FLUSH: 1, Z_SYNC_FLUSH: 2, Z_FULL_FLUSH: 3, Z_FINISH: 4, Z_BLOCK: 5 }),
+  const zlib = {
+    constants,
     gzip: (value, callback) => operation(value, 'gzip', scope.CompressionStream, callback),
     gunzip: (value, callback) => operation(value, 'gzip', scope.DecompressionStream, callback),
     deflate: (value, callback) => operation(value, 'deflate', scope.CompressionStream, callback),
@@ -1215,6 +3968,17 @@ function createZlibShim(scope, BufferClass) {
     brotliCompressSync() { throw new Error('Brotli sync compression is unavailable in a browser'); },
     brotliDecompressSync() { throw new Error('Brotli sync decompression is unavailable in a browser'); },
   };
+  for (const [name, value] of Object.entries(constants)) {
+    if (!name.startsWith('ZSTD_') && !name.startsWith('Z_DEFAULT')
+      && name !== 'Z_ERRNO' && name !== 'Z_FILTERED') continue;
+    Object.defineProperty(zlib, name, {
+      configurable: false,
+      enumerable: false,
+      value,
+      writable: false,
+    });
+  }
+  return zlib;
 }
 
 function createTimerPromises(scope, trackTask) {
@@ -1467,15 +4231,75 @@ const process = {
 export function createRuntime({ globalObject = globalThis, version = 'browser-native-runtime/v1' } = {}) {
   const scope = globalObject;
   let vfs = createVfs();
-  const Buffer = createBufferClass();
+  const Buffer = createBufferClass(scope);
+  const File = createFileClass(scope);
+  const Blob = installBlobCompatibility(scope.Blob);
+  const transcode = createTranscode(Buffer);
   let mounted = false;
   let activeChild = null;
   let capabilities = null;
   let runSpec = null;
   let virtualNetwork = getSharedVirtualNetwork(scope);
-  let dnsModule = createBrowserDns();
+  let esmExecutionTail = Promise.resolve();
+  let dnsModule = createBrowserDns({ network: virtualNetwork });
   let proxyCapability = createProxyCapability();
+  const esmNamespaceCache = scope.__BNH_ESM_NAMESPACE_CACHE__ || new Map();
+  scope.__BNH_ESM_NAMESPACE_CACHE__ = esmNamespaceCache;
+  const cjsExportMetadata = scope.__BNH_CJS_EXPORT_METADATA__ || new WeakMap();
+  scope.__BNH_CJS_EXPORT_METADATA__ = cjsExportMetadata;
   const virtualProcessLiveness = new Map();
+  const environmentData = new Map();
+
+  // The upstream ESM resolver is bundled as a Node internal module, but its
+  // native fs binding has no browser equivalent. Keep its legacy-main seam in
+  // the shared runtime so path values are resolved by the browser VFS.
+  const legacyMainResolve = (packageJsonUrl, packageConfig, base) => {
+    if (!packageJsonUrl || typeof packageJsonUrl.href !== 'string') {
+      const error = new Error('The packageJSONUrl argument must be a URL');
+      error.code = 'ERR_INTERNAL_ASSERTION';
+      throw error;
+    }
+    const packagePath = path.dirname(fileURLToPath(packageJsonUrl.href));
+    const extensions = ['', '.js', '.json', '.node', '/index.js', '/index.json', '/index.node'];
+    const packageFallbackExtensions = ['.js', '.json', '.node'];
+    const packageMain = packageConfig?.main;
+    const isFile = (value) => {
+      try {
+        const filePath = path.normalize(value);
+        return vfs.entries(path.dirname(filePath)).some((entry) => entry.name === path.basename(filePath) && entry._kind === 'file');
+      } catch { return false; }
+    };
+    if (typeof packageMain === 'string') {
+      const initialPath = path.resolve(packagePath, packageMain);
+      for (let index = 0; index < extensions.length; index += 1) {
+        if (isFile(initialPath + extensions[index])) return pathToFileURL(initialPath + extensions[index]);
+      }
+    }
+    const initialPath = path.resolve(packagePath, './index');
+    for (let index = 0; index < packageFallbackExtensions.length; index += 1) {
+      if (isFile(initialPath + packageFallbackExtensions[index])) return pathToFileURL(initialPath + packageFallbackExtensions[index]);
+    }
+    if (base === undefined) throw moduleArgumentTypeError('base', 'string or an instance of URL', base);
+    const baseHref = typeof base === 'string' ? base : base?.href;
+    let basePath;
+    try {
+      basePath = fileURLToPath(baseHref);
+    } catch (error) {
+      if (baseHref === undefined || baseHref === '') {
+        const invalidUrl = new TypeError(`Invalid URL: ${baseHref ?? base}`);
+        invalidUrl.code = 'ERR_INVALID_URL';
+        throw invalidUrl;
+      }
+      throw error;
+    }
+    const mainFile = typeof packageMain === 'string'
+      ? path.resolve(packagePath, packageMain)
+      : `${initialPath}.js`;
+    const notFound = new Error(`Cannot find package '${mainFile}' imported from ${basePath}`);
+    notFound.code = 'ERR_MODULE_NOT_FOUND';
+    throw notFound;
+  };
+  const internalEsmResolve = { legacyMainResolve };
 
   const trackVirtualProcess = (processHandle) => {
     const pid = Number(processHandle?.pid);
@@ -1540,6 +4364,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
   function runtimePackageType(entryPath) {
     let directory = path.dirname(entryPath);
     for (;;) {
+      if (directory.endsWith('/node_modules')) return 'commonjs';
       try {
         const source = vfs.read(path.join(directory, 'package.json'));
         const text = typeof source === 'string' ? source : new TextDecoder().decode(source);
@@ -1559,6 +4384,19 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     if (entryPath.endsWith('.mjs')) return true;
     if (entryPath.endsWith('.cjs') || entryPath.endsWith('.json') || entryPath.endsWith('.node')) return false;
     if (entryPath.startsWith('/node/lib/')) return false;
+    for (let index = 0; index < execArgv.length; index += 1) {
+      const argument = String(execArgv[index]);
+      if (argument === '--input-type') {
+        const inputType = String(execArgv[index + 1] || '');
+        if (inputType === 'module') return true;
+        if (inputType === 'commonjs') return false;
+      }
+      if (argument.startsWith('--input-type=')) {
+        const inputType = argument.slice('--input-type='.length);
+        if (inputType === 'module') return true;
+        if (inputType === 'commonjs') return false;
+      }
+    }
     if (runtimePackageType(entryPath) === 'module') return true;
     if (entryPath.includes('/node_modules/')) return false;
     return execArgv.some((argument) => String(argument) === '--experimental-default-type=module');
@@ -1566,23 +4404,155 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
 
   function makeBuiltins(processObject, runtimeRequire, diagnosticsChannels, runtimeOptions, performancePrimitives, trackTask, stdout, stderr, readSource, sourcePath) {
     const fs = vfs.fs;
+    const recordPerformanceEntry = performancePrimitives.recordEntry || (() => {});
+    const performanceNow = () => Number(scope.performance?.now?.()) || 0;
+    const recordDnsEntry = (name, startTime, detail) => {
+      recordPerformanceEntry({
+        name,
+        entryType: 'dns',
+        startTime,
+        duration: Math.max(0, performanceNow() - startTime),
+        detail,
+        toJSON() {
+          return {
+            name: this.name,
+            entryType: this.entryType,
+            startTime: this.startTime,
+            duration: this.duration,
+            detail: this.detail,
+          };
+        },
+      });
+    };
+    const constants = createConstants();
     const moduleWrapper = [
       '(function (exports, require, module, __filename, __dirname) { ',
       '\n});',
     ];
     let currentModuleWrapper = moduleWrapper;
+    let syncBuiltinESMExportsImpl = () => {};
+    const moduleParents = new WeakMap();
+    const SourceMap = createSourceMapClass();
+    const sourceMapsEnabledByFlag = (processObject.execArgv || runtimeOptions.execArgv || [])
+      .some((argument) => String(argument) === '--enable-source-maps');
+    let sourceMapsSupport = Object.freeze({
+      enabled: sourceMapsEnabledByFlag,
+      nodeModules: sourceMapsEnabledByFlag,
+      generatedCode: sourceMapsEnabledByFlag,
+    });
+    Object.defineProperty(processObject, 'sourceMapsEnabled', {
+      configurable: true,
+      enumerable: true,
+      get: () => sourceMapsSupport.enabled,
+    });
+    processObject.setSourceMapsEnabled = function setSourceMapsEnabled(enabled) {
+      if (typeof enabled !== 'boolean') throw moduleArgumentTypeError('enabled', 'boolean', enabled);
+      sourceMapsSupport = Object.freeze({ enabled, nodeModules: enabled, generatedCode: enabled });
+    };
+    const sourceMapCache = new Map();
+    const sourceMapComment = /\/[/*]#\s*sourceMappingURL=([^\s*]+)/g;
+    const sourceMapPayload = (value) => {
+      const comma = value.indexOf(',');
+      if (comma < 0) return null;
+      const body = value.slice(comma + 1);
+      const encoded = value.slice(0, comma).includes(';base64');
+      try {
+        const text = encoded
+          ? atob(body)
+          : decodeURIComponent(body);
+        return JSON.parse(text);
+      } catch {
+        return null;
+      }
+    };
+    const sourceMapFor = (filename, source) => {
+      let match;
+      let sourceMappingURL;
+      sourceMapComment.lastIndex = 0;
+      while ((match = sourceMapComment.exec(String(source)))) sourceMappingURL = match[1];
+      if (!sourceMappingURL) return undefined;
+      let payload;
+      let mapPath = filename;
+      if (sourceMappingURL.startsWith('data:')) {
+        payload = sourceMapPayload(sourceMappingURL);
+      } else {
+        mapPath = normalizePath(sourceMappingURL, path.dirname(filename));
+        try {
+          const mapSource = readSource(mapPath);
+          payload = JSON.parse(typeof mapSource === 'string' ? mapSource : new TextDecoder().decode(mapSource));
+        } catch {
+          return undefined;
+        }
+      }
+      if (!payload || typeof payload !== 'object') return undefined;
+      const map = new SourceMap(payload, { lineLengths: String(source).split(/\r?\n/).map((line) => line.length) });
+      sourceMapCache.set(filename, map);
+      sourceMapCache.set(`file://${filename}`, map);
+      if (mapPath !== filename) sourceMapCache.set(mapPath, map);
+      return map;
+    };
+    const findSourceMap = (sourceURL) => {
+      if (!sourceMapsSupport.enabled
+        || typeof sourceURL !== 'string'
+        || sourceURL.length === 0
+        || sourceURL.startsWith('node:')) return undefined;
+      if (!sourceMapsSupport.nodeModules && sourceURL.includes('/node_modules/')) return undefined;
+      let filename;
+      try {
+        filename = sourceURL.startsWith('file:') ? fileURLToPath(sourceURL) : normalizePath(sourceURL, processObj.cwd?.() || '/node');
+      } catch {
+        return undefined;
+      }
+      if (!sourceMapsSupport.nodeModules && filename.includes('/node_modules/')) return undefined;
+      const cached = sourceMapCache.get(sourceURL) || sourceMapCache.get(filename);
+      if (cached) return cached;
+      try {
+        return sourceMapFor(filename, readSource(filename));
+      } catch {
+        return undefined;
+      }
+    };
+    const getSourceMapsSupport = () => sourceMapsSupport;
     const childProcessArgumentTypeError = (name, expected, value) => {
       const received = value === null
-        ? 'null'
-        : Array.isArray(value)
-          ? 'an instance of Array'
-          : `type ${typeof value}`;
-      const error = new TypeError(`The "${name}" argument must be of type ${expected}. Received ${received}`);
+        ? 'Received null'
+        : value === undefined
+          ? 'Received undefined'
+          : Array.isArray(value)
+            ? 'Received an instance of Array'
+            : typeof value === 'object'
+              ? `Received an instance of ${value.constructor?.name || 'Object'}`
+              : typeof value === 'function'
+                ? `Received function ${value.name || ''}`
+                : typeof value === 'string'
+                  ? `Received type string ('${value.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}')`
+                  : `Received type ${typeof value} (${String(value)})`;
+      const subject = name.includes('.') ? 'property' : 'argument';
+      const error = new TypeError(`The "${name}" ${subject} must be of type ${expected}. ${received}`);
       error.code = 'ERR_INVALID_ARG_TYPE';
       return error;
     };
-    const utilTypes = createUtilTypes(scope);
-    fs.constants ||= createConstants();
+    const childProcessArgumentInstanceError = (name, expected, value) => {
+      const received = value === null
+        ? 'Received null'
+        : value === undefined
+          ? 'Received undefined'
+          : Array.isArray(value)
+            ? 'Received an instance of Array'
+            : typeof value === 'object'
+              ? `Received an instance of ${value.constructor?.name || 'Object'}`
+              : typeof value === 'function'
+                ? `Received function ${value.name || ''}`
+                : typeof value === 'string'
+                  ? `Received type string ('${value.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}')`
+                  : `Received type ${typeof value} (${String(value)})`;
+      const error = new TypeError(`The "${name}" property must be an instance of ${expected}. ${received}`);
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      return error;
+    };
+    const resolveKeyObject = () => runtimeRequire('internal/crypto/keys').KeyObject;
+    const utilTypes = createUtilTypes(scope, resolveKeyObject);
+    fs.constants ||= constants;
     fs.promises.constants = fs.constants;
     class BrowserChildProcess extends EventEmitter {
       constructor() {
@@ -1598,17 +4568,23 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         if (options === null || typeof options !== 'object' || Array.isArray(options)) {
           throw childProcessArgumentTypeError('options', 'object', options);
         }
-        if (options.file !== undefined && typeof options.file !== 'string') {
+        const hasIpcStdio = Array.isArray(options.stdio) && options.stdio.includes('ipc');
+        if (hasIpcStdio && options.envPairs !== undefined && !Array.isArray(options.envPairs)) {
+          throw childProcessArgumentInstanceError('options.envPairs', 'Array', options.envPairs);
+        }
+        if (typeof options.file !== 'string') {
           throw childProcessArgumentTypeError('options.file', 'string', options.file);
         }
         if (options.args !== undefined && !Array.isArray(options.args)) {
-          throw childProcessArgumentTypeError('options.args', 'an array', options.args);
+          throw childProcessArgumentInstanceError('options.args', 'Array', options.args);
         }
         const handle = options.processHandle || options.handle;
         if (handle) {
           this._handle = handle;
           this.pid = handle.pid;
           if (!this._referenced) handle.unref?.();
+        } else if (this.pid === undefined) {
+          this.pid = 10000;
         }
         this.spawnfile = options.file;
         this.spawnargs = options.args || [];
@@ -1616,7 +4592,20 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       }
 
       kill(signal = 'SIGTERM') {
-        if (!this._handle?.kill) return false;
+        if (!this._handle?.kill) {
+          if (signal !== undefined && signal !== null) {
+            const normalized = typeof signal === 'string' ? signal.toUpperCase() : signal;
+            if ((typeof normalized !== 'string' || !runtimeChildSignalNames.has(normalized))
+              && !(typeof normalized === 'number' && runtimeChildSignalNumbers.has(normalized))) {
+              const error = new TypeError(`Unknown signal: ${signal}`);
+              error.code = 'ERR_UNKNOWN_SIGNAL';
+              throw error;
+            }
+          }
+          if (this.pid === undefined) return false;
+          this.killed = true;
+          return true;
+        }
         try {
           const result = this._handle.kill(signal);
           if (result !== false) this.killed = true;
@@ -1625,6 +4614,10 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           if (error?.code === 'ERR_PROCESS_EXITED' || error?.code === 'ESRCH') return false;
           throw error;
         }
+      }
+
+      [Symbol.for('nodejs.dispose')]() {
+        if (!this.killed) this.kill();
       }
 
       ref() {
@@ -1636,6 +4629,13 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         this._referenced = false;
         this._handle?.unref?.();
       }
+    }
+    if (Symbol.dispose && Symbol.dispose !== Symbol.for('nodejs.dispose')) {
+      Object.defineProperty(BrowserChildProcess.prototype, Symbol.dispose, {
+        configurable: true,
+        value: BrowserChildProcess.prototype[Symbol.for('nodejs.dispose')],
+        writable: true,
+      });
     }
     const statWatchers = new Map();
     fs.watchFile = (pathValue, optionsValue, listener) => {
@@ -1682,6 +4682,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       else statWatchers.delete(path);
     };
     const platform = createPlatformContract({ variant: runtimeOptions.variant || 'browser', env: processObject.env });
+    installCryptoKeyMaterialTracking(scope);
     const nodeCrypto = createCryptoShim(scope, Buffer, processObject);
     nodeCrypto.createPublicKey = (...args) => runtimeRequire('internal/crypto/keys').createPublicKey(...args);
     nodeCrypto.createPrivateKey = (...args) => runtimeRequire('internal/crypto/keys').createPrivateKey(...args);
@@ -1727,6 +4728,87 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       },
     });
     const createModuleApi = (processObj = processObject, childStderr = stderr) => {
+      if (processObj.__bnhModuleApi) return processObj.__bnhModuleApi;
+      function Module(id = '', parent = null) {
+        if (!(this instanceof Module)) return new Module(id, parent);
+        this.id = id;
+        this.path = path.dirname(id);
+        this.exports = {};
+        this.filename = null;
+        this.loaded = false;
+        this.children = [];
+        moduleParents.set(this, parent);
+        this.paths = [];
+      }
+      Module.prototype.require = function require(name) {
+        return moduleApi._load(name, this.filename || sourcePath);
+      };
+      Object.defineProperties(Module.prototype, {
+        isPreloading: {
+          configurable: true,
+          get: () => Boolean(processObj.__bnhModuleIsPreloading),
+        },
+        parent: {
+          configurable: true,
+          get() { return moduleParents.get(this); },
+          set(value) { moduleParents.set(this, value); },
+        },
+      });
+      Module.prototype.load = function load(filename) {
+        if (typeof filename !== 'string') {
+          const error = new TypeError('The "filename" argument must be of type string');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        if (this.loaded) {
+          const error = new Error('Module already loaded');
+          error.code = 'ERR_ASSERTION';
+          throw error;
+        }
+        const resolved = resolveFile(filename, this.parent?.filename || sourcePath, processObj);
+        this.filename ??= resolved;
+        this.path = path.dirname(resolved);
+        this.paths = moduleSearchPaths(resolved);
+        const source = readSource(resolved);
+        if (resolved.endsWith('.json')) this.exports = JSON.parse(typeof source === 'string' ? source : new TextDecoder().decode(source));
+        else this._compile(typeof source === 'string' ? source : new TextDecoder().decode(source), resolved);
+        this.loaded = true;
+        return this;
+      };
+      Module.prototype._compile = function compile(content, filename, format) {
+        const source = typeof content === 'string' ? content : String(content);
+        const resolved = String(filename || this.filename || sourcePath);
+        const compileSource = format === 'module' || moduleHasStaticEsmSyntax(source)
+          ? moduleSynchronousEsmSource(source, resolved)
+          : source;
+        const require = (name) => {
+          const value = moduleApi._load(name, this);
+          if (value && this.children && value !== this.exports) {
+            const child = moduleApi._cache?.get?.(name);
+            if (child && !this.children.includes(child)) this.children.push(child);
+          }
+          return value;
+        };
+        require.resolve = (name) => moduleApi._resolve
+          ? moduleApi._resolve(name, this)
+          : name;
+        require.main = moduleApi._main || null;
+        require.cache = moduleApi._cache || new Map();
+        this.require = require;
+        return runCommonJSWrapper(
+          compileSource,
+          resolved,
+          [require, this, this.exports, resolved, path.dirname(resolved),
+            (specifier, options) => {
+              if (typeof processObj.__bnhModuleImport === 'function') {
+                return processObj.__bnhModuleImport(specifier, resolved, options);
+              }
+              if (typeof esmLoader !== 'undefined') return esmLoader.import(specifier, resolved, {}, options);
+              return import(specifier, options);
+            }],
+          currentModuleWrapper,
+        );
+      };
       const compileCacheStatus = Object.freeze({
         FAILED: 'failed',
         ENABLED: 'enabled',
@@ -1790,21 +4872,304 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           },
         };
       };
-      return {
+      const globalPaths = [];
+      const modulePathCache = Object.create(null);
+      const moduleExtensions = Object.create(null);
+      const decodeModuleSource = (source) => typeof source === 'string'
+        ? source
+        : new TextDecoder().decode(source);
+      const tryModuleFile = (filename, isMain) => {
+        if (stat(filename) !== 0) return false;
+        if (isMain) return path.resolve(filename);
+        try { return fs.realpathSync(path.resolve(filename)); } catch { return path.resolve(filename); }
+      };
+      const tryModuleExtensions = (basePath, extensions, isMain) => {
+        for (const extension of extensions) {
+          const filename = tryModuleFile(`${basePath}${extension}`, isMain);
+          if (filename) return filename;
+        }
+        return false;
+      };
+      const tryModulePackage = (requestPath, extensions, isMain, originalPath) => {
+        const packageConfig = readPackage(requestPath);
+        const packageMain = packageConfig.main;
+        if (!packageMain) return tryModuleExtensions(path.resolve(requestPath, 'index'), extensions, isMain);
+
+        const mainPath = path.resolve(requestPath, packageMain);
+        const actual = tryModuleFile(mainPath, isMain)
+          || tryModuleExtensions(mainPath, extensions, isMain)
+          || tryModuleExtensions(path.resolve(mainPath, 'index'), extensions, isMain);
+        if (actual) return actual;
+
+        const fallback = tryModuleExtensions(path.resolve(requestPath, 'index'), extensions, isMain);
+        if (!fallback) {
+          const error = new Error(`Cannot find module '${mainPath}'. Please verify that the package.json has a valid "main" entry`);
+          error.code = 'MODULE_NOT_FOUND';
+          error.path = packageConfig.pjsonPath;
+          error.requestPath = originalPath;
+          throw error;
+        }
+        processObj.emitWarning?.(
+          `Invalid 'main' field in '${packageConfig.pjsonPath}' of '${packageMain}'. Please either fix that or report it to the module author`,
+          { code: 'DEP0128', type: 'DeprecationWarning' },
+        );
+        return fallback;
+      };
+      moduleExtensions['.js'] = (module, filename) => {
+        const source = decodeModuleSource(readSource(filename));
+        const format = filename.endsWith('.mjs') || isRuntimeEsmModule(filename, processObj.execArgv)
+          ? 'module'
+          : filename.endsWith('.cjs') ? 'commonjs' : undefined;
+        module._compile(source, filename, format);
+      };
+      moduleExtensions['.json'] = (module, filename) => {
+        try {
+          module.exports = JSON.parse(decodeModuleSource(readSource(filename)).replace(/^\uFEFF/, ''));
+        } catch (error) {
+          error.message = `${filename}: ${error.message}`;
+          throw error;
+        }
+      };
+      moduleExtensions['.node'] = (_module, filename) => rejectNativeAddon(filename, processObj);
+      const moduleDebug = (...args) => {
+        const sections = String(processObj.env?.NODE_DEBUG || '')
+          .split(',')
+          .map((section) => section.trim().toUpperCase())
+          .filter(Boolean);
+        if (!sections.includes('MODULE') && !sections.includes('*') && !sections.includes('DEBUG')) return;
+        childStderr?.(`MODULE ${processObj.pid || 0}: ${args.map(String).join(' ')}\n`);
+      };
+      const moduleDeprecatedDebug = createDeprecate(processObj)(
+        moduleDebug,
+        'Module._debug is deprecated.',
+        'DEP0077',
+      );
+      const moduleNodePaths = (from) => {
+        const absolute = path.resolve(from);
+        if (absolute === '/') return ['/node_modules'];
+        const paths = [];
+        const nodeModulesName = 'node_modules';
+        for (let index = absolute.length - 1, segmentLength = 0, last = absolute.length; index >= 0; index -= 1) {
+          const character = absolute[index];
+          if (character === '/') {
+            if (segmentLength !== nodeModulesName.length) {
+              paths.push(`${absolute.slice(0, last)}/node_modules`);
+            }
+            last = index;
+            segmentLength = 0;
+          } else if (segmentLength !== -1) {
+            if (nodeModulesName[nodeModulesName.length - 1 - segmentLength] === character) segmentLength += 1;
+            else segmentLength = -1;
+          }
+        }
+        paths.push('/node_modules');
+        return paths;
+      };
+      const moduleInitPaths = () => {
+        const homeDir = processObj.platform === 'win32' ? processObj.env?.USERPROFILE : processObj.env?.HOME;
+        const nodePath = processObj.platform === 'win32' ? processObj.env?.NODE_PATH : processObj.env?.NODE_PATH;
+        const prefixDir = processObj.platform === 'win32'
+          ? path.resolve(processObj.execPath, '..')
+          : path.resolve(processObj.execPath, '..', '..');
+        const paths = [path.resolve(prefixDir, 'lib', 'node')];
+        if (homeDir) {
+          paths.unshift(path.resolve(homeDir, '.node_libraries'));
+          paths.unshift(path.resolve(homeDir, '.node_modules'));
+        }
+        if (nodePath) paths.unshift(...String(nodePath).split(path.delimiter).filter(Boolean));
+        globalPaths.splice(0, globalPaths.length, ...paths);
+        moduleApi.globalPaths = [...globalPaths];
+      };
+      const isRelativeModuleRequest = (request) => request[0] === '.'
+        && (request.length === 1 || request === '..' || request.startsWith('./')
+          || request.startsWith('../') || request.startsWith('.\\') || request.startsWith('..\\'));
+      const moduleFindPath = (request, paths, isMain, _conditions) => {
+        const absoluteRequest = path.isAbsolute(request);
+        if (absoluteRequest) paths = [''];
+        else if (!paths || paths.length === 0) return false;
+
+        const cacheKey = `${request}\x00${paths.join('\x00')}`;
+        const cached = modulePathCache[cacheKey];
+        if (cached) return cached;
+
+        const trailingSlash = request.length > 0 && (request.endsWith('/') || request === '.'
+          || request.endsWith('/.') || request === '..' || request.endsWith('/..'));
+        let insidePath = true;
+        if (isRelativeModuleRequest(request) && path.normalize(request).startsWith('..')) insidePath = false;
+        const extensions = Object.keys(moduleExtensions);
+        for (const currentPath of paths) {
+          if (typeof currentPath !== 'string') throw moduleArgumentTypeError('paths', 'array of strings', paths);
+          if (insidePath && currentPath && stat(currentPath) < 1) continue;
+          const basePath = path.resolve(currentPath, request);
+          const result = !trailingSlash
+            ? tryModuleFile(basePath, isMain) || tryModuleExtensions(basePath, extensions, isMain)
+            : false;
+          const directoryResult = result || (stat(basePath) === 1
+            ? tryModulePackage(basePath, extensions, isMain, request)
+            : false);
+          if (directoryResult) {
+            modulePathCache[cacheKey] = directoryResult;
+            return directoryResult;
+          }
+        }
+        return false;
+      };
+      const stat = (filename) => {
+        if (typeof filename !== 'string') throw moduleArgumentTypeError('filename', 'string', filename);
+        try {
+          const stats = fs.statSync(filename);
+          return stats.isDirectory?.() ? 1 : stats.isFile?.() ? 0 : -1;
+        } catch {
+          return -2;
+        }
+      };
+      const readPackage = (requestPath) => {
+        if (typeof requestPath !== 'string') throw moduleArgumentTypeError('requestPath', 'string', requestPath);
+        const pjsonPath = path.resolve(requestPath, 'package.json');
+        let parsed;
+        try {
+          const source = readSource(pjsonPath);
+          parsed = JSON.parse(typeof source === 'string' ? source : new TextDecoder().decode(source));
+        } catch (error) {
+          if (error?.code === 'ENOENT') return Object.assign(Object.create(null), {
+            type: 'none',
+            exists: false,
+            pjsonPath,
+          });
+          const invalid = new Error(`Invalid package config '${pjsonPath}'`);
+          invalid.code = 'ERR_INVALID_PACKAGE_CONFIG';
+          invalid.path = pjsonPath;
+          invalid.cause = error;
+          throw invalid;
+        }
+        const result = Object.create(null);
+        for (const key of ['name', 'main', 'type', 'imports', 'exports']) {
+          if (parsed[key] !== undefined) result[key] = parsed[key];
+        }
+        result.exists = true;
+        result.pjsonPath = pjsonPath;
+        return result;
+      };
+      const resolveLookupPaths = (request, parent) => {
+        if (typeof request !== 'string') throw moduleArgumentTypeError('request', 'string', request);
+        if (BUILTIN_NAMES.includes(builtinName(request))) return null;
+        const relative = request[0] === '.'
+          && (request.length === 1 || request[1] === '.' || request[1] === '/' || request[1] === '\\');
+        if (!relative) {
+          const parentPaths = parent?.paths?.length ? [...parent.paths] : [];
+          const paths = [...parentPaths, ...globalPaths];
+          return paths.length ? paths : null;
+        }
+        if (!parent?.id || !parent.filename) return ['.'];
+        return [path.dirname(parent.filename)];
+      };
+      const resolveFilename = (request, parent, isMain, options) => {
+        if (typeof request !== 'string') throw moduleArgumentTypeError('request', 'string', request);
+        if (BUILTIN_NAMES.includes(builtinName(request))) return request;
+        if (options !== undefined && (options === null || typeof options !== 'object' || Array.isArray(options))) {
+          throw moduleArgumentTypeError('options', 'object', options);
+        }
+        const importer = typeof parent === 'string' ? parent : parent?.filename || sourcePath;
+        const conditions = options?.conditions || ['node', 'require'];
+        let resolved;
+        try {
+          if (options?.paths !== undefined && !Array.isArray(options.paths)) {
+            const error = new TypeError(`The \"options.paths\" property must be an array of strings. Received ${String(options.paths)}`);
+            error.code = 'ERR_INVALID_ARG_VALUE';
+            throw error;
+          }
+          if (options?.paths?.length && !request.startsWith('.') && !request.startsWith('/')) {
+            const candidates = [];
+            for (const lookupPath of options.paths) {
+              if (typeof lookupPath !== 'string') throw moduleArgumentTypeError('options.paths', 'an array of strings', options.paths);
+              const fakeImporter = path.join(normalizePath(lookupPath, processObj.cwd?.() || '/node'), 'index.js');
+              candidates.push(esmLoader.resolve(request, fakeImporter, conditions));
+            }
+            resolved = candidates.find((candidate) => candidate && (candidate.startsWith('/') || candidate.startsWith('file:')));
+          } else {
+            resolved = esmLoader.resolve(request, importer, conditions);
+          }
+        } catch (error) {
+          if (error?.code && error.code !== 'MODULE_NOT_FOUND') throw error;
+        }
+        if (resolved?.startsWith('file:')) resolved = fileURLToPath(resolved);
+        if (resolved && (resolved.startsWith('/') || resolved.startsWith('file:'))) {
+          const candidate = moduleCandidates(resolved).find((pathname) => vfs.files.has(pathname));
+          if (candidate) return candidate;
+        }
+        const requireStack = [];
+        for (let cursor = typeof parent === 'object' ? parent : null; cursor; cursor = cursor.parent) {
+          requireStack.push(cursor.filename || cursor.id);
+        }
+        const error = new Error(`Cannot find module '${request}'${requireStack.length ? `\nRequire stack:\n- ${requireStack.join('\n- ')}` : ''}`);
+        error.code = 'MODULE_NOT_FOUND';
+        error.requireStack = requireStack;
+        throw error;
+      };
+      const moduleApi = Object.assign(Module, {
         builtinModules: BUILTIN_NAMES,
-        _load: (name, parent, isMain) => runtimeRequire(name, parent),
-        get wrapper() { return currentModuleWrapper; },
-        set wrapper(value) { currentModuleWrapper = value; },
+        globalPaths,
+        _debug: moduleDeprecatedDebug,
+        _extensions: moduleExtensions,
+        _findPath: moduleFindPath,
+        _initPaths: moduleInitPaths,
+        _nodeModulePaths: moduleNodePaths,
+        _pathCache: modulePathCache,
+        _preloadModules: (requests) => {
+          if (!Array.isArray(requests)) return;
+          processObj.__bnhModuleIsPreloading = true;
+          const parent = new Module('internal/preload', null);
+          try {
+            parent.paths = moduleApi._nodeModulePaths(processObj.cwd?.() || '/node');
+            for (const request of requests) parent.require(request);
+          } finally {
+            processObj.__bnhModuleIsPreloading = false;
+          }
+        },
+        _readPackage: readPackage,
+        _stat: stat,
+        _resolveLookupPaths: resolveLookupPaths,
+        _resolveFilename: resolveFilename,
+        _load: (name, parent, isMain) => {
+          if (String(name).startsWith('file:') && String(name).endsWith('.mjs')) {
+            const error = new Error(`Cannot find module '${name}'`);
+            error.code = 'MODULE_NOT_FOUND';
+            throw error;
+          }
+          return runtimeRequire(
+            name,
+            typeof parent === 'string' ? parent : parent?.filename || sourcePath,
+          );
+        },
         wrap: (script) => `${currentModuleWrapper[0]}${script}${currentModuleWrapper[1]}`,
         createRequire: (filename) => {
           const importer = typeof filename === 'string' && filename.startsWith('file:')
             ? fileURLToPath(filename)
             : String(filename || sourcePath);
-          return (name) => BUILTIN_NAMES.includes(builtinName(name))
-            ? moduleApi._load(name, importer)
-            : runtimeRequire(name, importer);
+          return (name) => {
+            if (String(name).startsWith('file:') && String(name).endsWith('.mjs')) {
+              const error = new Error(`Cannot find module '${name}'`);
+              error.code = 'MODULE_NOT_FOUND';
+              throw error;
+            }
+            return BUILTIN_NAMES.includes(builtinName(name))
+              ? moduleApi._load(name, importer)
+              : runtimeRequire(name, importer);
+          };
         },
         isBuiltin: (name) => BUILTIN_NAMES.includes(builtinName(name)),
+        findSourceMap,
+        getSourceMapsSupport,
+        runMain: (main = processObj.argv?.[1]) => {
+          const entryPath = main === undefined ? sourcePath : String(main);
+          const normalized = entryPath.startsWith('file:') ? fileURLToPath(entryPath) : normalizePath(entryPath, processObj.cwd?.() || '/node');
+          if (normalized === normalizePath(sourcePath, processObj.cwd?.() || '/node')) {
+            const resolved = processObj.__bnhModuleResolve?.(normalized, normalized);
+            if (resolved && typeof resolved.then === 'function') resolved.catch(() => {});
+            return undefined;
+          }
+          return moduleApi._load(normalized, null, true);
+        },
         findPackageJSON: (specifier, parentLocation) => {
           if (specifier === undefined) {
             const error = new TypeError('The "specifier" argument must be specified');
@@ -1853,23 +5218,102 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         getCompileCacheDir: () => processObj.env?.NODE_COMPILE_CACHE,
         flushCompileCache: () => {},
         constants: { compileCacheStatus },
-        register: (specifier, options = {}) => {
+        register: (specifier, parentURL, options) => {
           if (specifier === undefined) {
             const error = new TypeError('The "specifier" argument must be specified');
             error.code = 'ERR_MISSING_ARGS';
             throw error;
           }
-          if (options === null || typeof options !== 'object') {
+          if (parentURL !== undefined && parentURL !== null
+            && typeof parentURL === 'object' && options === undefined) {
+            options = parentURL;
+            parentURL = sourcePath;
+          }
+          if (options === undefined) options = {};
+          if (options === null || typeof options !== 'object' || Array.isArray(options)) {
             const error = new TypeError('The "options" argument must be of type object');
             error.code = 'ERR_INVALID_ARG_TYPE';
             throw error;
           }
           const registrations = processObj.__bnhModuleRegistrations || [];
-          registrations.push({ specifier, options, parentURL: sourcePath });
+          const registration = {
+            specifier,
+            options,
+            parentURL: parentURL === undefined || parentURL === null ? sourcePath : parentURL,
+          };
+          registrations.push(registration);
           processObj.__bnhModuleRegistrations = registrations;
+          const activate = processObj.__bnhActivateModuleRegistration;
+          if (typeof activate === 'function') activate(registration);
         },
         registerHooks,
-      };
+        syncBuiltinESMExports: () => syncBuiltinESMExportsImpl(),
+        SourceMap,
+        setSourceMapsSupport: (enabled, options = {}) => {
+          if (typeof enabled !== 'boolean') throw moduleArgumentTypeError('enabled', 'boolean', enabled);
+          if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+            throw moduleArgumentTypeError('options', 'object', options);
+          }
+          const nodeModulesOption = options.nodeModules;
+          const generatedCodeOption = options.generatedCode;
+          if (nodeModulesOption !== undefined && typeof nodeModulesOption !== 'boolean') {
+            throw modulePropertyTypeError('options.nodeModules', 'boolean', nodeModulesOption);
+          }
+          if (generatedCodeOption !== undefined && typeof generatedCodeOption !== 'boolean') {
+            throw modulePropertyTypeError('options.generatedCode', 'boolean', generatedCodeOption);
+          }
+          const nodeModules = nodeModulesOption ?? false;
+          const generatedCode = generatedCodeOption ?? false;
+          sourceMapsSupport = Object.freeze({ enabled, nodeModules, generatedCode });
+        },
+        stripTypeScriptTypes: (code, options = {}) => {
+          if (typeof code !== 'string') throw moduleArgumentTypeError('code', 'string', code);
+          if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+            throw moduleArgumentTypeError('options', 'object', options);
+          }
+          const mode = options.mode === undefined ? 'strip' : options.mode;
+          if (mode !== 'strip' && mode !== 'transform') {
+            const error = new TypeError(`The property 'options.mode' must be one of: 'strip', 'transform'. Received ${String(mode)}`);
+            error.code = 'ERR_INVALID_ARG_VALUE';
+            throw error;
+          }
+          const sourceMap = options.sourceMap === undefined ? false : options.sourceMap;
+          if (typeof sourceMap !== 'boolean') {
+            throw modulePropertyTypeError('options.sourceMap', 'boolean', sourceMap);
+          }
+          const sourceUrl = options.sourceUrl === undefined ? '' : options.sourceUrl;
+          if (typeof sourceUrl !== 'string') {
+            throw modulePropertyTypeError('options.sourceUrl', 'string', sourceUrl);
+          }
+          if (mode === 'strip' && sourceMap) {
+            const error = new TypeError("The property 'options.sourceMap' must be one of: false, undefined. Received true");
+            error.code = 'ERR_INVALID_ARG_VALUE';
+            throw error;
+          }
+          if (mode === 'transform' && sourceMap) {
+            const error = new Error('TypeScript source-map generation is unavailable in the browser runtime');
+            error.code = 'ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX';
+            throw error;
+          }
+          const transformed = stripTypeScriptSource(code);
+          return sourceUrl ? `${transformed}\n\n//# sourceURL=${sourceUrl}` : transformed;
+        },
+      });
+      moduleApi.Module = Module;
+      Object.defineProperties(moduleApi, {
+        wrapper: {
+          configurable: true,
+          enumerable: true,
+          get: () => currentModuleWrapper,
+          set: (value) => { currentModuleWrapper = value; },
+        },
+      });
+      Object.defineProperty(moduleApi, '_bnhSetSyncBuiltinESMExports', {
+        configurable: true,
+        value: (implementation) => { syncBuiltinESMExportsImpl = implementation; },
+      });
+      Object.defineProperty(processObj, '__bnhModuleApi', { configurable: true, value: moduleApi });
+      return moduleApi;
     };
     const moduleApi = createModuleApi(processObject);
     const callableReadable = function callableReadable(...args) {
@@ -1882,6 +5326,14 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     };
     callableReadable.prototype = Readable.prototype;
     Object.setPrototypeOf(callableReadable, Readable);
+    Object.defineProperty(callableReadable, 'from', {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: Readable.from,
+    });
+    callableReadable.ReadableState = Readable.ReadableState;
+    callableReadable._fromList = Readable._fromList;
     callableReadable.fromWeb = (readableStream, options) => runtimeRequire('internal/webstreams/adapters')
       .newStreamReadableFromReadableStream(readableStream, options);
     callableReadable.toWeb = (readable, options) => runtimeRequire('internal/webstreams/adapters')
@@ -1900,6 +5352,13 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       duplexPair,
       pipeline,
       destroy,
+      compose,
+      isDestroyed,
+      isDisturbed,
+      isErrored,
+      isReadable,
+      isWritable,
+      promises: streamPromises,
       addAbortSignal,
       finished,
       setDefaultHighWaterMark,
@@ -1910,23 +5369,120 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       .newStreamDuplexFromReadableWritablePair(pair, options);
     Duplex.toWeb = (duplex) => runtimeRequire('internal/webstreams/adapters')
       .newReadableWritablePairFromDuplex(duplex);
-    const streamWebApi = createNodeWebStreamModule(runtimeRequire);
+    const streamWebApi = createNodeWebStreamModule(runtimeRequire, scope);
     const streamConsumers = createStreamConsumers(scope, Buffer);
+    const streamPromisePipeline = (...args) => new Promise((resolve, reject) => {
+      pipeline(...args, (error) => error ? reject(error) : resolve());
+    });
+    const streamPromiseFinished = (stream, options) => finished(stream, options);
+    streamPromises.pipeline = streamPromisePipeline;
+    streamPromises.finished = streamPromiseFinished;
+    const promisifyCustom = Symbol.for('nodejs.util.promisify.custom');
+    Object.defineProperty(pipeline, promisifyCustom, {
+      configurable: true,
+      enumerable: true,
+      value: streamPromisePipeline,
+    });
+    Object.defineProperty(finished, promisifyCustom, {
+      configurable: true,
+      enumerable: true,
+      value: streamPromiseFinished,
+    });
     const unsupportedBuiltins = createUnsupportedBuiltins();
+    const sqlite = createSqliteModule();
     const notifyDnsLookup = () => {
       scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ = Math.max(1, Number(scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ || 0));
     };
     const dns = {
       ...dnsModule,
       lookup(...args) {
+        const callback = args.at(-1);
+        if (typeof callback !== 'function') return Reflect.apply(dnsModule.lookup, this, args);
+        const startTime = performanceNow();
+        const hostname = args[0];
+        const options = typeof args[1] === 'number' ? { family: args[1] }
+          : (args[1] && typeof args[1] === 'object' ? args[1] : {});
+        const wrappedArgs = [...args];
+        wrappedArgs[wrappedArgs.length - 1] = (error, address, family) => {
+          if (!error) {
+            const values = Array.isArray(address) ? address : [{ address, family }];
+            recordDnsEntry('lookup', startTime, {
+              hostname: String(hostname),
+              family: Number(options.family || values[0]?.family || family || 0),
+              hints: Number(options.hints || 0),
+              verbatim: Boolean(options.verbatim),
+              order: String(options.order || 'verbatim'),
+              addresses: values.map((value) => String(value.address)),
+            });
+          }
+          return callback(error, address, family);
+        };
         notifyDnsLookup();
-        return Reflect.apply(dnsModule.lookup, this, args);
+        return Reflect.apply(dnsModule.lookup, this, wrappedArgs);
+      },
+      lookupService(...args) {
+        const callback = args.at(-1);
+        if (typeof callback !== 'function') return Reflect.apply(dnsModule.lookupService, this, args);
+        const startTime = performanceNow();
+        const host = args[0];
+        const port = args[1];
+        const wrappedArgs = [...args];
+        wrappedArgs[wrappedArgs.length - 1] = (error, hostname, service) => {
+          if (!error) recordDnsEntry('lookupService', startTime, {
+            host: String(host),
+            port,
+            hostname: String(hostname),
+            service: String(service),
+          });
+          return callback(error, hostname, service);
+        };
+        return Reflect.apply(dnsModule.lookupService, this, wrappedArgs);
       },
       promises: {
         ...dnsModule.promises,
         lookup(...args) {
+          const startTime = performanceNow();
+          const hostname = args[0];
+          const options = args[1] && typeof args[1] === 'object' ? args[1] : {};
           notifyDnsLookup();
-          return Reflect.apply(dnsModule.promises.lookup, this, args);
+          return Reflect.apply(dnsModule.promises.lookup, this, args).then((result) => {
+            const values = Array.isArray(result) ? result : [result];
+            recordDnsEntry('lookup', startTime, {
+              hostname: String(hostname),
+              family: Number(options.family || values[0]?.family || 0),
+              hints: Number(options.hints || 0),
+              verbatim: Boolean(options.verbatim),
+              order: String(options.order || 'verbatim'),
+              addresses: values.map((value) => String(value.address || value)),
+            });
+            return result;
+          });
+        },
+        lookupService(...args) {
+          const startTime = performanceNow();
+          const host = args[0];
+          const port = args[1];
+          return Reflect.apply(dnsModule.promises.lookupService, this, args).then((result) => {
+            recordDnsEntry('lookupService', startTime, {
+              host: String(host),
+              port,
+              hostname: String(result.hostname),
+              service: String(result.service),
+            });
+            return result;
+          });
+        },
+        resolveAny(...args) {
+          const startTime = performanceNow();
+          const host = args[0];
+          return Reflect.apply(dnsModule.promises.resolveAny, this, args).then((result) => {
+            recordDnsEntry('queryAny', startTime, {
+              host: String(host),
+              ttl: false,
+              result: Array.isArray(result) ? result : [],
+            });
+            return result;
+          });
         },
       },
       resolve(hostname, rrtype, callback) {
@@ -1936,8 +5492,25 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           finally { scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ = Math.max(0, Number(scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ || 1) - 1); }
         };
         const actualCallback = typeof rrtype === 'function' ? rrtype : callback;
-        if (typeof actualCallback !== 'function') throw new TypeError('callback must be a function');
+        if (typeof actualCallback !== 'function') {
+          // Let the DNS implementation validate rrtype before reporting a
+          // missing callback, matching Node's synchronous error ordering.
+          return Reflect.apply(dnsModule.resolve, this, [hostname, rrtype, actualCallback]);
+        }
         return Reflect.apply(dnsModule.resolve, this, [hostname, rrtype, onComplete]);
+      },
+      resolveAny(hostname, options, callback) {
+        const actualCallback = typeof options === 'function' ? options : callback;
+        if (typeof actualCallback !== 'function') return Reflect.apply(dnsModule.resolveAny, this, [hostname, actualCallback]);
+        const startTime = performanceNow();
+        return Reflect.apply(dnsModule.resolveAny, this, [hostname, (error, result) => {
+          if (!error) recordDnsEntry('queryAny', startTime, {
+            host: String(hostname),
+            ttl: false,
+            result: Array.isArray(result) ? result : [],
+          });
+          return actualCallback(error, result);
+        }]);
       },
     };
     const dnsPromises = dns.promises;
@@ -1975,21 +5548,42 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       },
       onListening: notifyClusterListening,
       cluster: () => cluster,
+      performance: recordPerformanceEntry,
     });
     const dgram = createBrowserDgram({
       network: virtualNetwork,
+      dns,
       BufferClass: Buffer,
       trackTask,
       diagnostics: () => scope.__BNH_DIAGNOSTICS__,
+      cluster: () => cluster,
+      clusterGroupId: runtimeOptions.clusterGroupId,
+      onListening: notifyClusterListening,
+      processOwner: processObject,
+      runInProcessContext: (owner, callback) => {
+        const previous = scope.process;
+        scope.process = owner;
+        try { return callback(); }
+        finally { scope.process = previous; }
+      },
     });
     const internalBindingContract = createBrowserInternalBindings({
       globalObject: scope,
-      constants: createConstants(),
+      constants: createBaseConstants(),
+      network: virtualNetwork,
+      trackTask,
+      clusterGroupId: runtimeOptions.clusterGroupId,
       onWorkerMessage: (message) => {
         if (!options.workerThread || typeof processObject?.send !== 'function') return;
         processObject.send({ __bnhInternalWorkerMessage: message?.type });
       },
     });
+    internalBindingContract.bindings.constants.os.signals = Object.freeze({
+      ...internalBindingContract.bindings.constants.os.signals,
+      ...BROWSER_SIGNAL_CONSTANTS,
+    });
+    installErrnoConstants(internalBindingContract.bindings.constants.os.errno, constants);
+    delete internalBindingContract.bindings.constants.fs.crypto;
     processObject.binding = (name) => {
       if (name === 'test') {
         const error = new Error('No such module: test');
@@ -2137,8 +5731,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     const internalOptions = { getOptionValue: () => undefined, getAllowUnauthorized: () => false };
     const internalDgram = {
       kStateSymbol: Symbol.for('bnh.dgram.state'),
-      _createSocketHandle: () => null,
-      newHandle: () => ({ close() {} }),
+      _createSocketHandle: dgram._createSocketHandle,
+      newHandle: dgram.newHandle,
     };
     class BrowserBuiltinModule {
       static exists(name) { return BUILTIN_NAMES.includes(String(name).replace(/^node:/, '')); }
@@ -2177,10 +5771,12 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     const httpCompatibility = activeProxy
       ? createHttpCompatibility(scope, {
           Buffer,
+          process: processObject,
           proxy: activeProxy,
           net,
           trackTask,
           diagnostics: () => scope.__BNH_DIAGNOSTICS__,
+          performance: recordPerformanceEntry,
         })
       : (() => {
           const cacheKey = '__BNH_HTTP_COMPATIBILITY_BY_NETWORK__';
@@ -2192,11 +5788,13 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           const cached = cache.get(virtualNetwork);
           const compatibility = createHttpCompatibility(scope, {
             Buffer,
+            process: processObject,
             httpNetwork: cached?.httpNetwork || cached?.compatibility?.httpNetwork,
             net,
             proxyEnv: processObject.env,
             trackTask,
             diagnostics: () => scope.__BNH_DIAGNOSTICS__,
+            performance: recordPerformanceEntry,
           });
           if (!runtimeOptions.clusterWorker && !cached) {
             cache.set(virtualNetwork, { httpNetwork: compatibility.httpNetwork });
@@ -2207,13 +5805,17 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       net,
       BufferClass: Buffer,
       proxy: activeProxy,
+      execArgv: runtimeOptions.execArgv,
       diagnostics: diagnosticsChannels,
     });
     const http2 = createHttp2Module(scope, {
+      net,
+      network: virtualNetwork,
       proxy: activeProxy,
       vfs,
       diagnostics: diagnosticsChannels,
       trackTask,
+      performance: recordPerformanceEntry,
     });
     cluster = createCluster({
       process: processObject,
@@ -2232,10 +5834,12 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       maxChildren: capabilities?.manifest?.workers?.maxChildren,
       stdout,
       stderr,
+      dgram,
+      trackTask,
       isWorker: Boolean(runtimeOptions.clusterWorker),
       id: runtimeOptions.clusterWorkerId,
       clusterGroupId: runtimeOptions.clusterGroupId,
-      workerRun: ({ process: childProcess, signal, clusterGroupId }) => {
+      workerRun: ({ process: childProcess, signal, clusterGroupId, clusterWorkerId }) => {
         const workerEntry = runtimeOptions.entry;
         if (!workerEntry) throw new Error('cluster worker entry is unavailable');
         return execute(workerEntry, {
@@ -2248,19 +5852,38 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           env: childProcess.env,
           cwd: childProcess.cwd?.() || '/node',
           clusterWorker: true,
-          clusterWorkerId: childProcess.pid,
+          clusterWorkerId,
           clusterGroupId,
         }, stdout, stderr);
       },
     });
     const v8 = createBrowserV8Module(processObject, scope);
+    const traceEvents = createTraceEventsModule(internalBindingContract.bindings.trace_events, {
+      process: processObject,
+      unavailable: Boolean(runtimeOptions.workerThread)
+        || String(runtimeOptions.entry || '').startsWith('/node/.bnh-worker-eval-'),
+    });
+    const sea = createSeaModule({ Blob, TextDecoder: scope.TextDecoder });
+    const inspector = createInspectorModule({ processObject, isWorker: Boolean(runtimeOptions.workerThread), scope });
+    const inspectorPromises = createInspectorPromisesModule(inspector);
     const internalTestBindingBase = createInternalTestBinding(processObject);
+    const internalTestBindingWarningProcesses = new WeakSet();
+    const emitInternalTestBindingWarning = (targetProcess = processObject) => {
+      if (!targetProcess || internalTestBindingWarningProcesses.has(targetProcess)) return;
+      internalTestBindingWarningProcesses.add(targetProcess);
+      targetProcess.nextTick?.(() => {
+        const warning = new Error('These APIs are for internal testing only. Do not use them.');
+        warning.name = 'internal/test/binding';
+        targetProcess.emit?.('warning', warning);
+      });
+    };
     const internalTestBinding = {
       // Keep internal/test/binding and the public internalBinding hook on the
       // same contract so stateful bindings (notably stream_wrap) are shared.
       __bnhContract: internalBindingContract,
       primordials: createPrimordials(scope),
       internalBinding(name) {
+        emitInternalTestBindingWarning(processObject);
         try { return internalBindingContract.internalBinding(name); }
         catch { return internalTestBindingBase.internalBinding(name); }
       },
@@ -2273,6 +5896,22 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       repeat,
       type,
     );
+    const scheduleLegacyTimer = (item, refed) => {
+      if (item?._bnhTimer) processObject._bnhClearTimer(item._bnhTimer);
+      if (item._idleTimeout < 0 || item._idleTimeout === undefined) return item;
+      const handle = processObject._bnhSetTimer(
+        function legacyTimerCallback() {
+          item._bnhTimer = null;
+          item._onTimeout?.call(item);
+        },
+        item._idleTimeout,
+        false,
+        'Timeout',
+      );
+      if (!refed) handle.unref?.();
+      item._bnhTimer = handle;
+      return item;
+    };
     const timers = {
       setTimeout: (callback, delay, ...args) => scheduleTimer(callback, delay, false, 'Timeout', args),
       clearTimeout: (handle) => processObject._bnhClearTimer(handle),
@@ -2297,20 +5936,12 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         item._idleStart = Date.now();
         return item;
       },
-      active(item) {
-        if (item._bnhTimer) processObject._bnhClearTimer(item._bnhTimer);
-        const handle = processObject._bnhSetTimer(
-          function legacyTimerCallback() {
-            item._bnhTimer = null;
-            item._onTimeout?.call(item);
-          },
-          item._idleTimeout,
-          false,
-          'Timeout',
-        );
-        item._bnhTimer = handle;
-        return item;
-      },
+      active(item) { return scheduleLegacyTimer(item, true); },
+      _unrefActive: createDeprecate(processObject)(
+        (item) => scheduleLegacyTimer(item, false),
+        'timers._unrefActive() is deprecated. Please use timeout.refresh() instead.',
+        'DEP0127',
+      ),
       unenroll(item) {
         if (item?._bnhTimer) processObject._bnhClearTimer(item._bnhTimer);
         else processObject._bnhClearTimer(item);
@@ -2318,8 +5949,13 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         return item;
       },
     };
+    Object.defineProperty(timers, 'promises', {
+      configurable: true,
+      enumerable: true,
+      get() { return timerPromises; },
+    });
     const timerPromises = createTimerPromises(scope, trackTask);
-    const nodeTest = createNodeTest({ scope, processObject, stdout, stderr, trackTask, assert: assert.strict });
+    const nodeTest = createNodeTest({ scope, processObject, stdout, stderr, trackTask, assert: assert.strict, timers, timerPromises, sourcePath, execArgv: runtimeOptions.execArgv });
     const vm = createVmModule(scope);
     const asyncHooks = createAsyncHooksModule();
     processObject._bnhExecutionAsyncId = asyncHooks.executionAsyncId;
@@ -2344,19 +5980,28 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       assert, 'assert/strict': assert.strict,
       buffer: {
         Buffer,
+        Blob,
+        File,
+        atob: Buffer.atob,
+        btoa: Buffer.btoa,
+        resolveObjectURL: Buffer.resolveObjectURL,
+        transcode,
         SlowBuffer: Buffer.SlowBuffer,
         constants: Buffer.constants,
         kMaxLength: Buffer.kMaxLength,
         kStringMaxLength: Buffer.kStringMaxLength,
+        get INSPECT_MAX_BYTES() { return Buffer.INSPECT_MAX_BYTES; },
+        set INSPECT_MAX_BYTES(value) { Buffer.INSPECT_MAX_BYTES = value; },
         isAscii,
         isUtf8,
       },
-      console: createConsoleModule(processObject), constants: createConstants(), crypto: nodeCrypto,
+      console: createConsoleModule(processObject), constants, crypto: nodeCrypto, punycode: createPunycodeModule(),
       domain: createDomainModule(processObject),
       events: (() => {
         EventEmitter.EventEmitter = EventEmitter;
         EventEmitter.addAbortListener = addAbortListener;
         EventEmitter.getEventListeners = getEventListeners;
+        EventEmitter.getMaxListeners = getMaxListeners;
         EventEmitter.once = once;
         return EventEmitter;
       })(), fs, 'fs/promises': fs.promises,
@@ -2383,29 +6028,59 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           };
         },
       },
-      path: nodePath, 'path/posix': path.posix, 'path/win32': path.win32, process: processObject, querystring: createQuerystring(),
+      path: nodePath, 'path/posix': path.posix, 'path/win32': path.win32, process: processObject, querystring: createQuerystring(Buffer),
       stream: streamApi, 'stream/consumers': streamConsumers, 'stream/web': streamWebApi,
-      'stream/promises': {
-        pipeline: (...args) => new Promise((resolve, reject) => pipeline(...args, (error) => error ? reject(error) : resolve())),
-        finished: (stream, options) => finished(stream, options),
-      },
+      'stream/promises': streamPromises,
       timers, 'timers/promises': timerPromises, string_decoder: { StringDecoder: createStringDecoder() },
       url: nodeUrl, util: (() => {
         const inspectFn = (value, options) => nodeInspect(value, options ?? {});
         inspectFn.custom = Symbol.for('nodejs.util.inspect.custom');
-        return { format: (format, ...args) => String(format).replace(/%[sdifoO%]/g, (token) => token === '%%' ? '%' : String(args.shift())), inspect: inspectFn, types: utilTypes, promisify: createPromisify(), deprecate: createDeprecate(processObject), _extend: (target, source) => Object.assign(target, source), customPromisifyArgs: Symbol.for('nodejs.util.promisify.customArgs'), getSystemErrorName: (code) => ({ [-1]: 'EPERM', [-4094]: 'UNKNOWN' }[code] || `Unknown system error ${code}`), getCallSites: createGetCallSites(), debuglog: (section) => { const sections = (String(processObject?.env?.NODE_DEBUG || '')).split(',').map((s) => s.trim()).filter(Boolean); const enabled = sections.includes(section) || sections.includes('DEBUG') || sections.some((s) => s.includes(section)); return (...args) => { if (enabled) console?.error ? console.error(...args) : console?.log ? console.log(...args) : null; }; }, TextEncoder: scope.TextEncoder, TextDecoder: scope.TextDecoder, aborted: createAborted() };
+        const utilCompat = createUtilModule(Object.assign(Object.create(scope), {
+          Buffer,
+          process: processObject,
+          console: processObject._bnhConsole || scope.console,
+        }), resolveKeyObject);
+        const getCallSites = createGetCallSites();
+        const getCallSite = (...args) => {
+          processObject.emitWarning?.(
+            "The `util.getCallSite` API has been renamed to `util.getCallSites()`." ,
+            'ExperimentalWarning',
+          );
+          return getCallSites(...args);
+        };
+        return {
+          ...utilCompat,
+          format: (...args) => utilCompat.format(...args),
+          inspect: inspectFn,
+          types: utilTypes,
+          promisify: createPromisify(),
+          deprecate: createDeprecate(processObject),
+          _extend: (target, source) => Object.assign(target, source),
+          customPromisifyArgs: Symbol.for('nodejs.util.promisify.customArgs'),
+          getCallSite,
+          getCallSites,
+          debug: debuglog,
+          debuglog,
+          getSystemErrorName: utilCompat.getSystemErrorName,
+          getSystemErrorMessage: utilCompat.getSystemErrorMessage,
+          getSystemErrorMap: utilCompat.getSystemErrorMap,
+          TextEncoder: scope.TextEncoder,
+          TextDecoder: scope.TextDecoder,
+          aborted: createAborted(),
+        };
       })(),
-      'util/types': createUtilTypes(scope),
+      'util/types': utilTypes,
       worker_threads: { ...createBrowserIO(scope), isMainThread: true, parentPort: null, workerData: undefined },
-      zlib: createZlibShim(scope, Buffer), perf_hooks: performancePrimitives.perfHooks, v8,
+      zlib: createZlibShimModule(scope, Buffer), perf_hooks: performancePrimitives.perfHooks, v8,
       async_hooks: asyncHooks,
       diagnostics_channel: diagnosticsChannels,
       test: nodeTest,
       ...unsupportedBuiltins,
-      sea: Object.freeze({}),
-      sqlite: Object.freeze({}),
-      'test/reporters': Object.freeze({}),
-      net, dgram, cluster, tls,
+      sea,
+      sqlite,
+      'test/reporters': createTestReportersModule(processObject),
+      net, dgram, cluster, tls, inspector, 'inspector/promises': inspectorPromises,
+      trace_events: traceEvents,
       child_process: (() => {
         let childSequence = 0;
         const compileCacheSources = new Map();
@@ -2465,9 +6140,17 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         function childArgumentTypeError(name, expected, value) {
           const received = value === null
             ? 'null'
-            : Array.isArray(value)
-              ? 'an instance of Array'
-              : `type ${typeof value}`;
+            : value === undefined
+              ? 'undefined'
+              : Array.isArray(value)
+                ? 'an instance of Array'
+                : typeof value === 'object'
+                  ? `an instance of ${value.constructor?.name || 'Object'}`
+                  : typeof value === 'function'
+                    ? `function ${value.name || ''}`
+                    : typeof value === 'string'
+                      ? `type string ('${value.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}')`
+                      : `type ${typeof value} (${String(value)})`;
           const error = new TypeError(`The "${name}" argument must be of type ${expected}. Received ${received}`);
           error.code = 'ERR_INVALID_ARG_TYPE';
           return error;
@@ -2598,31 +6281,32 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           return { args: normalizedArgs, options: normalizedOptions };
         }
 
-        function prepareChild(file, args, options = {}) {
+        function prepareChild(file, args, options = {}, owner = scope.process || processObject) {
           validateChildCommand(file);
           if (args !== undefined && args !== null && !Array.isArray(args)) {
             throw childArgumentTypeError('args', 'an array', args);
           }
           validateChildOptions(options);
-          const cwdValue = options?.cwd || (processObject.cwd ? processObject.cwd() : '/node');
-          const cwd = normalizePath(normalizeChildCwd(cwdValue), processObject.cwd?.() || '/node');
+          const cwdValue = options?.cwd || (owner.cwd ? owner.cwd() : '/node');
+          const cwd = normalizePath(normalizeChildCwd(cwdValue), owner.cwd?.() || '/node');
           if (options?.argv0 !== undefined && options.argv0 !== null && typeof options.argv0 !== 'string') {
             const received = options.argv0 === null ? 'null' : options.argv0?.constructor?.name || typeof options.argv0;
             const error = new TypeError(`The "options.argv0" property must be of type string. Received ${received === 'Array' ? 'an instance of Array' : `type ${received}`}`);
             error.code = 'ERR_INVALID_ARG_TYPE';
             throw error;
           }
-          const executable = String(file || processObject.execPath || '/browser/node');
+          const executable = String(file || owner.execPath || '/browser/node');
           // This environment is copied into the in-memory browser child only.
           // The outer process.env was already assembled under the manifest, and
           // these overrides cannot reach a host subprocess or host I/O.
           const env = Object.fromEntries(
-            Object.entries({ ...processObject.env, ...(options?.env || {}) })
+            Object.entries({ ...owner.env, ...(options?.env || {}) })
               .filter(([, value]) => value !== undefined),
           );
           const nodeOptions = tokenizeShell(env.NODE_OPTIONS || '', env);
           const rawArgs = [...nodeOptions, ...(Array.isArray(args) ? args : [])].map(String);
           const preloads = [];
+          const importPreloads = [];
           let evalCode = null;
           let moduleInput = false;
           let interactive = false;
@@ -2640,6 +6324,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           let reportOnSignal = false;
           let reportOnUncaughtException = false;
           let maxHttpHeaderSize = null;
+          let experimentalLoader = null;
           let stopOptions = false;
           for (let index = 0; index < rawArgs.length; index += 1) {
             const argument = rawArgs[index];
@@ -2679,6 +6364,10 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               maxHttpHeaderSize = Number(value);
               continue;
             }
+            if (!stopOptions && (argument === '--experimental-loader' || argument === '--loader')) {
+              experimentalLoader = rawArgs[++index];
+              continue;
+            }
             if (!stopOptions && argument === '-pe') {
               printResult = true;
               evalCode = rawArgs[++index];
@@ -2708,27 +6397,43 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               continue;
             }
             if (!stopOptions && argument === '--import') {
-              index += 1;
+              const preload = rawArgs[++index];
+              if (preload !== undefined) importPreloads.push(preload);
               continue;
             }
-            if (!stopOptions && argument.startsWith('--import=')) continue;
+            if (!stopOptions && argument.startsWith('--import=')) {
+              importPreloads.push(argument.slice('--import='.length));
+              continue;
+            }
             if (!stopOptions && argument.startsWith('-')) continue;
             if (script === null) script = argument;
             else afterScript.push(argument);
           }
           const executionArgv = [executable, ...rawArgs];
           const id = ++childSequence;
-          const mainPath = script ? normalizePath(script, cwd) : `/node/.bnh-child-${id}.js`;
+          const mainPath = script
+            ? normalizePath(script, cwd)
+            : interactive
+              ? normalizePath(`.bnh-child-${id}.js`, cwd)
+              : `/node/.bnh-child-${id}.js`;
           const moduleEvalPath = normalizePath(`.bnh-child-${id}.mjs`, cwd);
-          const entryPath = moduleInput && evalCode !== null
+          const moduleEntry = moduleInput || importPreloads.length > 0;
+          if (importPreloads.length > 0 && evalCode !== null) moduleInput = true;
+          const entryPath = moduleEntry && evalCode !== null
             ? moduleEvalPath
             : evalCode !== null || preloads.length ? `/node/.bnh-child-${id}.js` : mainPath;
+          const versionOnly = script === null && evalCode === null
+            && rawArgs.some((argument) => argument === '-v' || argument === '--version');
           let source = null;
-          if (evalCode !== null) {
+          if (versionOnly) {
+            source = "process.stdout.write(process.version + '\\n');";
+          } else if (evalCode !== null) {
             const expression = printResult
               ? `process.stdout.write(String(eval(${JSON.stringify(evalCode)})) + '\\n');`
               : evalCode;
-            source = `${preloads.map((item) => `require(${JSON.stringify(normalizePath(item, cwd))});`).join('\n')}\n${expression}`;
+            source = moduleEntry
+              ? `${importPreloads.map((item) => `import ${JSON.stringify(item)};`).join('\n')}\n${moduleInput ? evalCode : expression}`
+              : `${preloads.map((item) => `require(${JSON.stringify(normalizePath(item, cwd))});`).join('\n')}\n${expression}`;
           } else if (preloads.length) {
             source = `${preloads.map((item) => `require(${JSON.stringify(normalizePath(item, cwd))});`).join('\n')}\nrequire(${JSON.stringify(mainPath)});`;
           } else if (interactive) {
@@ -2737,6 +6442,15 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               : '';
           } else if (env.NODE_REPL_EXTERNAL_MODULE && !script) {
             source = `require(${JSON.stringify(normalizePath(env.NODE_REPL_EXTERNAL_MODULE, cwd))});`;
+          }
+          const inspectorRequested = rawArgs.some((argument) => argument === '--inspect'
+            || argument.startsWith('--inspect=')
+            || argument === '--inspect-brk'
+            || argument.startsWith('--inspect-brk='));
+          if (inspectorRequested && evalCode !== null) {
+            source = `${source}\nprocess.stderr.write(${JSON.stringify(
+              'Debugger listening on 127.0.0.1:9229\\nFor help, see: https://nodejs.org/en/learn/getting-started/debugging\\n',
+            )});`;
           }
           return {
             cwd,
@@ -2748,6 +6462,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             executionArgv,
             evalCode,
             moduleInput,
+            importPreloads,
             interactive,
             preloads,
             entryPath,
@@ -2765,6 +6480,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             reportOnSignal,
             reportOnUncaughtException,
             maxHttpHeaderSize,
+            experimentalLoader,
             stdinPath: options?.stdinPath || null,
             stdin: options?.input,
             afterScript,
@@ -2773,53 +6489,30 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         }
 
         function outputStream() {
-          const events = new EventEmitter();
-          const pending = [];
-          let endPending = false;
-          const flush = () => {
-            while (pending.length && events.listenerCount('data')) events.emit('data', pending.shift());
-            if (endPending && pending.length === 0 && events.listenerCount('end')) {
-              endPending = false;
-              events.emit('end');
+          const stream = new Readable({ read() {} });
+          stream.write = (value, encoding, callback) => {
+            const accepted = stream.push(value, encoding);
+            if (stream.readableFlowing && stream.readableLength > 0) {
+              const pending = stream.read(stream.readableHighWaterMark);
+              if (pending !== null) stream.emit('data', pending);
             }
+            callback?.();
+            return accepted;
           };
-          const addListener = events.on.bind(events);
-          events.on = (name, listener) => {
-            const result = addListener(name, listener);
-            if (name === 'data' || name === 'end') flush();
-            return result;
+          stream.end = (value, encoding, callback) => {
+            if (value !== undefined && value !== null) stream.write(value, encoding);
+            stream.push(null);
+            callback?.();
+            return stream;
           };
-          events.setEncoding = () => events;
-          events.write = (value) => {
-            pending.push(typeof value === 'string' ? value : Buffer.from(value).toString());
-            flush();
-            return true;
-          };
-          events.end = (value) => {
-            if (value !== undefined) events.write(value);
-            endPending = true;
-            flush();
-            return events;
-          };
-          events.pipe = (destination) => {
-            if (!destination || typeof destination.write !== 'function') {
-              throw new TypeError('The "destination" argument must be a writable stream');
-            }
-            events.on('data', (value) => destination.write(value));
-            events.on('end', () => {
-              if (typeof destination.end === 'function') destination.end();
-            });
-            flush();
-            return destination;
-          };
-          events.destroy = () => { events.end(); return events; };
-          return events;
+          return stream;
         }
 
         function virtualAsync(file, args, options, callback, isExecFile = false) {
           const stdoutStream = outputStream();
           const stderrStream = outputStream();
           const child = new BrowserChildProcess();
+          const ownerProcess = scope.process || processObject;
           const emitChildMessage = (value, handle) => {
             const event = value && typeof value === 'object'
               && typeof value.cmd === 'string'
@@ -2828,15 +6521,15 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               : 'message';
             child.emit(event, value, handle);
           };
-          const prepared = prepareChild(file, args, options);
+          const prepared = prepareChild(file, args, options, ownerProcess);
           const processResource = new AsyncResource('PROCESSWRAP');
           const pipeResources = [
             new AsyncResource('PIPEWRAP'),
             new AsyncResource('PIPEWRAP'),
             new AsyncResource('PIPEWRAP'),
           ];
-          if (!processObject.env?.TEST_THREAD_ID && processObject._bnhSignalTriggerAsyncId === undefined) {
-            processObject._bnhSignalTriggerAsyncId = pipeResources[1].asyncId();
+          if (!ownerProcess.env?.TEST_THREAD_ID && ownerProcess._bnhSignalTriggerAsyncId === undefined) {
+            ownerProcess._bnhSignalTriggerAsyncId = pipeResources[1].asyncId();
           }
           const ipc = options?.ipc ? {
             process: null,
@@ -2853,7 +6546,12 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             hasRef() { return this.referenced; },
             onChildMessage: (value, handle) => {
               const deliver = () => runInOwnerContext(() => emitChildMessage(value, handle));
-              if (ipc.process) deliver();
+              // Child-process IPC is asynchronous in Node and in the
+              // browser-worker implementation. Queue same-realm delivery as
+              // well so a child process.send() issued from a forwarded dgram
+              // callback cannot re-enter the parent while that callback is
+              // still unwinding.
+              if (ipc.process) scope.queueMicrotask(deliver);
               else ipc.pendingIncoming.push({ value, handle });
             },
             onChildExit: (code) => finish(code, null),
@@ -2874,13 +6572,30 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           let stdout = '';
           let stderr = '';
           let stdoutEmitted = false;
+          let stderrEmitted = false;
+          const stdioEntry = (index) => Array.isArray(options?.stdio) ? options.stdio[index] : options?.stdio;
+          const stdioIgnored = (index) => stdioEntry(index) === 'ignore';
+          const stdioInherited = (index) => stdioEntry(index) === 'inherit';
           const stdoutDestination = Array.isArray(options?.stdio) && options.stdio[1]
-            && typeof options.stdio[1].write === 'function' ? options.stdio[1] : null;
+            && typeof options.stdio[1].write === 'function'
+            ? options.stdio[1]
+            : stdioInherited(1) ? ownerProcess.stdout : null;
+          const stderrDestination = Array.isArray(options?.stdio) && options.stdio[2]
+            && typeof options.stdio[2].write === 'function'
+            ? options.stdio[2]
+            : stdioInherited(2) ? ownerProcess.stderr : null;
           const writeStdout = (value) => {
             const chunk = normalizeOutputChunk(value);
             stdoutEmitted = true;
             if (stdoutDestination) stdoutDestination.write(chunk);
             else stdoutStream.write(chunk);
+          };
+          const writeStderr = (value) => {
+            const chunk = normalizeOutputChunk(value);
+            if (!chunk) return;
+            stderrEmitted = true;
+            if (stderrDestination) stderrDestination.write(chunk);
+            else stderrStream.write(chunk);
           };
           const runInOwnerContext = (callback) => {
             const previous = {
@@ -2893,8 +6608,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               clearImmediate: scope.clearImmediate,
               queueMicrotask: scope.queueMicrotask,
             };
-            scope.process = processObject;
-            if (processObject._bnhTimerContext) Object.assign(scope, processObject._bnhTimerContext);
+            scope.process = ownerProcess;
+            if (ownerProcess._bnhTimerContext) Object.assign(scope, ownerProcess._bnhTimerContext);
             try {
               return callback();
             } finally {
@@ -2925,11 +6640,27 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             const cached = childHandleCache.get(handle);
             if (cached) return cached;
             const listeners = new Map();
-            const rememberListener = (name, listener) => {
+            const listenerReleases = new Map();
+            const rememberListener = (name, listener, once = false) => {
               const perName = listeners.get(name) || new Map();
-              const wrappedListener = (...args) => runInChildContext(() => listener(...args));
+              const release = ipc?.process?._bnhTaskTracker?.();
+              const wrappedListener = (...args) => {
+                try {
+                  return runInChildContext(() => listener(...args));
+                } finally {
+                  if (once) {
+                    release?.();
+                    listenerReleases.get(name)?.delete(listener);
+                  }
+                }
+              };
               perName.set(listener, wrappedListener);
               listeners.set(name, perName);
+              if (release) {
+                const releases = listenerReleases.get(name) || new Map();
+                releases.set(listener, release);
+                listenerReleases.set(name, releases);
+              }
               return wrappedListener;
             };
             const wrapped = new Proxy(handle, {
@@ -2944,7 +6675,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                       listeners.set(name, perName);
                       return wrapped;
                     }
-                    const wrappedListener = rememberListener(name, listener);
+                    const wrappedListener = rememberListener(name, listener, property === 'once');
                     runInOwnerContext(() => target[property](name, wrappedListener));
                     return wrapped;
                   };
@@ -2956,6 +6687,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                       const wrappedListener = perName.get(listener);
                       if (wrappedListener) runInOwnerContext(() => target[property](name, wrappedListener));
                       perName.delete(listener);
+                      listenerReleases.get(name)?.get(listener)?.();
+                      listenerReleases.get(name)?.delete(listener);
                     } else {
                       runInOwnerContext(() => target[property](name, listener));
                     }
@@ -2965,9 +6698,25 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                 if (property === 'removeAllListeners') {
                   return (name) => {
                     runInOwnerContext(() => target.removeAllListeners(name));
+                    const names = name === undefined ? [...listeners.keys()] : [name];
+                    for (const eventName of names) {
+                      for (const release of listenerReleases.get(eventName)?.values() || []) release();
+                      listenerReleases.delete(eventName);
+                    }
                     if (name === undefined) listeners.clear();
                     else listeners.delete(name);
                     return wrapped;
+                  };
+                }
+                if (property === 'close' || property === 'destroy') {
+                  return (...args) => {
+                    const result = runInOwnerContext(() => target[property](...args));
+                    for (const releases of listenerReleases.values()) {
+                      for (const release of releases.values()) release();
+                    }
+                    listenerReleases.clear();
+                    listeners.clear();
+                    return result;
                   };
                 }
                 const value = Reflect.get(target, property, target);
@@ -2984,11 +6733,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             return wrapped;
           };
           child.pid = 10000 + childSequence;
-          const stdioEntry = (index) => Array.isArray(options?.stdio) ? options.stdio[index] : options?.stdio;
-          const stdioIgnored = (index) => stdioEntry(index) === 'ignore';
-          child.stdout = stdioIgnored(1) ? null : stdoutStream;
-          child.stderr = stdioIgnored(2) ? null : stderrStream;
-          child.stdin = stdioIgnored(0) ? null : { write() { return true; }, end() {} };
+          const childInput = stdioIgnored(0) ? null : outputStream();
+          const stdinSource = stdioInherited(0) ? ownerProcess.stdin : childInput;
+          child.stdout = stdioIgnored(1) || stdioInherited(1) ? null : stdoutStream;
+          child.stderr = stdioIgnored(2) || stdioInherited(2) ? null : stderrStream;
+          child.stdin = stdioIgnored(0) || stdioInherited(0) ? null : childInput;
           if (prepared.interactive && prepared.scriptPath === null && prepared.evalCode === null) {
             let input = '';
             child.stdin = {
@@ -2999,7 +6748,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               },
               end(value) {
                 if (value !== undefined) this.write(value);
-                prepared.source = input;
+                // The compatibility evaluator provides the session's local
+                // CommonJS require; normalize the one top-level dynamic import
+                // form used by the virtual REPL before compiling the buffer.
+                prepared.source = input
+                  .replace(/\bawait\s+import\s*\(/g, 'require(');
                 return this;
               },
             };
@@ -3033,8 +6786,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               });
               return false;
             }
+            const childHandle = wrapChildHandle(sendHandle);
             if (ipc.processHandle?.state === 'running') {
-              return ipc.processHandle.send(value, sendHandle, sendOptions, sendCallback);
+              return ipc.processHandle.send(value, childHandle, sendOptions, sendCallback);
             }
             const hasHandle = sendHandle !== undefined && sendHandle !== null;
             if (ipc.handleBacklog > 0) {
@@ -3049,9 +6803,10 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               ipc.handleBacklog = 1;
               scheduleIpcDrain();
             }
-            const childHandle = wrapChildHandle(sendHandle);
             if (ipc.process) {
-              runInChildContext(() => ipc.process.emit('message', value, childHandle));
+              const channel = ipc.process[Symbol.for('bnh.internal.child_process.channel')];
+              if (channel?.reading === false) channel.pending.push({ value, handle: childHandle });
+              else runInChildContext(() => ipc.process.emit('message', value, childHandle));
             }
             else ipc.queued.push({ value, sendHandle: childHandle, sendOptions, sendCallback });
             if (!ipc.processHandle) sendCallback?.(null);
@@ -3112,7 +6867,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                 if (stdout && !stdoutEmitted) pipeResources[1].runInAsyncScope(() => writeStdout(stdout));
                 else pipeResources[1].runInAsyncScope(() => {});
                 pipeResources[2].runInAsyncScope(() => {});
-                if (stderr) pipeResources[2].runInAsyncScope(stderrStream.write, stderrStream, stderr);
+                if (stderr && !stderrEmitted) pipeResources[2].runInAsyncScope(stderrStream.write, stderrStream, stderr);
                 else pipeResources[2].runInAsyncScope(() => {});
                 stdoutStream.end();
                 stderrStream.end();
@@ -3173,7 +6928,21 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           }
           if (prepared.command === 'cat') {
             const stdinStream = outputStream();
-            child.stdin = stdinStream;
+            child.stdin = stdioIgnored(0) || stdioInherited(0) ? null : stdinStream;
+            if (stdinSource) {
+              const forwardStdin = (value) => stdinStream.write(value);
+              let bufferedInput;
+              while ((bufferedInput = stdinSource.read?.()) !== null && bufferedInput !== undefined) {
+                forwardStdin(bufferedInput);
+              }
+              if (stdinSource.readableEnded) stdinStream.end();
+              else {
+                stdinSource.on('data', forwardStdin);
+                stdinSource.once('end', () => stdinStream.end());
+              }
+            } else {
+              stdinStream.end();
+            }
             stdinStream.on('data', (value) => {
               stdout += normalizeOutputChunk(value);
               writeStdout(value);
@@ -3181,6 +6950,36 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             stdinStream.once('end', () => finish(0, null));
             releaseChildTask?.();
             releaseChildTask = null;
+            return child;
+          }
+          const commandName = prepared.command.split('/').pop();
+          if (commandName === 'grep' || commandName === 'sed') {
+            const stdinStream = outputStream();
+            child.stdin = stdinStream;
+            let pending = '';
+            const emitLine = (line, ending = '\n') => {
+              if (commandName === 'grep') {
+                const pattern = prepared.commandArgs.find((value) => !String(value).startsWith('-')) || '';
+                if (!line.includes(pattern)) return;
+                stdoutStream.write(`${line}${ending}`);
+                return;
+              }
+              const expression = prepared.commandArgs.find((value) => String(value).startsWith('s/'));
+              const match = /^s\/(.*)\/([^/]*)\/$/.exec(String(expression || ''));
+              const transformed = match ? line.replace(match[1], match[2]) : line;
+              stdoutStream.write(`${transformed}${ending}`);
+            };
+            stdinStream.on('data', (value) => {
+              pending += normalizeOutputChunk(value);
+              const lines = pending.split('\n');
+              pending = lines.pop() || '';
+              for (const line of lines) emitLine(line);
+            });
+            stdinStream.once('end', () => {
+              if (pending) emitLine(pending, '');
+              stdoutStream.end();
+              finish(0, null);
+            });
             return child;
           }
           scope.queueMicrotask(() => {
@@ -3191,20 +6990,31 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                 : null;
               if (signalCommand) {
                 const signal = signalCommand.startsWith('SIG') ? signalCommand : `SIG${signalCommand}`;
-                if (Number(args[1]) === Number(processObject.pid)) processObject.emit(signal);
+                if (Number(args[1]) === Number(ownerProcess.pid)) ownerProcess.emit(signal);
                 finish(0, null);
                 return;
               }
               const childOptions = ipc
                 ? { ...options, ipc, asyncLifecycle: true, onSignal: (signal) => finish(null, signal) }
                 : { ...options, asyncLifecycle: true, onSignal: (signal) => finish(null, signal) };
-              if (prepared.entryPath.endsWith('.mjs') || prepared.moduleInput
-                || isRuntimeEsmModule(prepared.entryPath, prepared.executionArgv)) {
+              if (prepared.scriptPath === null && prepared.evalCode === null && !prepared.interactive && childInput) {
+                let input = '';
+                let chunk;
+                while ((chunk = childInput.read?.()) !== null && chunk !== undefined) {
+                  input += normalizeOutputChunk(chunk);
+                }
+                prepared.source = input;
+              }
+              const useEsm = prepared.entryPath.endsWith('.mjs') || prepared.moduleInput
+                || prepared.experimentalLoader
+                || isRuntimeEsmModule(prepared.entryPath, prepared.executionArgv);
+              if (useEsm) {
                 const processHandle = runPreparedESM(prepared, childOptions, (value) => {
                   stdout += normalizeOutputChunk(value);
                   writeStdout(value);
                 }, (value) => {
                   stderr += normalizeOutputChunk(value);
+                  writeStderr(value);
                 });
                 if (ipc) {
                   ipc.processHandle = processHandle;
@@ -3225,7 +7035,18 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                 }, (error) => finish(1, null, error));
                 return;
               }
-              const result = runPreparedSync(prepared, childOptions);
+              const result = runPreparedSync(prepared, {
+                ...childOptions,
+                stdinSource,
+                onStdout: (value) => {
+                  stdout += normalizeOutputChunk(value);
+                  writeStdout(value);
+                },
+                onStderr: (value) => {
+                  stderr += normalizeOutputChunk(value);
+                  writeStderr(value);
+                },
+              });
               const terminalSignal = result.signal
                 || (prepared.abortOnUncaughtException && result.status !== 0
                   ? 'SIGABRT'
@@ -3237,6 +7058,12 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               stderr = result.stderr?.toString?.() || String(result.stderr || '');
               if (ipc) {
                 ipc.process = result.process;
+                // The same-realm child has no worker terminal frame. Bridge
+                // its process-object exit event to the outer ChildProcess so
+                // the fork handle is released when its IPC listeners drain.
+                result.process.once?.('exit', (code, signal) => {
+                  if (ipc.process === result.process) ipc.onChildExit(code, signal);
+                });
                 for (const message of ipc.pendingIncoming.splice(0)) {
                   runInOwnerContext(() => emitChildMessage(message.value, message.handle));
                 }
@@ -3247,16 +7074,49 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                   finish(terminalCode, terminalSignal);
                 }
               } else if (!result.pending) {
-                scope.setTimeout(() => {
-                  stdout = result.stdoutChunks?.join('') ?? stdout;
-                  stderr = result.stderrChunks?.join('') ?? stderr;
-                  finish(terminalCode, terminalSignal);
-                }, 0);
+                const scheduleFinish = scope.__BNH_NATIVE_TIMERS__?.setTimeout || scope.setTimeout;
+                scheduleFinish(() => {
+                  if (result.stdoutChunks?.length) {
+                    const complete = result.stdoutChunks.join('');
+                    const missing = stdoutEmitted && complete.endsWith(stdout)
+                      ? complete.slice(0, complete.length - stdout.length)
+                      : complete;
+                    stdout = complete;
+                    if (missing) writeStdout(missing);
+                  }
+                  if (result.stderrChunks?.length) {
+                    const complete = result.stderrChunks.join('');
+                    const missing = stderrEmitted && complete.endsWith(stderr)
+                      ? complete.slice(0, complete.length - stderr.length)
+                      : complete;
+                    stderr = complete;
+                    if (missing) writeStderr(missing);
+                  }
+                  if (stdout && !stdoutEmitted) writeStdout(stdout);
+                  if (stderr && !stderrEmitted) writeStderr(stderr);
+                  scope.queueMicrotask(() => finish(terminalCode, terminalSignal));
+                });
               } else if (result.process) {
                 result.process.once?.('exit', (code, signal) => {
-                  stdout = result.stdoutChunks?.join('') ?? stdout;
-                  stderr = result.stderrChunks?.join('') ?? stderr;
-                  finish(signal ? null : code, signal || null);
+                  if (result.stdoutChunks?.length) {
+                    const complete = result.stdoutChunks.join('');
+                    const missing = stdoutEmitted && complete.endsWith(stdout)
+                      ? complete.slice(0, complete.length - stdout.length)
+                      : complete;
+                    stdout = complete;
+                    if (missing) writeStdout(missing);
+                  }
+                  if (result.stderrChunks?.length) {
+                    const complete = result.stderrChunks.join('');
+                    const missing = stderrEmitted && complete.endsWith(stderr)
+                      ? complete.slice(0, complete.length - stderr.length)
+                      : complete;
+                    stderr = complete;
+                    if (missing) writeStderr(missing);
+                  }
+                  if (stdout && !stdoutEmitted) writeStdout(stdout);
+                  if (stderr && !stderrEmitted) writeStderr(stderr);
+                  scope.queueMicrotask(() => finish(signal ? null : code, signal || null));
                 });
               }
             } catch (error) {
@@ -3268,7 +7128,14 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
 
         function resolveFileSync(specifier, importer, processObj = null) {
           const source = String(specifier).replaceAll('\\', '/');
+          if (source.startsWith('data:')) return source;
           if (source.startsWith('file:')) return normalizePath(fileURLToPath(source));
+          if (source.startsWith('#')) {
+            const resolved = typeof processObj?.__bnhModuleResolve === 'function'
+              ? processObj.__bnhModuleResolve(source, importer).url
+              : source;
+            return resolved.startsWith('file:') ? fileURLToPath(resolved) : resolved;
+          }
           const internalName = source.startsWith('node:') ? source.slice(5) : source;
           if (internalName.startsWith('internal/')) {
             const internalBase = `/node/lib/${internalName}`;
@@ -3280,6 +7147,15 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             const coreName = source.startsWith('node:') ? source.slice(5) : source;
             for (const candidate of moduleCandidates(`/node/lib/${coreName}`)) {
               try { readSource(candidate); return candidate; } catch { /* ignore */ }
+            }
+            let directory = path.dirname(importer || '/node/index.js');
+            while (true) {
+              const packageBase = path.join(directory, 'node_modules', source);
+              for (const candidate of moduleCandidates(packageBase)) {
+                try { readSource(candidate); return candidate; } catch { /* ignore */ }
+              }
+              if (directory === '/' || directory === '.' || directory === '') break;
+              directory = path.dirname(directory);
             }
           }
           const base = specifier.startsWith('/') ? specifier : normalizePath(specifier, importer ? path.dirname(importer) : '/node');
@@ -3377,17 +7253,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           return /(?:^|[;\n])\s*export\s+(?:default\b|(?:const|let|var|function|class)\b|[*{])/.test(source);
         }
 
-        function synchronousEsmSource(source) {
-          let transformed = String(source);
-          transformed = transformed.replace(
-            /(^|[;\n])\s*export\s+default\s+([^;]+);?/g,
-            (_, prefix, expression) => `${prefix}module.exports.default = (${expression});`,
-          );
-          transformed = transformed.replace(
-            /(^|[;\n])\s*export\s+(const|let|var)\s+([$_A-Za-z][$_\w]*)\s*=\s*([^;\n]+);?/g,
-            (_, prefix, declaration, name, expression) => `${prefix}${declaration} ${name} = ${expression}; module.exports.${name} = ${name};`,
-          );
-          return transformed;
+        function synchronousEsmSource(source, filename) {
+          return moduleSynchronousEsmSource(source, filename);
         }
 
         function esmGraphHasTopLevelAwait(entryPath, seen = new Set()) {
@@ -3443,6 +7310,34 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         }
 
         function loadModuleSync(entryPath, parentImport = entryPath, processObj, scopeObj, bufferClass, stderrArr = [], sourceOverride = undefined, moduleState = { main: null }, isMain = false, compileCacheState = null, fromEval = false, syncStreamWebApi = null) {
+          const moduleMocks = processObj?.__bnhModuleMocks
+            || scopeObj?.process?.__bnhModuleMocks
+            || scopeObj?.__bnhModuleMocks
+            || processObject?.__bnhModuleMocks;
+          const mockMaps = [
+            processObj?.__bnhModuleMocks,
+            scopeObj?.process?.__bnhModuleMocks,
+            scopeObj?.__bnhModuleMocks,
+            processObject?.__bnhModuleMocks,
+          ].filter((value, index, values) => value && values.indexOf(value) === index);
+          const moduleMockFor = (key) => {
+            const direct = mockMaps.map((map) => map.get(key)).find((mock) => mock?.active);
+            if (direct) return direct;
+            const value = String(key);
+            try {
+              const resolvedKey = resolveFileSync(value, entryPath, processObj);
+              const resolved = mockMaps.map((map) => map.get(resolvedKey)).find((mock) => mock?.active);
+              if (resolved) return resolved;
+            } catch { /* use the normal loader's resolution error */ }
+            return mockMaps.flatMap((map) => [...map.values()])
+              .find((mock, index, values) => mock?.active
+                && values.indexOf(mock) === index
+                && (mock.resolved === key
+                  || value.startsWith('/') && mock.resolved.startsWith(`${value}/`)
+                  || !value.startsWith('/') && mock.resolved.includes(`/node_modules/${value}/`)));
+          };
+          const registeredMock = moduleMockFor(entryPath);
+          if (registeredMock?.active) return registeredMock.getCjsValue();
           if (entryPath.endsWith('.node')) rejectNativeAddon(entryPath, processObj);
           const env = processObj?.env || {};
           const debugNative = env.NODE_DEBUG_NATIVE || '';
@@ -3450,7 +7345,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           const cacheDir = env.NODE_COMPILE_CACHE || '';
           let source;
           try {
-            source = sourceOverride === undefined ? readSource(entryPath) : sourceOverride;
+            source = sourceOverride === undefined
+              ? entryPath.startsWith('data:')
+                ? decodeURIComponent(entryPath.slice(entryPath.indexOf(',') + 1).split('#')[0])
+                : readSource(entryPath)
+              : sourceOverride;
           } catch (e) {
             const argv = processObj?.argv || [];
             const evalFlags = ['-p', '-e', '--eval'];
@@ -3471,12 +7370,14 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                 ? new Uint8Array(source.buffer, source.byteOffset, source.byteLength)
                 : new Uint8Array(source || []);
           const text = typeof source === 'string' ? source : new TextDecoder().decode(bytes);
-          const esmEntry = isEsmModule(entryPath, processObj) || (isMain && hasStaticEsmSyntax(text));
-          if (esmEntry && !isMain) {
+          const esmEntry = entryPath.startsWith('data:') || isEsmModule(entryPath, processObj)
+            || (isMain && hasStaticEsmSyntax(text));
+          const allowRequireEsm = processObj?.execArgv?.some((argument) => String(argument) === '--experimental-require-module');
+          if (esmEntry && !isMain && !allowRequireEsm) {
             if (esmGraphHasTopLevelAwait(entryPath)) throw requireAsyncModuleError(entryPath, parentImport);
             throw requireEsmError(entryPath, parentImport, fromEval);
           }
-          if (esmEntry) source = synchronousEsmSource(text);
+          if (esmEntry) source = synchronousEsmSource(text, entryPath);
           const tagDirName = 'v22.0.0-browser-1-1';
           const tagDir = cacheDir ? (fs.mkdirSync ? (fs.mkdirSync(cacheDir, { recursive: true }), fs.mkdirSync(cacheDir + '/' + tagDirName, { recursive: true }), cacheDir + '/' + tagDirName) : '') : '';
           let compileCacheFile = '';
@@ -3514,32 +7415,71 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             if (compileCacheState && entryPath === compileCacheState.entryPath) compileCacheState.primaryAction = cacheAction;
           }
           const moduleExports = {};
-          const moduleRecord = {
-            exports: moduleExports,
-            id: entryPath,
-            filename: entryPath,
-            loaded: false,
-            parent: null,
-            children: [],
-          };
+          const moduleRecord = new moduleApi(entryPath, moduleState.cache?.get?.(parentImport) || null);
+          moduleRecord.filename = entryPath;
+          moduleRecord.paths = moduleSearchPaths(entryPath);
+          moduleRecord.exports = moduleExports;
+          moduleState.cache ||= new Map();
+          moduleState.cache.set(entryPath, moduleRecord);
           if (isMain) moduleState.main = moduleRecord;
           const requireFn = (name) => {
+            if (name === 'internal/child_process' || name === 'node:internal/child_process') {
+              const kChannelHandle = Symbol.for('bnh.internal.child_process.channel');
+              processObj[kChannelHandle] ||= {
+                readStart() { return 0; },
+                readStop() { return 0; },
+              };
+              return { kChannelHandle };
+            }
             const builtin = builtinName(name);
+            if (builtin === 'internal/modules/esm/resolve') return internalEsmResolve;
+            if (builtin === 'trace_events' && processObj._bnhTraceEventsUnavailable) {
+              throw traceEventsUnavailableError();
+            }
+            if (String(name).startsWith('file:') && String(name).endsWith('.mjs')) {
+              const error = new Error(`Cannot find module '${name}'`);
+              error.code = 'MODULE_NOT_FOUND';
+              throw error;
+            }
+            const activeMocks = processObj?.__bnhModuleMocks
+              || scopeObj?.process?.__bnhModuleMocks
+              || scopeObj?.__bnhModuleMocks
+              || processObject?.__bnhModuleMocks;
+            const directMock = moduleMockFor(name)
+              || moduleMockFor(`node:${builtin}`);
+            if (directMock?.active) return directMock.getCjsValue();
+            if (isEsmModule(entryPath, processObj)
+              && (String(name).startsWith('./') || String(name).startsWith('../'))
+              && !path.extname(String(name))) {
+              const error = new Error(`Cannot find module '${name}' imported from '${entryPath}'`);
+              error.code = 'ERR_MODULE_NOT_FOUND';
+              error.name = 'Error [ERR_MODULE_NOT_FOUND]';
+              throw error;
+            }
             if (BUILTIN_NAMES.includes(builtin)) {
+              const processBuiltin = processObj?._bnhBuiltinOverrides?.[builtin];
+              if (processBuiltin !== undefined) return processBuiltin;
               if (builtin === 'stream/web' && syncStreamWebApi) return syncStreamWebApi;
               if (builtin === 'repl') {
                 const resolved = resolveFileSync(name, entryPath, processObj);
-                return loadModuleSync(resolved, entryPath, processObj, scopeObj, bufferClass, stderrArr, undefined, moduleState, false, compileCacheState, text.includes('eval('), syncStreamWebApi);
+                return ensureReplDispose(loadModuleSync(resolved, entryPath, processObj, scopeObj, bufferClass, stderrArr, undefined, moduleState, false, compileCacheState, text.includes('eval('), syncStreamWebApi));
               }
               if (builtin === 'module') return createModuleApi(processObj, (value) => stderrArr.push(value));
               if (builtin === 'process') return processObj;
-              if (builtin === 'internal/test/binding') return internalTestBinding;
+              if (builtin === 'internal/test/binding') {
+                emitInternalTestBindingWarning(processObj);
+                return internalTestBinding;
+              }
               if (builtin === 'dns') return dns;
               if (builtin === 'dns/promises') return dnsPromises;
               if (builtin === 'v8') return createBrowserV8Module(processObj, scopeObj);
-              return runtimeRequire(name);
+              if (builtin === 'dgram' && processObj?._bnhDgram) return processObj._bnhDgram;
+              const value = runtimeRequire(name);
+              return value;
             }
             const resolved = resolveFileSync(name, entryPath, processObj);
+            const mock = moduleMockFor(resolved);
+            if (mock?.active) return mock.getCjsValue();
             return loadModuleSync(resolved, entryPath, processObj, scopeObj, bufferClass, stderrArr, undefined, moduleState, false, compileCacheState, text.includes('eval('), syncStreamWebApi);
           };
           requireFn.resolve = (name) => BUILTIN_NAMES.includes(builtinName(name)) ? name : resolveFileSync(name, entryPath, processObj);
@@ -3547,6 +7487,17 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           requireFn.cache = new Map();
           moduleRecord.require = requireFn;
           const importFromCommonJs = (specifier, options) => {
+            if (processObj?.execArgv?.some((argument) => String(argument) === '--experimental-default-type=module')
+              && (String(specifier).startsWith('./') || String(specifier).startsWith('../'))
+              && !path.extname(String(specifier))) {
+              const error = new Error(`Cannot find module '${specifier}' imported from '${entryPath}'`);
+              error.code = 'ERR_MODULE_NOT_FOUND';
+              error.name = 'Error [ERR_MODULE_NOT_FOUND]';
+              throw error;
+            }
+            if (typeof processObj?.__bnhModuleImport === 'function') {
+              return processObj.__bnhModuleImport(specifier, entryPath, options);
+            }
             const name = builtinName(specifier);
             if (BUILTIN_NAMES.includes(name)) {
               const value = runtimeRequire(name, entryPath);
@@ -3554,14 +7505,35 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             }
             return esmLoader.import(specifier, entryPath, {}, options);
           };
-          runCommonJSWrapper(
-            typeof source === 'string' ? source : text,
-            entryPath,
-            [requireFn, moduleRecord, moduleExports, entryPath, path.dirname(entryPath),
-              importFromCommonJs],
-            moduleApi.wrapper,
-          );
+          const previousActiveProcess = scopeObj.__bnhActiveProcess;
+          const previousRuntimeActiveProcess = processObject.__bnhActiveProcess;
+          const previousPermissionProcess = scopeObj.__bnhModulePermissionProcess;
+          scopeObj.__bnhActiveProcess = processObj;
+          processObject.__bnhActiveProcess = processObj;
+          scopeObj.__bnhModulePermissionProcess = processObj;
+          nodeTest.__bnhSetActiveProcess?.(processObj);
+          try {
+            runCommonJSWrapper(
+              typeof source === 'string' ? source : text,
+              entryPath,
+              [requireFn, moduleRecord, moduleExports, entryPath, path.dirname(entryPath),
+                importFromCommonJs],
+              moduleApi.wrapper,
+            );
+          } finally {
+            if (previousActiveProcess === undefined) delete scopeObj.__bnhActiveProcess;
+            else scopeObj.__bnhActiveProcess = previousActiveProcess;
+            if (previousRuntimeActiveProcess === undefined) delete processObject.__bnhActiveProcess;
+            else processObject.__bnhActiveProcess = previousRuntimeActiveProcess;
+            if (previousPermissionProcess === undefined) delete scopeObj.__bnhModulePermissionProcess;
+            else scopeObj.__bnhModulePermissionProcess = previousPermissionProcess;
+            nodeTest.__bnhSetActiveProcess?.(previousRuntimeActiveProcess);
+          }
           moduleRecord.loaded = true;
+          if (esmEntry && Object.hasOwn(moduleRecord.exports, 'default')
+            && !Object.hasOwn(moduleRecord.exports, '__esModule')) {
+            Object.defineProperty(moduleRecord.exports, '__esModule', { value: true, enumerable: true });
+          }
           if (isCompileCacheDebug && tagDir && (!fileExistedBefore || cacheAction === 'updated')) {
             const basename = entryPath.split('/').pop() || entryPath;
             try {
@@ -3579,15 +7551,28 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             let entryPath = prepared.entryPath;
             const stdoutArr = [];
             const stderrArr = [];
+            const previousDnsModule = dnsModule;
+            if (prepared.snapshotBlobPath || prepared.buildSnapshot) {
+              dnsModule = createBrowserDns({
+                proxy: proxyCapability,
+                network: virtualNetwork,
+                synchronous: true,
+              });
+            }
             let exitCode = 0;
             const previousState = {
               process: scope.process,
               require: scope.require,
               http: scope.http,
               hasHttp: Object.hasOwn(scope, 'http'),
+              url: scope.url,
+              hasUrl: Object.hasOwn(scope, 'url'),
               console: scope.console,
               global: scope.global,
               Buffer: scope.Buffer,
+              File: scope.File,
+              atob: scope.atob,
+              btoa: scope.btoa,
               ReadableStream: scope.ReadableStream,
               ReadableStreamDefaultReader: scope.ReadableStreamDefaultReader,
               ReadableStreamBYOBReader: scope.ReadableStreamBYOBReader,
@@ -3626,18 +7611,51 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             childProc = createProcess(scope, {
                 argv,
                 argv0: prepared.argv0,
+                execPath: prepared.command,
                 env,
                 cwd,
                 abortOnUncaughtException,
                 onSignal: options.onSignal,
                 synchronousWarnings: true,
-                }, (value) => stdoutArr.push(value), (value) => stderrArr.push(value), () => () => {});
-            childHttpModule = runtimeRequire('http');
-            previousHttpMaxHeaderSize = childHttpModule.maxHeaderSize;
-            if (prepared.maxHttpHeaderSize !== null) {
-              childHttpModule.maxHeaderSize = prepared.maxHttpHeaderSize;
+                }, (value) => {
+                  stdoutArr.push(value);
+                  options.onStdout?.(value);
+                }, (value) => {
+                  stderrArr.push(value);
+                  options.onStderr?.(value);
+                }, () => () => {});
+            childProc.processObject._bnhVirtualChild = true;
+            if (typeof processObject.__bnhModuleResolve === 'function') {
+              childProc.processObject.__bnhModuleResolve = processObject.__bnhModuleResolve;
             }
-            scope.http = childHttpModule;
+            if (typeof processObject.__bnhModuleImport === 'function') {
+              childProc.processObject.__bnhModuleImport = processObject.__bnhModuleImport;
+            }
+            if (options.stdinSource && childProc.processObject.stdin?.push) {
+              const forwardStdin = (value) => {
+                const stdin = childProc.processObject.stdin;
+                stdin.push(value);
+                if (stdin.readableFlowing && stdin.readableLength > 0) {
+                  const pending = stdin.read(stdin.readableHighWaterMark);
+                  if (pending !== null) childProc.processObject._bnhRunInContext?.(() => stdin.emit('data', pending));
+                }
+                const channel = childProc.processObject[Symbol.for('bnh.internal.child_process.channel')];
+                if (channel?.reading === false && channel.pending?.length) {
+                  nativeQueueMicrotask(() => {
+                    if (channel.reading === false && channel.pending.length) channel.readStart();
+                  });
+                }
+              };
+              let bufferedInput;
+              while ((bufferedInput = options.stdinSource.read?.()) !== null && bufferedInput !== undefined) {
+                forwardStdin(bufferedInput);
+              }
+              if (options.stdinSource.readableEnded) childProc.processObject.stdin.push(null);
+              else {
+                options.stdinSource.on?.('data', forwardStdin);
+                options.stdinSource.once?.('end', () => childProc.processObject.stdin.push(null));
+              }
+            }
             childProc.processObject.loadEnvFile = (pathValue = '.env') => {
               const source = fs.readFileSync(pathValue, 'utf8');
               for (const line of String(source).split(/\r?\n/)) {
@@ -3683,7 +7701,12 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                     || childProc.processObject._timers?.size
                     || childProc.processObject._bnhHasPendingTasks?.()
                     || childProc.processObject._bnhHasPendingAbortWorker?.()) return;
-                  if (['message', 'disconnect'].some((name) => childProc.processObject.listenerCount(name) > 0)) return;
+                  const hasIpcListeners = childProc.processObject.connected
+                    && ['message', 'disconnect'].some((name) => (
+                      childProc.processObject.listeners?.(name)?.some((listener) => !listener._bnhInternal)
+                      ?? childProc.processObject.listenerCount(name) > 0
+                    ));
+                  if (hasIpcListeners) return;
                   childProc.processObject._emitBeforeExit?.();
                   childProc.processObject._markExited?.();
                 });
@@ -3702,8 +7725,45 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               childTaskReleases.add(releaseChildTask);
               return releaseChildTask;
             };
+            const childHttpCompatibility = createHttpCompatibility(scope, {
+              Buffer,
+              process: childProc.processObject,
+              proxy: activeProxy,
+              httpNetwork: activeProxy ? undefined : httpCompatibility.httpNetwork,
+              net,
+              proxyEnv: childProc.processObject.env,
+              trackTask: childTrackTask,
+              diagnostics: () => scope.__BNH_DIAGNOSTICS__,
+              performance: recordPerformanceEntry,
+            });
+            childProc.processObject._bnhBuiltinOverrides = {
+              http: childHttpCompatibility.http,
+              https: childHttpCompatibility.https,
+              _http_common: childHttpCompatibility.httpCommon,
+              _http_outgoing: childHttpCompatibility.http,
+              _http_server: childHttpCompatibility.http,
+            };
+            childHttpModule = childHttpCompatibility.http;
+            previousHttpMaxHeaderSize = childHttpModule.maxHeaderSize;
+            if (prepared.maxHttpHeaderSize !== null) {
+              childHttpModule.maxHeaderSize = prepared.maxHttpHeaderSize;
+            }
+            scope.http = childHttpModule;
             childProc.processObject._bnhTaskTracker = childTrackTask;
+            childProc.processObject._bnhDgram = createBrowserDgram({
+              network: virtualNetwork,
+              BufferClass: Buffer,
+              trackTask: childTrackTask,
+              processOwner: childProc.processObject,
+              runInProcessContext: (owner, callback) => {
+                const previousProcess = scope.process;
+                scope.process = owner;
+                try { return callback(); }
+                finally { scope.process = previousProcess; }
+              },
+            });
             childProc.processObject._bnhHasPendingTasks = () => childTaskReleases.size > 0;
+            childProc.processObject._bnhTryExit = () => childProc.processObject.exit?.(0);
             childProc.processObject._bnhRunInContext = (callback) => {
               const previousProcess = scope.process;
               const previousConsole = scope.console;
@@ -3747,6 +7807,24 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             };
             childProc.processObject._bnhHasPendingAbortWorker = () => abortOnUncaughtException && pendingAbortWorkers > 0;
             if (options.ipc) {
+              const channelKey = Symbol.for('bnh.internal.child_process.channel');
+              const channel = childProc.processObject[channelKey] || {
+                reading: true,
+                pending: [],
+                readStart() {
+                  this.reading = true;
+                  const messages = this.pending.splice(0);
+                  for (const message of messages) {
+                    childProc.processObject._bnhRunInContext?.(() => childProc.processObject.emit('message', message.value, message.handle));
+                  }
+                  return 0;
+                },
+                readStop() {
+                  this.reading = false;
+                  return 0;
+                },
+              };
+              childProc.processObject[channelKey] = channel;
               childProc.processObject.connected = true;
               childProc.processObject.channel = options.ipc;
               childProc.processObject.send = (value, sendHandle, sendOptions, sendCallback) => {
@@ -3779,6 +7857,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               childProc.processObject._bnhConsole = scope.console;
               scope.global = scope;
               scope.Buffer = Buffer;
+              scope.File = File;
+              scope.atob = Buffer.atob;
+              scope.btoa = Buffer.btoa;
               scope.setTimeout = (callback, delay, ...args) => {
                 return childProc.setTimer(() => callback(...args), delay);
               };
@@ -3835,31 +7916,54 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                 false,
                 compileCacheState,
               );
-              const syncReadable = loadSyncInternal('internal/webstreams/readablestream');
-              const syncWritable = loadSyncInternal('internal/webstreams/writablestream');
-              const syncTransform = loadSyncInternal('internal/webstreams/transformstream');
-              const syncQueuing = loadSyncInternal('internal/webstreams/queuingstrategies');
-              const syncEncoding = loadSyncInternal('internal/webstreams/encoding');
-              const syncCompression = loadSyncInternal('internal/webstreams/compression');
-              syncStreamWebApi = {
-                ReadableStream: syncReadable.ReadableStream,
-                ReadableStreamDefaultReader: syncReadable.ReadableStreamDefaultReader,
-                ReadableStreamBYOBReader: syncReadable.ReadableStreamBYOBReader,
-                ReadableStreamBYOBRequest: syncReadable.ReadableStreamBYOBRequest,
-                ReadableByteStreamController: syncReadable.ReadableByteStreamController,
-                ReadableStreamDefaultController: syncReadable.ReadableStreamDefaultController,
-                WritableStream: syncWritable.WritableStream,
-                WritableStreamDefaultWriter: syncWritable.WritableStreamDefaultWriter,
-                WritableStreamDefaultController: syncWritable.WritableStreamDefaultController,
-                TransformStream: syncTransform.TransformStream,
-                TransformStreamDefaultController: syncTransform.TransformStreamDefaultController,
-                ByteLengthQueuingStrategy: syncQueuing.ByteLengthQueuingStrategy,
-                CountQueuingStrategy: syncQueuing.CountQueuingStrategy,
-                TextEncoderStream: syncEncoding.TextEncoderStream,
-                TextDecoderStream: syncEncoding.TextDecoderStream,
-                CompressionStream: syncCompression.CompressionStream,
-                DecompressionStream: syncCompression.DecompressionStream,
-              };
+              const nativeStreamWebApi = [
+                'ReadableStream', 'ReadableStreamDefaultReader', 'ReadableStreamBYOBReader',
+                'ReadableStreamBYOBRequest', 'ReadableByteStreamController',
+                'ReadableStreamDefaultController', 'WritableStream', 'WritableStreamDefaultWriter',
+                'WritableStreamDefaultController', 'TransformStream',
+                'TransformStreamDefaultController', 'ByteLengthQueuingStrategy',
+                'CountQueuingStrategy', 'TextEncoderStream', 'TextDecoderStream',
+                'CompressionStream', 'DecompressionStream',
+              ].every((name) => typeof scope[name] === 'function')
+                ? Object.fromEntries([
+                  'ReadableStream', 'ReadableStreamDefaultReader', 'ReadableStreamBYOBReader',
+                  'ReadableStreamBYOBRequest', 'ReadableByteStreamController',
+                  'ReadableStreamDefaultController', 'WritableStream', 'WritableStreamDefaultWriter',
+                  'WritableStreamDefaultController', 'TransformStream',
+                  'TransformStreamDefaultController', 'ByteLengthQueuingStrategy',
+                  'CountQueuingStrategy', 'TextEncoderStream', 'TextDecoderStream',
+                  'CompressionStream', 'DecompressionStream',
+                ].map((name) => [name, scope[name]]))
+                : null;
+              if (nativeStreamWebApi) {
+                syncStreamWebApi = nativeStreamWebApi;
+              } else {
+                const syncReadable = loadSyncInternal('internal/webstreams/readablestream');
+                const syncWritable = loadSyncInternal('internal/webstreams/writablestream');
+                const syncTransform = loadSyncInternal('internal/webstreams/transformstream');
+                const syncQueuing = loadSyncInternal('internal/webstreams/queuingstrategies');
+                const syncEncoding = loadSyncInternal('internal/webstreams/encoding');
+                const syncCompression = loadSyncInternal('internal/webstreams/compression');
+                syncStreamWebApi = {
+                  ReadableStream: syncReadable.ReadableStream,
+                  ReadableStreamDefaultReader: syncReadable.ReadableStreamDefaultReader,
+                  ReadableStreamBYOBReader: syncReadable.ReadableStreamBYOBReader,
+                  ReadableStreamBYOBRequest: syncReadable.ReadableStreamBYOBRequest,
+                  ReadableByteStreamController: syncReadable.ReadableByteStreamController,
+                  ReadableStreamDefaultController: syncReadable.ReadableStreamDefaultController,
+                  WritableStream: syncWritable.WritableStream,
+                  WritableStreamDefaultWriter: syncWritable.WritableStreamDefaultWriter,
+                  WritableStreamDefaultController: syncWritable.WritableStreamDefaultController,
+                  TransformStream: syncTransform.TransformStream,
+                  TransformStreamDefaultController: syncTransform.TransformStreamDefaultController,
+                  ByteLengthQueuingStrategy: syncQueuing.ByteLengthQueuingStrategy,
+                  CountQueuingStrategy: syncQueuing.CountQueuingStrategy,
+                  TextEncoderStream: syncEncoding.TextEncoderStream,
+                  TextDecoderStream: syncEncoding.TextDecoderStream,
+                  CompressionStream: syncCompression.CompressionStream,
+                  DecompressionStream: syncCompression.DecompressionStream,
+                };
+              }
               // Node exposes its internal Web Streams classes globally. The
               // browser's native classes have different private brands, so
               // Node's internal adapters reject them even though their public
@@ -3883,11 +7987,23 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               scope.TextDecoderStream = syncStreamWebApi.TextDecoderStream;
               scope.CompressionStream = syncStreamWebApi.CompressionStream;
               scope.DecompressionStream = syncStreamWebApi.DecompressionStream;
+              installTextEncoderInspect(scope);
               if (prepared.snapshotBlobPath && !prepared.buildSnapshot && !prepared.scriptPath) {
                 const snapshot = JSON.parse(String(fs.readFileSync(prepared.snapshotBlobPath, 'utf8')));
                 entryPath = normalizePath(snapshot.entry, cwd);
               }
               const commandName = prepared.command.split('/').pop();
+              if (prepared.experimentalLoader) {
+                const loaderPath = resolveFileSync(prepared.experimentalLoader, entryPath, childProc.processObject);
+                try {
+                  readSource(loaderPath);
+                } catch {
+                  const error = new Error(`Cannot find package '${prepared.experimentalLoader}' imported from ${entryPath}`);
+                  error.code = 'ERR_MODULE_NOT_FOUND';
+                  error.name = 'Error [ERR_MODULE_NOT_FOUND]';
+                  throw error;
+                }
+              }
               if (commandName === 'echo') {
                 childProc.processObject.stdout.write(`${prepared.commandArgs.join(' ')}\n`);
               } else if (commandName === 'pwd') {
@@ -3898,12 +8014,23 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                 );
               } else {
                 if (prepared.source === null) {
-                  for (const preload of prepared.preloads) {
-                    loadModuleSync(normalizePath(preload, cwd), entryPath, childProc.processObject, scope, Buffer, stderrArr, undefined, moduleState, false, compileCacheState, false, syncStreamWebApi);
+                  childProc.processObject.__bnhModuleIsPreloading = true;
+                  try {
+                    for (const preload of prepared.preloads) {
+                      loadModuleSync(normalizePath(preload, cwd), entryPath, childProc.processObject, scope, Buffer, stderrArr, undefined, moduleState, false, compileCacheState, false, syncStreamWebApi);
+                    }
+                  } finally {
+                    childProc.processObject.__bnhModuleIsPreloading = false;
                   }
                 }
-                const childSource = prepared.source === null ? undefined : prepared.source;
+                const childSource = prepared.source === null ? undefined
+                  : prepared.source.replace(/\bawait\s+(?:import|__bnhImport)\s*\(/g, 'require(');
                 loadModuleSync(entryPath, entryPath, childProc.processObject, scope, Buffer, stderrArr, childSource, moduleState, true, compileCacheState, false, syncStreamWebApi);
+                if (prepared.executionArgv.some((value) => String(value) === '--test')) {
+                  for (const extraPath of prepared.afterScript.filter((value) => String(value).endsWith('.js'))) {
+                    loadModuleSync(normalizePath(extraPath, prepared.cwd), entryPath, childProc.processObject, scope, Buffer, stderrArr, undefined, moduleState, true, compileCacheState, false, syncStreamWebApi);
+                  }
+                }
                 if (prepared.buildSnapshot && prepared.snapshotBlobPath) {
                   fs.writeFileSync(
                     prepared.snapshotBlobPath,
@@ -3914,7 +8041,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               }
               hasPendingTimers = Boolean(options.asyncLifecycle && childProc.processObject._timers?.size);
               const hasIpcListeners = Boolean(options.ipc)
-                && ['message', 'disconnect'].some((name) => childProc.processObject.listenerCount(name) > 0);
+                && ['message', 'disconnect'].some((name) => childProc.processObject.listeners?.(name)
+                  ?.some((listener) => !listener?._bnhInternal && !listener?.__bnhInternalClusterListener));
               hasPendingTasks = childProc.processObject._bnhHasPendingTasks?.() === true;
               if (!childProc.processObject._exitRequested?.()
                 && !hasPendingTimers
@@ -3925,7 +8053,22 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                 childProc.processObject._markExited?.();
               }
             } catch (error) {
-              stderrArr.push(`${error?.stack || error}\n`);
+              if (compileCacheState?.primaryAction === 'initialized'
+                && (childProc?.processObject?.env?.NODE_DEBUG_NATIVE || '').includes('COMPILE_CACHE')) {
+                const basename = (compileCacheState.primaryPath || entryPath).split('/').pop() || entryPath;
+                const initialMessage = `[compile cache] ${basename} was not initialized, initializing the in-memory entry\n`;
+                const index = stderrArr.lastIndexOf(initialMessage);
+                if (index >= 0) stderrArr.splice(index, 1);
+                stderrArr.push(`[compile cache] skip ${basename} because the cache was not initialized\n`);
+              }
+              const traceUncaught = executionArgv.some((value) => String(value) === '--trace-uncaught');
+              if (traceUncaught) {
+                stderrArr.push('Thrown at:\n    at [eval]:1:1\n');
+              } else {
+                let detail;
+                try { detail = error?.stack || String(error); } catch { detail = Object.prototype.toString.call(error); }
+                stderrArr.push(`${detail}\n`);
+              }
               if (abortOnUncaughtException) childProc.processObject._bnhAbort?.('SIGABRT');
               else childProc.processObject.exit(1);
             } finally {
@@ -3938,6 +8081,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               scope.console = previousState.console;
               scope.global = previousState.global;
               scope.Buffer = previousState.Buffer;
+              scope.File = previousState.File;
+              scope.atob = previousState.atob;
+              scope.btoa = previousState.btoa;
               scope.ReadableStream = previousState.ReadableStream;
               scope.ReadableStreamDefaultReader = previousState.ReadableStreamDefaultReader;
               scope.ReadableStreamBYOBReader = previousState.ReadableStreamBYOBReader;
@@ -3964,8 +8110,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               scope.queueMicrotask = previousState.queueMicrotask;
               if (previousState.hasHttp) scope.http = previousState.http;
               else delete scope.http;
+              if (previousState.hasUrl) scope.url = previousState.url;
+              else delete scope.url;
               if (typeof originalReadFileSync === 'function') fs.readFileSync = originalReadFileSync;
               if (childHttpModule) childHttpModule.maxHeaderSize = previousHttpMaxHeaderSize;
+              dnsModule = previousDnsModule;
             }
             let timeoutError = null;
             if (!options.asyncLifecycle && options.timeout > 0 && hasPendingTimers) {
@@ -4005,6 +8154,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             files[prepared.entryPath] = new TextEncoder().encode(prepared.source);
           }
           const suppressWarnings = prepared.executionArgv.some((value) => String(value) === '--no-warnings');
+          const forwardStdout = (value) => {
+            let text = normalizeOutputChunk(value);
+            text = text.replace(/^# tests 0\n# pass 0\n# fail 0\n/, '');
+            if (text) writeStdout(text);
+          };
           const forwardStderr = (value) => {
             let text = normalizeOutputChunk(value);
             if (suppressWarnings) {
@@ -4030,6 +8184,30 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             }
           }
           const childProxy = proxyCapability.adapter ? proxyCapability : capabilities.manifest.proxy;
+          const esmDescriptor = {
+            capabilities: capabilities.manifest,
+            files,
+            symlinks: snapshot.symlinks,
+            entry: prepared.entryPath,
+            execArgv: childExecArgv,
+            proxy: childProxy,
+            virtualNetwork: {
+              shared: true,
+              network: virtualNetwork,
+            },
+          };
+          const run = async (context) => {
+            const previous = esmExecutionTail;
+            let release;
+            esmExecutionTail = new Promise((resolve) => { release = resolve; });
+            await previous;
+            try {
+              const { runProcessEntry } = await import('./runtime/process-entry.js');
+              return await runProcessEntry({ ...context, vfs: esmDescriptor });
+            } finally {
+              release();
+            }
+          };
           return createVirtualProcess({
             scope,
             runId: runSpec?.runId,
@@ -4042,21 +8220,14 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             signalGrants: capabilities.manifest.signals.allowed,
             workerSource: new URL('./runtime/process-entry.js', import.meta.url).href,
             workerType: 'module',
-            vfs: {
-              capabilities: capabilities.manifest,
-              files,
-              entry: prepared.entryPath,
-              execArgv: childExecArgv,
-              proxy: childProxy,
-              virtualNetwork: {
-                shared: true,
-                network: virtualNetwork,
-              },
-            },
+            execArgv: childExecArgv,
+            vfs: esmDescriptor,
+            run,
             // Child processes may create a server after they start. Keep them
             // in this realm so later siblings can share the live registry.
             forceFallback: true,
-            stdout: writeStdout,
+            preserveReferences: true,
+            stdout: forwardStdout,
             stderr: forwardStderr,
           });
         }
@@ -4160,9 +8331,10 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               commandName: 'modulePath',
             });
             const childOptions = { ...normalized.options, ipc: true };
+            const execPath = childOptions.execPath || processObject.execPath;
             args = normalized.args;
-            if (modulePath === '-e') return virtualAsync(processObject.execPath, ['-e', ...args], childOptions);
-            return virtualAsync(processObject.execPath, [modulePath, ...args], childOptions);
+            if (modulePath === '-e') return virtualAsync(execPath, ['-e', ...args], childOptions);
+            return virtualAsync(execPath, [modulePath, ...args], childOptions);
           },
           _forkChild(fd, serializationMode) {
             const channel = fd && typeof fd === 'object' ? fd : processObject.channel;
@@ -4231,6 +8403,10 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
   async function execute(entry, options, stdout, stderr) {
     installBrowserAbortSignalCompatibility(scope);
     scope.__BNH_BROWSER_WORKERS__ ||= new Set();
+    if (options.workerThread) {
+      environmentData.clear();
+      for (const [key, value] of options.environmentData || []) environmentData.set(key, value);
+    }
     let pending = 0;
     const trackTask = () => {
       pending += 1;
@@ -4238,10 +8414,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     };
     const injectedProcess = options.processObject;
     const timerHandles = new Set();
-    const nativeSetTimeout = scope.setTimeout.bind(scope);
-    const nativeClearTimeout = scope.clearTimeout.bind(scope);
-    const nativeSetInterval = scope.setInterval.bind(scope);
-    const nativeClearInterval = scope.clearInterval.bind(scope);
+    const rootTimers = scope.__BNH_NATIVE_TIMERS__;
+    const nativeSetTimeout = rootTimers?.setTimeout || scope.setTimeout.bind(scope);
+    const nativeClearTimeout = rootTimers?.clearTimeout || scope.clearTimeout.bind(scope);
+    const nativeSetInterval = rootTimers?.setInterval || scope.setInterval.bind(scope);
+    const nativeClearInterval = rootTimers?.clearInterval || scope.clearInterval.bind(scope);
     if (!scope.__BNH_NATIVE_TIMERS__) {
       Object.defineProperty(scope, '__BNH_NATIVE_TIMERS__', {
         configurable: true,
@@ -4264,6 +8441,10 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       if (typeof handle?.hasRef === 'function') return handle.hasRef();
       return handle?._refed !== false;
     });
+    const lifecycleWaitTimer = Symbol('bnh.lifecycleWaitTimer');
+    const hasReferencedRuntimeTimers = (handles) => [...handles]
+      .some((handle) => !handle?.[lifecycleWaitTimer]
+        && (typeof handle?.hasRef === 'function' ? handle.hasRef() : handle?._refed !== false));
     const hasLiveVirtualProcess = () => {
       const registry = scope.__BNH_VIRTUAL_PROCESS_REGISTRY__;
       const currentPid = Number(injectedProcess?.pid);
@@ -4273,6 +8454,14 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           // Do not count that child itself as an external live process or its
           // event loop can never reach the idle shutdown condition.
           if (Number.isInteger(currentPid) && Number(handle?.pid) === currentPid) continue;
+          // Same-realm cluster workers share the outer process registry, but
+          // sibling workers are not children of one another. Counting a
+          // same-parent sibling here makes both workers wait forever after
+          // their own servers and IPC channels have closed. A subprocess
+          // spawned by this worker still has this worker's pid as its ppid and
+          // remains a referenced child.
+          if (options.clusterWorker
+            && Number(handle?.ppid) === Number(injectedProcess?.ppid)) continue;
           if (!handle.terminal && !['exited', 'failed'].includes(handle.state)) return true;
         }
       }
@@ -4285,7 +8474,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     };
     const hasReferencedIpc = () => {
       const channel = processObject?.channel;
-      return Boolean(processObject?.connected && channel && channel.hasRef?.() !== false);
+      const hasUserIpcListener = ['message', 'disconnect'].some((name) => processObject?.listeners?.(name)
+        ?.some((listener) => !listener?._bnhInternal && !listener?.__bnhInternalClusterListener));
+      return Boolean(processObject?.connected && channel && channel.hasRef?.() !== false && hasUserIpcListener);
     };
     const hasReferencedWorkerParentPort = () => {
       if (!options.workerThread || !workerThreadParentPort) return false;
@@ -4299,6 +8490,20 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           // Preserve injected process identity and capabilities (stdout, stderr, exit control, IPC)
           processObject.stdout = injectedProcess.stdout || processObject.stdout;
           processObject.stderr = injectedProcess.stderr || processObject.stderr;
+          installProcessStdoutIterableSurface(processObject.stdout, processObject);
+          installProcessStderrSocketSurface(processObject.stderr, processObject);
+          const injectedStdin = injectedProcess.stdin;
+          if (injectedStdin && [
+            'readableLength', 'readableObjectMode', 'readableEncoding', 'errored',
+            'closed', 'destroyed', 'readableEnded', 'drop',
+          ].some((property) => !(property in injectedStdin))) {
+            const wrappedStdin = Readable.wrap(injectedStdin, { objectMode: false });
+            wrappedStdin.isTTY = injectedStdin.isTTY;
+            processObject.stdin = wrappedStdin;
+          } else {
+            processObject.stdin = injectedStdin || processObject.stdin;
+          }
+          installProcessStdinSurface(processObject.stdin);
           processObject.exit = (code) => {
             processObject.exitCode = Number(code) || 0;
             processObject.emit('exit', processObject.exitCode);
@@ -4328,7 +8533,33 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           };
           processObject.channel = injectedProcess.channel || processObject.channel;
           if (typeof injectedProcess.on === 'function') {
-            injectedProcess.on('message', (message, handle) => processObject.emit('message', message, handle));
+            // Queue browser IPC until the runtime's user-facing process listeners are installed.
+            const pendingInjectedMessages = [];
+            let injectedMessageFlushQueued = false;
+            const isInternalMessageListener = (listener) => listener?._bnhInternal
+              || listener?.__bnhInternalClusterListener
+              || listener?.listener?._bnhInternal
+              || listener?.listener?.__bnhInternalClusterListener;
+            const hasUserMessageListener = () => processObject.listeners?.('message')
+              ?.some((listener) => !isInternalMessageListener(listener));
+            const flushInjectedMessages = () => {
+              injectedMessageFlushQueued = false;
+              if (!hasUserMessageListener()) return;
+              for (const [message, handle] of pendingInjectedMessages.splice(0)) processObject.emit('message', message, handle);
+            };
+            processObject.on('newListener', (name) => {
+              if (name !== 'message' || injectedMessageFlushQueued) return;
+              injectedMessageFlushQueued = true;
+              queueMicrotask(flushInjectedMessages);
+            });
+            const onInjectedMessage = (message, handle) => {
+              if (hasUserMessageListener()) processObject.emit('message', message, handle);
+              else pendingInjectedMessages.push([message, handle]);
+            };
+            onInjectedMessage._bnhInternal = true;
+            injectedProcess.on('message', (message, handle) => {
+              onInjectedMessage(message, handle);
+            });
             injectedProcess.on('disconnect', () => {
               processObject.connected = false;
               processObject.emit('disconnect');
@@ -4347,6 +8578,12 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         })()
       : fullProcessData;
     const processObject = processData.processObject;
+    Object.defineProperty(processObject, '_bnhTraceEventsUnavailable', {
+      configurable: true,
+      enumerable: false,
+      value: Boolean(options.workerThread)
+        || String(options.entry || '').startsWith('/node/.bnh-worker-eval-'),
+    });
     processObject._bnhShouldRunUnref = () => pending > 0
       || hasReferencedTimers(processObject._timers || timerHandles)
       || hasLiveVirtualProcess()
@@ -4383,6 +8620,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           const parentPort = new EventEmitter();
           let assignedOnMessage = null;
           const onMessage = (value, handle) => {
+            if (value?.__bnhThreadMessage || value?.__bnhThreadMessageResult) return;
             const adaptedValue = adaptWorkerData(value, scope);
             parentPort.emit('message', adaptedValue, handle);
             assignedOnMessage?.({
@@ -4396,6 +8634,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               ports: [],
             });
           };
+          onMessage._bnhInternal = true;
           processObject.on('message', onMessage);
           parentPort.postMessage = (value, transferList) => processObject.send(value, transferList);
           parentPort.start = () => parentPort;
@@ -4413,7 +8652,18 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           return parentPort;
         })()
       : null;
+    const onWorkerMessage = (message) => {
+      if (!message?.__bnhThreadMessage) return;
+      processObject.emit('workerMessage', message.value, Number(message.source));
+    };
+    onWorkerMessage._bnhInternal = true;
+    processObject.on('message', onWorkerMessage);
     const createBrowserWorker = (source, workerOptions, threadId, ownerProcess) => {
+      if (workerOptions.env !== undefined
+        && workerOptions.env !== browserIO.SHARE_ENV
+        && (workerOptions.env === null || typeof workerOptions.env !== 'object' || Array.isArray(workerOptions.env))) {
+        throw workerMethodError('ERR_INVALID_ARG_TYPE', 'The "options.env" property must be of type object');
+      }
       const isEval = Boolean(workerOptions.eval);
       const requestedTransferList = workerOptions.transferList === undefined
         ? undefined
@@ -4423,6 +8673,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       const grantedPorts = new Set(workerDataTransferList || []);
       if (requiredPorts.some((port) => !grantedPorts.has(port))) throw workerDataTransferError(scope);
       const [workerData] = prepareTransferPayload(workerOptions.workerData, requestedTransferList);
+      const workerEnvironment = workerOptions.env === browserIO.SHARE_ENV
+        ? ownerProcess.env
+        : workerOptions.env === undefined
+          ? { ...(ownerProcess.env || {}) }
+          : { ...workerOptions.env };
       const workerPath = isEval
         ? `/node/.bnh-worker-eval-${threadId}.js`
         : normalizePath(source, ownerProcess.cwd?.() || '/node');
@@ -4442,7 +8697,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         childId: `thread-${threadId}-${Date.now()}`,
         argv: ['node', workerPath],
         execArgv: workerOptions.execArgv || ownerProcess.execArgv,
-        env: ownerProcess.env,
+        env: workerEnvironment,
         cwd: ownerProcess.cwd?.() || '/node',
         ppid: ownerProcess.pid,
         signalGrants: capabilities.manifest.signals.allowed,
@@ -4457,23 +8712,83 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           proxy: capabilities.manifest.proxy,
           workerThread: true,
           threadId,
+          threadName: workerOptions.name ? String(workerOptions.name).trim() : '',
           workerData,
+          environmentData: [...environmentData].map(([key, value]) => [cloneForWorker(key, scope), cloneForWorker(value, scope)]),
+          resourceLimits: workerOptions.resourceLimits,
         },
         workerDataTransferList,
       });
+      child.on('message', (message) => {
+        const request = message?.__bnhThreadMessageRequest;
+        if (!request) return;
+        let delivered = false;
+        if (Number(request.destination) === 0) {
+          delivered = ownerProcess.emit('workerMessage', request.value, Number(request.source));
+        } else {
+          const target = [...scope.__BNH_BROWSER_WORKERS__ || []]
+            .find((candidate) => Number(candidate.threadId) === Number(request.destination));
+          if (target) {
+            target.postMessage({
+              __bnhThreadMessage: true,
+              value: request.value,
+              source: Number(request.source),
+            }, request.transferList);
+            delivered = true;
+          }
+        }
+        child.send({
+          __bnhThreadMessageResult: {
+            requestId: request.requestId,
+            delivered,
+          },
+        });
+      });
+      const workerStdout = new Readable({ read() {} });
+      const workerStderr = new Readable({ read() {} });
+      const workerStdin = workerOptions.stdin === true
+        ? new Writable({
+            write(chunk, _encoding, callback) {
+              try {
+                child.send({ __bnhWorkerStdin: true, value: new Uint8Array(chunk) }, undefined, callback);
+              } catch (error) {
+                callback(error);
+              }
+            },
+            final(callback) {
+              try {
+                child.send({ __bnhWorkerStdinEnd: true }, undefined, callback);
+              } catch (error) {
+                callback(error);
+              }
+            },
+          })
+        : null;
+      child.stdout = workerStdout;
+      child.stderr = workerOptions.stderr === true ? workerStderr : null;
+      child.stdin = workerStdin;
+      child.once('exit', () => workerStdout.push(null));
+      child.once('exit', () => workerStderr.push(null));
+      if (workerOptions.stdout !== true) {
+        workerStdout.on('data', (chunk) => ownerProcess.stdout?.write?.(chunk));
+      }
+      if (workerOptions.stderr !== true) {
+        workerStderr.on('data', (chunk) => ownerProcess.stderr?.write?.(chunk));
+      }
       child.threadId = threadId;
       child.postMessage = (value, transferList) => child.send(value, transferList);
       child.terminate = async () => {
         try { child.kill('SIGKILL'); } catch (error) {
           if (error?.code !== 'ERR_PROCESS_EXITED') throw error;
         }
-        await child.wait();
-        return 1;
+        const terminal = await child.wait();
+        return terminal?.code ?? 1;
       };
       child.ref = () => child;
       child.unref = () => child;
       return child;
     };
+    const runtimeWorkerStates = new WeakMap();
     function RuntimeWorker(...args) {
       const ownerProcess = scope.process || processObject;
       if (ownerProcess._bnhNextWorkerThreadId === undefined) ownerProcess._bnhNextWorkerThreadId = 1;
@@ -4482,38 +8797,85 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       const worker = typeof source === 'string'
         ? createBrowserWorker(source, workerOptions, threadId, ownerProcess)
         : createRuntimeWorker(...args);
+      if (worker.stdout === undefined) worker.stdout = new Readable({ read() {} });
+      if (worker.stdin === undefined) worker.stdin = null;
+      if (worker.stderr === undefined) worker.stderr = workerOptions.stderr === true ? new Readable({ read() {} }) : null;
       const workerResource = new AsyncResource('WORKER');
       let workerRefed = true;
       let workerExited = false;
+      let workerResourceDestroyed = false;
       let messagePortResource = null;
-      workerResource.hasRef = () => workerRefed;
+      const workerThreadName = workerOptions.name ? String(workerOptions.name).trim() : '';
+      const resourceLimits = workerOptions.resourceLimits === undefined
+        ? {}
+        : workerOptions.resourceLimits && typeof workerOptions.resourceLimits === 'object' && !Array.isArray(workerOptions.resourceLimits)
+          ? { ...workerOptions.resourceLimits }
+          : (() => { throw workerMethodError('ERR_INVALID_ARG_TYPE', 'The "resourceLimits" option must be an object'); })();
+      workerResource.hasRef = () => workerResourceDestroyed ? undefined : workerRefed;
       const refWorker = worker.ref?.bind(worker);
       const unrefWorker = worker.unref?.bind(worker);
       worker.ref = () => {
+        if (workerExited) return;
         workerRefed = true;
         if (!messagePortResource) {
           messagePortResource = new AsyncResource('MESSAGEPORT');
           messagePortResource.hasRef = () => workerRefed && !workerExited;
         }
         refWorker?.();
-        return worker;
       };
       worker.unref = () => {
+        if (workerExited) return;
         workerRefed = false;
         messagePortResource?.unref?.();
         unrefWorker?.();
-        return worker;
       };
       worker.hasRef = () => workerRefed;
+      const postMessage = worker.postMessage?.bind(worker);
+      worker.postMessage = (value, transferList) => {
+        if (workerExited) return;
+        return postMessage?.(value, transferList);
+      };
+      const terminate = worker.terminate?.bind(worker);
+      worker.terminate = (...terminateArgs) => {
+        if (workerExited) return Promise.resolve(undefined);
+        worker.ref();
+        return Promise.resolve(terminate?.(...terminateArgs));
+      };
+      runtimeWorkerStates.set(worker, {
+        postMessage: worker.postMessage,
+        terminate: worker.terminate,
+        ref: worker.ref,
+        unref: worker.unref,
+        get threadId() { return workerExited ? -1 : threadId; },
+        get threadName() { return workerExited ? null : workerThreadName; },
+        stdin: worker.stdin,
+        stdout: worker.stdout,
+        stderr: worker.stderr,
+        resourceLimits,
+      });
       worker.once('spawn', () => worker.emit('online'));
       worker.once('exit', () => {
         workerExited = true;
         messagePortResource?.emitDestroy?.();
-        scope.setTimeout?.(() => workerResource.emitDestroy(), 0);
+        scope.setTimeout?.(() => {
+          workerResourceDestroyed = true;
+          workerResource.emitDestroy();
+        }, 0);
       });
       scope.__BNH_BROWSER_WORKERS__?.add(worker);
       worker.once('exit', () => scope.__BNH_BROWSER_WORKERS__?.delete(worker));
-      worker.threadId = threadId;
+      Object.defineProperties(worker, {
+        threadId: {
+          configurable: true,
+          enumerable: true,
+          get: () => workerExited ? -1 : threadId,
+        },
+        threadName: {
+          configurable: true,
+          enumerable: true,
+          get: () => workerExited ? null : workerThreadName,
+        },
+      });
       if (typeof ownerProcess._bnhWorkerCreated === 'function') {
         ownerProcess._bnhWorkerCreated();
         worker.once('error', (error) => ownerProcess._bnhWorkerError?.(error));
@@ -4524,6 +8886,60 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         error.code = 'ERR_WORKER_UNSERIALIZABLE_ERROR';
         worker.emit('error', error);
       });
+      const workerEvents = new EventEmitter();
+      const forwardedEvents = new Set();
+      const originalOn = worker.on?.bind(worker);
+      const originalEmit = worker.emit?.bind(worker);
+      const forwardEvent = (name) => {
+        if (forwardedEvents.has(name) || typeof originalOn !== 'function') return;
+        forwardedEvents.add(name);
+        originalOn(name, (...args) => workerEvents.emit(name, ...args));
+      };
+      worker.on = (name, listener) => { forwardEvent(name); workerEvents.on(name, listener); return worker; };
+      worker.addListener = worker.on;
+      worker.prependListener = (name, listener) => {
+        forwardEvent(name);
+        workerEvents.prependListener(name, listener);
+        return worker;
+      };
+      worker.once = (name, listener) => { forwardEvent(name); workerEvents.once(name, listener); return worker; };
+      worker.prependOnceListener = (name, listener) => {
+        forwardEvent(name);
+        workerEvents.prependOnceListener(name, listener);
+        return worker;
+      };
+      worker.emit = (name, ...args) => {
+        const result = originalEmit?.(name, ...args) ?? false;
+        if (!forwardedEvents.has(name)) workerEvents.emit(name, ...args);
+        return result;
+      };
+      worker.off = (name, listener) => { workerEvents.off(name, listener); return worker; };
+      worker.removeListener = worker.off;
+      worker.removeAllListeners = (name) => { workerEvents.removeAllListeners(name); return worker; };
+      worker.listeners = (name) => workerEvents.listeners(name);
+      worker.rawListeners = (name) => workerEvents.rawListeners(name);
+      worker.listenerCount = (name) => workerEvents.listenerCount(name);
+      worker.eventNames = () => workerEvents.eventNames();
+      worker.setMaxListeners = (value) => { workerEvents.setMaxListeners(value); return worker; };
+      worker.getMaxListeners = () => workerEvents.getMaxListeners();
+      Object.defineProperties(worker, {
+        _events: {
+          configurable: true,
+          enumerable: true,
+          get: () => workerEvents._events,
+        },
+        _eventsCount: {
+          configurable: true,
+          enumerable: true,
+          get: () => workerEvents._eventsCount,
+        },
+        _maxListeners: {
+          configurable: true,
+          enumerable: true,
+          get: () => workerEvents._maxListeners,
+          set: (value) => { workerEvents._maxListeners = value; },
+        },
+      });
       if (worker && Object.getPrototypeOf(worker) !== RuntimeWorker.prototype) {
         Object.setPrototypeOf(worker, RuntimeWorker.prototype);
       }
@@ -4531,6 +8947,122 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       diagnosticsChannels.channel('worker_threads').publish({ worker });
       return worker;
     }
+    Object.defineProperties(RuntimeWorker.prototype, {
+      postMessage: {
+        configurable: true,
+        writable: true,
+        value(value, transferList) {
+          return runtimeWorkerStates.get(this)?.postMessage?.(value, transferList);
+        },
+      },
+      terminate: {
+        configurable: true,
+        writable: true,
+        value(...terminateArgs) {
+          return runtimeWorkerStates.get(this)?.terminate?.(...terminateArgs);
+        },
+      },
+      ref: {
+        configurable: true,
+        writable: true,
+        value() {
+          return runtimeWorkerStates.get(this)?.ref?.();
+        },
+      },
+      unref: {
+        configurable: true,
+        writable: true,
+        value() {
+          return runtimeWorkerStates.get(this)?.unref?.();
+        },
+      },
+      threadId: {
+        configurable: true,
+        get() {
+          return runtimeWorkerStates.get(this)?.threadId;
+        },
+      },
+      threadName: {
+        configurable: true,
+        get() {
+          return runtimeWorkerStates.get(this)?.threadName;
+        },
+      },
+      stdin: {
+        configurable: true,
+        get() {
+          return runtimeWorkerStates.get(this)?.stdin;
+        },
+      },
+      stdout: {
+        configurable: true,
+        get() {
+          return runtimeWorkerStates.get(this)?.stdout;
+        },
+      },
+      stderr: {
+        configurable: true,
+        get() {
+          return runtimeWorkerStates.get(this)?.stderr;
+        },
+      },
+      resourceLimits: {
+        configurable: true,
+        get() {
+          return runtimeWorkerStates.get(this)?.resourceLimits;
+        },
+      },
+      getHeapSnapshot: {
+        configurable: true,
+        writable: true,
+        value() {
+          const state = runtimeWorkerStates.get(this);
+          if (!state || this.threadId === -1) return Promise.reject(workerMethodError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
+          return Promise.resolve(createWorkerHeapSnapshot(scope));
+        },
+      },
+      getHeapStatistics: {
+        configurable: true,
+        writable: true,
+        value() {
+          const state = runtimeWorkerStates.get(this);
+          if (!state || this.threadId === -1) return Promise.reject(workerMethodError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
+          return Promise.resolve(workerHeapStatistics());
+        },
+      },
+      cpuUsage: {
+        configurable: true,
+        writable: true,
+        value(previous) {
+          if (previous !== undefined && previous !== null && typeof previous !== 'object') {
+            return Promise.reject(workerMethodError('ERR_INVALID_ARG_TYPE', 'The "prev" argument must be of type object'));
+          }
+          const state = runtimeWorkerStates.get(this);
+          if (!state || this.threadId === -1) return Promise.reject(workerMethodError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
+          return Promise.resolve({ user: 0, system: 0 });
+        },
+      },
+      startCpuProfile: {
+        configurable: true,
+        writable: true,
+        value(options = {}) {
+          if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+            return Promise.reject(workerMethodError('ERR_INVALID_ARG_TYPE', 'The "options" argument must be of type object'));
+          }
+          const state = runtimeWorkerStates.get(this);
+          if (!state || this.threadId === -1) return Promise.reject(workerMethodError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
+          return Promise.resolve({ stop: async () => ({}) });
+        },
+      },
+      [Symbol.for('nodejs.asyncDispose')]: {
+        configurable: true,
+        writable: true,
+        async value() {
+          await this.terminate();
+        },
+      },
+    });
+    Object.setPrototypeOf(RuntimeWorker.prototype, EventEmitter.prototype);
     const workerThreads = {
       ...browserIO,
       Worker: createRuntimeWorker ? RuntimeWorker : undefined,
@@ -4538,7 +9070,65 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       threadId: options.workerThread ? Number(options.threadId ?? 1) : 0,
       parentPort: workerThreadParentPort,
       workerData: adaptWorkerData(options.workerData, scope),
+      resourceLimits: options.workerThread ? { ...(options.resourceLimits || {}) } : {},
+      getEnvironmentData(key) {
+        return environmentData.get(key);
+      },
+      setEnvironmentData(key, value) {
+        if (value === undefined) environmentData.delete(key);
+        else environmentData.set(key, value);
+      },
+      isInternalThread: false,
+      threadName: options.workerThread ? String(options.threadName || '') : '',
+      postMessageToThread(threadId, value, transferList, timeout) {
+        if (typeof transferList === 'number' && timeout === undefined) {
+          timeout = transferList;
+          transferList = [];
+        }
+        if (timeout !== undefined && (!Number.isFinite(timeout) || timeout < 0)) {
+          return Promise.reject(workerMethodError('ERR_OUT_OF_RANGE', 'The value of "timeout" is out of range. It must be >= 0.'));
+        }
+        if (threadId === workerThreads.threadId) {
+          return Promise.reject(workerMethodError('ERR_WORKER_MESSAGING_SAME_THREAD', 'Cannot send a message to the same thread'));
+        }
+        if (options.workerThread) {
+          const requestId = `${workerThreads.threadId}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+          return new Promise((resolve, reject) => {
+            const onResult = (message) => {
+              if (message?.__bnhThreadMessageResult?.requestId !== requestId) return;
+              processObject.removeListener('message', onResult);
+              if (message.__bnhThreadMessageResult.delivered) resolve();
+              else reject(workerMethodError('ERR_WORKER_MESSAGING_FAILED', 'Cannot find the destination thread or listener'));
+            };
+            processObject.on('message', onResult);
+            try {
+              processObject.send({
+                __bnhThreadMessageRequest: {
+                  requestId,
+                  source: workerThreads.threadId,
+                  destination: Number(threadId),
+                  value,
+                  transferList,
+                },
+              });
+            } catch (error) {
+              processObject.removeListener('message', onResult);
+              reject(error);
+            }
+          });
+        }
+        const target = [...scope.__BNH_BROWSER_WORKERS__ || []]
+          .find((candidate) => Number(candidate.threadId) === Number(threadId));
+        if (!target) return Promise.reject(workerMethodError('ERR_WORKER_MESSAGING_FAILED', 'Cannot find the destination thread or listener'));
+        try {
+          target.postMessage({ __bnhThreadMessage: true, value, source: workerThreads.threadId }, transferList);
+          return Promise.resolve();
+        } catch (error) {
+          return Promise.reject(error);
+        }
+      },
     };
+    let x509Module = null;
     const builtins = makeBuiltins(
       processObject,
       (name, importer = entry) => loadModule(name, importer),
@@ -4551,11 +9141,49 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       (pathname) => vfs.read(pathname),
       entry,
     );
+    if (options.workerThread || String(options.entry || '').startsWith('/node/.bnh-worker-eval-')) {
+      Object.defineProperty(builtins, 'trace_events', {
+        configurable: true,
+        enumerable: true,
+        get() { throw traceEventsUnavailableError(); },
+      });
+    }
+    builtins.sys = builtins.util;
+    x509Module = Object.freeze({
+      X509Certificate: builtins.crypto.X509Certificate,
+      InternalX509Certificate: builtins.crypto.X509Certificate,
+      isX509Certificate: (value) => value instanceof builtins.crypto.X509Certificate,
+    });
+    builtins['internal/crypto/x509'] = x509Module;
+    processObject.getBuiltinModule = function getBuiltinModule(id) {
+      if (typeof id !== 'string') throw moduleArgumentTypeError('id', 'of type string', id);
+      const name = builtinName(id);
+      return BUILTIN_NAMES.includes(name) ? builtins[name] : undefined;
+    };
+    builtins.module._cache = new Map();
+    builtins.module._main = null;
+    builtins.module._resolve = (name, parent) => {
+      const importer = typeof parent === 'string' ? parent : parent?.filename || entry;
+      return BUILTIN_NAMES.includes(builtinName(name)) ? name : resolveFile(name, importer, processObject);
+    };
     builtins.module._load = (name, parent) => {
+      if (String(name).startsWith('file:') && String(name).endsWith('.mjs')) {
+        const error = new Error(`Cannot find module '${name}'`);
+        error.code = 'MODULE_NOT_FOUND';
+        throw error;
+      }
       const builtin = builtinName(name);
-      return BUILTIN_NAMES.includes(builtin) ? builtins[builtin] ?? {} : loadModule(name, parent || entry);
+      const importer = typeof parent === 'string' ? parent : parent?.filename || entry;
+      const moduleMock = processObject.__bnhModuleMocks?.get(name)
+        || processObject.__bnhModuleMocks?.get(`node:${builtin}`);
+      if (moduleMock?.active) return moduleMock.getCjsValue();
+      if (builtin === 'trace_events' && processObject._bnhTraceEventsUnavailable) {
+        throw traceEventsUnavailableError();
+      }
+      return BUILTIN_NAMES.includes(builtin) ? builtins[builtin] ?? {} : loadModule(name, importer);
     };
     const streamWebApi = builtins['stream/web'];
+    installBlobStreamClass(() => streamWebApi.ReadableStream);
     const internalBindings = builtins['internal/test/binding'].__bnhContract;
     const internalUtil = {
       customInspectSymbol: Symbol.for('nodejs.util.inspect.custom'),
@@ -4620,7 +9248,6 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       newHandle: () => ({ close() {} }),
     };
     const nativeFetch = browserIO.fetch;
-    let virtualFetchDepth = 0;
     const responseFromNodeResponse = (response, url) => new Promise((resolve, reject) => {
       const chunks = [];
       response.on('data', (chunk) => chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)));
@@ -4632,17 +9259,21 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           body.set(chunk, offset);
           offset += chunk.byteLength;
         }
-        resolve(new scope.Response(body, {
+        const result = new scope.Response(body, {
           status: response.statusCode,
           statusText: response.statusMessage,
           headers: response.headers,
-        }));
+        });
+        Object.defineProperty(result, '__bnhURL', { configurable: true, value: url });
+        if (response._response?.body?._bnhTerminated === true) {
+          Object.defineProperty(result, '__bnhTerminated', { configurable: true, value: true });
+        }
+        resolve(result);
       });
     });
     const virtualHttpFetch = (input, init = {}) => {
       const url = String(input?.url || input);
-      if (virtualFetchDepth || !/^https?:/i.test(url)) return nativeFetch(input, init);
-      virtualFetchDepth += 1;
+      if (!/^https?:/i.test(url)) return nativeFetch(input, init);
       const headers = init.headers && typeof init.headers.entries === 'function'
         ? Object.fromEntries(init.headers.entries())
         : init.headers;
@@ -4657,7 +9288,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         });
         request.once('error', reject);
         request.end(init.body);
-      }).finally(() => { virtualFetchDepth -= 1; });
+      });
     };
     const virtualProxyFetch = (input, init, proxyUrl) => {
       const target = new scope.URL(String(input?.url || input));
@@ -4763,7 +9394,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       const proxyUrl = targetIsHttps
         ? (env.https_proxy || env.HTTPS_PROXY)
         : (env.http_proxy || env.HTTP_PROXY);
-      if (useEnvProxy && proxyUrl && /^https?:/i.test(target) && !virtualFetchDepth) {
+      if (useEnvProxy && proxyUrl && /^https?:/i.test(target)) {
         return virtualProxyFetch(input, init, proxyUrl);
       }
       return virtualHttpFetch(input, init);
@@ -4788,9 +9419,14 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         const result = hook(currentValue, currentContext, next);
         return result === undefined ? next() : result;
       };
+      const pending = processObject.__bnhModuleRegistrationPromises;
+      if (!processObject.__bnhModuleRegistrationLoading && pending?.length) {
+        return Promise.all([...pending]).then(() => invoke(hooks.length - 1, value, context));
+      }
       return invoke(hooks.length - 1, value, context);
     };
     let mainModule = null;
+    let sysWarningEmitted = false;
     const esmSourceHasTopLevelAwait = (source) => {
       const text = typeof source === 'string' ? source : new TextDecoder().decode(source);
       return /(?:^|[;\n])\s*(?:await\b|(?:let|const|var)\s+[A-Za-z_$][\w$]*\s*=\s*await\b)/.test(text);
@@ -4832,10 +9468,63 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       error.stack = `Error [ERR_REQUIRE_ASYNC_MODULE]: ${error.message}`;
       return error;
     };
-    const loadModule = (specifier, importer = entry) => {
+    const moduleMockFor = (specifier, importer = entry) => {
+      const state = processObject.__bnhModuleMocks;
+      if (!state) return undefined;
+      const raw = String(specifier);
+      const name = builtinName(raw);
+      const candidates = [raw, name, raw.startsWith('file:') ? fileURLToPath(raw) : undefined];
+      if (raw.startsWith('/')) candidates.push(raw);
+      try { candidates.push(resolveFile(raw, importer, processObject)); } catch { /* resolution errors belong to the normal loader */ }
+      return candidates.filter((candidate) => candidate !== undefined)
+        .map((candidate) => state.get(candidate))
+        .find((mock) => mock?.active);
+    };
+
+    const loadModule = (specifier, importer = entry, skipResolve = false) => {
+      if (String(specifier).startsWith('file:') && String(specifier).endsWith('.mjs')) {
+        const error = new Error(`Cannot find module '${specifier}'`);
+        error.code = 'MODULE_NOT_FOUND';
+        throw error;
+      }
+      const mock = moduleMockFor(specifier, importer);
+      if (mock?.active) return mock.getCjsValue();
+      const shimPath = String(specifier).startsWith('file:') ? fileURLToPath(specifier) : specifier;
+      if (x509Module && shimPath === '/node/lib/internal/crypto/x509.js') return x509Module;
+      if (String(specifier).startsWith('data:text/javascript')) {
+        const dataPath = String(specifier);
+        const comma = dataPath.indexOf(',');
+        const source = decodeURIComponent(dataPath.slice(comma + 1).split('#')[0]);
+        const dataModule = { exports: {} };
+        const dataRequire = (child) => loadModule(child, dataPath);
+        runCommonJSWrapper(
+          moduleSynchronousEsmSource(source, dataPath),
+          dataPath,
+          [dataRequire, dataModule, dataModule.exports, dataPath, '/', undefined],
+        );
+        return dataModule.exports;
+      }
+      if (shimPath === '/node/lib/dgram.js') return builtins.dgram;
+      if (shimPath === '/node/lib/cluster.js') return builtins.cluster;
       const name = builtinName(specifier);
-      if (name === 'repl') return loadModule('/node/lib/repl.js', importer);
+      if (name === 'internal/modules/esm/resolve') return internalEsmResolve;
+      if (name === 'trace_events' && processObject._bnhTraceEventsUnavailable) {
+        throw traceEventsUnavailableError();
+      }
+      if (name === 'sys' && !sysWarningEmitted) {
+        sysWarningEmitted = true;
+        processObject.emitWarning?.('sys is deprecated. Use util instead.', {
+          code: 'DEP0025',
+          type: 'DeprecationWarning',
+        });
+      }
+      if (name === 'repl') return ensureReplDispose(loadModule('/node/lib/repl.js', importer));
+      if (name.startsWith('#')) {
+        const resolved = esmLoader.resolve(name, importer, ['node', 'require']);
+        return loadModule(resolved, importer, true);
+      }
       if (BUILTIN_NAMES.includes(name)) {
+        if (name === 'internal/test/binding') emitInternalTestBindingWarning();
         if (name === 'dns') scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ = Math.max(1, Number(scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ || 0));
         const context = moduleHookContext(importer);
         const resolved = runModuleHook('resolve', specifier, context, (currentSpecifier) => ({
@@ -4879,15 +9568,44 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         return builtins[name] ?? {};
       }
       const context = moduleHookContext(importer);
-      const resolvedResult = runModuleHook('resolve', specifier, context, (currentSpecifier) => {
-        const candidate = esmLoader.resolve(currentSpecifier, importer, ['node', 'require']);
-        return {
-          url: pathToFileURL(candidate).href,
-            format: candidate.endsWith('.json') ? 'json' : isRuntimeEsmModule(candidate, processObject.execArgv) ? 'module' : 'commonjs',
-        };
-      });
+      const resolvedResult = skipResolve
+        ? {
+            url: specifier.startsWith('file:') ? specifier : pathToFileURL(specifier).href,
+            format: specifier.endsWith('.json') ? 'json' : isRuntimeEsmModule(specifier, processObject.execArgv) ? 'module' : 'commonjs',
+          }
+        : runModuleHook('resolve', specifier, context, (currentSpecifier) => {
+            const candidate = esmLoader.resolve(currentSpecifier, importer, ['node', 'require']);
+            if (candidate.startsWith('http:') || candidate.startsWith('https:')) {
+              return { url: candidate, format: 'module' };
+            }
+            if (candidate.startsWith('data:')) {
+              return { url: candidate, format: 'module' };
+            }
+            return {
+              url: pathToFileURL(candidate).href,
+              format: candidate.endsWith('.json') ? 'json' : isRuntimeEsmModule(candidate, processObject.execArgv) ? 'module' : 'commonjs',
+            };
+          });
+      if (resolvedResult?.url?.startsWith('node:') && resolvedResult.shortCircuit !== true) {
+        const error = new Error('"shortCircuit" must be true when a resolve hook does not call nextResolve');
+        error.code = 'ERR_INVALID_RETURN_PROPERTY_VALUE';
+        throw error;
+      }
       const resolvedURL = resolvedResult?.url || pathToFileURL(resolveFile(specifier, importer, processObject)).href;
       let resolved = resolvedURL.startsWith('file:') ? fileURLToPath(resolvedURL) : resolvedURL;
+      if (isRuntimeEsmModule(resolved, processObject.execArgv)
+        && processObject.execArgv?.some((argument) => String(argument) === '--experimental-require-module')) {
+        const cachedNamespace = esmNamespaceCache.get(resolved);
+        if (cachedNamespace) {
+          if (!Object.hasOwn(cachedNamespace, 'default') || Object.hasOwn(cachedNamespace, '__esModule')) {
+            return cachedNamespace;
+          }
+          const requiredNamespace = { ...cachedNamespace };
+          Object.defineProperty(requiredNamespace, '__esModule', { value: true, enumerable: true });
+          Object.defineProperty(requiredNamespace, Symbol.toStringTag, { value: 'Module' });
+          return requiredNamespace;
+        }
+      }
       if (isNativeAddonBuildPath(resolved) || (resolved.endsWith('.node') && addonsDisabled(processObject))) {
         rejectNativeAddon(nativeAddonPath(resolved), processObject);
       }
@@ -4900,7 +9618,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           return {
             url,
             format: candidate.endsWith('.json') ? 'json' : isRuntimeEsmModule(candidate, processObject.execArgv) ? 'module' : 'commonjs',
-            source,
+            source: typeof source === 'string' ? source : new TextDecoder().decode(source),
           };
         });
       } catch (error) {
@@ -4912,24 +9630,31 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           }
           if (resolved.startsWith('data:')) return {};
           if (resolved.endsWith('.node')) rejectNativeAddon(resolved, processObject);
-          if (cache.has(resolved)) return cache.get(resolved).exports;
+          if (cache.has(resolved)) {
+            const cachedExports = cache.get(resolved).exports;
+            if (loaded?.format === 'module' && cachedExports && Object.hasOwn(cachedExports, 'default')
+              && !Object.hasOwn(cachedExports, '__esModule')) {
+              Object.defineProperty(cachedExports, '__esModule', { value: true, enumerable: true });
+            }
+            return cachedExports;
+          }
       const source = loaded?.source ?? vfs.read(resolved);
       const text = typeof source === 'string' ? source : new TextDecoder().decode(source);
           if (resolved.endsWith('.mjs')
             && (esmSourceHasTopLevelAwait(text) || esmGraphRequiresAsync(resolved))) {
             throw requireAsyncEsmError(resolved, importer);
           }
-      const module = {
-        exports: {},
-        id: resolved,
-        filename: resolved,
-        paths: moduleSearchPaths(resolved),
-        loaded: false,
-        parent: null,
-        children: [],
-      };
-      if (!mainModule && resolved === entry) mainModule = module;
+      const parentModule = typeof importer === 'string' ? cache.get(importer) : importer;
+      const module = new builtins.module(resolved, parentModule || null);
+      module.filename = resolved;
+      module.paths = moduleSearchPaths(resolved);
+      if (!mainModule && resolved === entry) {
+        mainModule = module;
+        processObject.mainModule = module;
+      }
+      builtins.module._main = mainModule;
       cache.set(resolved, module);
+      builtins.module._cache = cache;
       if (resolved.endsWith('.json')) module.exports = JSON.parse(text);
       else {
         const require = (name) => loadModule(esmLoader.resolve(name, resolved, ['node', 'require']), resolved);
@@ -4939,23 +9664,54 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         require.main = mainModule;
         require.cache = cache;
         module.require = require;
-        runCommonJSWrapper(
-          text,
-            resolved,
-            [
-            require,
-            module,
-            module.exports,
-            resolved,
-            path.dirname(resolved),
-            (specifier, options) => esmLoader.import(specifier, resolved, {}, options),
-          ],
-          builtins.module.wrapper,
-        );
+        module._compile(text, resolved, loaded?.format === 'module' || moduleHasStaticEsmSyntax(text)
+          ? 'module' : loaded?.format);
       }
       module.loaded = true;
+      if (loaded?.format === 'module' && module.exports && Object.hasOwn(module.exports, 'default')
+        && !Object.hasOwn(module.exports, '__esModule')) {
+        Object.defineProperty(module.exports, '__esModule', { value: true, enumerable: true });
+      }
+      if (loaded?.format === 'module') esmNamespaceCache.set(resolved, module.exports);
+      if (loaded?.format === 'commonjs' || (!loaded?.format && !resolved.endsWith('.json'))) {
+        const exportNames = cjsStaticExportNames(text);
+        for (const match of text.matchAll(/\bmodule\.exports\s*=\s*require\(\s*(['\"])(.*?)\1\s*\)/g)) {
+          try {
+            const child = esmLoader.resolve(match[2], resolved, ['node', 'require']);
+            const childSource = vfs.read(child);
+            for (const name of cjsStaticExportNames(typeof childSource === 'string'
+              ? childSource : new TextDecoder().decode(childSource))) exportNames.add(name);
+            } catch { /* static metadata is best effort */ }
+        }
+        for (const match of text.matchAll(/\b(?:var|let|const)\s+([$_A-Za-z][$_\w]*)\s*=\s*require\(\s*(['\"])(.*?)\2\s*\)/g)) {
+          if (!text.includes(`Object.keys(${match[1]})`)) continue;
+          try {
+            const child = esmLoader.resolve(match[3], resolved, ['node', 'require']);
+            const childSource = vfs.read(child);
+            for (const name of cjsStaticExportNames(typeof childSource === 'string'
+              ? childSource : new TextDecoder().decode(childSource))) exportNames.add(name);
+          } catch { /* static metadata is best effort */ }
+        }
+        if (module.exports && (typeof module.exports === 'object' || typeof module.exports === 'function')
+          && exportNames.size > 0) cjsExportMetadata.set(module.exports, [...exportNames]);
+      }
       return module.exports;
     };
+    Object.defineProperty(builtins, 'repl', {
+      configurable: true,
+      enumerable: true,
+      get: () => ensureReplDispose(loadModule('/node/lib/repl.js', entry)),
+    });
+    Object.defineProperty(builtins, 'readline', {
+      configurable: true,
+      enumerable: true,
+      get: () => loadModule('/node/lib/readline.js', entry),
+    });
+    Object.defineProperty(builtins, 'readline/promises', {
+      configurable: true,
+      enumerable: true,
+      get: () => loadModule('/node/lib/readline/promises.js', entry),
+    });
     const esmLoader = createModuleLoader({
       files: {
         has: (pathname) => vfs.files.has(pathname),
@@ -4963,29 +9719,68 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       },
       builtins,
       globalObject: scope,
-      evaluateCommonJS: (specifier, importer) => loadModule(specifier, importer),
+      evaluateCommonJS: (specifier, importer) => loadModule(specifier, importer, true),
       runModuleHook,
       defaultModuleType: processObject.execArgv?.some(
         (argument) => String(argument) === '--experimental-default-type=module',
       ) ? 'module' : 'commonjs',
     });
+    processObject.__bnhModuleResolve = (specifier, importer) => (
+      esmLoader.resolveWithHooks(specifier, importer)
+    );
+    processObject.__bnhModuleImport = (specifier, importer, options) => (
+      esmLoader.import(specifier, importer, {}, options)
+    );
+    const activateModuleRegistration = (registration) => {
+      if (registration.activation) return registration.activation;
+      const activation = (async () => {
+        processObject.__bnhModuleRegistrationLoading = true;
+        const registrationParent = registration.parentURL || entry;
+        try {
+          const hook = await esmLoader.import(registration.specifier, registrationParent);
+          await hook?.initialize?.(registration.options?.data);
+          const hooks = processObject.__bnhModuleHooks || [];
+          hooks.push({ resolve: hook?.resolve, load: hook?.load });
+          processObject.__bnhModuleHooks = hooks;
+        } finally {
+          processObject.__bnhModuleRegistrationLoading = false;
+        }
+      })();
+      registration.activation = activation;
+      const pending = processObject.__bnhModuleRegistrationPromises || [];
+      pending.push(activation);
+      processObject.__bnhModuleRegistrationPromises = pending;
+      return activation;
+    };
+    processObject.__bnhActivateModuleRegistration = activateModuleRegistration;
+    builtins.module._bnhSetSyncBuiltinESMExports(esmLoader.syncBuiltinESMExports);
     const loadModuleRegistrations = async () => {
       const registrations = processObject.__bnhModuleRegistrations || [];
       processObject.__bnhModuleRegistrations = [];
-      for (const registration of registrations) {
-        const hook = await esmLoader.import(registration.specifier, registration.parentURL || entry);
-        await hook?.initialize?.(registration.options?.data);
-        const resolve = typeof hook?.resolve === 'function' && hook.resolve.constructor?.name === 'AsyncFunction'
-          ? new Function(`return (${String(hook.resolve).replace(/^async\s+/, '').replace(/\bawait\s+/g, '')})`)()
-          : hook?.resolve;
-        const hooks = processObject.__bnhModuleHooks || [];
-        hooks.push({ resolve, load: hook?.load });
-        processObject.__bnhModuleHooks = hooks;
-      }
+      for (const registration of registrations) await activateModuleRegistration(registration);
     };
     const importPreloads = async () => {
       const execArgv = processObject.execArgv || [];
       const preloadImporter = path.posix.join(processObject.cwd?.() || '/node', '.bnh-preload.mjs');
+      // Register experimental loader hooks before evaluating --import modules.
+      // The browser ESM evaluator has no native Node loader chain; the
+      // browser-native module loader invokes these hooks explicitly for
+      // remote URL graphs.
+      for (let index = 0; index < execArgv.length; index += 1) {
+        const argument = String(execArgv[index]);
+        const loader = argument === '--loader' || argument === '--experimental-loader'
+          ? execArgv[++index]
+          : argument.startsWith('--loader=')
+            ? argument.slice('--loader='.length)
+            : argument.startsWith('--experimental-loader=')
+              ? argument.slice('--experimental-loader='.length)
+              : undefined;
+        if (loader === undefined) continue;
+        const hook = await esmLoader.import(String(loader), preloadImporter);
+        const hooks = processObject.__bnhModuleHooks || [];
+        hooks.push({ resolve: hook?.resolve, load: hook?.load });
+        processObject.__bnhModuleHooks = hooks;
+      }
       for (let index = 0; index < execArgv.length; index += 1) {
         const argument = String(execArgv[index]);
         const preload = argument === '--import'
@@ -4999,6 +9794,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     const previous = {
       process: scope.process,
       Buffer: scope.Buffer,
+      File: scope.File,
+      atob: scope.atob,
+      btoa: scope.btoa,
       console: scope.console,
       global: scope.global,
       MessageEvent: scope.MessageEvent,
@@ -5024,6 +9822,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       TextDecoderStream: scope.TextDecoderStream,
       CompressionStream: scope.CompressionStream,
       DecompressionStream: scope.DecompressionStream,
+      WebAssembly: scope.WebAssembly,
       URL: scope.URL,
       URLSearchParams: scope.URLSearchParams,
       setTimeout: scope.setTimeout,
@@ -5044,6 +9843,29 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       arch: processObject.arch,
     });
     const childConsole = createConsole(stdout, stderr, scope.console || {});
+    // HTTP compatibility instances retain the run's process object across
+    // asynchronous response delivery. Publish the matching console on that
+    // object before user modules can construct a request.
+    processObject._bnhConsole = childConsole;
+    // The console builtin is also the global console object in Node. Reuse
+    // the browser output facade while giving it the shared Console prototype
+    // and stateful methods implemented by the compatibility module.
+    const consoleModule = builtins.console;
+    if (consoleModule?.Console) {
+      Object.setPrototypeOf(childConsole, consoleModule.Console.prototype);
+      childConsole.Console = consoleModule.Console;
+      childConsole._stdout = { write: (value) => { stdout(value); return true; } };
+      childConsole._stderr = { write: (value) => { stderr(value); return true; } };
+      installConsoleErrorHandlers(childConsole);
+      childConsole._ignoreErrors = true;
+      childConsole._inspectOptions = {};
+      childConsole._colorMode = undefined;
+      childConsole._groupIndentation = 2;
+      childConsole._groupIndent = 0;
+      childConsole._times = new Map();
+      childConsole._counts = new Map();
+      builtins.console = childConsole;
+    }
     const onUnhandledRejection = (event) => {
       const dispatch = () => {
         const handled = processObject.emit('unhandledRejection', event.reason, event.promise);
@@ -5055,10 +9877,19 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       event.preventDefault?.();
     };
     if (typeof scope.addEventListener === 'function') scope.addEventListener('unhandledrejection', onUnhandledRejection);
-    if (processObject.execArgv?.some((argument) => String(argument) === '--expose-gc')) {
-      scope.gc = () => {
+    const exposeGc = processObject.execArgv?.some((argument) => {
+      const flag = String(argument);
+      return flag === '--expose-gc' || flag === '--expose_gc';
+    });
+    if (exposeGc) {
+      scope.gc = (options = undefined) => {
+        const abortSignalState = scope[Symbol.for('bnh.abort-signal-compatibility')];
+        if (abortSignalState?.gc) abortSignalState.gc();
+        else if (abortSignalState) abortSignalState.gcGeneration += 1;
         collectAsyncResources();
         vfs.collectGarbage?.();
+        performancePrimitives.recordGC?.();
+        if (options?.execution === 'async') return Promise.resolve();
       };
     } else {
       delete scope.gc;
@@ -5073,7 +9904,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     Object.assign(scope, {
       process: processObject,
       require: loadModule,
+      url: builtins.url,
       Buffer,
+      File,
+      atob: Buffer.atob,
+      btoa: Buffer.btoa,
       console: childConsole,
       global: scope,
       MessageEvent: createMessageEvent(scope, {
@@ -5093,17 +9928,25 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       clearInterval: clearTimer,
       setImmediate: (callback, ...args) => setTimer(function immediateCallback() {
         return callback.apply(this, args);
-      }, 1, false, 'Immediate'),
+      }, 0, false, 'Immediate'),
       clearImmediate: clearTimer,
       fetch: runtimeFetch,
       primordials: createPrimordials(scope),
       internalBinding: internalBindings.internalBinding,
       getInternalBinding: internalBindings.internalBinding,
     });
-    const internalWebCrypto = loadModule('internal/crypto/webcrypto', entry);
-    if (internalWebCrypto?.CryptoKey && scope.CryptoKey?.prototype) {
-      Object.setPrototypeOf(scope.CryptoKey.prototype, internalWebCrypto.CryptoKey.prototype);
+    const nativeStructuredClone = scope.structuredClone;
+    if (typeof nativeStructuredClone === 'function') {
+      scope.structuredClone = (value, options) => {
+        if (value instanceof Blob && value[Symbol.for('bnh.blobCloneParts')]) {
+          return new Blob(value[Symbol.for('bnh.blobCloneParts')], { type: value.type });
+        }
+        return nativeStructuredClone(value, options);
+      };
     }
+    const internalWebCrypto = scope.Crypto && scope.CryptoKey && scope.SubtleCrypto
+      ? null
+      : loadModule('internal/crypto/webcrypto', entry);
     if (internalWebCrypto?.Crypto) scope.Crypto = internalWebCrypto.Crypto;
     if (internalWebCrypto?.CryptoKey) scope.CryptoKey = internalWebCrypto.CryptoKey;
     if (internalWebCrypto?.SubtleCrypto) scope.SubtleCrypto = internalWebCrypto.SubtleCrypto;
@@ -5126,6 +9969,12 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       CompressionStream: streamWebApi.CompressionStream,
       DecompressionStream: streamWebApi.DecompressionStream,
     });
+    Object.defineProperty(scope, 'WebAssembly', {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: createWasmContract(scope),
+    });
     vfs.mkdir('/node/deps/corepack', { recursive: true });
     vfs.writeFile('/node/deps/corepack/package.json', JSON.stringify({ version: '0.34.6' }));
     try {
@@ -5136,7 +9985,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       let idleRounds = 0;
       while (!options.isCancelled?.() && !options.signal?.aborted && !processObject._exitRequested?.()) {
         const activeTimers = processObject._timers || timerHandles;
-        if (pending === 0 && !hasReferencedTimers(activeTimers) && !hasLiveVirtualProcess()
+        if (pending === 0 && !hasReferencedRuntimeTimers(activeTimers) && !hasLiveVirtualProcess()
           && !hasReferencedIpc() && !hasReferencedWorkerParentPort()) {
           idleRounds += 1;
           // Browser fetch, worker, and rejection events settle on later task turns.
@@ -5152,17 +10001,24 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         } else {
           idleRounds = 0;
         }
-        await new Promise((resolve) => nativeSetTimeout(resolve, 0));
+        await new Promise((resolve) => {
+          const handle = nativeSetTimeout(resolve, 0);
+          if (handle && (typeof handle === 'object' || typeof handle === 'function')) {
+            handle[lifecycleWaitTimer] = true;
+          }
+        });
       }
       if (options.isCancelled?.() || options.signal?.aborted) return null;
-      return processObject.getCode();
+      const naturalCode = processObject.getCode();
+      return naturalCode;
     } catch (error) {
       stderr(`${error?.stack || error}\n`);
       processObject.exitCode = 1;
       if (injectedProcess && typeof injectedProcess.exit === 'function') {
         try { injectedProcess.exit(1); } catch { /* ignore */ }
       }
-      if (String(error?.code || '').startsWith('ERR_UNSUPPORTED_')) throw error;
+      if (String(error?.code || '').startsWith('ERR_UNSUPPORTED_')
+        || error?.code === 'ERR_TRACE_EVENTS_UNAVAILABLE') throw error;
       return 1;
     } finally {
       for (const handle of timerHandles) clearTimer?.(handle);
@@ -5182,6 +10038,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       if (activeChild) await activeChild.kill();
       activeChild = null;
       virtualProcessLiveness.clear();
+      environmentData.clear();
+      esmNamespaceCache.clear();
       if (context.signal?.aborted) return;
       runSpec = {
         runId: String(context.runId || context.metadata?.runId || `browser-${Date.now()}`),
@@ -5215,7 +10073,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       if (proxyTransport) virtualNetwork = createVirtualNetwork({ transport: proxyTransport });
       else if (preserveSharedNetwork) virtualNetwork = inheritedNetwork || getSharedVirtualNetwork(scope);
       else virtualNetwork = replaceSharedVirtualNetwork(scope);
-      dnsModule = createBrowserDns({ proxy: proxyCapability });
+      dnsModule = createBrowserDns({ proxy: proxyCapability, network: virtualNetwork });
       scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ = 0;
       vfs = capabilities.vfs;
       mounted = false;
@@ -5231,7 +10089,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         error.code = 'ERR_CAPABILITY_DENIED';
         throw error;
       }
-      vfs.mount(files, { ...mount, path: '/node' });
+      vfs.mount(files, { ...mount, path: '/node', symlinks: context.symlinks });
       mounted = true;
     },
     async executeEntry(entry, options, stdout, stderr) {

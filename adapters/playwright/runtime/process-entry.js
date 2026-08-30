@@ -18,7 +18,7 @@ export async function runProcessEntry(context) {
     proxy: descriptor.proxy,
     virtualNetwork: descriptor.virtualNetwork,
   });
-  await runtime.mount(descriptor.files);
+  await runtime.mount(descriptor.files, { symlinks: descriptor.symlinks });
   const code = await runtime.executeEntry(
     descriptor.entry,
     {
@@ -29,7 +29,10 @@ export async function runProcessEntry(context) {
       cwd: context.process.cwd(),
       workerThread: Boolean(descriptor.workerThread),
       threadId: descriptor.threadId,
+      threadName: descriptor.threadName,
       workerData: descriptor.workerData,
+      environmentData: descriptor.environmentData,
+      resourceLimits: descriptor.resourceLimits,
     },
     (value) => context.stdout(value),
     (value) => context.stderr(value),

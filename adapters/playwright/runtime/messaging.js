@@ -1,24 +1,68 @@
 import { BrowserEventEmitter } from './events.js';
 
 const uncloneableValues = new WeakSet();
+const uncloneableErrors = new WeakMap();
+const uncloneableMarker = Symbol.for('bnh.messaging.uncloneable');
+const uncloneableErrorMarker = Symbol.for('bnh.messaging.uncloneableError');
+const untransferableValues = new WeakSet();
+const untransferableMarker = Symbol.for('nodejs.worker_threads.untransferable');
 const nativeMessageChannels = new WeakMap();
 const cloneablePrototypeMarker = Symbol.for('bnh.messaging.cloneablePrototype');
+const messageEventData = new WeakMap();
 
-export function markAsUncloneable(value) {
+export const SHARE_ENV = Symbol.for('nodejs.worker_threads.SHARE_ENV');
+
+export function markAsUncloneable(value, errorFactory = undefined) {
   if (!value || (typeof value !== 'object' && typeof value !== 'function')) return;
   if (value instanceof ArrayBuffer || (typeof SharedArrayBuffer === 'function' && value instanceof SharedArrayBuffer)) return;
   uncloneableValues.add(value);
+  try {
+    Object.defineProperty(value, uncloneableMarker, { configurable: true, value: true });
+    if (typeof errorFactory === 'function') {
+      Object.defineProperty(value, uncloneableErrorMarker, {
+        configurable: true,
+        value: errorFactory,
+      });
+    }
+  } catch { /* host objects may be sealed; the WeakSet remains authoritative */ }
+  if (typeof errorFactory === 'function') uncloneableErrors.set(value, errorFactory);
+}
+
+export function markAsUntransferable(value) {
+  if (value !== null && (typeof value === 'object' || typeof value === 'function')) {
+    untransferableValues.add(value);
+    try { Object.defineProperty(value, untransferableMarker, { configurable: true, value: true }); } catch { /* host buffer may be sealed */ }
+  }
+}
+
+export function isMarkedAsUntransferable(value) {
+  return value !== null
+    && (typeof value === 'object' || typeof value === 'function')
+    && (untransferableValues.has(value)
+      || (Object.hasOwn(value, untransferableMarker) && value[untransferableMarker] === true));
 }
 
 function isUncloneable(value) {
   let current = value;
   let depth = 0;
   while (current && (typeof current === 'object' || typeof current === 'function') && depth < 32) {
-    if (uncloneableValues.has(current)) return true;
+    if (uncloneableValues.has(current) || current[uncloneableMarker] === true) return true;
     current = Object.getPrototypeOf(current);
     depth += 1;
   }
   return false;
+}
+
+function uncloneableError(value) {
+  let current = value;
+  let depth = 0;
+  while (current && (typeof current === 'object' || typeof current === 'function') && depth < 32) {
+    const factory = uncloneableErrors.get(current) || current[uncloneableErrorMarker];
+    if (factory) return factory();
+    current = Object.getPrototypeOf(current);
+    depth += 1;
+  }
+  return dataCloneError('object could not be cloned');
 }
 
 export const IPC_ERROR_CODES = Object.freeze({
@@ -96,6 +140,7 @@ function transferArguments(value, transferList) {
   const identities = new Set();
   for (const item of list) {
     const identity = item?.raw || item;
+    if (isMarkedAsUntransferable(identity)) throw dataCloneError('Cannot transfer object of unsupported type.');
     if (identities.has(identity)) {
       const type = item instanceof ArrayBuffer ? 'ArrayBuffer' : item?.__bnhReceiveMessage ? 'MessagePort' : null;
       if (type) throw dataCloneError(`Transfer list contains duplicate ${type}`);
@@ -166,6 +211,105 @@ function messageEventValue(value) {
 }
 
 let nodeMessagePortClass;
+const messagePortStates = new WeakMap();
+
+function messagePortState(receiver) {
+  const state = messagePortStates.get(receiver);
+  if (!state) {
+    const error = new TypeError('Value of "this" must be a MessagePort');
+    error.code = 'ERR_INVALID_THIS';
+    throw error;
+  }
+  return state;
+}
+
+function messagePortAddEventListener(name, listener) {
+  const state = messagePortState(this);
+  if (typeof listener !== 'function') return undefined;
+  const wrapped = name === 'message'
+    ? (data) => listener(state.messageEvent(data, receivedMessagePorts(data, state.nativePort)))
+    : (detail) => listener({ type: name, detail, target: this, currentTarget: this });
+  const listeners = state.eventTargetListeners.get(name) || new Map();
+  listeners.set(listener, wrapped);
+  state.eventTargetListeners.set(name, listeners);
+  state.events.on(name, wrapped);
+  if (name === 'message') state.drainDeferredMessages();
+  return undefined;
+}
+
+function messagePortRemoveEventListener(name, listener) {
+  const state = messagePortState(this);
+  const wrapped = state.eventTargetListeners.get(name)?.get(listener);
+  if (!wrapped) return undefined;
+  state.events.off(name, wrapped);
+  const listeners = state.eventTargetListeners.get(name);
+  listeners.delete(listener);
+  if (!listeners.size) state.eventTargetListeners.delete(name);
+  return undefined;
+}
+
+function messagePortDispatchEvent(event) {
+  const state = messagePortState(this);
+  if (!event || typeof event.type !== 'string') throw new TypeError('event must have a type');
+  state.events.emit(event.type, event.detail === undefined ? event : event.detail);
+  return true;
+}
+
+function messagePortOn(name, listener) {
+  messagePortState(this).events.on(name, listener);
+  return this;
+}
+
+function messagePortOnce(name, listener) {
+  messagePortState(this).events.once(name, listener);
+  return this;
+}
+
+function messagePortOff(name, listener) {
+  messagePortState(this).events.off(name, listener);
+  return this;
+}
+
+function messagePortRemoveAllListeners(name) {
+  messagePortState(this).events.removeAllListeners(name);
+  return this;
+}
+
+function messagePortEmit(name, ...args) {
+  return messagePortState(this).events.emit(name, ...args);
+}
+
+function messagePortListenerCount(name) {
+  return messagePortState(this).events.listenerCount(name);
+}
+
+function messagePortSetMaxListeners(value) {
+  messagePortState(this).events.setMaxListeners(value);
+  return this;
+}
+
+function messagePortGetMaxListeners() {
+  return messagePortState(this).events.getMaxListeners();
+}
+
+function messagePortEventNames() {
+  return messagePortState(this).events.eventNames();
+}
+
+const messagePortEventTargetPrototype = Object.create(Object.prototype);
+Object.defineProperties(messagePortEventTargetPrototype, {
+  setMaxListeners: { configurable: true, writable: true, value: messagePortSetMaxListeners },
+  getMaxListeners: { configurable: true, writable: true, value: messagePortGetMaxListeners },
+  eventNames: { configurable: true, writable: true, value: messagePortEventNames },
+  listenerCount: { configurable: true, writable: true, value: messagePortListenerCount },
+  off: { configurable: true, writable: true, value: messagePortOff },
+  removeListener: { configurable: true, writable: true, value: messagePortOff },
+  on: { configurable: true, writable: true, value: messagePortOn },
+  addListener: { configurable: true, writable: true, value: messagePortOn },
+  emit: { configurable: true, writable: true, value: messagePortEmit },
+  once: { configurable: true, writable: true, value: messagePortOnce },
+  removeAllListeners: { configurable: true, writable: true, value: messagePortRemoveAllListeners },
+});
 
 function isMessagePort(value, MessagePort, NativeMessagePort = MessagePort) {
   return (typeof MessagePort === 'function' && value instanceof MessagePort)
@@ -234,7 +378,7 @@ export function createMessageEvent(scope = globalThis, {
   NativeMessagePort = scope.MessagePort,
 } = {}) {
   const Event = scope.Event || class BrowserEvent {};
-  return class MessageEvent extends Event {
+  const MessageEvent = class MessageEvent extends Event {
     constructor(type, init = {}) {
       super(type, init || {});
       const options = init || {};
@@ -259,15 +403,80 @@ export function createMessageEvent(scope = globalThis, {
           }
         }
       }
-      Object.defineProperties(this, {
-        data: { enumerable: true, value: options.data === undefined ? null : options.data },
-        origin: { enumerable: true, value: options.origin === undefined ? '' : String(options.origin) },
-        lastEventId: { enumerable: true, value: options.lastEventId === undefined ? '' : String(options.lastEventId) },
-        source: { enumerable: true, value: source },
-        ports: { enumerable: true, value: ports },
+      messageEventData.set(this, {
+        data: options.data === undefined ? null : options.data,
+        origin: options.origin === undefined ? '' : String(options.origin),
+        lastEventId: options.lastEventId === undefined ? '' : String(options.lastEventId),
+        source,
+        ports,
       });
     }
   };
+  function getMessageEventField(field) {
+    const data = messageEventData.get(this);
+    if (!data) {
+      const error = new TypeError('Illegal invocation');
+      error.code = 'ERR_INVALID_THIS';
+      throw error;
+    }
+    return data[field];
+  }
+  Object.defineProperties(MessageEvent.prototype, {
+    data: {
+      configurable: true,
+      enumerable: true,
+      get() { return getMessageEventField.call(this, 'data'); },
+    },
+    origin: {
+      configurable: true,
+      enumerable: true,
+      get() { return getMessageEventField.call(this, 'origin'); },
+    },
+    lastEventId: {
+      configurable: true,
+      enumerable: true,
+      get() { return getMessageEventField.call(this, 'lastEventId'); },
+    },
+    source: {
+      configurable: true,
+      enumerable: true,
+      get() { return getMessageEventField.call(this, 'source'); },
+    },
+    ports: {
+      configurable: true,
+      enumerable: true,
+      get() { return getMessageEventField.call(this, 'ports'); },
+    },
+    initMessageEvent: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: function initMessageEvent(
+        type,
+        bubbles = false,
+        cancelable = false,
+        data = null,
+        origin = '',
+        lastEventId = '',
+        source = null,
+        ports = [],
+      ) {
+        if (arguments.length === 0) {
+          throw new TypeError('MessageEvent.initMessageEvent: 1 argument required, but 0 found.');
+        }
+        return new MessageEvent(type, {
+          bubbles,
+          cancelable,
+          data,
+          origin,
+          lastEventId,
+          source,
+          ports,
+        });
+      },
+    },
+  });
+  return MessageEvent;
 }
 
 function isVirtualHandle(value) {
@@ -389,6 +598,9 @@ export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePor
     removeListener(name, listener) { events.off(name, listener); return port; },
     removeAllListeners(name) { events.removeAllListeners(name); return port; },
     listenerCount(name) { return events.listenerCount(name); },
+    setMaxListeners(value) { events.setMaxListeners(value); return port; },
+    getMaxListeners() { return events.getMaxListeners(); },
+    eventNames() { return events.eventNames(); },
     emit(name, ...args) { events.emit(name, ...args); return true; },
     addEventListener(name, listener) {
       if (typeof listener !== 'function') return;
@@ -456,6 +668,14 @@ export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePor
     unref() { refed = false; return port; },
   };
 
+  messagePortStates.set(port, {
+    events,
+    nativePort,
+    eventTargetListeners,
+    messageEvent,
+    drainDeferredMessages,
+  });
+
   Object.defineProperties(port, {
     __bnhCloseFromPeer: {
       value: () => {
@@ -503,6 +723,7 @@ export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePor
       },
     },
     [Symbol.for('nodejs.util.inspect.custom')]: {
+      configurable: true,
       value: () => `MessagePort { active: ${!closed}, refed: ${refed} }`,
     },
   });
@@ -747,7 +968,19 @@ function createMessagePortClass() {
     unref: { configurable: true, writable: true, value() { return this; } },
     onmessage: { configurable: true, get() { return null; }, set(_) {} },
     onmessageerror: { configurable: true, get() { return null; }, set(_) {} },
+    addEventListener: { configurable: true, writable: true, value: messagePortAddEventListener },
+    removeEventListener: { configurable: true, writable: true, value: messagePortRemoveEventListener },
+    dispatchEvent: { configurable: true, writable: true, value: messagePortDispatchEvent },
+    [Symbol.for('nodejs.util.inspect.custom')]: {
+      configurable: true,
+      value() { return 'MessagePort'; },
+    },
+    [Symbol.toStringTag]: {
+      configurable: true,
+      value: 'EventTarget',
+    },
   });
+  Object.setPrototypeOf(MessagePort.prototype, messagePortEventTargetPrototype);
   return MessagePort;
 }
 
@@ -856,8 +1089,8 @@ export function adaptWorker(nativeWorker, { revokeURL = null } = {}) {
         return 1;
       });
     },
-    ref() { return worker; },
-    unref() { return worker; },
+    ref() {},
+    unref() {},
   };
   return worker;
 }
@@ -893,12 +1126,126 @@ export function createWorkerFactory(scope = globalThis, { bootstrap = '' } = {})
 
 export function createBroadcastChannelFactory(scope = globalThis) {
   if (typeof scope.BroadcastChannel !== 'function') return undefined;
-  return function BroadcastChannel(name) {
-    const channel = new scope.BroadcastChannel(name);
-    const adapted = adaptMessagePort(channel);
-    adapted.name = channel.name;
-    return adapted;
+  const channelStates = new WeakMap();
+  const stateFor = (receiver) => {
+    const state = channelStates.get(receiver);
+    if (!state) {
+      const error = new TypeError('Illegal invocation');
+      error.code = 'ERR_INVALID_THIS';
+      throw error;
+    }
+    return state;
   };
+  function BroadcastChannel(name) {
+    if (!new.target) {
+      const error = new TypeError('Class constructor BroadcastChannel cannot be invoked without \'new\'');
+      error.code = 'ERR_CONSTRUCT_CALL_REQUIRED';
+      throw error;
+    }
+    if (arguments.length === 0) {
+      const error = new TypeError('The "name" argument must be specified');
+      error.code = 'ERR_MISSING_ARGS';
+      throw error;
+    }
+    const channelName = String(name);
+    const channel = new scope.BroadcastChannel(channelName);
+    const adapted = adaptMessagePort(channel, { MessagePortClass: BroadcastChannel });
+    const nativeClose = adapted.close;
+    const nativePostMessage = adapted.postMessage;
+    const nativeRef = adapted.ref;
+    const nativeUnref = adapted.unref;
+    const onmessage = Object.getOwnPropertyDescriptor(adapted, 'onmessage');
+    const onmessageerror = Object.getOwnPropertyDescriptor(adapted, 'onmessageerror');
+    const postMessage = function postMessage(value) {
+      if (arguments.length === 0) {
+        const error = new TypeError('The "message" argument must be specified');
+        error.code = 'ERR_MISSING_ARGS';
+        throw error;
+      }
+      if (adapted.__bnhIsClosed) {
+        const error = typeof scope.DOMException === 'function'
+          ? new scope.DOMException('BroadcastChannel is closed.', 'InvalidStateError')
+          : Object.assign(new Error('BroadcastChannel is closed.'), { name: 'InvalidStateError', code: 11 });
+        throw error;
+      }
+      return nativePostMessage.call(adapted, value);
+    };
+    const ownProperties = ['close', 'hasRef', 'postMessage', 'ref', 'start', 'unref'];
+    for (const property of ownProperties) delete adapted[property];
+    delete adapted[Symbol.for('nodejs.util.inspect.custom')];
+    channelStates.set(adapted, {
+      adapted,
+      channelName,
+      close: () => { nativeClose.call(adapted); },
+      postMessage,
+      ref: () => nativeRef.call(adapted),
+      unref: () => nativeUnref.call(adapted),
+      onmessage,
+      onmessageerror,
+    });
+    return adapted;
+  }
+  const close = function close() { stateFor(this).close(); };
+  const postMessage = function postMessage(message) {
+    const state = stateFor(this);
+    return arguments.length === 0 ? state.postMessage() : state.postMessage(message);
+  };
+  const ref = function ref() { stateFor(this).ref(); return this; };
+  const unref = function unref() { stateFor(this).unref(); return this; };
+  Object.defineProperties(BroadcastChannel.prototype, {
+    constructor: { configurable: true, writable: true, value: BroadcastChannel },
+    name: {
+      configurable: true,
+      enumerable: true,
+      get() { return stateFor(this).channelName; },
+    },
+    close: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: close,
+    },
+    postMessage: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: postMessage,
+    },
+    ref: {
+      configurable: true,
+      writable: true,
+      value: ref,
+    },
+    unref: {
+      configurable: true,
+      writable: true,
+      value: unref,
+    },
+    onmessage: {
+      configurable: true,
+      enumerable: true,
+      get() { return stateFor(this).onmessage.get.call(stateFor(this).adapted); },
+      set(value) { stateFor(this).onmessage.set.call(stateFor(this).adapted, value); },
+    },
+    onmessageerror: {
+      configurable: true,
+      enumerable: true,
+      get() { return stateFor(this).onmessageerror.get.call(stateFor(this).adapted); },
+      set(value) { stateFor(this).onmessageerror.set.call(stateFor(this).adapted, value); },
+    },
+    [Symbol.for('nodejs.util.inspect.custom')]: {
+      configurable: true,
+      value(depth) {
+        const state = stateFor(this);
+        if (depth < 0) return 'BroadcastChannel';
+        const quotedName = state.channelName.replaceAll('\\', '\\\\').replaceAll("'", "\\'");
+        return `BroadcastChannel { name: '${quotedName}', active: ${!state.adapted.__bnhIsClosed} }`;
+      },
+    },
+  });
+  if (scope.EventTarget?.prototype) Object.setPrototypeOf(BroadcastChannel.prototype, scope.EventTarget.prototype);
+  Object.defineProperty(BroadcastChannel, 'prototype', { writable: false });
+  return BroadcastChannel;
 }
 
 export function createMessagingPrimitives(scope = globalThis) {
@@ -923,14 +1270,17 @@ export function createMessagingPrimitives(scope = globalThis) {
     Worker,
     MessageChannel,
     BroadcastChannel: createBroadcastChannelFactory(scope),
+    SHARE_ENV,
     MessagePort: nodeMessagePortClass,
     isMainThread: true,
     parentPort: null,
     workerData: undefined,
     ...createMessagePortHelpers(),
     markAsUncloneable,
+    markAsUntransferable,
+    isMarkedAsUntransferable,
     structuredClone(value, options) {
-      if (isUncloneable(value)) throw dataCloneError('object could not be cloned');
+      if (isUncloneable(value)) throw uncloneableError(value);
       if (!nativeStructuredClone) return value;
       return nativeStructuredClone(value, options);
     },

@@ -16,6 +16,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
   let lastUserSequence = 0;
   let exitCode = 0;
   let signalCode = null;
+  const processExitSignal = {};
   const remoteHandles = new Map();
 
   function errorRecord(error) {
@@ -107,13 +108,59 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
 
   function makeEmitter() {
     const listeners = new Map();
-    return {
-      on(name, listener) { const set = listeners.get(name) || new Set(); set.add(listener); listeners.set(name, set); return this; },
-      once(name, listener) { const wrapped = (...args) => { this.off(name, wrapped); listener(...args); }; return this.on(name, wrapped); },
-      off(name, listener) { listeners.get(name)?.delete(listener); return this; },
-      emit(name, ...args) { const set = listeners.get(name); if (!set) return false; for (const listener of [...set]) listener(...args); return set.size > 0; },
-      listenerCount(name) { return listeners.get(name)?.size || 0; },
+    const emitter = {
+      on(name, listener) {
+        const set = listeners.get(name) || [];
+        set.push(listener);
+        listeners.set(name, set);
+        return this;
+      },
+      addListener(name, listener) { return this.on(name, listener); },
+      prependListener(name, listener) {
+        const set = listeners.get(name) || [];
+        set.unshift(listener);
+        listeners.set(name, set);
+        return this;
+      },
+      once(name, listener) {
+        const wrapped = (...args) => { this.off(name, wrapped); listener(...args); };
+        wrapped.listener = listener;
+        return this.on(name, wrapped);
+      },
+      prependOnceListener(name, listener) {
+        const wrapped = (...args) => { this.off(name, wrapped); listener(...args); };
+        wrapped.listener = listener;
+        return this.prependListener(name, wrapped);
+      },
+      off(name, listener) {
+        const set = listeners.get(name);
+        if (!set) return this;
+        const index = [...set].reverse().findIndex((candidate) => candidate === listener || candidate.listener === listener);
+        if (index >= 0) set.splice(set.length - 1 - index, 1);
+        if (!set.length) listeners.delete(name);
+        return this;
+      },
+      removeListener(name, listener) { return this.off(name, listener); },
+      removeAllListeners(name) {
+        if (name === undefined) listeners.clear();
+        else listeners.delete(name);
+        return this;
+      },
+      emit(name, ...args) {
+        const set = listeners.get(name);
+        if (!set?.length) return false;
+        for (const listener of [...set]) listener(...args);
+        return true;
+      },
+      listenerCount(name) { return listeners.get(name)?.length || 0; },
+      listeners(name) { return (listeners.get(name) || []).map((listener) => listener.listener || listener); },
+      rawListeners(name) { return [...(listeners.get(name) || [])]; },
+      eventNames() { return [...listeners.keys()]; },
+      getMaxListeners() { return 10; },
+      setMaxListeners() { return this; },
     };
+    emitter.off = emitter.removeListener;
+    return emitter;
   }
 
   function installProcessContract(process) {
@@ -144,7 +191,20 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       return numeric;
     };
     process.config ||= { variables: { v8_enable_i18n_support: 1, openssl_quic: false, asan: 0 }, target_defaults: { default_configuration: 'Release' } };
-    process.features ||= { inspector: false, debug: false };
+    process.features ||= {
+      inspector: true,
+      debug: false,
+      uv: false,
+      ipv6: true,
+      openssl_is_boringssl: false,
+      tls_alpn: true,
+      tls_sni: true,
+      tls_ocsp: true,
+      tls: true,
+      cached_builtins: false,
+      require_module: false,
+      typescript: false,
+    };
     process.execPath ||= '/browser/node';
     process.argv0 ||= 'node';
     process.versions ||= { node: '22.0.0', v8: '12.0.0' };
@@ -220,6 +280,22 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     identity = message.identity;
     const process = makeEmitter();
     installProcessContract(process);
+    process.stdin = makeEmitter();
+    process.stdin.readable = true;
+    process.stdin.isTTY = false;
+    process.stdin.push = (value) => {
+      if (value === null) process.stdin.emit('end');
+      else process.stdin.emit('data', value);
+      return true;
+    };
+    process.stdin.resume = () => process.stdin;
+    process.stdin.pause = () => process.stdin;
+    process.stdin.pipe = (destination) => {
+      process.stdin.on('data', (value) => destination.write?.(value));
+      process.stdin.once('end', () => destination.end?.());
+      process.stdin.resume();
+      return destination;
+    };
     if (typeof self.addEventListener === 'function') self.addEventListener('error', uncaughtWorkerError);
     else self.onerror = uncaughtWorkerError;
     Object.assign(process, {
@@ -230,7 +306,18 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       connected: true,
       exitCode: 0,
       cwd: () => identity.cwd,
-      chdir: (value) => { identity.cwd = String(value); },
+      chdir: (value) => {
+        const source = String(value);
+        const base = String(identity.cwd || '/node');
+        const absolute = source.startsWith('/') ? source : base.replace(/\/+$/, '') + '/' + source;
+        const parts = [];
+        for (const part of absolute.split('/')) {
+          if (!part || part === '.') continue;
+          if (part === '..') { parts.pop(); continue; }
+          parts.push(part);
+        }
+        identity.cwd = '/' + parts.join('/');
+      },
       send(value, transferList, callback) {
         if (typeof transferList === 'function') { callback = transferList; transferList = undefined; }
         if (disconnected) {
@@ -266,9 +353,17 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         return true;
       },
       kill: (signal = 'SIGTERM') => { sendControl('child-signal-request', { signal }); return true; },
-      exit(code = 0) { exitCode = Number(code) || 0; process.exitCode = exitCode; process.emit('exit', exitCode); finish('exit', exitCode); },
+      exit(code = 0) { exitCode = Number(code) || 0; process.exitCode = exitCode; process.emit('exit', exitCode); finish('exit', exitCode); throw processExitSignal; },
     });
-    process.stdout = { isTTY: false, write(value) { sendControl('output', { stream: 'stdout', value: outputText(value) }); return true; } };
+    process.stdout = {
+      isTTY: false,
+      _host: null,
+      _isStdio: true,
+      _parent: null,
+      _pendingData: null,
+      _pendingEncoding: '',
+      write(value) { sendControl('output', { stream: 'stdout', value: outputText(value) }); return true; },
+    };
     process.stderr = { isTTY: false, write(value) { sendControl('output', { stream: 'stderr', value: outputText(value) }); return true; } };
 
     control.onmessage = (event) => {
@@ -292,7 +387,13 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         const target = remoteHandles.get(frame.payload?.handleId);
         if (target) target.emit(frame.payload.event, ...(frame.payload.args || []).map((value) => value?.id ? createRemoteHandle(value) : value));
       } else if (frame.type === 'message') {
-        process.emit('message', frame.payload, createRemoteHandle(frame.handle));
+        if (frame.payload?.__bnhWorkerStdin) {
+          process.stdin.push(frame.payload.value);
+        } else if (frame.payload?.__bnhWorkerStdinEnd) {
+          process.stdin.push(null);
+        } else {
+          process.emit('message', frame.payload, createRemoteHandle(frame.handle));
+        }
       }
     };
     control.start?.();

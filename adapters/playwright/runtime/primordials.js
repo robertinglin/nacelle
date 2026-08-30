@@ -49,6 +49,21 @@ function regexpGetters(primordials) {
 }
 
 export function createPrimordials(globalObject = globalThis) {
+  const detachedArrayBuffers = new WeakSet();
+  const arrayBufferTransfer = uncurry(ArrayBuffer.prototype.transfer)
+    || (typeof globalObject?.structuredClone === 'function'
+      ? uncurry(function transfer(newLength = this.byteLength) {
+          const source = this;
+          const moved = globalObject.structuredClone(source, { transfer: [source] });
+          detachedArrayBuffers.add(source);
+          if (newLength === moved.byteLength) return moved;
+          const resized = new ArrayBuffer(newLength);
+          new Uint8Array(resized).set(new Uint8Array(moved).subarray(0, newLength));
+          return resized;
+        })
+      : undefined);
+  const arrayBufferDetached = getter(ArrayBuffer.prototype, 'detached')
+    || uncurry(function detached() { return detachedArrayBuffers.has(this); });
   const primordials = {
     Array, ArrayBuffer, ArrayBufferIsView: ArrayBuffer.isView, Boolean, DataView, Date, Error, EvalError,
     FinalizationRegistry, Float32Array, Float64Array, Function, Int8Array, Int16Array,
@@ -56,6 +71,8 @@ export function createPrimordials(globalObject = globalThis) {
     RegExp, Set, SharedArrayBuffer, String, Symbol, SyntaxError, TypeError, URIError,
     Uint8Array, Uint8ClampedArray, Uint16Array, Uint32Array, WeakMap, WeakRef, WeakSet,
     AggregateError, BigInt, BigInt64Array, BigUint64Array, JSON, Math, WebAssembly,
+    ArrayBufferPrototypeTransfer: arrayBufferTransfer,
+    ArrayBufferPrototypeGetDetached: arrayBufferDetached,
     globalThis: globalObject,
     ObjectPrototype: Object.prototype,
     FunctionPrototype: Function.prototype,
@@ -165,7 +182,7 @@ export function createPrimordials(globalObject = globalThis) {
     uncurryThis: uncurry,
     SymbolToPrimitive: Symbol.toPrimitive,
   };
-  prototypeMethods(primordials, Array, 'Array', ['at', 'concat', 'every', 'fill', 'filter', 'find', 'findIndex', 'findLast', 'findLastIndex', 'flatMap', 'forEach', 'includes', 'indexOf', 'join', 'map', 'pop', 'push', 'reduce', 'reduceRight', 'reverse', 'shift', 'slice', 'some', 'sort', 'splice', 'toReversed', 'toSorted', 'unshift', 'with']);
+  prototypeMethods(primordials, Array, 'Array', ['at', 'concat', 'copyWithin', 'every', 'fill', 'filter', 'find', 'findIndex', 'findLast', 'findLastIndex', 'flatMap', 'forEach', 'includes', 'indexOf', 'join', 'lastIndexOf', 'map', 'pop', 'push', 'reduce', 'reduceRight', 'reverse', 'shift', 'slice', 'some', 'sort', 'splice', 'toReversed', 'toSorted', 'unshift', 'with']);
   prototypeMethods(primordials, String, 'String', ['at', 'charAt', 'charCodeAt', 'codePointAt', 'endsWith', 'includes', 'indexOf', 'lastIndexOf', 'localeCompare', 'normalize', 'padEnd', 'padStart', 'repeat', 'replace', 'replaceAll', 'search', 'slice', 'split', 'startsWith', 'substring', 'toLocaleLowerCase', 'toLowerCase', 'toUpperCase', 'trim', 'trimStart', 'trimEnd', 'valueOf']);
   prototypeMethods(primordials, RegExp, 'RegExp', ['exec', 'test', 'toString']);
   prototypeMethods(primordials, Function, 'Function', ['bind', 'call', 'apply', 'toString']);

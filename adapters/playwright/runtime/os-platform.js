@@ -26,12 +26,12 @@ function freezeConstants() {
     UV_UDP_REUSEADDR: 4,
     dlopen: Object.freeze({ RTLD_LAZY: 1, RTLD_NOW: 2, RTLD_GLOBAL: 256, RTLD_LOCAL: 0, RTLD_DEEPBIND: 8 }),
     signals: Object.freeze({
-      SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGILL: 4, SIGTRAP: 5, SIGABRT: 6,
+      SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGILL: 4, SIGTRAP: 5, SIGABRT: 6, SIGIOT: 6,
       SIGBUS: 7, SIGFPE: 8, SIGKILL: 9, SIGUSR1: 10, SIGSEGV: 11, SIGUSR2: 12,
       SIGPIPE: 13, SIGALRM: 14, SIGTERM: 15, SIGCHLD: 17, SIGCONT: 18,
       SIGSTOP: 19, SIGTSTP: 20, SIGTTIN: 21, SIGTTOU: 22, SIGURG: 23,
       SIGXCPU: 24, SIGXFSZ: 25, SIGVTALRM: 26, SIGPROF: 27, SIGWINCH: 28,
-      SIGIO: 29, SIGPOLL: 29, SIGPWR: 30, SIGSYS: 31,
+      SIGIO: 29, SIGPOLL: 29, SIGPWR: 30, SIGSYS: 31, SIGSTKFLT: 16,
     }),
     priority: Object.freeze({
       PRIORITY_LOW: 19,
@@ -58,6 +58,22 @@ function encodeUserInfo(value, encoding) {
 function createPrimitiveMethod(readValue) {
   const method = () => readValue();
   Object.defineProperty(method, Symbol.toPrimitive, { value: () => String(readValue()) });
+  return method;
+}
+
+function createCheckedPrimitiveMethod(readValue) {
+  const method = function (...args) {
+    try {
+      return Reflect.apply(readValue, this, args);
+    } catch (error) {
+      if (Error.stackTraceLimit && typeof Error.captureStackTrace === 'function') {
+        Error.captureStackTrace(error, method);
+      }
+      throw error;
+    }
+  };
+  Object.defineProperty(method, Symbol.toPrimitive, { value: () => String(method()) });
+  method.withoutStackTrace = readValue;
   return method;
 }
 
@@ -102,9 +118,9 @@ export function createPlatformContract({
     freemem: createPrimitiveMethod(() => BROWSER_FREE_MEMORY),
     availableParallelism: createPrimitiveMethod(() => 1),
     cpus: () => [{ ...BROWSER_CPU, times: { ...BROWSER_CPU.times } }],
-    homedir: createPrimitiveMethod(() => homedir),
-    hostname: createPrimitiveMethod(() => 'browser'),
-    uptime: createPrimitiveMethod(() => 1),
+    homedir: createCheckedPrimitiveMethod(() => homedir),
+    hostname: createCheckedPrimitiveMethod(() => 'browser'),
+    uptime: createCheckedPrimitiveMethod(() => 1),
     loadavg: () => [0, 0, 0],
     userInfo: (options = {}) => {
       const encoding = options?.encoding;

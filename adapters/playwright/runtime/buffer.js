@@ -1,5 +1,8 @@
+import { inspect as nodeInspect } from './assert.js';
+
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+const MAX_BUFFER_LENGTH = Number.MAX_SAFE_INTEGER;
 
 // ---------------------------------------------------------------------------
 // One byte/encoding layer shared by Buffer.from, Buffer#write,
@@ -118,6 +121,129 @@ function encodeBase64(bytes, urlSafe) {
   return urlSafe ? encodedText.replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '') : encodedText;
 }
 
+const inspectCustomSymbol = Symbol.for('nodejs.util.inspect.custom');
+const blobClonePartsSymbol = Symbol.for('bnh.blobCloneParts');
+const blobBytesSymbol = Symbol.for('bnh.blobBytes');
+let blobStreamClass;
+
+export function installBlobStreamClass(StreamClass) {
+  if (typeof StreamClass === 'function') blobStreamClass = StreamClass;
+}
+
+function storedBlobBytes(parts) {
+  if (!Array.isArray(parts)) return null;
+  const pieces = [];
+  let length = 0;
+  for (const part of parts) {
+    let bytes;
+    if (typeof part === 'string') bytes = new TextEncoder().encode(part);
+    else if (part instanceof ArrayBuffer) bytes = new Uint8Array(part);
+    else if (ArrayBuffer.isView(part)) bytes = new Uint8Array(part.buffer, part.byteOffset, part.byteLength);
+    else if (part?.[blobClonePartsSymbol]) bytes = storedBlobBytes(part[blobClonePartsSymbol]);
+    else return null;
+    pieces.push(bytes);
+    length += bytes.byteLength;
+  }
+  const result = new Uint8Array(length);
+  let offset = 0;
+  for (const bytes of pieces) {
+    result.set(bytes, offset);
+    offset += bytes.byteLength;
+  }
+  return result;
+}
+
+function inspectBlobProperties(properties, options) {
+  if (options.depth !== null && options.depth < 0) return '[Object]';
+
+  const entries = Object.entries(properties).map(([key, value]) => `${key}: ${nodeInspect(value, options)}`);
+  const body = entries.join(', ');
+  const breakLength = options.breakLength ?? 80;
+  if (options.compact === false || body.length > breakLength) {
+    return ['{', `  ${entries.join(',\n  ')}`, '}'].join('\n');
+  }
+  return `{ ${body} }`;
+}
+
+function blobInspect(depth, options) {
+  if (depth < 0) return this;
+
+  const opts = {
+    ...options,
+    depth: options.depth == null ? null : options.depth - 1,
+  };
+
+  return `Blob ${inspectBlobProperties({
+    size: this.size,
+    type: this.type,
+  }, opts)}`;
+}
+
+function fileInspect(depth, options) {
+  if (depth < 0) return this;
+
+  const opts = {
+    ...options,
+    depth: options.depth == null ? null : options.depth - 1,
+  };
+
+  return `File ${inspectBlobProperties({
+    size: this.size,
+    type: this.type,
+    name: this.name,
+    lastModified: this.lastModified,
+  }, opts)}`;
+}
+
+function installBlobInspection(BlobClass) {
+  if (typeof BlobClass !== 'function' || !BlobClass.prototype) return BlobClass;
+  Object.defineProperty(BlobClass.prototype, inspectCustomSymbol, {
+    configurable: true,
+    writable: true,
+    value: blobInspect,
+  });
+  return BlobClass;
+}
+
+function installFileInspection(FileClass) {
+  if (typeof FileClass !== 'function' || !FileClass.prototype) return FileClass;
+  Object.defineProperty(FileClass.prototype, inspectCustomSymbol, {
+    configurable: true,
+    writable: true,
+    value: fileInspect,
+  });
+  return FileClass;
+}
+
+function sliceBytes(buffer, start, end) {
+  const [first, last] = nativeSliceRange(buffer.length, start, end);
+  return buffer.subarray(first, last);
+}
+
+function asciiSlice(start, end) {
+  return decodeAscii(sliceBytes(this, start, end));
+}
+
+function base64Slice(start, end) {
+  return encodeBase64(sliceBytes(this, start, end), false);
+}
+
+function base64urlSlice(start, end) {
+  return encodeBase64(sliceBytes(this, start, end), true);
+}
+
+function latin1Slice(start, end) {
+  return decodeSingleByte(sliceBytes(this, start, end));
+}
+
+function hexSlice(start, end) {
+  return encodeHex(sliceBytes(this, start, end));
+}
+
+function ucs2Slice(start, end) {
+  return decodeUcs2(sliceBytes(this, start, end));
+}
+
 const UTF8_OPS = Object.freeze({
   search: 'bytes',
   encode: (text) => textEncoder.encode(text),
@@ -129,7 +255,9 @@ const UCS2_OPS = Object.freeze({
   decode: decodeUcs2,
 });
 const LATIN1_OPS = Object.freeze({ search: 'bytes', encode: (text) => encodeLatin1(text, false), decode: decodeSingleByte });
-const ASCII_OPS = Object.freeze({ search: 'bytes', encode: (text) => encodeLatin1(text, true), decode: decodeAscii });
+// Node's ASCII encoder is an 8-bit write; only ASCII decoding masks the high
+// bit.  This distinction matters for Buffer.from/write and transcode.
+const ASCII_OPS = Object.freeze({ search: 'bytes', encode: (text) => encodeLatin1(text, false), decode: decodeAscii });
 const HEX_OPS = Object.freeze({ search: 'bytes', encode: decodeHex, decode: encodeHex });
 const BASE64_OPS = Object.freeze({ search: 'bytes', encode: (text) => decodeBase64(text), decode: (bytes) => encodeBase64(bytes, false) });
 const BASE64URL_OPS = Object.freeze({ search: 'bytes', encode: (text) => decodeBase64(text), decode: (bytes) => encodeBase64(bytes, true) });
@@ -202,8 +330,8 @@ function outOfRangeError(name, range, value) {
 
 function validateBufferSize(size) {
   if (typeof size !== 'number') throw invalidArgumentTypeError('size', ['number'], size);
-  if (!Number.isFinite(size) || size < 0 || size > 0x7fffffff) {
-    throw outOfRangeError('size', '>= 0 && <= 2147483647', size);
+  if (size < 0 || size > MAX_BUFFER_LENGTH || Number.isNaN(size)) {
+    throw outOfRangeError('size', `>= 0 && <= ${MAX_BUFFER_LENGTH}`, size);
   }
   return Math.trunc(size);
 }
@@ -225,6 +353,416 @@ function bytesFrom(value, encoding = 'utf8') {
 
 function encoded(bytes, encoding = 'utf8') {
   return encodingOpsOrThrow(encoding).decode(bytes);
+}
+
+function outOfRangeIndexError() {
+  const error = new RangeError('Index out of range');
+  error.code = 'ERR_OUT_OF_RANGE';
+  return error;
+}
+
+function bufferBoundsError(name) {
+  const error = new RangeError(`"${name}" is outside of buffer bounds`);
+  error.code = 'ERR_BUFFER_OUT_OF_BOUNDS';
+  return error;
+}
+
+function nativeSliceRange(length, start, end) {
+  const normalize = (value, fallback) => {
+    if (value === undefined) return fallback;
+    const number = Number(value);
+    if (Number.isNaN(number)) return 0;
+    if (number === Infinity) return length;
+    if (number === -Infinity) return 0;
+    const index = Math.trunc(number);
+    return Math.min(length, Math.max(0, index < 0 ? length + index : index));
+  };
+  return [normalize(start, 0), normalize(end, length)];
+}
+
+function nativeWriteRange(buffer, offset, length, strictLength) {
+  const numberOffset = offset === undefined ? 0 : Number(offset);
+  if (Number.isNaN(numberOffset)) {
+    offset = 0;
+  } else {
+    offset = Math.trunc(numberOffset);
+  }
+  if (!Number.isFinite(numberOffset) || offset < 0 || offset > buffer.length) {
+    if (!strictLength && offset < 0) throw outOfRangeIndexError();
+    throw bufferBoundsError('offset');
+  }
+
+  const numberLength = length === undefined ? buffer.length - offset : Number(length);
+  if (Number.isNaN(numberLength)) length = 0;
+  else length = Math.trunc(numberLength);
+  if (!Number.isFinite(numberLength) || length < 0) {
+    if (strictLength) throw bufferBoundsError('length');
+    throw outOfRangeIndexError();
+  }
+  if (strictLength && offset + length > buffer.length) throw bufferBoundsError('length');
+  return { offset, length: Math.min(length, buffer.length - offset) };
+}
+
+function completeUtf8Prefix(bytes, maximum) {
+  let end = Math.min(bytes.length, maximum);
+  while (end > 0 && (bytes[end - 1] & 0xc0) === 0x80) end -= 1;
+  if (end === 0 || end === bytes.length) return end;
+  const lead = bytes[end - 1];
+  const width = lead < 0x80 ? 1 : lead < 0xe0 ? 2 : lead < 0xf0 ? 3 : 4;
+  return end - 1 + width <= maximum ? end - 1 + width : end - 1;
+}
+
+function nativeWrite(buffer, value, offset, length, operations, strictLength = true) {
+  if (typeof value !== 'string') throw invalidArgumentTypeError('argument', ['string'], value);
+  const range = nativeWriteRange(buffer, offset, length, strictLength);
+  if (range.length === 0 || value.length === 0) return 0;
+  const bytes = operations.encode(value);
+  const written = operations === UTF8_OPS
+    ? completeUtf8Prefix(bytes, range.length)
+    : operations === UCS2_OPS
+      ? Math.min(bytes.length, range.length - (range.length & 1))
+      : Math.min(bytes.length, range.length);
+  buffer.set(bytes.subarray(0, written), range.offset);
+  return written;
+}
+
+function transcodeEncoding(value) {
+  if (value === undefined || value === null || value === '') return 'utf8';
+  if (typeof value !== 'string') return undefined;
+  switch (value.toLowerCase()) {
+    case 'utf8':
+    case 'utf-8': return 'utf8';
+    case 'utf16le':
+    case 'utf-16le':
+    case 'ucs2':
+    case 'ucs-2': return 'utf16le';
+    case 'latin1':
+    case 'binary': return 'latin1';
+    case 'ascii': return 'ascii';
+    default: return undefined;
+  }
+}
+
+function transcodeError(code = 'U_ILLEGAL_ARGUMENT_ERROR') {
+  const error = new Error(`Unable to transcode Buffer [${code}]`);
+  error.code = code;
+  error.errno = code === 'U_INVALID_CHAR_FOUND' ? 10 : 1;
+  return error;
+}
+
+function decodeTranscode(bytes, encoding, target) {
+  if (encoding === 'utf8') {
+    try {
+      return new TextDecoder('utf-8', { fatal: target === 'utf16le' }).decode(bytes);
+    } catch {
+      throw transcodeError('U_INVALID_CHAR_FOUND');
+    }
+  }
+  if (encoding === 'utf16le') {
+    try {
+      // ICU ignores an incomplete trailing code unit, while its fatal mode
+      // still rejects unpaired surrogates.
+      const evenBytes = bytes.subarray(0, bytes.length & ~1);
+      return new TextDecoder('utf-16le', { fatal: target === 'utf8' }).decode(evenBytes);
+    } catch {
+      throw transcodeError('U_INVALID_CHAR_FOUND');
+    }
+  }
+  if (encoding === 'ascii' && target === 'utf16le') return decodeSingleByte(bytes);
+  if (encoding === 'latin1') return decodeSingleByte(bytes);
+  let text = '';
+  for (const byte of bytes) text += byte <= 0x7f ? String.fromCharCode(byte) : '\\ufffd';
+  return text;
+}
+
+function encodeTranscode(text, encoding) {
+  if (encoding === 'utf8') return textEncoder.encode(text);
+  if (encoding === 'utf16le') return encodeUcs2(text);
+  const bytes = new Uint8Array(text.length);
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    bytes[index] = encoding === 'ascii'
+      ? (code <= 0x7f ? code : 0x3f)
+      : (code <= 0xff ? code : 0x3f);
+  }
+  return bytes;
+}
+
+export function createTranscode(BufferClass) {
+  return function transcode(source, fromEncoding, toEncoding) {
+    const isUint8Array = source instanceof Uint8Array
+      || Object.prototype.toString.call(source) === '[object Uint8Array]';
+    if (!isUint8Array) {
+      throw invalidArgumentTypeError('source', ['Buffer', 'Uint8Array'], source);
+    }
+    const bytes = viewBytes(source);
+    if (bytes.length === 0) return BufferClass.alloc(0);
+    const from = transcodeEncoding(fromEncoding);
+    const to = transcodeEncoding(toEncoding);
+    if (from === undefined || to === undefined) throw transcodeError();
+    return BufferClass.from(encodeTranscode(decodeTranscode(bytes, from, to), to));
+  };
+}
+
+export function installBlobCompatibility(BlobClass) {
+  if (typeof BlobClass !== 'function') return BlobClass;
+  class Blob extends BlobClass {
+    constructor(parts, options) {
+      if (parts !== undefined && !Array.isArray(parts)) {
+        throw invalidArgumentTypeError('sources', ['Array'], parts);
+      }
+      if (options !== undefined && options !== null
+          && typeof options !== 'object' && typeof options !== 'function') {
+        throw invalidArgumentTypeError('options', ['Object'], options);
+      }
+      if (options?.endings !== undefined
+          && options.endings !== 'transparent' && options.endings !== 'native') {
+        throw invalidArgumentValueError('options.endings', options.endings);
+      }
+      if (arguments.length === 0) super();
+      else if (arguments.length === 1) super(parts);
+      else super(parts, options);
+      Object.defineProperty(this, blobClonePartsSymbol, {
+        configurable: true,
+        value: parts === undefined ? [] : Array.from(parts),
+      });
+      const bytes = storedBlobBytes(this[blobClonePartsSymbol]);
+      if (bytes) Object.defineProperty(this, blobBytesSymbol, { configurable: true, value: bytes });
+    }
+  }
+  const isBlobReceiver = (value) => value instanceof BlobClass
+    && value !== Blob.prototype && value !== BlobClass.prototype;
+  installBlobInspection(Blob);
+  Object.defineProperty(Blob.prototype, Symbol.toStringTag, {
+    configurable: true,
+    enumerable: false,
+    value: 'Blob',
+    writable: false,
+  });
+  for (const name of ['size', 'type', 'slice', 'stream', 'text', 'arrayBuffer']) {
+    const descriptor = Object.getOwnPropertyDescriptor(BlobClass.prototype, name);
+    if (!descriptor) continue;
+    if (descriptor.get) {
+      const getter = descriptor.get;
+      descriptor.get = function getBlobProperty() {
+        if (!isBlobReceiver(this)) {
+          const error = new TypeError('Illegal invocation');
+          error.code = 'ERR_INVALID_THIS';
+          throw error;
+        }
+        return getter.call(this);
+      };
+    } else if (typeof descriptor.value === 'function') {
+      const method = descriptor.value;
+      descriptor.value = function blobMethod(...args) {
+        if (!isBlobReceiver(this)) {
+          const error = new TypeError('Illegal invocation');
+          error.code = 'ERR_INVALID_THIS';
+          if (name === 'arrayBuffer' || name === 'text') return Promise.reject(error);
+          throw error;
+        }
+        return method.apply(this, args);
+      };
+    }
+    Object.defineProperty(Blob.prototype, name, { ...descriptor, enumerable: true });
+  }
+  Object.defineProperty(Blob.prototype, 'bytes', {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: typeof BlobClass.prototype.bytes === 'function'
+      ? function bytes(...args) {
+          if (!isBlobReceiver(this)) {
+            const error = new TypeError('Illegal invocation');
+            error.code = 'ERR_INVALID_THIS';
+            return Promise.reject(error);
+          }
+          return BlobClass.prototype.bytes.apply(this, args);
+        }
+      : function bytes() {
+          if (!isBlobReceiver(this)) {
+            const error = new TypeError('Illegal invocation');
+            error.code = 'ERR_INVALID_THIS';
+            return Promise.reject(error);
+          }
+          return this.arrayBuffer().then((buffer) => new Uint8Array(buffer));
+        },
+  });
+  for (const name of ['slice', 'stream', 'text', 'arrayBuffer']) {
+    const method = Object.getOwnPropertyDescriptor(BlobClass.prototype, name)?.value;
+    if (typeof method !== 'function') continue;
+    Object.defineProperty(Blob.prototype, name, {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) {
+        if (!isBlobReceiver(this)) {
+          const error = new TypeError('Illegal invocation');
+          error.code = 'ERR_INVALID_THIS';
+          if (name === 'text' || name === 'arrayBuffer') return Promise.reject(error);
+          throw error;
+        }
+        if (name === 'stream' && typeof (blobStreamClass || globalThis.ReadableStream) === 'function') {
+          const StreamClass = typeof blobStreamClass === 'function'
+            ? blobStreamClass()
+            : globalThis.ReadableStream;
+          let bytesPromise;
+          let offset = 0;
+          let pumping = false;
+          let canceled = false;
+          let byobRequestSize;
+          const stream = new StreamClass({
+            type: 'bytes',
+            pull: (controller) => {
+              bytesPromise ||= (() => {
+                const stored = this[blobBytesSymbol];
+                if (stored) return Promise.resolve(stored);
+                return Object.getOwnPropertyDescriptor(BlobClass.prototype, 'arrayBuffer')
+                  .value.call(this).then((buffer) => new Uint8Array(buffer));
+              })();
+              return bytesPromise.then((bytes) => {
+                if (pumping || canceled) return;
+                pumping = true;
+                byobRequestSize ??= controller.byobRequest?.view?.byteLength;
+                const eager = byobRequestSize === undefined || byobRequestSize >= 100;
+                const pump = () => {
+                  if (canceled) {
+                    pumping = false;
+                    return;
+                  }
+                  if (offset >= bytes.byteLength) {
+                    pumping = false;
+                    try {
+                      controller.close();
+                      controller.byobRequest?.respond(0);
+                    } catch {}
+                    return;
+                  }
+                  const end = Math.min(offset + 5, bytes.byteLength);
+                  // Byte-stream enqueue transfers the supplied ArrayBuffer;
+                  // keep the complete Blob copy alive for subsequent chunks.
+                  try {
+                    const request = byobRequestSize >= 100 ? controller.byobRequest : undefined;
+                    if (request) {
+                      const written = Math.min(end - offset, request.view.byteLength);
+                      request.view.set(bytes.subarray(offset, offset + written));
+                      request.respond(written);
+                    } else {
+                      controller.enqueue(bytes.slice(offset, end));
+                    }
+                  } catch {
+                    pumping = false;
+                    return;
+                  }
+                  offset = end;
+                  if (!eager && controller.desiredSize < 0) {
+                    pumping = false;
+                    return;
+                  }
+                  setTimeout(pump, 0);
+                };
+                pump();
+              });
+            },
+            cancel() {
+              canceled = true;
+              return new Promise((resolve) => setTimeout(resolve, 0));
+            },
+          });
+          const getReader = stream.getReader;
+          stream.getReader = function getBlobReader(...args) {
+            const reader = getReader.apply(this, args);
+            const cancel = reader.cancel;
+            reader.cancel = function cancelBlobReader(...cancelArgs) {
+              const result = cancel.apply(this, cancelArgs);
+              Object.defineProperty(this, 'closed', {
+                configurable: true,
+                enumerable: true,
+                value: Promise.resolve(),
+              });
+              return result;
+            };
+            return reader;
+          };
+          return stream;
+        }
+        const result = method.apply(this, args);
+        if (name === 'slice' && result instanceof BlobClass
+            && !(result instanceof Blob)) {
+          Object.setPrototypeOf(result, Blob.prototype);
+        }
+        return result;
+      },
+    });
+  }
+  return Blob;
+}
+
+function missingArgumentError(name) {
+  const error = new TypeError(`The "${name}" argument must be specified`);
+  error.code = 'ERR_MISSING_ARGS';
+  return error;
+}
+
+function inspectTypedArray(value) {
+  const name = value.constructor?.name || 'TypedArray';
+  const values = Array.from(value, (item) => String(item)).join(', ');
+  return `${name}(${value.length}) [${values ? ` ${values} ` : ''}]`;
+}
+
+function bufferInspect(_recurseTimes, context = {}, inspectValue = null) {
+  const max = this.constructor?.__bnhInspectMaxBytes ?? 50;
+  const actualMax = Math.min(max, this.length);
+  const byteCount = Number.isFinite(actualMax) ? Math.max(0, Math.trunc(actualMax)) : this.length;
+  let text = encodeHex(this.subarray(0, byteCount)).replace(/(.{2})/g, '$1 ').trim();
+  const remaining = this.length - max;
+  if (remaining > 0) text += ` ... ${remaining} more byte${remaining > 1 ? 's' : ''}`;
+
+  const keys = Reflect.ownKeys(this).filter((key) => {
+    if (typeof key === 'string' && /^(?:0|[1-9]\d*)$/.test(key)) return false;
+    if (context.showHidden) return true;
+    return Object.getOwnPropertyDescriptor(this, key)?.enumerable === true;
+  });
+  if (keys.length > 0) {
+    const extras = keys.map((key) => {
+      const label = typeof key === 'symbol'
+        ? `[${String(key)}]`
+        : /^[A-Za-z_$][\w$]*$/.test(key) ? key : `'${key}'`;
+      let value;
+      try { value = this[key]; } catch { value = '<unavailable>'; }
+      let inspected;
+      if (ArrayBuffer.isView(value) && !(value instanceof DataView)) inspected = inspectTypedArray(value);
+      else if (typeof inspectValue === 'function') inspected = inspectValue(value, { ...context, breakLength: Infinity, compact: true });
+      else inspected = String(value);
+      return `${label}: ${inspected}`;
+    });
+    if (this.length !== 0) text += ', ';
+    text += extras.join(', ');
+  }
+  let constructorName = 'Buffer';
+  try {
+    const constructor = this.constructor;
+    if (typeof constructor === 'function' && Object.prototype.hasOwnProperty.call(constructor, 'name')) {
+      constructorName = constructor.name;
+    }
+  } catch { /* Ignore errors and use the default name. */ }
+  return `<${constructorName} ${text}>`;
+}
+
+export function createFileClass(scope = globalThis) {
+  if (typeof scope.File === 'function') return installFileInspection(scope.File);
+  if (typeof scope.Blob !== 'function') return undefined;
+  const FileClass = class File extends scope.Blob {
+    constructor(bits, name, options = {}) {
+      super(bits, options);
+      const lastModified = options?.lastModified === undefined ? Date.now() : Number(options.lastModified);
+      Object.defineProperties(this, {
+        name: { configurable: true, enumerable: true, value: String(name).replaceAll('/', ':') },
+        lastModified: { configurable: true, enumerable: true, value: Number.isFinite(lastModified) ? lastModified : Date.now() },
+      });
+    }
+  };
+  return installFileInspection(FileClass);
 }
 
 // ---------------------------------------------------------------------------
@@ -268,16 +806,29 @@ function formatList(items) {
 function invalidArgumentTypeError(name, expected, value) {
   const kinds = [];
   const instances = [];
+  const other = [];
+  const className = /^[A-Z][a-zA-Z0-9]*$/;
+  const typeNames = new Set(['string', 'function', 'number', 'object', 'Function', 'Object', 'boolean', 'bigint', 'symbol']);
   for (const item of expected) {
-    if (/^[a-z]/.test(item)) kinds.push(item.toLowerCase());
-    else instances.push(item);
+    if (typeNames.has(item)) kinds.push(item.toLowerCase());
+    else if (className.test(item)) instances.push(item);
+    else other.push(item);
   }
-  let message = `The "${name}" argument must be `;
+  let message = 'The ';
+  if (name.endsWith(' argument')) message += `${name} `;
+  else message += `"${name}" ${name.includes('.') ? 'property' : 'argument'} `;
+  message += 'must be ';
   if (kinds.length > 0) {
     message += `${kinds.length > 1 ? 'one of type' : 'of type'} ${formatList(kinds)}`;
-    if (instances.length > 0) message += ' or ';
+    if (instances.length > 0 || other.length > 0) message += ' or ';
   }
-  if (instances.length > 0) message += `an instance of ${formatList(instances)}`;
+  if (instances.length > 0) {
+    message += `an instance of ${formatList(instances)}`;
+    if (other.length > 0) message += ' or ';
+  }
+  if (other.length > 0) {
+    message += other.length > 1 ? `one of ${formatList(other)}` : `${other[0][0] === other[0][0].toUpperCase() ? 'an ' : ''}${other[0]}`;
+  }
   message += `. Received ${determineSpecificType(value)}`;
   const error = new TypeError(message);
   error.code = 'ERR_INVALID_ARG_TYPE';
@@ -578,6 +1129,11 @@ function isTypedArray(value) {
   return ArrayBuffer.isView(value) && !(value instanceof DataView);
 }
 
+function isUint8Array(value) {
+  return ArrayBuffer.isView(value)
+    && Object.prototype.toString.call(value) === '[object Uint8Array]';
+}
+
 function isAnyArrayBuffer(value) {
   try {
     Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength').get.call(value);
@@ -638,8 +1194,67 @@ export function isUtf8(input) {
   }
 }
 
-export function createBufferClass() {
+export function createBufferClass(scope = globalThis) {
   const internalBuffer = Symbol('internal buffer');
+  const untransferableMarker = Symbol.for('nodejs.worker_threads.untransferable');
+  const objectURLRegistryKey = Symbol.for('bnh.buffer.objectURLRegistry');
+  const objectURLWrapperKey = Symbol.for('bnh.buffer.objectURLWrappers');
+  const urlClass = scope?.URL;
+  const objectURLRegistry = urlClass?.[objectURLRegistryKey] || new Map();
+  if (urlClass && typeof urlClass.createObjectURL === 'function' && !urlClass[objectURLWrapperKey]) {
+    const nativeCreateObjectURL = urlClass.createObjectURL;
+    const nativeRevokeObjectURL = urlClass.revokeObjectURL;
+    const wrappers = {
+      registry: objectURLRegistry,
+      createObjectURL(blob) {
+        const url = nativeCreateObjectURL.call(urlClass, blob);
+        objectURLRegistry.set(url, blob);
+        return url;
+      },
+      revokeObjectURL(url) {
+        objectURLRegistry.delete(url);
+        return typeof nativeRevokeObjectURL === 'function'
+          ? nativeRevokeObjectURL.call(urlClass, url)
+          : undefined;
+      },
+    };
+    try {
+      Object.defineProperty(urlClass, objectURLRegistryKey, { configurable: true, value: objectURLRegistry });
+      Object.defineProperty(urlClass, objectURLWrapperKey, { configurable: true, value: wrappers });
+      Object.defineProperty(urlClass, 'createObjectURL', { configurable: true, writable: true, value: wrappers.createObjectURL });
+      if (typeof nativeRevokeObjectURL === 'function') {
+        Object.defineProperty(urlClass, 'revokeObjectURL', { configurable: true, writable: true, value: wrappers.revokeObjectURL });
+      }
+    } catch { /* URL implementations may expose immutable static methods. */ }
+  }
+  const nativeAtob = typeof scope?.atob === 'function' ? scope.atob.bind(scope) : null;
+  const nativeBtoa = typeof scope?.btoa === 'function' ? scope.btoa.bind(scope) : null;
+  const nodeAtob = function atob(input) {
+    if (arguments.length === 0) throw missingArgumentError('input');
+    if (!nativeAtob) throw new TypeError('atob is not available in this browser');
+    return nativeAtob(`${input}`);
+  };
+  const nodeBtoa = function btoa(input) {
+    if (arguments.length === 0) throw missingArgumentError('input');
+    if (!nativeBtoa) throw new TypeError('btoa is not available in this browser');
+    return nativeBtoa(`${input}`);
+  };
+  let poolBuffer = null;
+  let poolOffset = 0;
+  const pooledBytes = (size) => {
+    const configuredSize = Math.trunc(Number(Buffer.poolSize));
+    const halfPoolSize = configuredSize / 2;
+    if (!Number.isFinite(configuredSize) || configuredSize <= 0 || size <= 0 || size >= halfPoolSize) return null;
+    if (!poolBuffer || poolBuffer.byteLength !== configuredSize || poolOffset + size > configuredSize) {
+      poolBuffer = new ArrayBuffer(configuredSize);
+      poolOffset = 0;
+      try { Object.defineProperty(poolBuffer, untransferableMarker, { configurable: true, value: true }); } catch { /* host buffer may be sealed */ }
+    }
+    const view = new Uint8Array(poolBuffer, poolOffset, size);
+    poolOffset += size;
+    poolOffset = (poolOffset + 7) & ~7;
+    return view;
+  };
   let warningEmitted = false;
   class NodeBuffer extends Uint8Array {
     // Typed-array slice/subarray consult species before our methods can wrap
@@ -664,6 +1279,7 @@ export function createBufferClass() {
       if (typeof value === 'string') {
         super(bytesFrom(value, args[1]));
       } else if (typeof value === 'number') {
+        if (typeof args[1] === 'string') throw invalidArgumentTypeError('string', ['string'], value);
         super(validateBufferSize(value));
       } else if (value === null) {
         throw invalidArgumentTypeError('first argument', ['string', 'Buffer', 'ArrayBuffer', 'Array', 'Array-like Object'], value);
@@ -673,21 +1289,17 @@ export function createBufferClass() {
     }
     static from(value, encodingOrOffset, length) {
       if (isAnyArrayBuffer(value)) {
-        if (encodingOrOffset !== undefined && typeof encodingOrOffset === 'number' && !Number.isFinite(encodingOrOffset)) {
-          throw outOfRangeError('offset', 'an integer', encodingOrOffset);
-        }
-        const offset = typeof encodingOrOffset === 'number' && Number.isFinite(encodingOrOffset)
-          ? normalizeInteger(encodingOrOffset, 'byteOffset')
-          : 0;
+        let offset = encodingOrOffset === undefined ? 0 : Number(encodingOrOffset);
+        if (Number.isNaN(offset)) offset = 0;
         const available = value.byteLength - offset;
-        const size = length === undefined
-          ? available
-          : normalizeInteger(length, 'length', { maximum: value.byteLength });
-        if (offset > value.byteLength) {
+        if (available < 0) {
           const error = new RangeError('"offset" is outside of buffer bounds');
           error.code = 'ERR_BUFFER_OUT_OF_BOUNDS';
           throw error;
         }
+        if (length === undefined) return new NodeBuffer(value, offset, internalBuffer);
+        let size = Number(length);
+        if (Number.isNaN(size) || size <= 0) size = 0;
         if (size > available) {
           const error = new RangeError('"length" is outside of buffer bounds');
           error.code = 'ERR_BUFFER_OUT_OF_BOUNDS';
@@ -695,24 +1307,52 @@ export function createBufferClass() {
         }
         return new NodeBuffer(value, offset, size, internalBuffer);
       }
-      return new NodeBuffer(bytesFrom(value, encodingOrOffset), internalBuffer);
+      if (value && typeof value === 'object') {
+        const valueOf = value.valueOf && value.valueOf();
+        if (valueOf != null && valueOf !== value
+            && (typeof valueOf === 'string' || typeof valueOf === 'object')) {
+          return NodeBuffer.from(valueOf, encodingOrOffset, length);
+        }
+        const isArrayLike = value.length !== undefined || isAnyArrayBuffer(value.buffer)
+          || (value.type === 'Buffer' && Array.isArray(value.data));
+        if (!isArrayLike && typeof value[Symbol.toPrimitive] === 'function') {
+          const primitive = value[Symbol.toPrimitive]('string');
+          if (typeof primitive === 'string') return NodeBuffer.from(primitive, encodingOrOffset);
+        }
+      }
+      const bytes = bytesFrom(value, encodingOrOffset);
+      const pooled = pooledBytes(bytes.byteLength);
+      if (pooled) {
+        pooled.set(bytes);
+        return new NodeBuffer(pooled.buffer, pooled.byteOffset, pooled.byteLength, internalBuffer);
+      }
+      return new NodeBuffer(bytes, internalBuffer);
     }
     static alloc(size, fill = 0, encoding) {
       const result = new NodeBuffer(validateBufferSize(size), internalBuffer);
       if (result.length === 0 || fill === 0 || fill === null || fill === undefined || fill === '') return result;
-      if (typeof fill === 'number') {
-        result.fill(fill);
-        return result;
-      }
       if (typeof fill === 'string' && encoding !== undefined && encoding !== null && typeof encoding !== 'string') {
         throw invalidArgumentTypeError('encoding', ['string'], encoding);
       }
-      const bytes = bytesFrom(fill, encoding);
-      if (bytes.length === 0) return result;
+      if (typeof fill !== 'string' && !ArrayBuffer.isView(fill)) {
+        Uint8Array.prototype.fill.call(result, fill);
+        return result;
+      }
+      const bytes = typeof fill === 'string' ? bytesFrom(fill, encoding) : viewBytes(fill);
+      if (bytes.length === 0) {
+        if (typeof fill === 'string' && fill.length === 0) return result;
+        throw invalidArgumentValueError('value', fill);
+      }
       for (let index = 0; index < result.length; index += 1) result[index] = bytes[index % bytes.length];
       return result;
     }
-    static allocUnsafe(size) { return new NodeBuffer(validateBufferSize(size), internalBuffer); }
+    static allocUnsafe(size) {
+      const validatedSize = validateBufferSize(size);
+      const pooled = pooledBytes(validatedSize);
+      return pooled
+        ? new NodeBuffer(pooled.buffer, pooled.byteOffset, pooled.byteLength, internalBuffer)
+        : new NodeBuffer(validatedSize, internalBuffer);
+    }
     static allocUnsafeSlow(size) { return new NodeBuffer(validateBufferSize(size), internalBuffer); }
     static isBuffer(value) { return value instanceof NodeBuffer; }
     static isEncoding(encoding) {
@@ -727,37 +1367,71 @@ export function createBufferClass() {
     }
     static concat(list, totalLength) {
       if (!Array.isArray(list)) throw invalidArgumentTypeError('list', ['Array'], list);
-      const values = list.map((value) => bytesFrom(value));
-      const size = totalLength === undefined
-        ? values.reduce((sum, value) => sum + value.length, 0)
-        : normalizeInteger(totalLength, 'length', { maximum: 0x7fffffff });
+      if (list.length === 0) return new NodeBuffer(0, internalBuffer);
+      let size;
+      if (totalLength === undefined) {
+        size = 0;
+        for (const value of list) {
+          if (value.length) size += value.length;
+        }
+      } else {
+        size = normalizeInteger(totalLength, 'length', { maximum: 0x7fffffff });
+      }
       const result = new NodeBuffer(size, internalBuffer);
       let offset = 0;
-      for (const value of values) { result.set(value.subarray(0, size - offset), offset); offset += value.length; }
+      for (let index = 0; index < list.length; index += 1) {
+        const value = list[index];
+        if (!isUint8Array(value)) {
+          throw invalidArgumentTypeError(`list[${index}]`, ['Buffer', 'Uint8Array'], value);
+        }
+        const bytes = viewBytes(value);
+        const count = Math.min(bytes.length, size - offset);
+        result.set(bytes.subarray(0, count), offset);
+        offset += count;
+      }
       return result;
     }
     static compare(left, right) {
-      if (!(left instanceof Uint8Array)) throw invalidArgumentTypeError('buf1', ['Buffer', 'Uint8Array'], left);
-      if (!(right instanceof Uint8Array)) throw invalidArgumentTypeError('buf2', ['Buffer', 'Uint8Array'], right);
+      if (!isUint8Array(left)) throw invalidArgumentTypeError('buf1', ['Buffer', 'Uint8Array'], left);
+      if (!isUint8Array(right)) throw invalidArgumentTypeError('buf2', ['Buffer', 'Uint8Array'], right);
       const a = bytesFrom(left); const b = bytesFrom(right);
       for (let index = 0; index < Math.min(a.length, b.length); index += 1) {
         if (a[index] !== b[index]) return a[index] < b[index] ? -1 : 1;
       }
       return a.length === b.length ? 0 : a.length < b.length ? -1 : 1;
     }
-    static copyBytesFrom(view, offset = 0, length = view?.byteLength - offset) {
+    static copyBytesFrom(view, offset, length) {
       if (!isTypedArray(view)) throw invalidArgumentTypeError('view', ['TypedArray'], view);
-      const start = normalizeInteger(offset, 'offset', { maximum: view.byteLength });
-      const size = normalizeInteger(length, 'length', { maximum: view.byteLength - start });
-      return new NodeBuffer(new Uint8Array(view.buffer, view.byteOffset + start, size), internalBuffer);
+      const viewLength = view.length;
+      if (viewLength === 0) return new NodeBuffer(0, internalBuffer);
+      let start = 0;
+      let end = viewLength;
+      if (offset !== undefined || length !== undefined) {
+        if (offset !== undefined) start = normalizeInteger(offset, 'offset');
+        if (start >= viewLength) return new NodeBuffer(0, internalBuffer);
+        if (length !== undefined) {
+          const size = normalizeInteger(length, 'length');
+          end = Math.min(start + size, viewLength);
+        }
+      }
+      const bytes = new Uint8Array(
+        view.buffer,
+        view.byteOffset + (start * view.BYTES_PER_ELEMENT),
+        (end - start) * view.BYTES_PER_ELEMENT,
+      );
+      return new NodeBuffer(bytes, internalBuffer);
     }
     toString(encoding, start, end) { return encoded(this.subarray(start, end), encoding); }
+    utf8Slice(start, end) {
+      const [first, last] = nativeSliceRange(this.length, start, end);
+      return textDecoder.decode(this.subarray(first, last));
+    }
     equals(other) {
-      if (!(other instanceof Uint8Array)) throw invalidArgumentTypeError('otherBuffer', ['Buffer', 'Uint8Array'], other);
+      if (!isUint8Array(other)) throw invalidArgumentTypeError('otherBuffer', ['Buffer', 'Uint8Array'], other);
       return NodeBuffer.compare(this, other) === 0;
     }
     compare(other, targetStart, targetEnd, sourceStart, sourceEnd) {
-      if (!(other instanceof Uint8Array)) throw invalidArgumentTypeError('target', ['Buffer', 'Uint8Array'], other);
+      if (!isUint8Array(other)) throw invalidArgumentTypeError('target', ['Buffer', 'Uint8Array'], other);
       const targetFirst = compareRange(targetStart, 'targetStart', other.length, 0, true);
       const targetLast = compareRange(targetEnd, 'targetEnd', other.length, other.length);
       const sourceFirst = compareRange(sourceStart, 'sourceStart', this.length, 0, true);
@@ -767,8 +1441,14 @@ export function createBufferClass() {
         other.subarray(targetFirst, Math.max(targetFirst, targetLast)),
       );
     }
-    slice(start, end) { return new NodeBuffer(super.slice(start, end), internalBuffer); }
-    subarray(start, end) { return new NodeBuffer(super.subarray(start, end), internalBuffer); }
+    slice(start, end) {
+      const [first, last] = nativeSliceRange(this.length, start, end);
+      return new NodeBuffer(this.buffer, this.byteOffset + first, last - first, internalBuffer);
+    }
+    subarray(start, end) {
+      const [first, last] = nativeSliceRange(this.length, start, end);
+      return new NodeBuffer(this.buffer, this.byteOffset + first, last - first, internalBuffer);
+    }
     fill(value, start, end, encoding) {
       if (this.length > this.byteLength) {
         const error = new RangeError('Attempt to access memory outside buffer bounds');
@@ -807,15 +1487,23 @@ export function createBufferClass() {
       for (let index = first; index < last; index += 1) this[index] = bytes[(index - first) % bytes.length];
       return this;
     }
-    copy(target, targetStart = 0, sourceStart = 0, sourceEnd = this.length) {
+    copy(target, targetStart = 0, sourceStart = 0, sourceEnd) {
       if (!ArrayBuffer.isView(this)) throw invalidArgumentTypeError('this', ['Buffer', 'Uint8Array'], this);
-      if (!(target instanceof Uint8Array)) throw invalidArgumentTypeError('target', ['Buffer', 'Uint8Array'], target);
-      const targetOffset = copyRange(targetStart, 'targetStart', target.length, 0, true);
-      const sourceOffset = copyRange(sourceStart, 'sourceStart', this.length, 0);
-      const sourceLimit = copyRange(sourceEnd, 'sourceEnd', this.length, this.length, true);
-      if (targetOffset >= target.length || sourceOffset >= sourceLimit || sourceOffset >= this.length) return 0;
-      const count = Math.min(sourceLimit - sourceOffset, target.length - targetOffset);
-      target.set(this.subarray(sourceOffset, sourceOffset + count), targetOffset);
+      if (!ArrayBuffer.isView(target)) throw invalidArgumentTypeError('target', ['Buffer', 'Uint8Array'], target);
+      const sourceBytes = viewBytes(this);
+      const targetBytes = viewBytes(target);
+      const targetOffset = copyRange(targetStart, 'targetStart', targetBytes.length, 0, true);
+      const sourceOffset = copyRange(sourceStart, 'sourceStart', sourceBytes.length, 0);
+      const sourceLimit = copyRange(
+        sourceEnd,
+        'sourceEnd',
+        sourceBytes.length,
+        sourceBytes.length,
+        true,
+      );
+      if (targetOffset >= targetBytes.length || sourceOffset >= sourceLimit || sourceOffset >= sourceBytes.length) return 0;
+      const count = Math.min(sourceLimit - sourceOffset, targetBytes.length - targetOffset);
+      targetBytes.set(sourceBytes.subarray(sourceOffset, sourceOffset + count), targetOffset);
       return count;
     }
     readUInt8(offset) { return readUnsigned(this, offset, 1, false); }
@@ -893,13 +1581,26 @@ export function createBufferClass() {
           length = Math.min(length, remaining);
         }
       }
-      const bytes = encodingOpsOrThrow(encoding).encode(value);
-      const written = Math.min(bytes.length, length);
-      this.set(bytes.subarray(0, written), offset);
-      return written;
+      if (encoding === undefined || encoding === 'utf8') return this.utf8Write(value, offset, length);
+      if (encoding === 'ascii') return this.asciiWrite(value, offset, length);
+      const operations = encodingOpsOrThrow(encoding);
+      if (operations === BASE64_OPS) return this.base64Write(value, offset, length);
+      if (operations === BASE64URL_OPS) return this.base64urlWrite(value, offset, length);
+      if (operations === LATIN1_OPS) return this.latin1Write(value, offset, length);
+      if (operations === HEX_OPS) return this.hexWrite(value, offset, length);
+      if (operations === UCS2_OPS) return this.ucs2Write(value, offset, length);
+      return this.utf8Write(value, offset, length);
     }
+    asciiWrite(value, offset, length) { return nativeWrite(this, value, offset, length, ASCII_OPS); }
+    base64Write(value, offset, length) { return nativeWrite(this, value, offset, length, BASE64_OPS, false); }
+    base64urlWrite(value, offset, length) { return nativeWrite(this, value, offset, length, BASE64URL_OPS, false); }
+    latin1Write(value, offset, length) { return nativeWrite(this, value, offset, length, LATIN1_OPS); }
+    hexWrite(value, offset, length) { return nativeWrite(this, value, offset, length, HEX_OPS, false); }
+    ucs2Write(value, offset, length) { return nativeWrite(this, value, offset, length, UCS2_OPS, false); }
+    utf8Write(value, offset, length) { return nativeWrite(this, value, offset, length, UTF8_OPS); }
     toJSON() { return { type: 'Buffer', data: [...this] }; }
   }
+  Object.defineProperty(NodeBuffer, 'name', { configurable: true, value: 'FastBuffer' });
   // Plain functions (not class methods): Buffer#lastIndexOf must remain
   // constructible so misuse reports ERR_INVALID_ARG_TYPE instead of failing
   // with a generic "not a constructor" error.
@@ -909,7 +1610,33 @@ export function createBufferClass() {
   NodeBuffer.prototype.lastIndexOf = function lastIndexOf(val, byteOffset, encoding) {
     return bidirectionalIndexOf(this, val, byteOffset, encoding, false);
   };
-    NodeBuffer.prototype.includes = function includes(val, byteOffset, encoding) {
+  Object.assign(NodeBuffer.prototype, {
+    readBigUint64LE: NodeBuffer.prototype.readBigUInt64LE,
+    readBigUint64BE: NodeBuffer.prototype.readBigUInt64BE,
+    writeBigUint64LE: NodeBuffer.prototype.writeBigUInt64LE,
+    writeBigUint64BE: NodeBuffer.prototype.writeBigUInt64BE,
+    readUintLE: NodeBuffer.prototype.readUIntLE,
+    readUint32LE: NodeBuffer.prototype.readUInt32LE,
+    readUint16LE: NodeBuffer.prototype.readUInt16LE,
+    readUint8: NodeBuffer.prototype.readUInt8,
+    readUintBE: NodeBuffer.prototype.readUIntBE,
+    readUint32BE: NodeBuffer.prototype.readUInt32BE,
+    readUint16BE: NodeBuffer.prototype.readUInt16BE,
+    writeUintLE: NodeBuffer.prototype.writeUIntLE,
+    writeUint32LE: NodeBuffer.prototype.writeUInt32LE,
+    writeUint16LE: NodeBuffer.prototype.writeUInt16LE,
+    writeUint8: NodeBuffer.prototype.writeUInt8,
+    writeUintBE: NodeBuffer.prototype.writeUIntBE,
+    writeUint16BE: NodeBuffer.prototype.writeUInt16BE,
+    writeUint32BE: NodeBuffer.prototype.writeUInt32BE,
+    asciiSlice,
+    base64Slice,
+    base64urlSlice,
+    latin1Slice,
+    hexSlice,
+    ucs2Slice,
+  });
+  NodeBuffer.prototype.includes = function includes(val, byteOffset, encoding) {
     return this.indexOf(val, byteOffset, encoding) !== -1;
   };
   Object.defineProperties(NodeBuffer.prototype, {
@@ -924,12 +1651,59 @@ export function createBufferClass() {
   Object.setPrototypeOf(Buffer, NodeBuffer);
   Buffer.prototype = NodeBuffer.prototype;
   Object.defineProperty(NodeBuffer.prototype, 'constructor', { value: Buffer, configurable: true, writable: true });
-  const maxLength = 0x7fffffff;
-  const maxStringLength = 0x100000;
+  Buffer.poolSize = NodeBuffer.poolSize;
+  Buffer.from = NodeBuffer.from;
+  Buffer.copyBytesFrom = NodeBuffer.copyBytesFrom;
+  Buffer.alloc = NodeBuffer.alloc;
+  Buffer.allocUnsafe = NodeBuffer.allocUnsafe;
+  Buffer.allocUnsafeSlow = NodeBuffer.allocUnsafeSlow;
+  Buffer.isBuffer = NodeBuffer.isBuffer;
+  Buffer.isEncoding = NodeBuffer.isEncoding;
+  Buffer.concat = NodeBuffer.concat;
+  Object.defineProperty(Buffer, Symbol.species, {
+    configurable: true,
+    get() { return NodeBuffer; },
+  });
+  Buffer.of = (...items) => {
+    const result = new NodeBuffer(items.length, internalBuffer);
+    for (let index = 0; index < items.length; index += 1) result[index] = items[index];
+    return result;
+  };
+  const maxLength = MAX_BUFFER_LENGTH;
+  const maxStringLength = 0x1fffffe8;
   const constants = Object.freeze({ MAX_LENGTH: maxLength, MAX_STRING_LENGTH: maxStringLength });
   Buffer.constants = constants;
   Buffer.kMaxLength = maxLength;
   Buffer.kStringMaxLength = maxStringLength;
   Buffer.SlowBuffer = function SlowBuffer(size) { return Buffer.alloc(size); };
+  Object.setPrototypeOf(Buffer.SlowBuffer.prototype, Uint8Array.prototype);
+  Object.setPrototypeOf(Buffer.SlowBuffer, Uint8Array);
+  let inspectMaxBytes = 50;
+  Object.defineProperty(Buffer, '__bnhInspectMaxBytes', { configurable: true, value: inspectMaxBytes });
+  Object.defineProperty(NodeBuffer.prototype, 'inspect', {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: bufferInspect,
+  });
+  Object.defineProperty(NodeBuffer.prototype, Symbol.for('nodejs.util.inspect.custom'), {
+    configurable: true,
+    writable: true,
+    value: bufferInspect,
+  });
+  Object.defineProperty(Buffer, 'INSPECT_MAX_BYTES', {
+    configurable: true,
+    enumerable: true,
+    get() { return inspectMaxBytes; },
+    set(value) {
+      if (typeof value !== 'number') throw invalidArgumentTypeError('INSPECT_MAX_BYTES', ['number'], value);
+      if (Number.isNaN(value) || value < 0) throw outOfRangeError('INSPECT_MAX_BYTES', '>= 0', value);
+      inspectMaxBytes = value;
+      Object.defineProperty(Buffer, '__bnhInspectMaxBytes', { configurable: true, value });
+    },
+  });
+  Buffer.atob = nodeAtob;
+  Buffer.btoa = nodeBtoa;
+  Buffer.resolveObjectURL = (url) => objectURLRegistry.get(url);
   return Buffer;
 }

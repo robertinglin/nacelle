@@ -1,9 +1,12 @@
 import { EventEmitter } from './events.js';
-import { Writable, ensureOutputStream } from './streams.js';
+import { Readable, Writable, ensureOutputStream } from './streams.js';
 import { adaptMessagePort, adaptWorker, createIpcError, createMessageChannel, createScopedIpcEndpoint, createWorkerFactory } from './messaging.js';
 import { createProcessWorkerSource } from './process-worker.js';
 import { browserCryptoVersion } from './crypto.js';
 import { installWarningContract } from './warnings.js';
+import { installProcessFinalization } from './finalization.js';
+import { unsupportedBoundary } from './errors.js';
+import { inspect as nodeInspect } from './assert.js';
 
 export { PROCESS_WORKER_SOURCE } from './process-worker.js';
 
@@ -12,6 +15,78 @@ const STATES = Object.freeze(['created', 'starting', 'running', 'stopping', 'exi
 let nextProcessId = 1000;
 let nextRunId = 1;
 const sharedFileBuffers = new WeakMap();
+
+function resolveLogicalCwd(value, cwd = '/node') {
+  const input = String(value);
+  const source = input.startsWith('/') ? input : `${String(cwd).replace(/\/+$/, '') || '/'}/${input}`;
+  const parts = [];
+  for (const part of source.split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') parts.pop();
+    else parts.push(part);
+  }
+  return `/${parts.join('/')}`;
+}
+
+function execveTypeError(name, expected, value) {
+  const received = value === null
+    ? 'null'
+    : value === undefined
+      ? 'undefined'
+      : Array.isArray(value)
+        ? 'an instance of Array'
+        : typeof value === 'object'
+          ? `an instance of ${value.constructor?.name || 'Object'}`
+          : `type ${typeof value} (${nodeInspect(value, { colors: false })})`;
+  const error = new TypeError(`The "${name}" argument must be ${expected}. Received ${received}`);
+  error.code = 'ERR_INVALID_ARG_TYPE';
+  return error;
+}
+
+function inspectExecveValue(value, options) {
+  if (options?.depth === 0 && value && typeof value === 'object' && !Array.isArray(value)) {
+    const entries = Object.entries(value).map(([key, entry]) => (
+      `${key}: ${inspectExecveValue(entry, { ...options, depth: -1 })}`
+    ));
+    return `{ ${entries.join(', ')} }`;
+  }
+  return nodeInspect(value, options).replaceAll('\u0000', '\\x00');
+}
+
+function execveValueError(name, value, reason) {
+  const error = new TypeError(`The argument '${name}' must be ${reason}. Received ${inspectExecveValue(value, { colors: false, depth: 0 })}`);
+  error.code = 'ERR_INVALID_ARG_VALUE';
+  return error;
+}
+
+export function createBrowserExecve(processObject) {
+  let warned = false;
+  return function execve(execPath, args = [], env = processObject.env) {
+    if (!warned) {
+      warned = true;
+      processObject.emitWarning?.(
+        'process.execve is an experimental feature and might change at any time',
+        { type: 'ExperimentalWarning' },
+      );
+    }
+    if (typeof execPath !== 'string') throw execveTypeError('execPath', 'of type string', execPath);
+    if (!Array.isArray(args)) throw execveTypeError('args', 'an instance of Array', args);
+    for (let index = 0; index < args.length; index += 1) {
+      if (typeof args[index] !== 'string' || args[index].includes('\u0000')) {
+        throw execveValueError(`args[${index}]`, args[index], 'a string without null bytes');
+      }
+    }
+    if (env === null || typeof env !== 'object' || Array.isArray(env)) {
+      throw execveTypeError('env', 'of type object', env);
+    }
+    for (const [key, value] of Object.entries(env)) {
+      if (key.includes('\u0000') || typeof value !== 'string' || value.includes('\u0000')) {
+        throw execveValueError('env', env, 'an object with string keys and values without null bytes');
+      }
+    }
+    unsupportedBoundary('real-subprocesses', 'process.execve requires a real subprocess boundary');
+  };
+}
 
 function shareFileBytes(bytes, scope) {
   if (!(bytes instanceof Uint8Array)) return bytes;
@@ -86,7 +161,20 @@ const PROCESS_CONFIG = Object.freeze({
   target_defaults: Object.freeze({ default_configuration: 'Release' }),
 });
 
-const PROCESS_FEATURES = Object.freeze({ inspector: false, debug: false });
+const PROCESS_FEATURES = Object.freeze({
+  inspector: true,
+  debug: false,
+  uv: false,
+  ipv6: true,
+  openssl_is_boringssl: false,
+  tls_alpn: true,
+  tls_sni: true,
+  tls_ocsp: true,
+  tls: true,
+  cached_builtins: false,
+  require_module: false,
+  typescript: false,
+});
 
 function processVersions(scope = globalThis) {
   const versions = { node: '22.0.0', v8: '12.0.0' };
@@ -101,15 +189,25 @@ function credentialError(kind, value) {
   return error;
 }
 
-function invalidCredentialType(value) {
-  const received = value === null ? 'null' : value?.constructor?.name || typeof value;
-  const error = new TypeError(`The "id" argument must be one of type number or string. Received ${received === 'Object' ? 'an instance of Object' : `type ${received}`}`);
+function invalidCredentialType(value, argumentName = 'id') {
+  const received = value === null || value === undefined
+    ? String(value)
+    : typeof value === 'function'
+      ? `function ${value.name || ''}`
+      : typeof value === 'object'
+        ? `an instance of ${value.constructor?.name || 'Object'}`
+        : `type ${typeof value} (${nodeInspect(value, { colors: false })})`;
+  const error = new TypeError(`The "${argumentName}" argument must be one of type number or string. Received ${received}`);
   error.code = 'ERR_INVALID_ARG_TYPE';
   return error;
 }
 
-function normalizeCredential(value, kind) {
-  if (typeof value !== 'number' && typeof value !== 'string') throw invalidCredentialType(value);
+function validateCredentialType(value, argumentName = 'id') {
+  if (typeof value !== 'number' && typeof value !== 'string') throw invalidCredentialType(value, argumentName);
+}
+
+function normalizeCredential(value, kind, argumentName = 'id') {
+  validateCredentialType(value, argumentName);
   if (typeof value === 'string' && !/^[0-9]+$/.test(value)) throw credentialError(kind, value);
   const numeric = Number(value);
   if (!Number.isInteger(numeric) || numeric < 0 || numeric > 0xffffffff) {
@@ -165,8 +263,20 @@ export function installProcessContract(process, { uid = 1000, gid = 1000, umask 
   installCredential('euid', 'User', () => currentUid);
   installCredential('gid', 'Group', () => currentGid);
   installCredential('egid', 'Group', () => currentGid);
+  process.getgroups ||= () => [currentGid];
+  process.initgroups ||= (user, extraGroup) => {
+    validateCredentialType(user, 'user');
+    validateCredentialType(extraGroup, 'extraGroup');
+    normalizeCredential(extraGroup, 'Group', 'extraGroup');
+    normalizeCredential(user, 'User', 'user');
+  };
+  process.getBuiltinModule ||= (id) => {
+    if (typeof id !== 'string') throw execveTypeError('id', 'of type string', id);
+    return undefined;
+  };
   if (process.stdout) process.stdout = ensureOutputStream(process.stdout);
   if (process.stderr) process.stderr = ensureOutputStream(process.stderr);
+  installProcessStderrSurface(process.stderr, process);
   if (process.stdout) process.stdout.isTTY = false;
   if (process.stderr) process.stderr.isTTY = false;
   return process;
@@ -184,6 +294,193 @@ function makeWritableEndpoint(endpoint) {
   if (endpoint && typeof endpoint.write === 'function') return ensureOutputStream(endpoint);
   if (Array.isArray(endpoint)) return new Writable({ write(chunk, _encoding, callback) { endpoint.push(typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk)); callback(); } });
   return new Writable({ write(chunk, _encoding, callback) { outputWrite(endpoint, chunk); callback(); } });
+}
+
+function installProcessStdoutSurface(stream) {
+  if (!stream) return;
+  const fields = {
+    _host: null,
+    _isStdio: true,
+    _parent: null,
+    _pendingData: null,
+    _pendingEncoding: '',
+  };
+  for (const [name, value] of Object.entries(fields)) {
+    if (Object.hasOwn(stream, name)) continue;
+    Object.defineProperty(stream, name, {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value,
+    });
+  }
+}
+
+function installProcessStderrSurface(stream, processObject) {
+  if (!stream || stream.__BNH_PROCESS_STDERR_SURFACE__) return;
+  Object.defineProperty(stream, '__BNH_PROCESS_STDERR_SURFACE__', {
+    configurable: false,
+    enumerable: false,
+    value: true,
+  });
+  const readable = new (class extends EventEmitter {
+    constructor() {
+      super();
+      this.readable = false;
+      this.readableEnded = true;
+      this.readableEncoding = null;
+    }
+    resume() { return this; }
+    setEncoding(encoding = 'utf8') {
+      if (typeof encoding !== 'string') {
+        const error = new TypeError(`Unknown encoding: ${encoding}`);
+        error.code = 'ERR_UNKNOWN_ENCODING';
+        throw error;
+      }
+      this.readableEncoding = encoding;
+      return this;
+    }
+    async some() { return false; }
+  })();
+  const emptyReadable = () => new Readable({ read() {}, readable: false });
+  const socketPrototype = Object.create(Object.getPrototypeOf(stream));
+  Object.defineProperties(stream, {
+    server: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: null,
+    },
+    connecting: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: false,
+    },
+    destroySoon: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    fd: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: 2,
+    },
+  });
+  Object.defineProperties(socketPrototype, {
+    resetAndDestroy: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { return this; },
+    },
+    resume: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() { readable.resume(); return this; },
+    },
+    setEncoding: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(...args) { readable.setEncoding(...args); return this; },
+    },
+    setKeepAlive: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(enable = false, initialDelayMsecs = 0) {
+        this._keepAlive = Boolean(enable);
+        this._keepAliveInitialDelay = ~~(initialDelayMsecs / 1000);
+        return this;
+      },
+    },
+    setNoDelay: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(enable = true) {
+        this._noDelay = Boolean(enable);
+        return this;
+      },
+    },
+    setTimeout: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value(milliseconds, callback) {
+        if (typeof milliseconds !== 'number') {
+          const error = new TypeError('The "msecs" argument must be of type number');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        if (!Number.isFinite(milliseconds) || milliseconds < 0) {
+          const error = new RangeError(`The value of "msecs" is out of range. It must be >= 0 && <= ${Number.MAX_SAFE_INTEGER}. Received ${milliseconds}`);
+          error.code = 'ERR_OUT_OF_RANGE';
+          throw error;
+        }
+        if (callback !== undefined && typeof callback !== 'function') {
+          const error = new TypeError('The "callback" argument must be of type function');
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        this.timeout = milliseconds;
+        if (this._timeout) processObject?._bnhClearTimer?.(this._timeout);
+        this._timeout = null;
+        if (milliseconds === 0) return this;
+        if (callback) this.once?.('timeout', callback);
+        this._timeout = processObject?._bnhSetTimer?.(
+          () => { this._timeout = null; this.emit?.('timeout'); },
+          milliseconds,
+          false,
+          'Timeout',
+        );
+        this._timeout?.unref?.();
+        return this;
+      },
+    },
+    some: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return readable.some(...args); },
+    },
+    drop: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return emptyReadable().drop(...args); },
+    },
+    every: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return emptyReadable().every(...args); },
+    },
+    filter: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return emptyReadable().filter(...args); },
+    },
+    find: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return emptyReadable().find(...args); },
+    },
+    flatMap: {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) { return emptyReadable().flatMap(...args); },
+    },
+  });
+  Object.setPrototypeOf(stream, socketPrototype);
 }
 
 function transition(state, next) {
@@ -269,16 +566,18 @@ export function createProcess({ argv, env, cwd, execArgv, output = {}, platform 
   process.arch = arch;
   process.pid = pid;
   process.ppid = ppid;
+  process.debugPort = 9229;
   process.argv = [...(argv || ['node'])].map(String);
   process.execArgv = [...(execArgv || [])].map(String);
   process.env = stringEnvironment(env);
+  process.execve = createBrowserExecve(process);
   process.exitCode = 0;
   process.title = 'node';
   process.connected = Boolean(ipc);
   if (ipc) process.channel = ipc;
   process.state = 'running';
   process.cwd = () => logicalCwd;
-  process.chdir = (value) => { logicalCwd = String(value); };
+  process.chdir = (value) => { logicalCwd = resolveLogicalCwd(value, logicalCwd); };
   process.nextTick = (callback, ...args) => queueMicrotask(() => callback(...args));
   process.hrtime = (previous) => {
     const now = performance.now();
@@ -296,6 +595,12 @@ export function createProcess({ argv, env, cwd, execArgv, output = {}, platform 
     exited = true;
     process.state = 'exited';
     exit?.(exitCode);
+  };
+  process.reallyExit = () => {
+    exitCode = Number(process.exitCode) || 0;
+    process.exitCode = exitCode;
+    exitRequested = true;
+    exited = true;
   };
   process.kill = (_pid, signal = 'SIGTERM') => {
     const name = validateSignal(signal, grants);
@@ -323,6 +628,7 @@ export function createProcess({ argv, env, cwd, execArgv, output = {}, platform 
   };
   process.stdout = makeWritableEndpoint(output.stdout);
   process.stderr = makeWritableEndpoint(output.stderr);
+  installProcessStdoutSurface(process.stdout);
   Object.defineProperty(process, 'exitCode', { configurable: true, enumerable: true, get: () => exitCode, set: (value) => { exitCode = Number(value) || 0; } });
   process.getCode = () => exitCode;
   process._exitRequested = () => exitRequested;
@@ -338,6 +644,7 @@ export function createProcess({ argv, env, cwd, execArgv, output = {}, platform 
   process.stderr.isTTY = false;
   installProcessContract(process, { scope });
   installWarningContract(process);
+  installProcessFinalization(process);
   return process;
 }
 

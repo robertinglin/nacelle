@@ -476,11 +476,10 @@ app.get('/api/info', (req, res) => {
 app.get('/hello', (req, res) => {
   const name = req.query.name || 'Developer';
   res.send(`
-    <base href="/">
     <body style="font-family: system-ui; padding: 40px; background: #f8fafc; color: #0f172a;">
       <h1 style="color: #0284c7;">Hello, ${name}!</h1>
       <p>This page was generated dynamically by in-browser Express.</p>
-      <p><a href="/" style="color: #6366f1; font-weight: 600;">← Back to Home</a></p>
+      <p><a href="./" style="color: #6366f1; font-weight: 600;">← Back to Home</a></p>
     </body>
   `);
 });
@@ -504,9 +503,9 @@ const server = app.listen(3000, () => {
           <span style="color: var(--text-muted); font-size: 0.78rem;">URL:</span>
           <input class="address-input" id="url-input" value="/" />
           <div class="url-quick-buttons">
-            <button class="secondary" onclick="navigateFrame('/__vhost__/3000/')">/</button>
-            <button class="secondary" onclick="navigateFrame('/__vhost__/3000/api/info')">/api/info</button>
-            <button class="secondary" onclick="navigateFrame('/__vhost__/3000/hello?name=Developer')">/hello</button>
+            <button class="secondary" onclick="navigateFrame('/')">/</button>
+            <button class="secondary" onclick="navigateFrame('/api/info')">/api/info</button>
+            <button class="secondary" onclick="navigateFrame('/hello?name=Developer')">/hello</button>
             <button id="btn-go">Go</button>
           </div>
         </div>
@@ -536,15 +535,7 @@ const server = app.listen(3000, () => {
   </main>
 
   <script type="module">
-    import { createRuntime } from '/runtime.js';
-    import { BrowserNpm, BrowserNpmCache } from '/runtime/npm.js';
-    import { packTarGz } from '/runtime/tar.js';
-    import { createBrowserNet } from '/runtime/net.js';
-    import { installGatewayBridge } from '/runtime/gateway-bridge.js';
-    import { createBufferClass } from '/runtime/buffer.js';
-    import { watchFrameAddress } from '/runtime/frame-address.js';
-
-    window.Buffer = createBufferClass(window);
+    import { BrowserNode } from '/index.js';
 
     const termOutput = document.getElementById('term-output');
     const termNetwork = document.getElementById('term-network');
@@ -554,8 +545,6 @@ const server = app.listen(3000, () => {
     const iframe = document.getElementById('app-preview');
     const urlInput = document.getElementById('url-input');
     const npmPkgInput = document.getElementById('npm-pkg-input');
-
-    const npmCache = new BrowserNpmCache({ globalObject: window });
 
     function logTerminal(text, type = 'stdout') {
       const line = document.createElement('div');
@@ -573,9 +562,14 @@ const server = app.listen(3000, () => {
       termNetwork.scrollTop = termNetwork.scrollHeight;
     }
 
+    let node = null;
+    let activeServerProcess = null;
+    let activeAbortController = null;
+
     async function updateCacheBadge() {
+      if (!node) return;
       try {
-        const stats = await npmCache.getStats();
+        const stats = await node.npm.getCacheStats();
         const kb = (stats.totalBytes / 1024).toFixed(1);
         npmCacheBadge.textContent = `IndexedDB Cache: ${stats.count} pkgs (${kb} KB)`;
       } catch {
@@ -583,30 +577,21 @@ const server = app.listen(3000, () => {
       }
     }
 
-    window.navigateFrame = (path) => {
+    window.navigateFrame = (path = '/') => {
       urlInput.value = path;
-      const targetUrl = path.startsWith('/') ? path : '/' + path;
-      iframe.src = targetUrl;
-      logNetwork(`Navigate -> ${targetUrl}`);
+      if (node) {
+        node.connectIframe(iframe, { port: 3000, path, autoLoad: true });
+      }
+      logNetwork(`Navigate -> ${path}`);
     };
-
-    watchFrameAddress(iframe, (address) => {
-      urlInput.value = address;
-    });
 
     document.getElementById('btn-go').addEventListener('click', (e) => {
       e.preventDefault();
-      const val = urlInput.value.trim();
-      const target = val.startsWith('/__vhost__/') ? val : (val.startsWith('/') ? `/__vhost__/3000${val}` : `/__vhost__/3000/${val}`);
-      urlInput.value = target;
-      iframe.src = target;
-      logNetwork(`Navigate -> ${target}`);
+      window.navigateFrame(urlInput.value.trim() || '/');
     });
 
     urlInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        document.getElementById('btn-go').click();
-      }
+      if (e.key === 'Enter') document.getElementById('btn-go').click();
     });
 
     document.getElementById('btn-clear-logs').addEventListener('click', () => {
@@ -615,48 +600,29 @@ const server = app.listen(3000, () => {
     });
 
     document.getElementById('btn-clear-cache').addEventListener('click', async () => {
-      await npmCache.clear();
-      cachedNodeModulesMount = null;
+      if (node) await node.npm.clearCache();
       await updateCacheBadge();
       logNetwork('🗑️ IndexedDB NPM Cache cleared', 'npm');
     });
 
-    let currentRuntime = null;
-    let activeAbortController = null;
-    let isInitialized = false;
-    let cachedNodeModulesMount = null;
-
     document.getElementById('btn-npm-install').addEventListener('click', async () => {
       const spec = npmPkgInput.value.trim();
-      if (!spec) return;
-      if (!currentRuntime) {
-        logTerminal('Runtime not initialized yet. Click Run Express Code first.', 'stderr');
-        return;
-      }
+      if (!spec || !node) return;
 
-      logNetwork(`[NPM] 🌐 Installing ${spec} from https://registry.npmjs.org...`, 'npm');
+      logNetwork(`[NPM] 🌐 Installing ${spec} from npmjs.org...`, 'npm');
       logTerminal(`[NPM] Installing package: ${spec}...`, 'system');
 
-      const npm = new BrowserNpm({
-        vfs: currentRuntime.vfs,
-        cache: npmCache,
-        globalObject: window,
-      });
-
       try {
-        const res = await npm.install([spec], {
-          cwd: '/node',
+        const res = await node.npm.install(spec, {
           onProgress: (ev) => {
-            if (ev.phase === 'cache-hit-tarball') {
-              logNetwork(`⚡ Cache HIT (tarball): ${ev.name}@${ev.version}`, 'npm');
-            } else if (ev.phase === 'cache-hit-meta') {
-              logNetwork(`⚡ Cache HIT (meta): ${ev.name}`, 'npm');
+            if (ev.phase === 'cache-hit-tarball' || ev.phase === 'cache-hit-meta') {
+              logNetwork(`⚡ Cache HIT: ${ev.name}@${ev.version || ''}`, 'npm');
             } else if (ev.phase === 'fetching-meta') {
-              logNetwork(`🌐 Fetching metadata: ${ev.name} (${ev.url})`, 'npm');
+              logNetwork(`🌐 Fetch metadata: ${ev.name}`, 'npm');
             } else if (ev.phase === 'downloading-tarball') {
               logNetwork(`⬇️ Downloading tarball: ${ev.name}@${ev.version} from npmjs.org`, 'npm');
             } else if (ev.phase === 'unpacking') {
-              logNetwork(`📂 Unpacking ${ev.name}@${ev.version} into VFS...`, 'npm');
+              logNetwork(`📂 Unpacking ${ev.name}@${ev.version} into VFS`, 'npm');
             }
           },
         });
@@ -669,161 +635,75 @@ const server = app.listen(3000, () => {
       }
     });
 
-    async function initServiceWorker() {
-      if (!('serviceWorker' in navigator)) return;
-      logTerminal('Registering Service Worker HTTP Gateway...', 'system');
-      const controllerChange = new Promise((resolve) => {
-        let timeout;
-        const finish = () => {
-          clearTimeout(timeout);
-          navigator.serviceWorker.removeEventListener('controllerchange', finish);
-          resolve();
-        };
-        navigator.serviceWorker.addEventListener('controllerchange', finish);
-        timeout = setTimeout(finish, 2000);
-      });
-      const reg = await navigator.serviceWorker.register('/runtime/gateway-sw.js', {
-        scope: '/',
-        updateViaCache: 'none',
-      });
-      await reg.update().catch(() => {});
-      await navigator.serviceWorker.ready;
-      if (!navigator.serviceWorker.controller || reg.installing || reg.waiting) {
-        await controllerChange;
-      }
-      logTerminal('✓ Service Worker HTTP Gateway active', 'system');
-    }
-
     async function runServer() {
       statusIndicator.className = 'status-dot loading';
-
-      if (activeAbortController) {
-        activeAbortController.abort();
-      }
+      if (activeAbortController) activeAbortController.abort();
       activeAbortController = new AbortController();
       const signal = activeAbortController.signal;
 
-      if (!isInitialized) {
-        await initServiceWorker();
-        await updateCacheBadge();
-        isInitialized = true;
-      }
+      logTerminal('--- Booting Browser Node Runtime ---', 'system');
 
-      logTerminal('--- Initializing In-Browser Node.js Runtime ---', 'system');
-
-      // 1. Create fresh runtime instance
-      currentRuntime = createRuntime({ globalObject: window });
-      await currentRuntime.reset({
-        runId: `express-run-${Date.now()}`,
-        signal,
-        capabilities: {
-          vfs: { mounts: [{ path: '/node', mode: 'read-write' }] },
-          workers: { entryModules: ['*'], maxChildren: 8 },
-          signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
-          envVars: { allowed: [] },
-          ipc: { enabled: true },
-          output: { maxBytes: 4 * 1024 * 1024, stdoutBytes: 2 * 1024 * 1024, stderrBytes: 2 * 1024 * 1024 },
-        },
-      });
-
-      // 2. Install Express from In-Memory Snapshot, IndexedDB Cache, or Live npmjs.org
-      if (cachedNodeModulesMount) {
-        logNetwork('⚡ Fast re-mount: Express packages restored from memory in 5ms', 'npm');
-        await currentRuntime.mount(cachedNodeModulesMount);
-        npmStatus.textContent = '✓ express@4.19.2 ready (in-memory)';
-      } else {
-        npmStatus.textContent = 'Resolving express@4.19.2...';
-        const npm = new BrowserNpm({
-          vfs: currentRuntime.vfs,
-          cache: npmCache,
+      if (!node) {
+        node = await BrowserNode.create({
+          cwd: '/node',
           globalObject: window,
         });
 
-        const installRes = await npm.install(['express@4.19.2'], {
-          cwd: '/node',
+        // Set up two-way URL sync without preloading iframe before server is listening
+        node.connectIframe(iframe, {
+          port: 3000,
+          autoLoad: false,
+          onNavigate: (cleanAddress) => { urlInput.value = cleanAddress; },
+        });
+
+        // Preinstall express
+        npmStatus.textContent = 'Resolving express@4.19.2...';
+        await node.npm.install('express@4.19.2', {
           onProgress: (ev) => {
             if (ev.phase === 'cache-hit-tarball') {
-              logNetwork(`⚡ Cache HIT: ${ev.name}@${ev.version} (loaded from IndexedDB)`, 'npm');
-            } else if (ev.phase === 'cache-hit-meta') {
-              logNetwork(`⚡ Cache HIT (meta): ${ev.name}`, 'npm');
-            } else if (ev.phase === 'fetching-meta') {
-              logNetwork(`🌐 Fetch metadata: ${ev.name} from https://registry.npmjs.org`, 'npm');
-            } else if (ev.phase === 'downloading-tarball') {
-              logNetwork(`⬇️ Downloading tarball: ${ev.name}@${ev.version} from npmjs.org`, 'npm');
+              logNetwork(`⚡ Cache HIT: ${ev.name}@${ev.version}`, 'npm');
             } else if (ev.phase === 'unpacking') {
-              logNetwork(`📂 Unpacking ${ev.name}@${ev.version} into /node/node_modules`, 'npm');
+              logNetwork(`📂 Unpacking ${ev.name}@${ev.version}`, 'npm');
             }
           },
         });
-
-        cachedNodeModulesMount = installRes.files;
         npmStatus.textContent = '✓ express@4.19.2 ready';
         await updateCacheBadge();
       }
 
-      // 3. Connect Gateway Bridge
-      const netModule = createBrowserNet({
-        network: currentRuntime.virtualNetwork,
-        BufferClass: window.Buffer,
-      });
-      installGatewayBridge({ net: netModule, globalObject: window });
-
-      // 4. Mount updated user code
+      // Write updated user code
       const code = document.getElementById('code-editor').value;
-      await currentRuntime.mount({
-        '/node/app.js': code,
-      });
+      await node.fs.writeFile('/node/app.js', code);
 
-      logTerminal('Executing /node/app.js...', 'system');
+      logTerminal('Executing /node/app.js in isolated Web Worker...', 'system');
 
-      // 5. Run entry
-      let refreshed = false;
-      const doRefresh = () => {
-        refreshed = true;
+      let booted = false;
+      const onServerListening = () => {
+        if (booted) return;
+        booted = true;
         statusIndicator.className = 'status-dot online';
-        const val = (urlInput.value || '').trim();
-        const pathPart = val.startsWith('/__vhost__/')
-          ? val
-          : (val.startsWith('/') ? `/__vhost__/3000${val}` : '/__vhost__/3000/');
-        const target = new URL(pathPart, window.location.href);
-        target.searchParams.set('_t', Date.now());
-        iframe.src = target.pathname + target.search + target.hash;
+        node.connectIframe(iframe, { port: 3000, path: urlInput.value || '/' });
       };
 
-      await new Promise((resolve) => {
-        let done = false;
-        const finish = () => {
-          if (done) return;
-          done = true;
-          doRefresh();
-          resolve();
-        };
-
-        currentRuntime.executeEntry('/node/app.js', { cwd: '/node', signal }, (stdoutChunk) => {
-          logTerminal(stdoutChunk, 'stdout');
-          if (stdoutChunk.includes('listening') || stdoutChunk.includes('3000')) {
-            setTimeout(finish, 50);
+      activeServerProcess = await node.run({
+        entry: '/node/app.js',
+        signal,
+        onStdout: (chunk) => {
+          logTerminal(chunk, 'stdout');
+          if (chunk.includes('listening') || chunk.includes('3000')) {
+            setTimeout(onServerListening, 50);
           }
-        }, (stderrChunk) => {
-          logTerminal(stderrChunk, 'stderr');
-        }).catch((err) => {
-          logTerminal('Execute error: ' + err.message, 'stderr');
-          finish();
-        });
-
-        // Fallback refresh
-        setTimeout(finish, 15000);
+        },
+        onStderr: (chunk) => {
+          logTerminal(chunk, 'stderr');
+        },
       });
+
+      setTimeout(onServerListening, 15000);
     }
 
-    document.getElementById('btn-run').addEventListener('click', () => {
-      runServer();
-    });
-
-    document.getElementById('btn-restart').addEventListener('click', () => {
-      runServer();
-    });
-
+    document.getElementById('btn-run').addEventListener('click', runServer);
+    document.getElementById('btn-restart').addEventListener('click', runServer);
     window.runServer = runServer;
 
     const hamburgerBtn = document.getElementById('btn-hamburger');

@@ -442,6 +442,12 @@ function createMemoryBackend() {
   };
 }
 
+const VIRTUAL_EXECUTABLE_PATH = '/browser/node';
+
+function virtualExecutableBytes() {
+  return new TextEncoder().encode('browser-native-node-runtime\n');
+}
+
 export function createMemoryVfsBackend() {
   return createMemoryBackend();
 }
@@ -1704,11 +1710,19 @@ export function createVfs(options = {}) {
   function copyFile(sourceValue, destinationValue, flags = 0) {
     const source = resolve(sourceValue);
     const destination = resolve(destinationValue);
-    const sourceMount = access(source, 'copyFile');
+    const sourceIsVirtualExecutable = source === VIRTUAL_EXECUTABLE_PATH;
+    const sourceMount = sourceIsVirtualExecutable ? null : access(source, 'copyFile');
     const destinationMount = access(destination, 'copyFile', true);
-    if (sourceMount.path !== destinationMount.path) throw denied(destination, 'copyFile');
+    if (!sourceIsVirtualExecutable && sourceMount.path !== destinationMount.path) {
+      throw denied(destination, 'copyFile');
+    }
     if (flags & 1 && (files.has(destination) || directories.has(destination))) throw existsError(destination, 'copyFile');
-    setFile(destination, readBytes(source, 'copyFile'), false, 'copyFile');
+    setFile(
+      destination,
+      sourceIsVirtualExecutable ? virtualExecutableBytes() : readBytes(source, 'copyFile'),
+      false,
+      'copyFile',
+    );
   }
 
   function copyOptions(optionsValue) {
@@ -2471,8 +2485,7 @@ export function createVfs(options = {}) {
     validateStreamFunction(fsApi, 'read');
     if (options.fd === undefined || options.fd === null) validateStreamFunction(fsApi, 'open');
     if (options.autoClose !== false) validateStreamFunction(fsApi, 'close');
-    const virtualExecutable = pathValue === '/browser/node';
-    const virtualExecutableBytes = new TextEncoder().encode('browser-native-node-runtime\n');
+    const virtualExecutable = pathValue === VIRTUAL_EXECUTABLE_PATH;
     const highWaterMark = options.highWaterMark ?? options.bufferSize ?? 64 * 1024;
     const autoDestroy = options.autoClose !== false;
     const streamOptions = { highWaterMark, autoDestroy };
@@ -2482,7 +2495,7 @@ export function createVfs(options = {}) {
     stream.path = pathValue ?? undefined;
     stream._fsApi = fsApi;
     stream._fsOptions = options;
-    stream._fsVirtualExecutable = virtualExecutable ? virtualExecutableBytes : null;
+    stream._fsVirtualExecutable = virtualExecutable ? virtualExecutableBytes() : null;
     const hasFd = options.fd !== undefined && options.fd !== null;
     stream.fd = hasFd ? (typeof options.fd === 'number' ? options.fd : options.fd?.fd) : null;
     stream.flags = options.flags || 'r';

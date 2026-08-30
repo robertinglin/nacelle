@@ -3195,7 +3195,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     features: BROWSER_PROCESS_FEATURES,
     versions: browserProcessVersions(scope),
     title: 'browser-node',
-    execPath: '/browser/node',
+    execPath: options.execPath || '/browser/node',
     execArgv: [],
     execve: createBrowserExecve(processObject),
     stdin,
@@ -7179,6 +7179,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             childProc = createProcess(scope, {
                 argv,
                 argv0: prepared.argv0,
+                execPath: prepared.command,
                 env,
                 cwd,
                 abortOnUncaughtException,
@@ -7885,9 +7886,10 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               commandName: 'modulePath',
             });
             const childOptions = { ...normalized.options, ipc: true };
+            const execPath = childOptions.execPath || processObject.execPath;
             args = normalized.args;
-            if (modulePath === '-e') return virtualAsync(processObject.execPath, ['-e', ...args], childOptions);
-            return virtualAsync(processObject.execPath, [modulePath, ...args], childOptions);
+            if (modulePath === '-e') return virtualAsync(execPath, ['-e', ...args], childOptions);
+            return virtualAsync(execPath, [modulePath, ...args], childOptions);
           },
           _forkChild(fd, serializationMode) {
             const channel = fd && typeof fd === 'object' ? fd : processObject.channel;

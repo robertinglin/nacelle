@@ -5696,6 +5696,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       net,
       BufferClass: Buffer,
       proxy: activeProxy,
+      execArgv: runtimeOptions.execArgv,
       diagnostics: diagnosticsChannels,
     });
     const http2 = createHttp2Module(scope, {

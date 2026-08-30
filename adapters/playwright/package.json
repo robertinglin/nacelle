@@ -11,6 +11,7 @@
     "test:express": "playwright test tests/express-iframe.spec.mjs --workers=1",
     "test:npm": "playwright test tests/npm-install.spec.mjs --workers=1",
     "test:real-npm": "playwright test tests/express-real-npm.spec.mjs --workers=1",
+    "test:vite-react": "playwright test tests/vite-react-demo.spec.mjs --workers=1",
     "test:browser": "node tests/run-browser-tests.mjs",
     "test:wasm": "playwright test tests/wasm-demo.spec.mjs --workers=1",
     "dev": "node ../../scripts/dev-express.mjs",

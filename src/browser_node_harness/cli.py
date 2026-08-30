@@ -198,7 +198,7 @@ def build_parser() -> argparse.ArgumentParser:
     npm_install.add_argument("packages", nargs="+", help="package specs (e.g. express@4.19.2)")
     npm_install.add_argument("--worktree", default=None, help="target worktree directory")
 
-    dev = sub.add_parser("dev", help="launch the interactive in-browser Express live demo and preview")
+    dev = sub.add_parser("dev", help="launch the interactive in-browser Express, Vite + React, and WASM demos")
 
     return parser
 

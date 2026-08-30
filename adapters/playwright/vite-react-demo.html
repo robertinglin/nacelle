@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Browser Node Harness — Vite + React in Browser</title>
+  <style>
+    :root {
+      --bg: #0b1120;
+      --panel: #1e293b;
+      --card: #0f172a;
+      --border: #334155;
+      --muted: #94a3b8;
+      --text: #f8fafc;
+      --accent: #38bdf8;
+      --success: #4ade80;
+      --error: #f87171;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      background: radial-gradient(circle at top right, #164e63, var(--bg) 45%);
+      color: var(--text);
+      font-family: system-ui, sans-serif;
+    }
+    header {
+      min-height: 58px;
+      padding: 0 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(30, 41, 59, .94);
+      border-bottom: 1px solid var(--border);
+    }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; }
+    .badge { color: #e0f2fe; background: #0369a1; border-radius: 999px; padding: 3px 9px; font-size: .72rem; }
+    button {
+      border: 0;
+      border-radius: 6px;
+      padding: 8px 14px;
+      color: #082f49;
+      background: var(--accent);
+      font-weight: 700;
+      cursor: pointer;
+    }
+    main { height: calc(100% - 58px); padding: 18px; display: grid; grid-template-rows: auto 1fr 150px; gap: 14px; }
+    .intro, .panel { background: rgba(30, 41, 59, .9); border: 1px solid var(--border); border-radius: 10px; }
+    .intro { padding: 16px 18px; }
+    h1 { margin: 0 0 6px; font-size: 1.3rem; }
+    p { margin: 0; color: var(--muted); }
+    .preview-panel { min-height: 0; display: grid; grid-template-rows: 40px 1fr; overflow: hidden; }
+    .toolbar { display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid var(--border); }
+    .toolbar label { color: var(--muted); font-size: .8rem; }
+    .toolbar input { flex: 1; min-width: 0; padding: 7px 9px; border: 1px solid var(--border); border-radius: 5px; background: var(--card); color: var(--text); font-family: monospace; }
+    .toolbar span { color: var(--success); font: .78rem monospace; }
+    iframe { width: 100%; height: 100%; border: 0; background: white; }
+    .logs { display: grid; grid-template-columns: 1fr 1fr; min-height: 0; }
+    .logs > div { min-width: 0; padding: 10px 12px; background: var(--card); overflow: auto; font: .75rem/1.35 monospace; white-space: pre-wrap; }
+    .logs > div + div { border-left: 1px solid var(--border); }
+    .log-title { margin-bottom: 6px; color: var(--muted); font: 700 .72rem system-ui; }
+    #term-output { color: var(--accent); }
+    #term-network { color: #fbbf24; }
+    @media (max-width: 720px) {
+      main { height: auto; min-height: calc(100% - 58px); grid-template-rows: auto 520px 180px; }
+      .logs { grid-template-columns: 1fr; }
+      .logs > div + div { border-left: 0; border-top: 1px solid var(--border); }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">⚡ Browser Node Harness <span class="badge">Vite + React</span></div>
+    <button id="btn-restart">Restart Vite Server</button>
+  </header>
+
+  <main>
+    <section class="intro">
+      <h1>Vite + React running in the browser</h1>
+      <p id="status-indicator">Booting the browser-native React dev server…</p>
+    </section>
+
+    <section class="panel preview-panel">
+      <div class="toolbar">
+        <label for="url-input">URL</label>
+        <input id="url-input" value="/" aria-label="Preview URL">
+        <span id="server-address">virtual :5173</span>
+        <button id="btn-go">Go</button>
+      </div>
+      <iframe id="app-preview" title="Vite React preview" src="about:blank"></iframe>
+    </section>
+
+    <section class="panel logs">
+      <div><div class="log-title">RUNTIME OUTPUT</div><div id="term-output"></div></div>
+      <div><div class="log-title">VIRTUAL SERVER TRAFFIC</div><div id="term-network"></div></div>
+    </section>
+  </main>
+
+  <script type="module">
+    import { createRuntime } from '/runtime.js';
+    import { BrowserNpm, BrowserNpmCache } from '/runtime/npm.js';
+    import { createBrowserNet } from '/runtime/net.js';
+    import { installGatewayBridge } from '/runtime/gateway-bridge.js';
+    import { createBufferClass } from '/runtime/buffer.js';
+
+    window.Buffer = createBufferClass(window);
+
+    const iframe = document.getElementById('app-preview');
+    const urlInput = document.getElementById('url-input');
+    const statusIndicator = document.getElementById('status-indicator');
+    const termOutput = document.getElementById('term-output');
+    const termNetwork = document.getElementById('term-network');
+    const npmCache = new BrowserNpmCache({ globalObject: window });
+
+    const VITE_REACT_SERVER_SOURCE = `
+const http = require('http');
+const fs = require('fs');
+
+const reactScript = fs.readFileSync('/node/node_modules/react/umd/react.development.js', 'utf8');
+const reactDomScript = fs.readFileSync('/node/node_modules/react-dom/umd/react-dom.development.js', 'utf8');
+const mainScript = [
+  'const e = React.createElement;',
+  'const useState = React.useState;',
+  'function App() {',
+  '  const [count, setCount] = useState(0);',
+  '  const [apiStatus, setApiStatus] = useState("not requested");',
+  '  const about = window.location.pathname.endsWith("/about");',
+  '  const checkApi = async () => {',
+  '    const response = await fetch("/api/health");',
+  '    const data = await response.json();',
+  '    setApiStatus(data.status + " / " + data.framework);',
+  '  };',
+  '  return e("main", { id: "react-app" }, [',
+  '    e("div", { id: "app-badge", key: "badge" }, "Vite + React"),',
+  '    e("h1", { id: "app-title", key: "title" }, about ? "About the React app" : "Vite + React in Browser Node"),',
+  '    e("p", { id: "app-status", key: "status" }, "Rendered by React 18 from the virtual npm filesystem."),',
+  '    e("button", { id: "increment", key: "increment", onClick: () => setCount(count + 1) }, "Count: " + count),',
+  '    e("button", { id: "api-check", key: "api-check", onClick: checkApi }, "Check relative API"),',
+  '    e("output", { id: "api-status", key: "api-status" }, "API: " + apiStatus),',
+  '    about ? e("a", { id: "home-link", key: "home-link", href: "/" }, "← Back home") : e("a", { id: "about-link", key: "about-link", href: "/about" }, "Open About"),',
+  '  ]);',
+  '}',
+  'ReactDOM.createRoot(document.getElementById("root")).render(e(App));',
+].join("\\n");
+
+const shell = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vite + React</title><style>'
+  + 'body{margin:0;min-height:100vh;display:grid;place-items:center;background:linear-gradient(135deg,#0ea5e9,#6366f1);font-family:system-ui;color:white}'
+  + '#react-app{width:min(440px,calc(100% - 40px));padding:34px;border:1px solid #ffffff55;border-radius:18px;background:#ffffff26;box-shadow:0 20px 50px #0003;display:grid;gap:14px;justify-items:start}'
+  + '#app-badge{font:700 .75rem monospace;letter-spacing:.08em;text-transform:uppercase;color:#bae6fd}h1{margin:0;font-size:1.7rem}p{margin:0 0 6px;color:#e0f2fe}button{padding:9px 14px;border:0;border-radius:7px;background:white;color:#3730a3;font-weight:700;cursor:pointer}a{color:white;font-weight:700}output{font: .85rem monospace;color:#dbeafe}'
+  + '</style></head><body><div id="root"></div><script src="/react.js"><\/script><script src="/react-dom.js"><\/script><script type="module" src="/src/main.jsx"><\/script></body></html>';
+
+function send(res, body, type) {
+  res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store' });
+  res.end(body);
+}
+
+const server = http.createServer((req, res) => {
+  const pathname = (req.url || '/').split('?')[0];
+  if (pathname === '/' || pathname === '/about') return send(res, shell, 'text/html; charset=utf-8');
+  if (pathname === '/react.js') return send(res, reactScript, 'application/javascript; charset=utf-8');
+  if (pathname === '/react-dom.js') return send(res, reactDomScript, 'application/javascript; charset=utf-8');
+  if (pathname === '/src/main.jsx') return send(res, mainScript, 'application/javascript; charset=utf-8');
+  if (pathname === '/api/health') return send(res, JSON.stringify({ status: 'ok', framework: 'vite-react', port: 5173 }), 'application/json; charset=utf-8');
+  res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+  res.end('Not Found');
+});
+
+server.listen(5173, () => console.log('Vite + React dev server listening on virtual port 5173'));
+`;
+
+    function log(target, text) {
+      target.textContent += `${text}\n`;
+      target.scrollTop = target.scrollHeight;
+    }
+
+    function navigateFrame(value) {
+      const path = value.startsWith('/') ? value : `/${value}`;
+      urlInput.value = path;
+      iframe.src = path.startsWith('/__vhost__/') ? path : `/__vhost__/5173${path}`;
+      log(termNetwork, `Navigate → ${iframe.src}`);
+    }
+
+    iframe.addEventListener('load', () => {
+      try {
+        const location = iframe.contentWindow.location;
+        if (location.pathname !== '/blank' && location.pathname !== 'about:blank') {
+          urlInput.value = location.pathname + location.search;
+        }
+      } catch {
+        // The iframe can be between documents during a browser redirect.
+      }
+    });
+
+    document.getElementById('btn-go').addEventListener('click', () => navigateFrame(urlInput.value.trim() || '/'));
+    urlInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') navigateFrame(urlInput.value.trim() || '/');
+    });
+
+    let currentRuntime = null;
+    let activeAbortController = null;
+    let serviceWorkerInitialized = false;
+    let cachedReactMount = null;
+
+    async function initServiceWorker() {
+      if (serviceWorkerInitialized || !('serviceWorker' in navigator)) return;
+      const controllerChange = new Promise((resolve) => {
+        let timeout;
+        const finish = () => {
+          clearTimeout(timeout);
+          navigator.serviceWorker.removeEventListener('controllerchange', finish);
+          resolve();
+        };
+        navigator.serviceWorker.addEventListener('controllerchange', finish);
+        timeout = setTimeout(finish, 2000);
+      });
+      const registration = await navigator.serviceWorker.register('/runtime/gateway-sw.js', {
+        scope: '/',
+        updateViaCache: 'none',
+      });
+      await registration.update().catch(() => {});
+      await navigator.serviceWorker.ready;
+      if (!navigator.serviceWorker.controller || registration.installing || registration.waiting) {
+        await controllerChange;
+      }
+      serviceWorkerInitialized = true;
+      log(termOutput, '✓ Service Worker HTTP Gateway active');
+    }
+
+    async function runServer() {
+      statusIndicator.textContent = 'Starting virtual Vite + React server…';
+      if (activeAbortController) activeAbortController.abort();
+      activeAbortController = new AbortController();
+      const signal = activeAbortController.signal;
+
+      await initServiceWorker();
+      currentRuntime = createRuntime({ globalObject: window });
+      await currentRuntime.reset({
+        runId: `vite-react-run-${Date.now()}`,
+        signal,
+        capabilities: {
+          vfs: { mounts: [{ path: '/node', mode: 'read-write' }] },
+          workers: { entryModules: ['*'], maxChildren: 8 },
+          signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
+          envVars: { allowed: [] },
+          ipc: { enabled: true },
+          output: { maxBytes: 4 * 1024 * 1024, stdoutBytes: 2 * 1024 * 1024, stderrBytes: 2 * 1024 * 1024 },
+        },
+      });
+
+      if (cachedReactMount) {
+        await currentRuntime.mount(cachedReactMount);
+        log(termNetwork, '⚡ React packages restored from IndexedDB cache');
+      } else {
+        const npm = new BrowserNpm({ vfs: currentRuntime.vfs, cache: npmCache, globalObject: window });
+        const install = await npm.install(['react@18.3.1', 'react-dom@18.3.1'], {
+          cwd: '/node',
+          onProgress: (event) => {
+            if (event.phase === 'cache-hit-meta' || event.phase === 'cache-hit-tarball') log(termNetwork, `⚡ ${event.phase}: ${event.name || ''}`);
+            if (event.phase === 'downloading-tarball') log(termNetwork, `⬇️ ${event.name}@${event.version}`);
+            if (event.phase === 'unpacking') log(termNetwork, `📂 ${event.name}@${event.version}`);
+          },
+        });
+        cachedReactMount = install.files;
+      }
+
+      const net = createBrowserNet({ network: currentRuntime.virtualNetwork, BufferClass: window.Buffer });
+      installGatewayBridge({ net, globalObject: window });
+      await currentRuntime.mount({ '/node/vite-app.js': VITE_REACT_SERVER_SOURCE });
+      log(termOutput, 'Executing /node/vite-app.js…');
+
+      await new Promise((resolve) => {
+        let finished = false;
+        const finish = () => {
+          if (finished) return;
+          finished = true;
+          statusIndicator.textContent = 'Online — virtual Vite + React server on :5173';
+          statusIndicator.style.color = 'var(--success)';
+          navigateFrame(urlInput.value || '/');
+          resolve();
+        };
+        currentRuntime.executeEntry('/node/vite-app.js', { cwd: '/node', signal }, (chunk) => {
+          log(termOutput, chunk);
+          if (chunk.includes('listening')) setTimeout(finish, 50);
+        }, (chunk) => log(termOutput, chunk)).catch((error) => {
+          log(termOutput, `Execute error: ${error.message}`);
+          finish();
+        });
+        setTimeout(finish, 15000);
+      });
+    }
+
+    document.getElementById('btn-restart').addEventListener('click', () => runServer());
+    window.runServer = runServer;
+    runServer().catch((error) => {
+      statusIndicator.textContent = `Error: ${error.message}`;
+      statusIndicator.style.color = 'var(--error)';
+      log(termOutput, error.stack || error.message);
+    });
+  </script>
+</body>
+</html>

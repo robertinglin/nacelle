@@ -2893,13 +2893,22 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     if (!resource) return originalProcessEmit(name, ...args);
     return resource.runInAsyncScope(() => originalProcessEmit(name, ...args));
   };
-  const normalizeCredential = (value, kind) => {
+  const validateCredentialType = (value, argumentName = 'id') => {
     if (typeof value !== 'number' && typeof value !== 'string') {
-      const received = value === null ? 'null' : value?.constructor?.name || typeof value;
-      const error = new TypeError(`The "id" argument must be one of type number or string. Received ${received === 'Object' ? 'an instance of Object' : `type ${received}`}`);
+      const received = value === null || value === undefined
+        ? String(value)
+        : typeof value === 'function'
+          ? `function ${value.name || ''}`
+          : typeof value === 'object'
+            ? `an instance of ${value.constructor?.name || 'Object'}`
+            : `type ${typeof value} (${nodeInspect(value, { colors: false })})`;
+      const error = new TypeError(`The "${argumentName}" argument must be one of type number or string. Received ${received}`);
       error.code = 'ERR_INVALID_ARG_TYPE';
       throw error;
     }
+  };
+  const normalizeCredential = (value, kind, argumentName = 'id') => {
+    validateCredentialType(value, argumentName);
     if (typeof value === 'string' && !/^[0-9]+$/.test(value)) {
       const error = new Error(`${kind} identifier does not exist: ${value}`);
       error.code = 'ERR_UNKNOWN_CREDENTIAL';
@@ -3068,8 +3077,10 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     getegid: () => gid,
     getgroups: () => [gid],
     initgroups: (user, extraGroup) => {
-      normalizeCredential(user, 'User');
-      normalizeCredential(extraGroup, 'Group');
+      validateCredentialType(user, 'user');
+      validateCredentialType(extraGroup, 'extraGroup');
+      normalizeCredential(extraGroup, 'Group', 'extraGroup');
+      normalizeCredential(user, 'User', 'user');
     },
     setuid: (value) => { uid = normalizeCredential(value, 'User'); },
     seteuid: (value) => { uid = normalizeCredential(value, 'User'); },

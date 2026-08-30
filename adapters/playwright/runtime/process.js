@@ -6,6 +6,7 @@ import { browserCryptoVersion } from './crypto.js';
 import { installWarningContract } from './warnings.js';
 import { installProcessFinalization } from './finalization.js';
 import { unsupportedBoundary } from './errors.js';
+import { inspect as nodeInspect } from './assert.js';
 
 export { PROCESS_WORKER_SOURCE } from './process-worker.js';
 
@@ -36,14 +37,24 @@ function execveTypeError(name, expected, value) {
         ? 'an instance of Array'
         : typeof value === 'object'
           ? `an instance of ${value.constructor?.name || 'Object'}`
-          : `type ${typeof value} (${String(value)})`;
+          : `type ${typeof value} (${nodeInspect(value, { colors: false })})`;
   const error = new TypeError(`The "${name}" argument must be ${expected}. Received ${received}`);
   error.code = 'ERR_INVALID_ARG_TYPE';
   return error;
 }
 
+function inspectExecveValue(value, options) {
+  if (options?.depth === 0 && value && typeof value === 'object' && !Array.isArray(value)) {
+    const entries = Object.entries(value).map(([key, entry]) => (
+      `${key}: ${inspectExecveValue(entry, { ...options, depth: -1 })}`
+    ));
+    return `{ ${entries.join(', ')} }`;
+  }
+  return nodeInspect(value, options).replaceAll('\u0000', '\\x00');
+}
+
 function execveValueError(name, value, reason) {
-  const error = new TypeError(`The argument '${name}' must be ${reason}. Received ${String(value)}`);
+  const error = new TypeError(`The argument '${name}' must be ${reason}. Received ${inspectExecveValue(value, { colors: false, depth: 0 })}`);
   error.code = 'ERR_INVALID_ARG_VALUE';
   return error;
 }
@@ -178,15 +189,25 @@ function credentialError(kind, value) {
   return error;
 }
 
-function invalidCredentialType(value) {
-  const received = value === null ? 'null' : value?.constructor?.name || typeof value;
-  const error = new TypeError(`The "id" argument must be one of type number or string. Received ${received === 'Object' ? 'an instance of Object' : `type ${received}`}`);
+function invalidCredentialType(value, argumentName = 'id') {
+  const received = value === null || value === undefined
+    ? String(value)
+    : typeof value === 'function'
+      ? `function ${value.name || ''}`
+      : typeof value === 'object'
+        ? `an instance of ${value.constructor?.name || 'Object'}`
+        : `type ${typeof value} (${nodeInspect(value, { colors: false })})`;
+  const error = new TypeError(`The "${argumentName}" argument must be one of type number or string. Received ${received}`);
   error.code = 'ERR_INVALID_ARG_TYPE';
   return error;
 }
 
-function normalizeCredential(value, kind) {
-  if (typeof value !== 'number' && typeof value !== 'string') throw invalidCredentialType(value);
+function validateCredentialType(value, argumentName = 'id') {
+  if (typeof value !== 'number' && typeof value !== 'string') throw invalidCredentialType(value, argumentName);
+}
+
+function normalizeCredential(value, kind, argumentName = 'id') {
+  validateCredentialType(value, argumentName);
   if (typeof value === 'string' && !/^[0-9]+$/.test(value)) throw credentialError(kind, value);
   const numeric = Number(value);
   if (!Number.isInteger(numeric) || numeric < 0 || numeric > 0xffffffff) {
@@ -244,8 +265,10 @@ export function installProcessContract(process, { uid = 1000, gid = 1000, umask 
   installCredential('egid', 'Group', () => currentGid);
   process.getgroups ||= () => [currentGid];
   process.initgroups ||= (user, extraGroup) => {
-    normalizeCredential(user, 'User');
-    normalizeCredential(extraGroup, 'Group');
+    validateCredentialType(user, 'user');
+    validateCredentialType(extraGroup, 'extraGroup');
+    normalizeCredential(extraGroup, 'Group', 'extraGroup');
+    normalizeCredential(user, 'User', 'user');
   };
   process.getBuiltinModule ||= (id) => {
     if (typeof id !== 'string') throw execveTypeError('id', 'of type string', id);

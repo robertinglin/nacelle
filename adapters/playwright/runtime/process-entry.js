@@ -18,7 +18,7 @@ export async function runProcessEntry(context) {
     proxy: descriptor.proxy,
     virtualNetwork: descriptor.virtualNetwork,
   });
-  await runtime.mount(descriptor.files);
+  await runtime.mount(descriptor.files, { symlinks: descriptor.symlinks });
   const code = await runtime.executeEntry(
     descriptor.entry,
     {

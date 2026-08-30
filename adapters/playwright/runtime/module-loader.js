@@ -405,6 +405,7 @@ export function createModuleLoader({
   const packageScopeType = (resolved) => {
     let directory = posix.dirname(resolved);
     while (true) {
+      if (directory.endsWith('/node_modules')) return undefined;
       const config = packageConfig(directory);
       if (config !== undefined) {
         if (config.type === 'module' || config.type === 'commonjs') return config.type;
@@ -599,7 +600,18 @@ export function createModuleLoader({
     let directory = posix.dirname(importer);
     for (;;) {
       const packageRoot = posix.join(directory, 'node_modules', packageName);
-      const config = packageConfig(packageRoot);
+      let config;
+      try {
+        config = packageConfig(packageRoot);
+      } catch (error) {
+        if (error?.code === 'ERR_INVALID_PACKAGE_CONFIG') {
+          const packagePath = error.path || posix.join(packageRoot, 'package.json');
+          error.message = `Invalid package config ${packagePath} while importing \"${specifier}\" from ${importer}.`;
+          error.name = 'Error [ERR_INVALID_PACKAGE_CONFIG]';
+          error.stack = `${error.name}: ${error.message}\ncode: '${error.code}'`;
+        }
+        throw error;
+      }
       if (config?.exports !== undefined) {
         const request = subpath ? `./${subpath}` : '.';
         const exportsMap = typeof config.exports === 'string' || Array.isArray(config.exports)
@@ -657,7 +669,7 @@ export function createModuleLoader({
     const name = builtinName(value);
     if (hasBuiltin(name)) return value.startsWith('node:') ? `node:${name}` : name;
     if (value.startsWith('node:')) {
-      const libraryFile = resolveNodeLibrary(name);
+      const libraryFile = resolveInternalModule(name) || resolveNodeLibrary(name);
       if (libraryFile) return libraryFile;
       throw packageError('ERR_UNKNOWN_BUILTIN_MODULE', `No such built-in module: ${name}`);
     }
@@ -1340,7 +1352,10 @@ export function createModuleLoader({
         }
         throw error;
       }
-      importCache.set(resolved, import(url).catch((error) => {
+      importCache.set(resolved, import(url).then((namespace) => {
+        globalObject.__BNH_ESM_NAMESPACE_CACHE__?.set?.(resolved, namespace);
+        return namespace;
+      }).catch((error) => {
         if (error?.code === 'MODULE_NOT_FOUND') {
           error.code = 'ERR_MODULE_NOT_FOUND';
           error.name = 'Error [ERR_MODULE_NOT_FOUND]';
@@ -1390,6 +1405,14 @@ export function createModuleLoader({
       return import(url);
     }
     validateImportAttributes(resolved, options);
+    const sharedNamespace = globalObject.__BNH_ESM_NAMESPACE_CACHE__?.get?.(resolved);
+    if (sharedNamespace) {
+      if (!Object.hasOwn(sharedNamespace, '__esModule')) return sharedNamespace;
+      const importNamespace = { ...sharedNamespace };
+      delete importNamespace.__esModule;
+      Object.defineProperty(importNamespace, Symbol.toStringTag, { value: 'Module' });
+      return importNamespace;
+    }
     if (resolved.startsWith('node:') && !isBuiltinSpecifier(resolved)) {
       throw packageError('ERR_UNKNOWN_BUILTIN_MODULE', `No such built-in module: ${resolved.slice(5)}`);
     }

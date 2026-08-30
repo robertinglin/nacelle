@@ -480,6 +480,18 @@ function invalidArgumentType(name, expected, value, property = false) {
   return error;
 }
 
+function validateHost(host, name) {
+  if (host !== null && host !== undefined && typeof host !== 'string') {
+    throw invalidArgumentType(
+      `options.${name}`,
+      'string or one of undefined or null',
+      host,
+      true,
+    );
+  }
+  return host;
+}
+
 function initializeOutgoingMessageState(message) {
   outgoingMessageState.set(message, {
     errored: null,
@@ -782,7 +794,11 @@ function makeURL(input, options, defaultProtocol, scope) {
   const path = String(options.path || options.pathname || '/');
   if (protocol === 'data:') return `data:${path.replace(/^data:/, '')}`;
 
-  const hostname = String(options.hostname || options.host || 'localhost');
+  const hostname = String(
+    validateHost(options.hostname, 'hostname')
+      || validateHost(options.host, 'host')
+      || 'localhost',
+  );
   const isIPv6 = hostname.includes(':');
   let authority = isIPv6 && !hostname.startsWith('[') ? `[${hostname}]` : hostname;
   if (options.port !== undefined && options.port !== null) {

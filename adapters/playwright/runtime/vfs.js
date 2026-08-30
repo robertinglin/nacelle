@@ -3137,6 +3137,20 @@ export function createVfs(options = {}) {
     }
     const mountRecord = declareMount(mountConfig);
     seedTree(mountRecord.path, fixtureTree);
+    for (const [link, target] of mountConfig.symlinks || []) {
+      const linkPath = normalizePath(link, mountRecord.path);
+      if (!isWithin(linkPath, mountRecord.path)) throw denied(linkPath, 'mount');
+      let parent = parentOf(linkPath);
+      const parts = parent.slice(mountRecord.path.length).split('/').filter(Boolean);
+      parent = mountRecord.path;
+      for (const part of parts) {
+        parent = `${parent}/${part}`;
+        if (files.has(parent)) throw notDirectory(parent, 'mount');
+        directories.add(parent);
+      }
+      if (nodeExists(linkPath)) throw existsError(linkPath, 'mount');
+      symlinks.set(linkPath, sourcePath(target));
+    }
     return { path: mountRecord.path, mode: mountRecord.mode };
   }
 
@@ -3200,6 +3214,7 @@ export function createVfs(options = {}) {
         mode: mountRecord.mode,
         artifacts: [...mountRecord.artifacts].sort(lexicalCompare),
       })),
+      symlinks: [...symlinks.entries()].sort(([left], [right]) => lexicalCompare(left, right)),
       artifacts: artifactList,
       files: Object.fromEntries(artifactList.map(({ path, bytes }) => [path, bytes])),
     };

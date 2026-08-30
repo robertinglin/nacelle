@@ -2536,17 +2536,106 @@ function moduleHasStaticEsmSyntax(source) {
   return /(?:^|[;\n])\s*export\s+(?:default\b|(?:const|let|var|function|class)\b|[*{])/.test(source);
 }
 
-function moduleSynchronousEsmSource(source) {
+function cjsStaticExportNames(source) {
+  const names = new Set();
+  const add = (name) => {
+    if (typeof name !== 'string' || !name) return;
+    for (let index = 0; index < name.length; index += 1) {
+      const code = name.charCodeAt(index);
+      if (code >= 0xD800 && code <= 0xDBFF) {
+        const next = name.charCodeAt(index + 1);
+        if (Number.isNaN(next) || next < 0xDC00 || next > 0xDFFF) return;
+        index += 1;
+      } else if (code >= 0xDC00 && code <= 0xDFFF) return;
+    }
+    if (/^[^\u0000-\u001F]+$/u.test(name)) names.add(name);
+  };
+  for (const match of String(source).matchAll(/\b(?:exports|module\.exports)\s*\.\s*([$_A-Za-z][$_\w]*)/g)) add(match[1]);
+  for (const match of String(source).matchAll(/\b(?:exports|module\.exports)\s*\[\s*(['\"])(.*?)\1\s*\]/g)) {
+    add(match[2]
+      .replace(/\\u\{([0-9a-f]+)\}/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)))
+      .replace(/\\u([0-9a-f]{4})/gi, (_, code) => String.fromCharCode(parseInt(code, 16))));
+  }
+  for (const match of String(source).matchAll(/Object\.defineProperty\(\s*exports\s*,\s*(['\"])(.*?)\1/g)) add(match[2]);
+  return names;
+}
+
+function moduleSynchronousEsmSource(source, filename = '/node/index.mjs') {
   let transformed = String(source);
+  const prelude = "Object.defineProperty(module.exports, Symbol.toStringTag, { value: 'Module' });\n";
+  let reexportIndex = 0;
+  let namespaceIndex = 0;
+  const importBindings = (clause, request, namespace = false) => {
+    const trimmed = clause.trim();
+    if (trimmed.startsWith('{')) {
+      const bindings = trimmed.slice(1, -1).split(',').map((part) => part.trim()).filter(Boolean).map((part) => {
+        const [imported, local = imported] = part.split(/\s+as\s+/);
+        return `${JSON.stringify(imported)}: ${local}`;
+      }).join(', ');
+      return `const { ${bindings} } = ${request};`;
+    }
+    if (trimmed.startsWith('*')) {
+      const local = trimmed.match(/\bas\s+([$_A-Za-z][$_\w]*)/)?.[1];
+      if (!namespace) return `const ${local} = ${request};`;
+      const binding = `__bnhNamespace${namespaceIndex++}`;
+      const keys = `[...(globalThis.__BNH_CJS_EXPORT_METADATA__?.get(${binding}) || Object.keys(${binding})), ...(${binding}[Symbol.toStringTag] === 'Module' ? [] : ['default'])].sort()`;
+      return `const ${binding} = ${request}; const ${local} = Object.fromEntries(${keys}.map((name) => [name, name === 'default' ? ${binding} : ${binding}[name]]));`;
+    }
+    const comma = trimmed.indexOf(',');
+    const defaultName = comma < 0 ? trimmed : trimmed.slice(0, comma).trim();
+    let result = `const ${defaultName} = ${request};`;
+    if (comma >= 0) result += `\n${importBindings(trimmed.slice(comma + 1), request)}`;
+    return result;
+  };
+  transformed = transformed.replace(
+    /(^|[;\n])\s*import\s+([\s\S]*?)\s+from\s+(['\"])([^'\"]+)\3\s*;?/g,
+    (_, prefix, clause, quote, specifier) => `${prefix}${importBindings(clause, `require(${JSON.stringify(specifier)})`, clause.trim().startsWith('*'))}`,
+  );
+  transformed = transformed.replace(
+    /(^|[;\n])\s*import\s+(['\"])([^'\"]+)\2\s*;?/g,
+    (_, prefix, quote, specifier) => `${prefix}require(${JSON.stringify(specifier)});`,
+  );
+  transformed = transformed.replace(/\bconst\s+(require|exports|module)\s*=/g, 'var $1 =');
   transformed = transformed.replace(
     /(^|[;\n])\s*export\s+default\s+([^;]+);?/g,
-    (_, prefix, expression) => `${prefix}module.exports.default = (${expression});`,
+    (_, prefix, expression) => `${prefix}Object.defineProperty(module.exports, '__esModule', { value: true, enumerable: true }); module.exports.default = (${expression});`,
   );
   transformed = transformed.replace(
     /(^|[;\n])\s*export\s+(const|let|var)\s+([$_A-Za-z][$_\w]*)\s*=\s*([^;\n]+);?/g,
     (_, prefix, declaration, name, expression) => `${prefix}${declaration} ${name} = ${expression}; module.exports.${name} = ${name};`,
   );
-  return transformed;
+  transformed = transformed.replace(
+    /(^|[;\n])\s*export\s+\{([^}]+)\}(?!\s+from\b)\s*;?/g,
+    (_, prefix, names) => `${prefix}${names.split(',').map((part) => part.trim()).filter(Boolean).map((part) => {
+      const [local, exported = local] = part.trim().split(/\s+as\s+/);
+      return `module.exports[${JSON.stringify(exported)}] = ${local};`;
+    }).join('\n')}`,
+  );
+  transformed = transformed.replace(
+    /(^|[;\n])\s*export\s+\{([^}]+)\}\s+from\s+(['\"])([^'\"]+)\3\s*;?/g,
+    (_, prefix, names, quote, specifier) => {
+      const request = `require(${JSON.stringify(specifier)})`;
+      const binding = `__bnhReexport${reexportIndex++}`;
+      return `${prefix}const ${binding} = ${request};\n${names.split(',').map((part) => {
+        const [local, exported = local] = part.trim().split(/\s+as\s+/);
+        return `module.exports[${JSON.stringify(exported)}] = ${binding}[${JSON.stringify(local)}];`;
+      }).join('\n')}`;
+    },
+  );
+  transformed = transformed.replace(
+    /(^|[;\n])\s*export\s+(async\s+)?(function|class)\s+([$_A-Za-z][$_\w]*)/g,
+    (_, prefix, asyncKeyword = '', declaration, name) => `${prefix}${asyncKeyword}${declaration} ${name}`,
+  );
+  const exportedDeclarations = [...String(source).matchAll(/\bexport\s+(?:async\s+)?(?:function|class)\s+([$_A-Za-z][$_\w]*)/g)];
+  if (exportedDeclarations.length) {
+    transformed += `\n${exportedDeclarations.map(([, name]) => `module.exports.${name} = ${name};`).join('\n')}`;
+  }
+  transformed = transformed.replace(
+    /(^|[;\n])\s*export\s+\*\s+from\s+(['\"])([^'\"]+)\2\s*;?/g,
+    (_, prefix, quote, specifier) => `${prefix}Object.assign(module.exports, require(${JSON.stringify(specifier)}));`,
+  );
+  transformed = transformed.replace(/\bimport\.meta\.url\b/g, JSON.stringify(pathToFileURL(filename).href));
+  return `${prelude}${transformed}`;
 }
 
 function moduleArgumentTypeError(name, expected, value) {
@@ -4141,6 +4230,10 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
   let esmExecutionTail = Promise.resolve();
   let dnsModule = createBrowserDns({ network: virtualNetwork });
   let proxyCapability = createProxyCapability();
+  const esmNamespaceCache = scope.__BNH_ESM_NAMESPACE_CACHE__ || new Map();
+  scope.__BNH_ESM_NAMESPACE_CACHE__ = esmNamespaceCache;
+  const cjsExportMetadata = scope.__BNH_CJS_EXPORT_METADATA__ || new WeakMap();
+  scope.__BNH_CJS_EXPORT_METADATA__ = cjsExportMetadata;
   const virtualProcessLiveness = new Map();
   const environmentData = new Map();
 
@@ -4207,6 +4300,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
   function runtimePackageType(entryPath) {
     let directory = path.dirname(entryPath);
     for (;;) {
+      if (directory.endsWith('/node_modules')) return 'commonjs';
       try {
         const source = vfs.read(path.join(directory, 'package.json'));
         const text = typeof source === 'string' ? source : new TextDecoder().decode(source);
@@ -4575,7 +4669,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         const source = typeof content === 'string' ? content : String(content);
         const resolved = String(filename || this.filename || sourcePath);
         const compileSource = format === 'module' || moduleHasStaticEsmSyntax(source)
-          ? moduleSynchronousEsmSource(source)
+          ? moduleSynchronousEsmSource(source, resolved)
           : source;
         const require = (name) => {
           const value = moduleApi._load(name, this);
@@ -6835,6 +6929,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
 
         function resolveFileSync(specifier, importer, processObj = null) {
           const source = String(specifier).replaceAll('\\', '/');
+          if (source.startsWith('data:')) return source;
           if (source.startsWith('file:')) return normalizePath(fileURLToPath(source));
           if (source.startsWith('#')) {
             const resolved = typeof processObj?.__bnhModuleResolve === 'function'
@@ -6950,17 +7045,8 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           return /(?:^|[;\n])\s*export\s+(?:default\b|(?:const|let|var|function|class)\b|[*{])/.test(source);
         }
 
-        function synchronousEsmSource(source) {
-          let transformed = String(source);
-          transformed = transformed.replace(
-            /(^|[;\n])\s*export\s+default\s+([^;]+);?/g,
-            (_, prefix, expression) => `${prefix}module.exports.default = (${expression});`,
-          );
-          transformed = transformed.replace(
-            /(^|[;\n])\s*export\s+(const|let|var)\s+([$_A-Za-z][$_\w]*)\s*=\s*([^;\n]+);?/g,
-            (_, prefix, declaration, name, expression) => `${prefix}${declaration} ${name} = ${expression}; module.exports.${name} = ${name};`,
-          );
-          return transformed;
+        function synchronousEsmSource(source, filename) {
+          return moduleSynchronousEsmSource(source, filename);
         }
 
         function esmGraphHasTopLevelAwait(entryPath, seen = new Set()) {
@@ -7023,7 +7109,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           const cacheDir = env.NODE_COMPILE_CACHE || '';
           let source;
           try {
-            source = sourceOverride === undefined ? readSource(entryPath) : sourceOverride;
+            source = sourceOverride === undefined
+              ? entryPath.startsWith('data:')
+                ? decodeURIComponent(entryPath.slice(entryPath.indexOf(',') + 1).split('#')[0])
+                : readSource(entryPath)
+              : sourceOverride;
           } catch (e) {
             const argv = processObj?.argv || [];
             const evalFlags = ['-p', '-e', '--eval'];
@@ -7044,12 +7134,14 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                 ? new Uint8Array(source.buffer, source.byteOffset, source.byteLength)
                 : new Uint8Array(source || []);
           const text = typeof source === 'string' ? source : new TextDecoder().decode(bytes);
-          const esmEntry = isEsmModule(entryPath, processObj) || (isMain && hasStaticEsmSyntax(text));
-          if (esmEntry && !isMain) {
+          const esmEntry = entryPath.startsWith('data:') || isEsmModule(entryPath, processObj)
+            || (isMain && hasStaticEsmSyntax(text));
+          const allowRequireEsm = processObj?.execArgv?.some((argument) => String(argument) === '--experimental-require-module');
+          if (esmEntry && !isMain && !allowRequireEsm) {
             if (esmGraphHasTopLevelAwait(entryPath)) throw requireAsyncModuleError(entryPath, parentImport);
             throw requireEsmError(entryPath, parentImport, fromEval);
           }
-          if (esmEntry) source = synchronousEsmSource(text);
+          if (esmEntry) source = synchronousEsmSource(text, entryPath);
           const tagDirName = 'v22.0.0-browser-1-1';
           const tagDir = cacheDir ? (fs.mkdirSync ? (fs.mkdirSync(cacheDir, { recursive: true }), fs.mkdirSync(cacheDir + '/' + tagDirName, { recursive: true }), cacheDir + '/' + tagDirName) : '') : '';
           let compileCacheFile = '';
@@ -7148,6 +7240,10 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             moduleApi.wrapper,
           );
           moduleRecord.loaded = true;
+          if (esmEntry && Object.hasOwn(moduleRecord.exports, 'default')
+            && !Object.hasOwn(moduleRecord.exports, '__esModule')) {
+            Object.defineProperty(moduleRecord.exports, '__esModule', { value: true, enumerable: true });
+          }
           if (isCompileCacheDebug && tagDir && (!fileExistedBefore || cacheAction === 'updated')) {
             const basename = entryPath.split('/').pop() || entryPath;
             try {
@@ -7656,6 +7752,14 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                 childProc.processObject._markExited?.();
               }
             } catch (error) {
+              if (compileCacheState?.primaryAction === 'initialized'
+                && (childProc?.processObject?.env?.NODE_DEBUG_NATIVE || '').includes('COMPILE_CACHE')) {
+                const basename = (compileCacheState.primaryPath || entryPath).split('/').pop() || entryPath;
+                const initialMessage = `[compile cache] ${basename} was not initialized, initializing the in-memory entry\n`;
+                const index = stderrArr.lastIndexOf(initialMessage);
+                if (index >= 0) stderrArr.splice(index, 1);
+                stderrArr.push(`[compile cache] skip ${basename} because the cache was not initialized\n`);
+              }
               const traceUncaught = executionArgv.some((value) => String(value) === '--trace-uncaught');
               if (traceUncaught) {
                 stderrArr.push('Thrown at:\n    at [eval]:1:1\n');
@@ -7781,6 +7885,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           const esmDescriptor = {
             capabilities: capabilities.manifest,
             files,
+            symlinks: snapshot.symlinks,
             entry: prepared.entryPath,
             execArgv: childExecArgv,
             proxy: childProxy,
@@ -9044,6 +9149,19 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     };
     const loadModule = (specifier, importer = entry, skipResolve = false) => {
       const shimPath = String(specifier).startsWith('file:') ? fileURLToPath(specifier) : specifier;
+      if (String(specifier).startsWith('data:text/javascript')) {
+        const dataPath = String(specifier);
+        const comma = dataPath.indexOf(',');
+        const source = decodeURIComponent(dataPath.slice(comma + 1).split('#')[0]);
+        const dataModule = { exports: {} };
+        const dataRequire = (child) => loadModule(child, dataPath);
+        runCommonJSWrapper(
+          moduleSynchronousEsmSource(source, dataPath),
+          dataPath,
+          [dataRequire, dataModule, dataModule.exports, dataPath, '/', undefined],
+        );
+        return dataModule.exports;
+      }
       if (shimPath === '/node/lib/dgram.js') return builtins.dgram;
       if (shimPath === '/node/lib/cluster.js') return builtins.cluster;
       const name = builtinName(specifier);
@@ -9131,6 +9249,19 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       }
       const resolvedURL = resolvedResult?.url || pathToFileURL(resolveFile(specifier, importer, processObject)).href;
       let resolved = resolvedURL.startsWith('file:') ? fileURLToPath(resolvedURL) : resolvedURL;
+      if (isRuntimeEsmModule(resolved, processObject.execArgv)
+        && processObject.execArgv?.some((argument) => String(argument) === '--experimental-require-module')) {
+        const cachedNamespace = esmNamespaceCache.get(resolved);
+        if (cachedNamespace) {
+          if (!Object.hasOwn(cachedNamespace, 'default') || Object.hasOwn(cachedNamespace, '__esModule')) {
+            return cachedNamespace;
+          }
+          const requiredNamespace = { ...cachedNamespace };
+          Object.defineProperty(requiredNamespace, '__esModule', { value: true, enumerable: true });
+          Object.defineProperty(requiredNamespace, Symbol.toStringTag, { value: 'Module' });
+          return requiredNamespace;
+        }
+      }
       if (isNativeAddonBuildPath(resolved) || (resolved.endsWith('.node') && addonsDisabled(processObject))) {
         rejectNativeAddon(nativeAddonPath(resolved), processObject);
       }
@@ -9155,7 +9286,14 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           }
           if (resolved.startsWith('data:')) return {};
           if (resolved.endsWith('.node')) rejectNativeAddon(resolved, processObject);
-          if (cache.has(resolved)) return cache.get(resolved).exports;
+          if (cache.has(resolved)) {
+            const cachedExports = cache.get(resolved).exports;
+            if (loaded?.format === 'module' && cachedExports && Object.hasOwn(cachedExports, 'default')
+              && !Object.hasOwn(cachedExports, '__esModule')) {
+              Object.defineProperty(cachedExports, '__esModule', { value: true, enumerable: true });
+            }
+            return cachedExports;
+          }
       const source = loaded?.source ?? vfs.read(resolved);
       const text = typeof source === 'string' ? source : new TextDecoder().decode(source);
           if (resolved.endsWith('.mjs')
@@ -9186,6 +9324,33 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           ? 'module' : loaded?.format);
       }
       module.loaded = true;
+      if (loaded?.format === 'module' && module.exports && Object.hasOwn(module.exports, 'default')
+        && !Object.hasOwn(module.exports, '__esModule')) {
+        Object.defineProperty(module.exports, '__esModule', { value: true, enumerable: true });
+      }
+      if (loaded?.format === 'module') esmNamespaceCache.set(resolved, module.exports);
+      if (loaded?.format === 'commonjs' || (!loaded?.format && !resolved.endsWith('.json'))) {
+        const exportNames = cjsStaticExportNames(text);
+        for (const match of text.matchAll(/\bmodule\.exports\s*=\s*require\(\s*(['\"])(.*?)\1\s*\)/g)) {
+          try {
+            const child = esmLoader.resolve(match[2], resolved, ['node', 'require']);
+            const childSource = vfs.read(child);
+            for (const name of cjsStaticExportNames(typeof childSource === 'string'
+              ? childSource : new TextDecoder().decode(childSource))) exportNames.add(name);
+            } catch { /* static metadata is best effort */ }
+        }
+        for (const match of text.matchAll(/\b(?:var|let|const)\s+([$_A-Za-z][$_\w]*)\s*=\s*require\(\s*(['\"])(.*?)\2\s*\)/g)) {
+          if (!text.includes(`Object.keys(${match[1]})`)) continue;
+          try {
+            const child = esmLoader.resolve(match[3], resolved, ['node', 'require']);
+            const childSource = vfs.read(child);
+            for (const name of cjsStaticExportNames(typeof childSource === 'string'
+              ? childSource : new TextDecoder().decode(childSource))) exportNames.add(name);
+          } catch { /* static metadata is best effort */ }
+        }
+        if (module.exports && (typeof module.exports === 'object' || typeof module.exports === 'function')
+          && exportNames.size > 0) cjsExportMetadata.set(module.exports, [...exportNames]);
+      }
       return module.exports;
     };
     Object.defineProperty(builtins, 'repl', {
@@ -9513,6 +9678,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       activeChild = null;
       virtualProcessLiveness.clear();
       environmentData.clear();
+      esmNamespaceCache.clear();
       if (context.signal?.aborted) return;
       runSpec = {
         runId: String(context.runId || context.metadata?.runId || `browser-${Date.now()}`),
@@ -9562,7 +9728,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         error.code = 'ERR_CAPABILITY_DENIED';
         throw error;
       }
-      vfs.mount(files, { ...mount, path: '/node' });
+      vfs.mount(files, { ...mount, path: '/node', symlinks: context.symlinks });
       mounted = true;
     },
     async executeEntry(entry, options, stdout, stderr) {

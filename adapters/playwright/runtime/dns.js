@@ -560,6 +560,9 @@ export function createBrowserDns({ synchronous = false, records = {}, proxy, loo
 
   function queryDnsServer(hostname, type, callback) {
     const server = servers[0];
+    if (hasLocalRecord(customRecords, hostname)
+      || customQueryRecords.get(hostname)?.[type] !== undefined
+      || BUILTIN_DNS_RECORDS[hostname]?.[type] !== undefined) return false;
     if (!network || typeof server !== 'string' || !queryTypes[type]) return false;
     const match = /^(\[[^\]]+\]|[^:]+)(?::(\d+))?$/.exec(server);
     if (!match) return false;

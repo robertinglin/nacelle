@@ -1,89 +1,231 @@
 #!/usr/bin/env node
-/**
- * Production build script for browser-node
- *
- * Bundles the core runtime, public API, and target Node version WASM binaries.
- *
- * Usage:
- *   node scripts/build.mjs [--node-version=v22]
- */
+/** Build every supported Node line while selecting one root/default profile. */
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import {
+  listNodeVersionProfiles,
+  nodeVersionAliases,
+  resolveNodeVersionProfile,
+} from '../src/versions/index.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(__dirname, '..');
-const srcDir = path.resolve(repoRoot, 'src');
-const distDir = path.resolve(repoRoot, 'dist');
+const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
+const repositoryRoot = path.resolve(scriptDirectory, '..');
+const sourceDirectory = path.join(repositoryRoot, 'src');
+const outputDirectory = path.join(repositoryRoot, 'dist');
+const packageJSON = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8'));
 
-const args = process.argv.slice(2);
-let nodeVersion = 'v22';
+function selectedVersion(args) {
+  const argument = args.find((value) => value.startsWith('--node-version='));
+  return resolveNodeVersionProfile(argument ? argument.slice('--node-version='.length) : 'lts');
+}
 
-for (const arg of args) {
-  if (arg.startsWith('--node-version=')) {
-    nodeVersion = arg.slice('--node-version='.length);
-    if (!nodeVersion.startsWith('v')) nodeVersion = `v${nodeVersion}`;
+function sourceRevision() {
+  if (process.env.SOURCE_REVISION) return process.env.SOURCE_REVISION;
+  try {
+    return execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repositoryRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    return 'unknown';
   }
 }
 
-console.log(`\n======================================================`);
-console.log(`  📦 Building nacelle for Node ${nodeVersion}`);
-console.log(`======================================================\n`);
+function sha256(bytes) {
+  return crypto.createHash('sha256').update(bytes).digest('hex');
+}
 
-// 1. Clean dist directory
-fs.rmSync(distDir, { recursive: true, force: true });
-fs.mkdirSync(distDir, { recursive: true });
-const distWasmDir = path.join(distDir, 'wasm');
-fs.mkdirSync(distWasmDir, { recursive: true });
-
-// 2. Bundle ONLY the target version's WASM binaries
-const versionWasmDir = path.join(srcDir, 'wasm', nodeVersion);
-if (fs.existsSync(versionWasmDir)) {
-  const wasmFiles = fs.readdirSync(versionWasmDir).filter(f => f.endsWith('.wasm') || f.endsWith('.json'));
-  for (const file of wasmFiles) {
-    fs.copyFileSync(path.join(versionWasmDir, file), path.join(distWasmDir, file));
+function readManifest(profile) {
+  const directory = path.join(repositoryRoot, profile.wasm.directory);
+  const manifestPath = path.join(directory, profile.wasm.manifest);
+  if (!fs.existsSync(manifestPath)) throw new Error(`Missing WASM manifest for ${profile.id}: ${manifestPath}`);
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  if (manifest.node_version !== profile.id
+    || manifest.reference_version !== profile.referenceVersion
+    || String(manifest.abi?.modules) !== profile.versions.modules
+    || String(manifest.abi?.napi) !== profile.versions.napi
+    || !Array.isArray(manifest.artifacts)
+    || manifest.artifacts.length === 0) {
+    throw new Error(`WASM manifest metadata does not match the ${profile.id} profile`);
   }
-  console.log(`  ✓ Bundled ${wasmFiles.length} WASM binaries from src/wasm/${nodeVersion}/ into dist/wasm/`);
-} else {
-  console.warn(`  ⚠ Warning: No WASM binaries found at src/wasm/${nodeVersion}/`);
+  return { directory, manifest };
 }
 
-// 3. Copy runtime tree to dist/runtime/ and root runtime.js
-fs.cpSync(path.join(srcDir, 'runtime'), path.join(distDir, 'runtime'), { recursive: true });
-fs.copyFileSync(path.join(srcDir, 'runtime.js'), path.join(distDir, 'runtime.js'));
-fs.copyFileSync(path.join(srcDir, 'runtime.js'), path.join(distDir, 'runtime.mjs'));
-console.log(`  ✓ Staged runtime modules in dist/runtime/ and dist/runtime.mjs`);
-
-// 4. Copy worker & service worker assets
-const workerSrc = path.join(srcDir, 'runtime', 'process-worker.js');
-if (fs.existsSync(workerSrc)) {
-  fs.copyFileSync(workerSrc, path.join(distDir, 'process-worker.js'));
+function stageWasm(profile, targetDirectory) {
+  const { directory, manifest } = readManifest(profile);
+  fs.mkdirSync(targetDirectory, { recursive: true });
+  const stagedFiles = new Set();
+  const virtualPaths = new Set();
+  const artifacts = manifest.artifacts.map((artifact) => {
+    const wasmPath = String(artifact?.wasm || '');
+    const filename = path.posix.basename(wasmPath);
+    const virtualPath = String(artifact?.node || '');
+    const virtualParts = virtualPath.split('/');
+    if (wasmPath !== `./${filename}` || !filename.endsWith('.wasm')) {
+      throw new Error(`Invalid ${profile.id} WASM artifact path: ${JSON.stringify(artifact?.wasm)}`);
+    }
+    if (!virtualPath || virtualPath.startsWith('/') || virtualPath.includes('\\')
+      || virtualParts.some((part) => !part || part === '.' || part === '..')) {
+      throw new Error(`Invalid ${profile.id} virtual addon path: ${JSON.stringify(artifact?.node)}`);
+    }
+    if (typeof artifact.entry !== 'string' || !artifact.entry) {
+      throw new Error(`Invalid ${profile.id} WASM artifact entry for ${filename}`);
+    }
+    if (stagedFiles.has(filename) || virtualPaths.has(virtualPath)) {
+      throw new Error(`Duplicate ${profile.id} WASM artifact mapping for ${filename}`);
+    }
+    stagedFiles.add(filename);
+    virtualPaths.add(virtualPath);
+    const source = path.join(directory, filename);
+    if (!fs.existsSync(source)) throw new Error(`Missing ${profile.id} WASM artifact: ${filename}`);
+    const bytes = fs.readFileSync(source);
+    if (!WebAssembly.validate(bytes)) throw new Error(`Invalid ${profile.id} WASM artifact: ${filename}`);
+    fs.copyFileSync(source, path.join(targetDirectory, filename));
+    return { ...artifact, wasm: `./${filename}`, bytes: bytes.byteLength, sha256: sha256(bytes) };
+  });
+  const artifactSetHash = sha256(artifacts.map((artifact) => `${artifact.wasm}:${artifact.sha256}\n`).join(''));
+  const outputManifest = { ...manifest, artifact_set_sha256: artifactSetHash, artifacts };
+  fs.writeFileSync(
+    path.join(targetDirectory, profile.wasm.manifest),
+    `${JSON.stringify(outputManifest, null, 2)}\n`,
+  );
+  return { count: artifacts.length, artifactSetHash };
 }
-const swSrc = path.join(srcDir, 'runtime', 'gateway-sw.js');
-if (fs.existsSync(swSrc)) {
-  fs.copyFileSync(swSrc, path.join(distDir, 'gateway-sw.js'));
+
+function versionEntry(profile, baseImport) {
+  return `export * from ${JSON.stringify(baseImport)};
+import { Nacelle as BaseNacelle } from ${JSON.stringify(baseImport)};
+
+export class Nacelle extends BaseNacelle {
+  static create(options = {}) {
+    return super.create({
+      ...options,
+      version: options.version ?? ${JSON.stringify(profile.id)},
+      wasmBaseUrl: options.wasmBaseUrl ?? new URL('./wasm/', import.meta.url).href,
+    });
+  }
 }
-
-// 5. Emit ESM & CJS entry bundles and TypeScript definitions
-fs.copyFileSync(path.join(srcDir, 'index.js'), path.join(distDir, 'index.mjs'));
-fs.copyFileSync(path.join(srcDir, 'index.js'), path.join(distDir, 'index.js'));
-fs.copyFileSync(path.join(srcDir, 'types.d.ts'), path.join(distDir, 'index.d.ts'));
-
-// CJS wrapper
-const cjsWrapper = `
-// nacelle CJS wrapper
-module.exports = require('./index.js');
+export default Nacelle;
 `;
-fs.writeFileSync(path.join(distDir, 'index.cjs'), cjsWrapper.trim() + '\n');
+}
 
-// Version metadata
-const versionMeta = {
-  name: 'nacelle',
-  nodeTargetVersion: nodeVersion,
-  buildTime: new Date().toISOString(),
+function commonJsEntry(profile) {
+  const record = JSON.stringify(Object.fromEntries([
+    'id', 'major', 'nodeRef', 'referenceVersion', 'status', 'maturity', 'codename',
+    'endOfLife', 'npmTag', 'wasmDirectory',
+  ].map((key) => [key, profile[key]])));
+  return `'use strict';
+let modulePromise;
+const load = () => { modulePromise ||= import('./index.mjs'); return modulePromise; };
+const record = Object.freeze(${record});
+const records = Object.freeze([record]);
+const aliases = Object.freeze(${JSON.stringify(nodeVersionAliases())});
+const resolveVersion = (value = 'lts') => {
+  const text = String(value).trim().toLowerCase();
+  if (aliases[text] === record.id || /^(?:node@?|n|v)?${profile.major}(?:\\..*)?$/.test(text)) return record;
+  const error = new RangeError('Unsupported Node.js target ' + JSON.stringify(value) + '; supported targets are ${profile.id}, ${Object.keys(nodeVersionAliases()).join(', ')}');
+  error.code = 'ERR_NACELLE_UNSUPPORTED_NODE_VERSION';
+  error.requested = value;
+  error.supported = [record.id];
+  throw error;
 };
-fs.writeFileSync(path.join(distDir, 'version.json'), JSON.stringify(versionMeta, null, 2) + '\n');
+class Nacelle {
+  static get supportedVersions() { return records; }
+  static resolveVersion(value) { return resolveVersion(value); }
+  static async create(options) { return (await load()).Nacelle.create(options); }
+  static async initServiceWorker(...args) { return (await load()).Nacelle.initServiceWorker(...args); }
+}
+module.exports = {
+  Nacelle,
+  default: Nacelle,
+  load,
+  listSupportedNodeVersions: () => records,
+  nodeVersionAliases: () => aliases,
+  resolveNodeVersionRecord: resolveVersion,
+};
+`;
+}
 
-console.log(`  ✓ Emitted dist/index.mjs, dist/index.cjs, dist/index.d.ts, dist/version.json`);
-console.log(`\n  ✨ Build completed successfully for ${nodeVersion}!\n`);
+function profileMetadata(profile, wasm, revision) {
+  const profileHash = sha256(JSON.stringify({
+    id: profile.id,
+    referenceVersion: profile.referenceVersion,
+    versions: profile.versions,
+    features: profile.features,
+    wasm: wasm.artifactSetHash,
+  }));
+  return {
+    name: packageJSON.name,
+    packageVersion: packageJSON.version,
+    nodeTargetVersion: profile.id,
+    nodeReferenceVersion: profile.referenceVersion,
+    nodeModuleAbi: profile.versions.modules,
+    nodeApi: profile.versions.napi,
+    codename: profile.codename,
+    endOfLife: profile.endOfLife,
+    npmTag: profile.npmTag,
+    releaseStatus: profile.status,
+    releaseMaturity: profile.maturity,
+    sourceRevision: revision,
+    profileSha256: profileHash,
+    wasmArtifactSetSha256: wasm.artifactSetHash,
+  };
+}
+
+const defaultProfile = selectedVersion(process.argv.slice(2));
+const profiles = listNodeVersionProfiles();
+const revision = sourceRevision();
+
+fs.rmSync(outputDirectory, { recursive: true, force: true });
+fs.mkdirSync(outputDirectory, { recursive: true });
+fs.cpSync(path.join(sourceDirectory, 'runtime'), path.join(outputDirectory, 'runtime'), { recursive: true });
+fs.cpSync(path.join(sourceDirectory, 'versions'), path.join(outputDirectory, 'versions'), { recursive: true });
+fs.copyFileSync(path.join(sourceDirectory, 'runtime.js'), path.join(outputDirectory, 'runtime.js'));
+fs.copyFileSync(path.join(sourceDirectory, 'runtime.js'), path.join(outputDirectory, 'runtime.mjs'));
+fs.copyFileSync(path.join(sourceDirectory, 'index.js'), path.join(outputDirectory, 'base-index.mjs'));
+fs.copyFileSync(path.join(sourceDirectory, 'types.d.ts'), path.join(outputDirectory, 'index.d.ts'));
+fs.copyFileSync(path.join(sourceDirectory, 'runtime', 'process-worker.js'), path.join(outputDirectory, 'process-worker.js'));
+fs.copyFileSync(path.join(sourceDirectory, 'runtime', 'gateway-sw.js'), path.join(outputDirectory, 'gateway-sw.js'));
+
+const metadata = [];
+for (const profile of profiles) {
+  const versionDirectory = path.join(outputDirectory, profile.id);
+  fs.mkdirSync(versionDirectory, { recursive: true });
+  const wasm = stageWasm(profile, path.join(versionDirectory, 'wasm'));
+  const versionMetadata = profileMetadata(profile, wasm, revision);
+  metadata.push(versionMetadata);
+  fs.writeFileSync(path.join(versionDirectory, 'index.mjs'), versionEntry(profile, '../base-index.mjs'));
+  fs.writeFileSync(path.join(versionDirectory, 'index.cjs'), commonJsEntry(profile));
+  fs.copyFileSync(path.join(sourceDirectory, 'types.d.ts'), path.join(versionDirectory, 'index.d.ts'));
+  fs.writeFileSync(path.join(versionDirectory, 'version.json'), `${JSON.stringify(versionMetadata, null, 2)}\n`);
+  console.log(`  ✓ ${profile.id}: ${wasm.count} WASM artifacts, Node ${profile.referenceVersion}`);
+}
+
+fs.writeFileSync(path.join(outputDirectory, 'index.mjs'), versionEntry(defaultProfile, './base-index.mjs'));
+fs.copyFileSync(path.join(outputDirectory, 'index.mjs'), path.join(outputDirectory, 'index.js'));
+fs.writeFileSync(path.join(outputDirectory, 'index.cjs'), commonJsEntry(defaultProfile));
+fs.cpSync(
+  path.join(outputDirectory, defaultProfile.id, 'wasm'),
+  path.join(outputDirectory, 'wasm'),
+  { recursive: true },
+);
+
+const support = {
+  default: defaultProfile.id,
+  aliases: nodeVersionAliases(),
+  sourceRevision: revision,
+  profiles: metadata,
+};
+fs.writeFileSync(path.join(outputDirectory, 'support.json'), `${JSON.stringify(support, null, 2)}\n`);
+fs.writeFileSync(
+  path.join(outputDirectory, 'version.json'),
+  `${JSON.stringify(metadata.find((item) => item.nodeTargetVersion === defaultProfile.id), null, 2)}\n`,
+);
+
+console.log(`  ✓ default: ${defaultProfile.id}`);
+console.log(`  ✓ output: ${path.relative(repositoryRoot, outputDirectory)}/`);

@@ -1,6 +1,7 @@
 // The supplied bridge uses the shared browser-native runtime as its base.
 // Keep this page-side layer thin; target projects extend the runtime library.
-import { runtime } from './runtime.js';
+import { createRuntime } from './runtime.js';
+import { resolveNodeVersionProfile } from './versions/index.js';
 
 function decodeBase64(data) {
   const binary = atob(data);
@@ -10,6 +11,17 @@ function decodeBase64(data) {
 }
 
 const materializationCache = new Map();
+const runtimes = new Map();
+
+function runtimeFor(variant) {
+  const profile = resolveNodeVersionProfile(variant || 'lts');
+  let runtime = runtimes.get(profile.id);
+  if (!runtime) {
+    runtime = createRuntime({ globalObject: globalThis, nodeProfile: profile });
+    runtimes.set(profile.id, runtime);
+  }
+  return runtime;
+}
 
 async function materialize(files, sourceSha256 = '') {
   const tree = {};
@@ -91,6 +103,7 @@ globalThis.__BROWSER_NODE_HARNESS__ = {
     const controller = new AbortController();
     const timeoutMs = timeoutMsFor(request);
     let child = null;
+    let runtime = null;
     let timedOut = false;
     let timeoutTimer;
 
@@ -113,6 +126,7 @@ globalThis.__BROWSER_NODE_HARNESS__ = {
       }, timeoutMs);
     });
     const execute = (async () => {
+      runtime = runtimeFor(variant);
       if (controller.signal.aborted) return { exitCode: null, cancelled: true };
       await runtime.reset(runtimeContext);
       if (controller.signal.aborted) return { exitCode: null, cancelled: true };
@@ -144,7 +158,7 @@ globalThis.__BROWSER_NODE_HARNESS__ = {
           stderr: partial.stderr,
           timedOut: true,
           runResult: failureResult(runId, 'shutdown', Object.assign(new Error('browser run timed out'), { code: 'ERR_RUN_TIMEOUT' }), 'timed_out'),
-          details: { runtimeVersion: runtime.version, variant, metadata, tty_supported: false },
+          details: { runtimeVersion: runtime?.version || null, variant, metadata, tty_supported: false },
         };
       }
       const runResult = result.structuredResult || failureResult(runId, 'running', new Error('browser runtime returned no structured result'));
@@ -154,14 +168,14 @@ globalThis.__BROWSER_NODE_HARNESS__ = {
         stderr: result.stderr,
         timedOut: false,
         runResult,
-        details: { runtimeVersion: runtime.version, variant, metadata, tty_supported: false },
+        details: { runtimeVersion: runtime?.version || null, variant, metadata, tty_supported: false },
       };
     } catch (error) {
       const phase = error?.code === 'ERR_CAPABILITY_DENIED' || error?.code === 'ERR_INVALID_CAPABILITY'
         ? 'setup'
         : 'launch';
       const runResult = failureResult(runId, phase, error, error?.code === 'ERR_NOT_SUPPORTED' ? 'unsupported' : 'failed');
-      return { exitCode: null, stdout: '', stderr: String(error?.stack || error), timedOut: false, runResult, details: { runtimeVersion: runtime.version, variant, metadata, tty_supported: false } };
+      return { exitCode: null, stdout: '', stderr: String(error?.stack || error), timedOut: false, runResult, details: { runtimeVersion: runtime?.version || null, variant, metadata, tty_supported: false } };
     } finally {
       clearTimeout(timeoutTimer);
     }

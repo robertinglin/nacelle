@@ -9,6 +9,14 @@ import { installGatewayBridge } from './runtime/gateway-bridge.js';
 import { watchFrameAddress } from './runtime/frame-address.js';
 import { createBrowserNet } from './runtime/net.js';
 import { createBufferClass } from './runtime/buffer.js';
+import { createWasmAddonManager } from './runtime/wasm-addons.js';
+import {
+  listNodeVersionProfiles,
+  listSupportedNodeVersions,
+  nodeVersionAliases,
+  resolveNodeVersionProfile,
+  resolveNodeVersionRecord,
+} from './versions/index.js';
 
 export {
   createRuntime,
@@ -25,39 +33,54 @@ export {
   createProxyConfig,
   createNegotiatedTransport,
   isBrowserFetchFailure,
+  listNodeVersionProfiles,
+  listSupportedNodeVersions,
+  nodeVersionAliases,
+  resolveNodeVersionProfile,
+  resolveNodeVersionRecord,
 };
 
 /**
  * High-level In-Browser Node.js Execution Engine
  */
 export class Nacelle {
+  static get supportedVersions() {
+    return listSupportedNodeVersions();
+  }
+
+  static resolveVersion(value = 'lts') {
+    return resolveNodeVersionRecord(value);
+  }
+
   /**
    * Helper to register the Service Worker HTTP Gateway
    * @param {string} [swPath='/runtime/gateway-sw.js']
    * @param {string} [scope='/']
+   * @param {Object} [globalObject=globalThis] Browser realm that owns the Service Worker API
    */
-  static async initServiceWorker(swPath = '/runtime/gateway-sw.js', scope = '/') {
-    if (typeof globalThis.navigator === 'undefined' || !('serviceWorker' in globalThis.navigator)) {
+  static async initServiceWorker(swPath = '/runtime/gateway-sw.js', scope = '/', globalObject = globalThis) {
+    const browserNavigator = globalObject.navigator;
+    if (!browserNavigator || !('serviceWorker' in browserNavigator)) {
       return null;
     }
     const controllerChange = new Promise((resolve) => {
       let timeout;
       const finish = () => {
-        clearTimeout(timeout);
-        navigator.serviceWorker.removeEventListener('controllerchange', finish);
+        globalObject.clearTimeout(timeout);
+        browserNavigator.serviceWorker.removeEventListener('controllerchange', finish);
         resolve();
       };
-      navigator.serviceWorker.addEventListener('controllerchange', finish);
-      timeout = setTimeout(finish, 2000);
+      browserNavigator.serviceWorker.addEventListener('controllerchange', finish);
+      timeout = globalObject.setTimeout(finish, 2000);
     });
 
-    const registration = await navigator.serviceWorker.register(swPath, {
+    const registration = await browserNavigator.serviceWorker.register(swPath, {
       scope,
       updateViaCache: 'none',
     });
     await registration.update().catch(() => {});
-    await navigator.serviceWorker.ready;
-    if (!navigator.serviceWorker.controller || registration.installing || registration.waiting) {
+    await browserNavigator.serviceWorker.ready;
+    if (!browserNavigator.serviceWorker.controller || registration.installing || registration.waiting) {
       await controllerChange;
     }
     return registration;
@@ -78,6 +101,7 @@ export class Nacelle {
   static async create(options = {}) {
     const cwd = options.cwd || '/node';
     const globalObject = options.globalObject || globalThis;
+    const nodeProfile = resolveNodeVersionProfile(options.version || 'lts');
     const proxyConfig = options.proxy ? createProxyConfig(options.proxy, globalObject) : null;
     const env = {
       NODE_ENV: 'development',
@@ -98,15 +122,17 @@ export class Nacelle {
       const scope = typeof options.gateway === 'object' && options.gateway.scope
         ? options.gateway.scope
         : '/';
-      await BrowserNode.initServiceWorker(swPath, scope).catch((err) => {
-        console.warn('[BrowserNode] Service Worker registration skipped:', err.message);
+      await this.initServiceWorker(swPath, scope, globalObject).catch((err) => {
+        console.warn('[Nacelle] Service Worker registration skipped:', err.message);
       });
     }
 
+    const wasmBaseUrl = options.wasmBaseUrl
+      || new URL(`./wasm/${nodeProfile.id}/`, import.meta.url).href;
     const runtime = createRuntime({
       globalObject,
-      version: `v${options.version || '22'}`,
-      wasmBaseUrl: options.wasmBaseUrl,
+      nodeProfile,
+      wasmBaseUrl,
     });
 
     const mounts = [
@@ -153,7 +179,13 @@ export class Nacelle {
       installGatewayBridge({ net: netModule, globalObject });
     }
 
-    const instance = new Nacelle(runtime, { cwd, env, globalObject, transport });
+    const instance = new this(runtime, {
+      cwd,
+      env,
+      globalObject,
+      transport,
+      nodeProfile,
+    });
 
     // Seed initial files if provided
     if (options.files) {
@@ -171,8 +203,16 @@ export class Nacelle {
     this._env = config.env;
     this._globalObject = config.globalObject;
     this._transport = config.transport || null;
+    this._nodeProfile = config.nodeProfile;
     this._listeners = new Map();
     this._npmCache = new BrowserNpmCache({ globalObject: this._globalObject });
+    this._wasm = createWasmAddonManager({
+      baseUrl: this._runtime.wasmBaseUrl,
+      profile: this._nodeProfile,
+      globalObject: this._globalObject,
+      writeFile: (path, bytes) => this.fs.writeFile(path, bytes),
+      execute: (source) => this.execute(source),
+    });
   }
 
   /** Low-level runtime bridge */
@@ -193,6 +233,11 @@ export class Nacelle {
   /** Optional negotiated transport, when Nacelle+ or another adapter is enabled. */
   get transport() {
     return this._transport;
+  }
+
+  /** Selected, immutable Node release-line profile. */
+  get nodeProfile() {
+    return this._nodeProfile;
   }
 
   /**
@@ -411,43 +456,14 @@ export class Nacelle {
     } catch { /* fallback */ }
 
     const targetUrl = this.getVirtualUrl(port, path);
-    return globalThis.fetch(targetUrl, options);
+    return this._globalObject.fetch(targetUrl, options);
   }
 
   /**
    * WASM Addon Engine
    */
   get wasm() {
-    return {
-      list: () => [
-        'sqlite', 'better_sqlite3', 'sqlite3', 'zlib', 'brotli',
-        'zstd', 'llhttp', 'nghttp2', 'simdutf', 'ada', 'cares',
-        'uvwasi', 'bcrypt', 'node_addon_napi',
-      ],
-      probe: async (moduleName) => {
-        // Execute probe inside virtual node instance
-        const testCode = `
-          const moduleName = ${JSON.stringify(moduleName)};
-          if (moduleName === 'sqlite') {
-            const { DatabaseSync } = require('node:sqlite');
-            const db = new DatabaseSync(':memory:');
-            db.exec('CREATE TABLE test (id INTEGER PRIMARY KEY, msg TEXT)');
-            const insert = db.prepare('INSERT INTO test (msg) VALUES (?)');
-            insert.run('hello wasm sqlite');
-            const row = db.prepare('SELECT * FROM test WHERE id = 1').get();
-            console.log(JSON.stringify({ status: 'ok', module: 'sqlite', row }));
-          } else if (moduleName === 'zlib') {
-            const zlib = require('node:zlib');
-            const deflated = zlib.deflateSync('Hello from zlib wasm!');
-            const inflated = zlib.inflateSync(deflated).toString();
-            console.log(JSON.stringify({ status: 'ok', module: 'zlib', result: inflated }));
-          } else {
-            console.log(JSON.stringify({ status: 'ok', module: moduleName }));
-          }
-        `;
-        return this.execute(testCode);
-      },
-    };
+    return this._wasm;
   }
 
   /**
@@ -612,6 +628,7 @@ export class Nacelle {
         signal: nodeOptions.signal,
         timeout: nodeOptions.timeout,
       }),
+      nodeVersion: this._nodeProfile.runtimeVersion,
       signal: options.signal,
       timeout: options.timeout,
       onStdout: options.onStdout,

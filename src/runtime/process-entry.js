@@ -1,17 +1,29 @@
 import { createRuntime } from '../runtime.js';
 import { PROCESS_WORKER_SOURCE } from './process-worker.js';
 import { installProcessContract } from './process.js';
+import { resolveNodeVersionProfile } from '../versions/index.js';
 
-const runtime = createRuntime({ globalObject: globalThis });
+const runtimes = new Map();
+
+function runtimeFor(nodeVersion) {
+  const profile = resolveNodeVersionProfile(nodeVersion || 'lts');
+  let runtime = runtimes.get(profile.id);
+  if (!runtime) {
+    runtime = createRuntime({ globalObject: globalThis, nodeProfile: profile });
+    runtimes.set(profile.id, runtime);
+  }
+  return { profile, runtime };
+}
 
 export async function runProcessEntry(context) {
-  installProcessContract(context.process);
   const descriptor = context.vfs;
   if (!descriptor?.capabilities || !descriptor.files) {
     const error = new Error('worker VFS descriptor is missing');
     error.code = 'ERR_INVALID_CAPABILITY';
     throw error;
   }
+  const { profile, runtime } = runtimeFor(descriptor.nodeVersion);
+  installProcessContract(context.process, { nodeProfile: profile });
   await runtime.reset({
     runId: context.process.runId,
     capabilities: descriptor.capabilities,

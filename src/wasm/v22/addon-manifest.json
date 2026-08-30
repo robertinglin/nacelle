@@ -1,6 +1,9 @@
 {
-  "version": 1,
+  "version": 2,
   "node_version": "v22",
+  "reference_version": "22.23.2",
+  "abi": { "modules": "127", "napi": "10" },
+  "artifact_compatibility": "browser-wasm-napi10",
   "artifacts": [
     {
       "node": "internal/deps/sqlite.node",

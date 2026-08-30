@@ -129,6 +129,7 @@ import { createVirtualNetwork, getSharedVirtualNetwork, replaceSharedVirtualNetw
 import { createCluster } from './runtime/cluster.js';
 import { createVirtualProcess } from './runtime/virtual-process.js';
 import { createBrowserExecve, createBrowserProcess } from './runtime/process.js';
+import { resolveNodeVersionProfile } from './versions/index.js';
 import { createProxyCapability } from './runtime/proxy.js';
 import { createV8Module } from './runtime/v8.js';
 import { createProcessReport } from './runtime/report.js';
@@ -2856,35 +2857,6 @@ function createConsole(stdout, stderr, nativeConsole) {
 // adapter. In particular, Web Crypto is not Node's OpenSSL-backed runtime and
 // must not make host crypto, networking, or subprocess capabilities appear
 // available to Node's test helpers.
-const BROWSER_PROCESS_CONFIG = Object.freeze({
-  variables: Object.freeze({
-    v8_enable_i18n_support: 1,
-    openssl_quic: false,
-    asan: 0,
-    node_builtin_shareable_builtins: Object.freeze([]),
-    node_use_amaro: false,
-    node_shared_openssl: false,
-    node_use_openssl: true,
-    napi_build_version: '9',
-  }),
-  target_defaults: Object.freeze({ default_configuration: 'Release' }),
-});
-
-const BROWSER_PROCESS_FEATURES = Object.freeze({
-  inspector: true,
-  debug: false,
-  uv: false,
-  ipv6: true,
-  openssl_is_boringssl: false,
-  tls_alpn: true,
-  tls_sni: true,
-  tls_ocsp: true,
-  tls: true,
-  cached_builtins: false,
-  require_module: false,
-  typescript: false,
-});
-
 const DEFAULT_RUNTIME_CAPABILITIES = Object.freeze({
   vfs: { mounts: [{ path: '/node', mode: 'read-write' }] },
   workers: { entryModules: ['*'], maxChildren: 8 },
@@ -2894,44 +2866,15 @@ const DEFAULT_RUNTIME_CAPABILITIES = Object.freeze({
   envVars: { allowed: [] },
 });
 
-const BROWSER_PROCESS_VERSIONS = Object.freeze({
-  node: '22.0.0',
-  acorn: '8.16.0',
-  ada: '2.7.8',
-  amaro: '1.1.8',
-  ares: '1.33.1',
-  brotli: '1.1.0',
-  cjs_module_lexer: '2.2.0',
-  cldr: '45.0',
-  icu: '75.1',
-  llhttp: '9.2.1',
-  modules: '127',
-  napi: '9',
-  nbytes: '1.1.0',
-  ncrypto: '1.0.0',
-  nghttp2: '1.61.0',
-  openssl: '3.0.0',
-  simdjson: '3.9.3',
-  simdutf: '5.2.4',
-  sqlite: '3.51.3',
-  tz: '2024a',
-  undici: '6.28.0',
-  unicode: '15.1',
-  uv: '1.48.0',
-  uvwasi: '0.0.20',
-  v8: '12.0.0-node.1',
-  zlib: '1.3.1',
-  zstd: '1.5.5',
-});
-
-function browserProcessVersions(scope) {
-  const versions = { ...BROWSER_PROCESS_VERSIONS };
+function browserProcessVersions(scope, profile) {
+  const versions = { ...profile.versions };
   const openssl = browserCryptoVersion(scope);
   if (openssl) versions.openssl = openssl;
   return Object.freeze(versions);
 }
 
 function createProcess(scope, options, stdout, stderr, trackTask) {
+  const profile = options.nodeProfile || resolveNodeVersionProfile(options.nodeVersion || 'lts');
   const env = Object.fromEntries(Object.entries(options.env || {}).map(([key, value]) => [key, String(value)]));
   const timers = new Set();
   const timerHandles = new Map();
@@ -3355,11 +3298,11 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     debugPort: 9229,
     platform: 'linux',
     arch: 'x64',
-    version: 'v22.0.0-browser',
-    release: { name: 'node', lts: 'Jod' },
-    config: BROWSER_PROCESS_CONFIG,
-    features: BROWSER_PROCESS_FEATURES,
-    versions: browserProcessVersions(scope),
+    version: profile.runtimeVersion,
+    release: profile.release,
+    config: profile.config,
+    features: profile.features,
+    versions: browserProcessVersions(scope, profile),
     title: 'browser-node',
     execPath: options.execPath || '/browser/node',
     execArgv: [],
@@ -4251,8 +4194,16 @@ const process = {
 };
 `;
 
-export function createRuntime({ globalObject = globalThis, version = 'browser-native-runtime/v1' } = {}) {
+export function createRuntime({
+  globalObject = globalThis,
+  version,
+  nodeVersion,
+  nodeProfile,
+  wasmBaseUrl,
+} = {}) {
   const scope = globalObject;
+  const legacyVersion = /^(?:node@?|n|v)?\d+(?:\..*)?$/.test(String(version || '')) ? version : null;
+  const resolvedProfile = resolveNodeVersionProfile(nodeProfile?.id || nodeVersion || legacyVersion || 'lts');
   let vfs = createVfs();
   const Buffer = createBufferClass(scope);
   const File = createFileClass(scope);
@@ -5892,6 +5843,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       network: virtualNetwork,
       processFactory: (processOptions) => trackVirtualProcess(createVirtualProcess({
         ...processOptions,
+        nodeVersion: resolvedProfile.id,
         forceFallback: true,
         deferRun: true,
       })),
@@ -7453,7 +7405,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             throw requireEsmError(entryPath, parentImport, fromEval);
           }
           if (esmEntry) source = synchronousEsmSource(text, entryPath);
-          const tagDirName = 'v22.0.0-browser-1-1';
+          const tagDirName = `${resolvedProfile.runtimeVersion}-browser-1-1`;
           const tagDir = cacheDir ? (fs.mkdirSync ? (fs.mkdirSync(cacheDir, { recursive: true }), fs.mkdirSync(cacheDir + '/' + tagDirName, { recursive: true }), cacheDir + '/' + tagDirName) : '') : '';
           let compileCacheFile = '';
           if (tagDir) {
@@ -7692,6 +7644,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
                 abortOnUncaughtException,
                 onSignal: options.onSignal,
                 synchronousWarnings: true,
+                nodeProfile: resolvedProfile,
                 }, (value) => {
                   stdoutArr.push(value);
                   options.onStdout?.(value);
@@ -8261,6 +8214,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           const childProxy = proxyCapability.adapter ? proxyCapability : capabilities.manifest.proxy;
           const esmDescriptor = {
             capabilities: capabilities.manifest,
+            nodeVersion: resolvedProfile.id,
             files,
             symlinks: snapshot.symlinks,
             entry: prepared.entryPath,
@@ -8285,6 +8239,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           };
           return createVirtualProcess({
             scope,
+            nodeVersion: resolvedProfile.id,
             runId: runSpec?.runId,
             childId: `child-${childSequence}`,
             entry: prepared.entryPath,
@@ -8563,7 +8518,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       return workerThreadParentPort.listenerCount?.('message') > 0
         || typeof workerThreadParentPort.onmessage === 'function';
     };
-    const fullProcessData = createProcess(scope, { ...options, isPidAlive: isVirtualPidAlive }, stdout, stderr, trackTask);
+    const fullProcessData = createProcess(scope, {
+      ...options,
+      nodeProfile: resolvedProfile,
+      isPidAlive: isVirtualPidAlive,
+    }, stdout, stderr, trackTask);
     const processData = injectedProcess
       ? (() => {
           const processObject = fullProcessData.processObject;
@@ -8651,9 +8610,11 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           processObject.argv = injectedProcess.argv || processObject.argv;
           processObject.cwd = (injectedProcess.cwd) ? (() => injectedProcess.cwd()) : processObject.cwd;
           processObject.chdir = (value) => { if (injectedProcess.chdir) return injectedProcess.chdir(value); processObject.cwd = () => normalizePath(value, processObject.cwd()); };
-          processObject.config = BROWSER_PROCESS_CONFIG;
-          processObject.features = BROWSER_PROCESS_FEATURES;
-          processObject.versions = browserProcessVersions(scope);
+          processObject.version = resolvedProfile.runtimeVersion;
+          processObject.release = resolvedProfile.release;
+          processObject.config = resolvedProfile.config;
+          processObject.features = resolvedProfile.features;
+          processObject.versions = browserProcessVersions(scope, resolvedProfile);
           return { processObject, setTimer: fullProcessData.setTimer, clearTimer: fullProcessData.clearTimer };
         })()
       : fullProcessData;
@@ -8777,6 +8738,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       if (isEval) files[workerPath] = new scope.TextEncoder().encode(String(source));
       const child = createBrowserProcess({
         scope,
+        nodeVersion: resolvedProfile.id,
         runId: `${runSpec?.runId || 'browser'}-thread-${threadId}`,
         childId: `thread-${threadId}-${Date.now()}`,
         argv: ['node', workerPath],
@@ -8790,6 +8752,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         runSource: '((context) => globalThis.__bnhRun(context))',
         vfs: {
           capabilities: capabilities.manifest,
+          nodeVersion: resolvedProfile.id,
           files,
           entry: workerPath,
           execArgv: workerOptions.execArgv || ownerProcess.execArgv,
@@ -10133,7 +10096,9 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
   }
 
   const runtime = {
-    version,
+    version: resolvedProfile.runtimeVersion,
+    profile: resolvedProfile,
+    wasmBaseUrl: wasmBaseUrl || `./${resolvedProfile.id}/wasm/`,
     contracts: createBrowserRuntimeContracts({ globalObject: scope }),
     async reset(context = {}) {
       if (activeChild) await activeChild.kill();
@@ -10184,13 +10149,36 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       if (!capabilities) {
         await runtime.reset({ runId: 'direct-runtime', capabilities: DEFAULT_RUNTIME_CAPABILITIES });
       }
-      const mount = capabilities.manifest.vfs.mounts.find((item) => item.path === '/node');
-      if (!mount) {
-        const error = new Error('the /node VFS mount is required for a browser entry');
-        error.code = 'ERR_CAPABILITY_DENIED';
-        throw error;
+
+      const declaredMounts = [...capabilities.manifest.vfs.mounts]
+        .sort((left, right) => right.path.length - left.path.length);
+      const groups = new Map(declaredMounts.map((mount) => [mount.path, {
+        files: {},
+        mount,
+        symlinks: [],
+      }]));
+      const owningMount = (entry) => {
+        const path = normalizePath(entry, '/node');
+        const mount = declaredMounts.find((candidate) => candidate.path === '/'
+          || path === candidate.path || path.startsWith(`${candidate.path}/`));
+        if (!mount) {
+          const error = new Error(`path is outside the granted VFS mounts: ${path}`);
+          error.code = 'ERR_CAPABILITY_DENIED';
+          throw error;
+        }
+        return groups.get(mount.path);
+      };
+
+      const entries = files instanceof Map ? files.entries() : Object.entries(files || {});
+      for (const [entry, value] of entries) owningMount(entry).files[entry] = value;
+      for (const [link, target] of context.symlinks || []) {
+        owningMount(link).symlinks.push([link, target]);
       }
-      vfs.mount(files, { ...mount, path: '/node', symlinks: context.symlinks });
+      for (const group of groups.values()) {
+        if (Object.keys(group.files).length || group.symlinks.length) {
+          vfs.mount(group.files, { ...group.mount, symlinks: group.symlinks });
+        }
+      }
       mounted = true;
     },
     async executeEntry(entry, options, stdout, stderr) {
@@ -10236,6 +10224,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       }
       const processOptions = {
         runId: runSpec.runId,
+        nodeVersion: resolvedProfile.id,
         childId: `entry-${Date.now()}-${Math.random().toString(36).slice(2)}`,
         entry,
         argv,
@@ -10249,6 +10238,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         runSource: '((context) => globalThis.__bnhRun(context))',
         vfs: {
           capabilities: capabilities.manifest,
+          nodeVersion: resolvedProfile.id,
           files,
           entry,
           execArgv: childExecArgv,
@@ -10304,7 +10294,6 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     get vfs() { return vfs; },
     get capabilities() { return capabilities; },
     get virtualNetwork() { return virtualNetwork; },
-    get version() { return 'browser-native/v1'; },
   };
   return runtime;
 }

@@ -27,7 +27,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(__dirname, "..");
+const repoRoot = path.resolve(__dirname, "..", "..");
 
 const args = process.argv.slice(2);
 let nodeVersion = "v22";
@@ -41,7 +41,7 @@ for (const arg of args) {
   }
 }
 
-const outDir = explicitOutDir || path.resolve(repoRoot, "adapters", "playwright", "wasm", nodeVersion);
+const outDir = explicitOutDir || path.resolve(repoRoot, "src", "wasm", nodeVersion);
 if (!fs.existsSync(outDir)) {
   fs.mkdirSync(outDir, { recursive: true });
 }
@@ -75,7 +75,7 @@ if (!emcc) {
   try {
     spawnSync("python3", ["-m", "browser_node_harness", "addon-build", "--bootstrap"], {
       cwd: repoRoot,
-      env: { ...process.env, PYTHONPATH: path.join(repoRoot, "src") },
+      env: { ...process.env, PYTHONPATH: path.join(repoRoot, "dev", "harness") },
       stdio: "inherit",
     });
     emcc = findEmcc();

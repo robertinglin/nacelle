@@ -1,15 +1,63 @@
 {
-  "name": "browser-node-harness",
+  "name": "browser-node",
   "version": "1.0.0",
-  "description": "Deterministic browser test harness and compatibility layer for Node.js standard libraries and npm packages",
+  "description": "Full Node.js standard library and runtime executing entirely in the browser via WebAssembly, Web Workers, and Virtual Filesystem",
+  "keywords": [
+    "node",
+    "browser",
+    "nodejs",
+    "webassembly",
+    "wasm",
+    "vfs",
+    "runtime",
+    "webcontainer",
+    "in-browser"
+  ],
+  "author": "Browser Node Team",
+  "license": "MIT",
   "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    },
+    "./v22": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    },
+    "./runtime": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/runtime.mjs"
+    },
+    "./worker": "./dist/process-worker.js",
+    "./sw": "./dist/gateway-sw.js",
+    "./wasm/*": "./dist/wasm/*"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
-    "dev": "node scripts/dev-express.mjs",
-    "dev:vite-react": "node scripts/dev-express.mjs --vite-react",
-    "test:express": "npm --prefix adapters/playwright run test:express",
-    "test:vite-react": "npm --prefix adapters/playwright run test:vite-react",
-    "test:npm": "npm --prefix adapters/playwright run test:npm",
-    "test:fast": "node adapters/playwright/node_modules/playwright/cli.js test --config adapters/playwright/tests tests/npm-install.spec.mjs tests/express-iframe.spec.mjs --workers=1",
-    "test:all": "node adapters/playwright/tests/run-browser-tests.mjs"
+    "build": "node scripts/build.mjs",
+    "build:v22": "node scripts/build.mjs --node-version=v22",
+    "examples": "node examples/examples-server.mjs",
+    "examples:vite-react": "node examples/examples-server.mjs --vite-react",
+    "examples:wasm": "node examples/examples-server.mjs --wasm",
+    "publish:release": "node scripts/publish-release.mjs",
+    "publish:v22": "node scripts/publish-release.mjs --channel=v22 --set-latest"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/robertinglin/browser-node-harness"
   }
 }

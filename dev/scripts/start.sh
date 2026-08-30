@@ -7,5 +7,5 @@ if [[ "$#" -gt 0 ]]; then
   shift
 fi
 
-export PYTHONPATH="$project_dir/src${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$project_dir/harness${PYTHONPATH:+:$PYTHONPATH}"
 exec python3 -m browser_node_harness --config "$config_path" start "$@"

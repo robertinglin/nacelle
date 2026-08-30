@@ -24,7 +24,7 @@ dependencies = []
 bnh = "browser_node_harness.cli:main"
 
 [tool.setuptools]
-package-dir = { "" = "src" }
+package-dir = { "" = "harness" }
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["harness"]

@@ -7,8 +7,9 @@ import sys
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
+DEV_DIR = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = DEV_DIR.parent
+sys.path.insert(0, str(DEV_DIR / "harness"))
 
 from browser_node_harness.runtime_links import main  # noqa: E402
 

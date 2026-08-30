@@ -1070,6 +1070,15 @@ function createWorkerBinding(globalObject, noMessageSymbol, onWorkerMessage) {
   const MessageChannel = globalObject.MessageChannel;
   const BroadcastChannel = globalObject.BroadcastChannel;
   let MessagePort = globalObject.MessagePort;
+  // Node's internal/worker/io module installs a non-configurable inspector
+  // hook on the binding's MessagePort prototype. Cluster workers can execute
+  // in this same browser realm, so a later runtime must not expose the
+  // already-sealed native prototype to that second module evaluation.
+  const inspectCustom = Symbol.for('nodejs.util.inspect.custom');
+  if (MessagePort?.prototype
+      && Object.getOwnPropertyDescriptor(MessagePort.prototype, inspectCustom)?.configurable === false) {
+    MessagePort = class BrowserMessagePort {};
+  }
   if (!MessagePort && typeof MessageChannel === 'function') {
     try {
       const sample = new MessageChannel();

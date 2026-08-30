@@ -24,6 +24,7 @@ const BIND_STATE_BINDING = 1;
 const BIND_STATE_BOUND = 2;
 const UV_EBADF = -9;
 const UV_EINVAL = -22;
+const UV_EADDRNOTAVAIL = -99;
 const UV_EADDRINUSE = -98;
 let nextVirtualDescriptor = 1000;
 
@@ -115,7 +116,9 @@ function socketError(code, message) {
 }
 
 function handleError(error, syscall) {
-  const code = error === UV_EINVAL ? 'EINVAL' : 'UNKNOWN';
+  const code = error === UV_EINVAL
+    ? 'EINVAL'
+    : error === UV_EADDRNOTAVAIL ? 'EADDRNOTAVAIL' : 'UNKNOWN';
   const exception = new Error(`${syscall} ${code}`);
   exception.code = code;
   exception.errno = error;
@@ -331,7 +334,8 @@ function createDgramHandle(type, { dns, network, lookup, BufferClass, cluster, c
       return 0;
     },
     dropMembership(multicastAddress, interfaceAddress) {
-      state.memberships.delete(`${multicastAddress}\u0000${interfaceAddress ?? ''}`);
+      const key = `${multicastAddress}\u0000${interfaceAddress ?? ''}`;
+      if (!state.memberships.delete(key)) return UV_EADDRNOTAVAIL;
       return 0;
     },
     addSourceSpecificMembership(sourceAddress, groupAddress, interfaceAddress) {
@@ -664,7 +668,8 @@ export class Socket extends EventEmitter {
       return 0;
     };
     state.handle.dropMembership = (multicastAddress, interfaceAddress) => {
-      state.memberships.delete(`${multicastAddress}\u0000${interfaceAddress ?? ''}`);
+      const key = `${multicastAddress}\u0000${interfaceAddress ?? ''}`;
+      if (!state.memberships.delete(key)) return UV_EADDRNOTAVAIL;
       return 0;
     };
     state.handle.addSourceSpecificMembership = (sourceAddress, groupAddress, interfaceAddress) => {

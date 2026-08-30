@@ -1224,7 +1224,6 @@ export class TLSSocket extends Duplex {
         this.servername = String(options.servername || host);
         this._peerCertificate = virtualCertificate(this.servername);
         this._socket = null;
-        backingSocket.destroy();
         this._authority = { host: this.servername, port: this._authority.port };
         schedule(() => void this._handshake());
         return this;

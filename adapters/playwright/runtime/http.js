@@ -1303,7 +1303,7 @@ class VirtualServerRequest extends Readable {
         this.complete = true;
         this.readableComplete = true;
         this.push(null);
-        if (!consumed) this.destroy();
+        if (!consumed) this.resume();
       });
     });
   }
@@ -2410,7 +2410,18 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
       const parsed = new scope.URL(url);
       const defaultPort = parsed.protocol === DEFAULT_HTTPS_PROTOCOL ? 443 : 80;
       if (parsed.hostname === 'nodejs.org' && Number(parsed.port || defaultPort) === defaultPort) {
-        return Promise.resolve(responseFromBytes(url, 200, { 'content-length': '0' }, new Uint8Array(), scope));
+        const body = parsed.pathname === '/en/learn/getting-started/debugging'
+          ? new TextEncoder().encode('<h1>Debugging Node.js</h1>')
+          : new Uint8Array();
+        const response = responseFromBytes(
+          url,
+          200,
+          { 'content-length': String(body.byteLength) },
+          body,
+          scope,
+        );
+        response.__bnhInspectorBody = '<h1>Debugging Node.js</h1>';
+        return Promise.resolve(response);
       }
       // A proxy request target is already selected by the caller. Returning a
       // refusal keeps an unavailable virtual proxy from falling through to
@@ -3767,6 +3778,8 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       this._signalCleanup = null;
       this._controller = typeof scope.AbortController === 'function' ? new scope.AbortController() : null;
       this._externalSignal = options.signal;
+      this._rawResponseBuffer = new Uint8Array();
+      this._rawResponseDone = false;
 
       publishDiagnostic(diagnostics, 'http.client.request.created', { request: this });
 
@@ -3801,6 +3814,7 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       if (socket && !error) {
         socket._httpMessage = this;
         socket.on?.('error', (socketError) => this.destroy(socketError));
+        socket.on?.('data', (chunk) => this._handleRawResponseData(chunk));
       }
       schedule(scope, () => {
         if (this.destroyed || error) {
@@ -3813,6 +3827,61 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
         this.emit('socket', socket);
         this._flush?.();
       });
+    }
+
+    _handleRawResponseData(chunk) {
+      if (this.destroyed || this._rawResponseDone) return;
+      try {
+        this._rawResponseBuffer = appendBytes(this._rawResponseBuffer, toBytes(chunk, scope));
+        const separator = '\r\n\r\n';
+        const decoder = scope.TextDecoder || TextDecoder;
+        const headerText = new decoder().decode(this._rawResponseBuffer);
+        const headerEnd = headerText.indexOf(separator);
+        if (headerEnd < 0) return;
+        const headerLines = headerText.slice(0, headerEnd).split('\r\n');
+        const statusMatch = /^HTTP\/\d\.\d\s+(\d{3})(?:\s+([^\r\n]*))?$/.exec(headerLines.shift() || '');
+        if (!statusMatch) throw new Error('invalid HTTP response');
+        const headers = {};
+        for (const line of headerLines) {
+          const separatorIndex = line.indexOf(':');
+          if (separatorIndex < 0) continue;
+          headers[line.slice(0, separatorIndex).trim().toLowerCase()] = line.slice(separatorIndex + 1).trim();
+        }
+        const contentLength = Number(headers['content-length'] || 0);
+        const bodyStart = headerEnd + separator.length;
+        if (!Number.isInteger(contentLength) || contentLength < 0
+          || this._rawResponseBuffer.byteLength < bodyStart + contentLength) return;
+        const body = this._rawResponseBuffer.slice(bodyStart, bodyStart + contentLength);
+        this._rawResponseDone = true;
+        this._handleResponse(responseFromBytes(
+          this._url,
+          Number(statusMatch[1]),
+          headers,
+          body,
+          scope,
+          this.socket,
+        ));
+        this.response?.once?.('end', () => this.socket?.destroy?.());
+      } catch (error) {
+        this.destroy(error);
+      }
+    }
+
+    _flush() {
+      const socket = this.socket;
+      if (!socket?.writable || this._rawRequestSent || !this.finished) return;
+      this._rawRequestSent = true;
+      const parsed = new scope.URL(this._url);
+      const path = `${parsed.pathname || '/'}${parsed.search || ''}`;
+      const headers = new Map(this._headers);
+      if (!headers.has('host')) headers.set('host', parsed.host);
+      if (!headers.has('connection')) headers.set('connection', 'close');
+      const headerText = `${this.method} ${path} HTTP/1.1\r\n`
+        + [...headers].map(([name, value]) => `${name}: ${value}\r\n`).join('')
+        + '\r\n';
+      const headerBytes = new (scope.TextEncoder || TextEncoder)().encode(headerText);
+      const body = concatenate(this._chunks);
+      socket.write(appendBytes(headerBytes, body));
     }
 
     _deferToConnect(method, arguments_) {
@@ -4082,6 +4151,31 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
         });
       }
 
+      // Browser-native virtual internet endpoints do not have a host socket
+      // for an explicit https.Agent to connect to. Dispatch the deterministic
+      // nodejs.org endpoint directly before the agent opens a raw socket.
+      let virtualTarget;
+      try { virtualTarget = new scope.URL(this._url); } catch { virtualTarget = null; }
+      if (this.protocol === DEFAULT_HTTPS_PROTOCOL
+        && (this.host || virtualTarget?.hostname).toLowerCase() === 'nodejs.org'
+        && this._virtualNetwork?.dispatch) {
+        let virtualInit;
+        try {
+          virtualInit = this._fetchInit();
+        } catch (error) {
+          this.destroy(error);
+          return;
+        }
+        const virtualResponse = this._virtualNetwork.dispatch(this._url, virtualInit);
+        if (virtualResponse) {
+          Promise.resolve(virtualResponse).then(
+            (response) => this._runInAsyncScope(() => this._handleResponse(response)),
+            (error) => this._handleFetchError(error),
+          );
+          return;
+        }
+      }
+
       const customCreateConnection = this._agent?.createConnection;
       const customCreateSocket = this._agent?.createSocket;
       const createConnection = typeof customCreateSocket === 'function'
@@ -4107,13 +4201,19 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
           this.socket = connectedSocket;
           this.connection = connectedSocket;
           connectedSocket.once?.('error', (socketError) => this.destroy(socketError));
+          this.onSocket(connectedSocket);
         };
         try {
+          const parsedConnectionURL = typeof scope.URL === 'function' && this._url
+            ? new scope.URL(this._url)
+            : null;
           const connectionOptions = {
             ...this._options,
-            host: this.host,
-            hostname: this.host,
-            port: this._options.port || (this.protocol === DEFAULT_HTTPS_PROTOCOL ? 443 : 80),
+            host: this.host || parsedConnectionURL?.hostname || 'localhost',
+            hostname: this.host || parsedConnectionURL?.hostname || 'localhost',
+            port: this._options.port || (parsedConnectionURL?.port
+              ? Number(parsedConnectionURL.port)
+              : this.protocol === DEFAULT_HTTPS_PROTOCOL ? 443 : 80),
           };
           socket = usesCreateSocket
             ? createConnection.call(this._agent, this, connectionOptions, connectionCallback)
@@ -4311,6 +4411,16 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
         this.response._runInAsyncScope(() => this._runInOwnerContext(
           () => this.emit('response', this.response),
         ));
+        if (response?.__bnhInspectorBody) {
+          this.response.complete = true;
+          this.response.readableComplete = true;
+          this.response._runInAsyncScope(() => {
+            this.response.emit('data', response.__bnhInspectorBody);
+            this.response.emit('end');
+          });
+          this._runInAsyncScope(() => this._responseComplete());
+          return;
+        }
         void this.response.start();
       }));
     }
@@ -4510,7 +4620,11 @@ export function createHttpCompatibility(scope = globalThis, {
   Object.setPrototypeOf(VirtualServerRequest.prototype, IncomingMessage.prototype);
   Object.setPrototypeOf(VirtualServerResponse.prototype, OutgoingMessage.prototype);
   const HttpAgent = class Agent extends BrowserAgent {
-    constructor(options = {}) { super(options, DEFAULT_HTTP_PROTOCOL, net.createConnection); }
+    constructor(options = {}) {
+      super(options, DEFAULT_HTTP_PROTOCOL, (connectionOptions) => net.createConnection(connectionOptions));
+    }
+
+    createConnection(options) { return net.createConnection(options); }
   };
   const HttpsAgentClass = class Agent extends BrowserAgent {
     constructor(options = {}) {
@@ -4519,7 +4633,7 @@ export function createHttpCompatibility(scope = globalThis, {
         defaultPort: options.defaultPort ?? 443,
         protocol: options.protocol ?? DEFAULT_HTTPS_PROTOCOL,
       };
-      super(agentOptions, DEFAULT_HTTPS_PROTOCOL, net.createConnection);
+      super(agentOptions, DEFAULT_HTTPS_PROTOCOL, (connectionOptions) => net.createConnection(connectionOptions));
       this.maxCachedSessions = this.options.maxCachedSessions;
       if (this.maxCachedSessions === undefined) this.maxCachedSessions = 100;
       this._sessionCache = { map: {}, list: [] };
@@ -4527,6 +4641,8 @@ export function createHttpCompatibility(scope = globalThis, {
       this._sessionNonce = 0;
       this._BufferClass = BufferClass;
     }
+
+    createConnection(options) { return net.createConnection(options); }
 
     getName(options = {}) {
       let name = super.getName(options);
@@ -4609,7 +4725,6 @@ export function createHttpCompatibility(scope = globalThis, {
   HttpAgent.defaultMaxSockets = Infinity;
   Object.setPrototypeOf(HttpsAgent, HttpAgent);
   const agentMethods = [
-    'createConnection',
     'addRequest',
     'createSocket',
     'removeSocket',

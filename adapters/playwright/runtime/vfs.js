@@ -159,7 +159,7 @@ function outOfRange(name, value, minimum, maximum) {
 
 function receivedArgumentValue(value) {
   if (value === null || value === undefined) return `Received ${value}`;
-  if (typeof value === 'function') return `Received function ${value.name || ''}`.trimEnd();
+  if (typeof value === 'function') return `Received function ${value.name || ''}`;
   if (typeof value === 'object') return `Received an instance of ${value.constructor?.name || 'Object'}`;
   if (typeof value === 'string') {
     const inspected = `'${value.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`;
@@ -765,6 +765,9 @@ export function createVfs(options = {}) {
 
   function access(path, operation, write = false) {
     const mount = findMount(path);
+    if (!mount && path === '/' && operation === 'open') {
+      return { path: '/', mode: 'read-only' };
+    }
     if (!mount) throw denied(path, operation);
     if (write && mount.mode === 'read-only') throw denied(path, operation);
     return mount;

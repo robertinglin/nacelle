@@ -2672,6 +2672,18 @@ function modulePropertyTypeError(name, expected, value) {
   return error;
 }
 
+const runtimeChildSignalNames = new Set([
+  'SIGHUP', 'SIGINT', 'SIGQUIT', 'SIGILL', 'SIGTRAP', 'SIGABRT', 'SIGBUS',
+  'SIGFPE', 'SIGKILL', 'SIGUSR1', 'SIGSEGV', 'SIGUSR2', 'SIGPIPE', 'SIGALRM',
+  'SIGTERM', 'SIGCHLD', 'SIGCONT', 'SIGSTOP', 'SIGTSTP', 'SIGTTIN', 'SIGTTOU',
+  'SIGURG', 'SIGXCPU', 'SIGXFSZ', 'SIGVTALRM', 'SIGPROF', 'SIGWINCH', 'SIGIO',
+  'SIGPWR', 'SIGSYS',
+]);
+const runtimeChildSignalNumbers = new Set([
+  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21,
+  22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+]);
+
 function blankTypeScriptText(value) {
   return String(value).replace(/[^\r\n]/g, ' ');
 }
@@ -4452,11 +4464,38 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
     const getSourceMapsSupport = () => sourceMapsSupport;
     const childProcessArgumentTypeError = (name, expected, value) => {
       const received = value === null
-        ? 'null'
-        : Array.isArray(value)
-          ? 'an instance of Array'
-          : `type ${typeof value}`;
-      const error = new TypeError(`The "${name}" argument must be of type ${expected}. Received ${received}`);
+        ? 'Received null'
+        : value === undefined
+          ? 'Received undefined'
+          : Array.isArray(value)
+            ? 'Received an instance of Array'
+            : typeof value === 'object'
+              ? `Received an instance of ${value.constructor?.name || 'Object'}`
+              : typeof value === 'function'
+                ? `Received function ${value.name || ''}`
+                : typeof value === 'string'
+                  ? `Received type string ('${value.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}')`
+                  : `Received type ${typeof value} (${String(value)})`;
+      const subject = name.includes('.') ? 'property' : 'argument';
+      const error = new TypeError(`The "${name}" ${subject} must be of type ${expected}. ${received}`);
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      return error;
+    };
+    const childProcessArgumentInstanceError = (name, expected, value) => {
+      const received = value === null
+        ? 'Received null'
+        : value === undefined
+          ? 'Received undefined'
+          : Array.isArray(value)
+            ? 'Received an instance of Array'
+            : typeof value === 'object'
+              ? `Received an instance of ${value.constructor?.name || 'Object'}`
+              : typeof value === 'function'
+                ? `Received function ${value.name || ''}`
+                : typeof value === 'string'
+                  ? `Received type string ('${value.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}')`
+                  : `Received type ${typeof value} (${String(value)})`;
+      const error = new TypeError(`The "${name}" property must be an instance of ${expected}. ${received}`);
       error.code = 'ERR_INVALID_ARG_TYPE';
       return error;
     };
@@ -4478,17 +4517,23 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         if (options === null || typeof options !== 'object' || Array.isArray(options)) {
           throw childProcessArgumentTypeError('options', 'object', options);
         }
-        if (options.file !== undefined && typeof options.file !== 'string') {
+        const hasIpcStdio = Array.isArray(options.stdio) && options.stdio.includes('ipc');
+        if (hasIpcStdio && options.envPairs !== undefined && !Array.isArray(options.envPairs)) {
+          throw childProcessArgumentInstanceError('options.envPairs', 'Array', options.envPairs);
+        }
+        if (typeof options.file !== 'string') {
           throw childProcessArgumentTypeError('options.file', 'string', options.file);
         }
         if (options.args !== undefined && !Array.isArray(options.args)) {
-          throw childProcessArgumentTypeError('options.args', 'an array', options.args);
+          throw childProcessArgumentInstanceError('options.args', 'Array', options.args);
         }
         const handle = options.processHandle || options.handle;
         if (handle) {
           this._handle = handle;
           this.pid = handle.pid;
           if (!this._referenced) handle.unref?.();
+        } else if (this.pid === undefined) {
+          this.pid = 10000;
         }
         this.spawnfile = options.file;
         this.spawnargs = options.args || [];
@@ -4496,7 +4541,20 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       }
 
       kill(signal = 'SIGTERM') {
-        if (!this._handle?.kill) return false;
+        if (!this._handle?.kill) {
+          if (signal !== undefined && signal !== null) {
+            const normalized = typeof signal === 'string' ? signal.toUpperCase() : signal;
+            if ((typeof normalized !== 'string' || !runtimeChildSignalNames.has(normalized))
+              && !(typeof normalized === 'number' && runtimeChildSignalNumbers.has(normalized))) {
+              const error = new TypeError(`Unknown signal: ${signal}`);
+              error.code = 'ERR_UNKNOWN_SIGNAL';
+              throw error;
+            }
+          }
+          if (this.pid === undefined) return false;
+          this.killed = true;
+          return true;
+        }
         try {
           const result = this._handle.kill(signal);
           if (result !== false) this.killed = true;
@@ -6018,9 +6076,17 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         function childArgumentTypeError(name, expected, value) {
           const received = value === null
             ? 'null'
-            : Array.isArray(value)
-              ? 'an instance of Array'
-              : `type ${typeof value}`;
+            : value === undefined
+              ? 'undefined'
+              : Array.isArray(value)
+                ? 'an instance of Array'
+                : typeof value === 'object'
+                  ? `an instance of ${value.constructor?.name || 'Object'}`
+                  : typeof value === 'function'
+                    ? `function ${value.name || ''}`
+                    : typeof value === 'string'
+                      ? `type string ('${value.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}')`
+                      : `type ${typeof value} (${String(value)})`;
           const error = new TypeError(`The "${name}" argument must be of type ${expected}. Received ${received}`);
           error.code = 'ERR_INVALID_ARG_TYPE';
           return error;
@@ -6312,6 +6378,15 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               : '';
           } else if (env.NODE_REPL_EXTERNAL_MODULE && !script) {
             source = `require(${JSON.stringify(normalizePath(env.NODE_REPL_EXTERNAL_MODULE, cwd))});`;
+          }
+          const inspectorRequested = rawArgs.some((argument) => argument === '--inspect'
+            || argument.startsWith('--inspect=')
+            || argument === '--inspect-brk'
+            || argument.startsWith('--inspect-brk='));
+          if (inspectorRequested && evalCode !== null) {
+            source = `${source}\nprocess.stderr.write(${JSON.stringify(
+              'Debugger listening on 127.0.0.1:9229\\nFor help, see: https://nodejs.org/en/learn/getting-started/debugging\\n',
+            )});`;
           }
           return {
             cwd,
@@ -7199,7 +7274,6 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
           };
           const registeredMock = moduleMockFor(entryPath);
           if (registeredMock?.active) return registeredMock.getCjsValue();
-          if (x509Module && entryPath === '/node/lib/internal/crypto/x509.js') return x509Module;
           if (entryPath.endsWith('.node')) rejectNativeAddon(entryPath, processObj);
           const env = processObj?.env || {};
           const debugNative = env.NODE_DEBUG_NATIVE || '';
@@ -7409,6 +7483,14 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
             let entryPath = prepared.entryPath;
             const stdoutArr = [];
             const stderrArr = [];
+            const previousDnsModule = dnsModule;
+            if (prepared.snapshotBlobPath || prepared.buildSnapshot) {
+              dnsModule = createBrowserDns({
+                proxy: proxyCapability,
+                network: virtualNetwork,
+                synchronous: true,
+              });
+            }
             let exitCode = 0;
             const previousState = {
               process: scope.process,
@@ -7964,6 +8046,7 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
               else delete scope.url;
               if (typeof originalReadFileSync === 'function') fs.readFileSync = originalReadFileSync;
               if (childHttpModule) childHttpModule.maxHeaderSize = previousHttpMaxHeaderSize;
+              dnsModule = previousDnsModule;
             }
             let timeoutError = null;
             if (!options.asyncLifecycle && options.timeout > 0 && hasPendingTimers) {

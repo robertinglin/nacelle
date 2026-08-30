@@ -32,8 +32,12 @@ You can import `nacelle` directly in browser scripts via modern CDNs:
     }
   });
 
-  const proc = await node.run({ entry: '/app/index.js' });
-  console.log(await proc.stdoutText());
+const proc = await node.run({ entry: '/app/index.js' });
+console.log(await proc.stdoutText());
+
+// Run shell lines directly in the virtual filesystem
+const shell = await node.bash('NODE_ENV=production echo "$NODE_ENV" | sed \'s/production/ready/\'');
+console.log(await shell.stdoutText());
 </script>
 ```
 
@@ -115,9 +119,31 @@ npm run examples:vite-react
 
 # Run Native WASM Addons example
 npm run examples:wasm
+
+# Try the inline bash compatibility demo
+npm run examples:bash
+
+# Try the TypeScript strip-and-run demo
+npm run examples:typescript
 ```
 
 Each example page includes a navigation menu (☰) at the top to easily switch between examples.
+
+### Inline shell execution
+
+`node.bash(command, options)` runs the supported POSIX shell subset against the virtual filesystem and returns a normal `ProcessHandle`. It supports npm-style command lists, environment assignments, PATH lookup, pipes, redirects, globbing, and common commands including `mv`, `cp`, `ls`, `ps`, `grep`, `cat`, `find`, `cut`, `tr`, `sort`, `uniq`, `tee`, `head`, `tail`, `wc`, `mkdir`, `rm`, and `touch`:
+
+```javascript
+const proc = await node.bash(`
+  mkdir -p dist &&
+  echo "built in $NODE_ENV" > dist/status.txt &&
+  cat dist/status.txt
+`, { env: { NODE_ENV: 'production' } });
+
+console.log(await proc.stdoutText());
+```
+
+The TypeScript demo uses the browser runtime's `module.stripTypeScriptTypes()` implementation from an inline bash build script, then executes the emitted JavaScript.
 
 ---
 

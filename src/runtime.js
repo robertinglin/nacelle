@@ -2288,7 +2288,11 @@ const COMMONJS_WRAPPER_PARAMETERS = Object.freeze([
   'require', 'module', 'exports', '__filename', '__dirname', '__bnhImport',
 ]);
 function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = null) {
-  const sourceText = `${String(source).replace(/\bimport\s*\(/g, '__bnhImport(')}\n//# sourceURL=${sourceURL}`;
+  // npm bin shims are executable text files and commonly start with a
+  // shebang, which JavaScript's Function constructor cannot parse.
+  const sourceText = `${String(source)
+    .replace(/^#![^\r\n]*(?:\r\n|\n|$)/, (shebang) => shebang.endsWith('\n') ? '\n' : '')
+    .replace(/\bimport\s*\(/g, '__bnhImport(')}\n//# sourceURL=${sourceURL}`;
   if (moduleWrapper) {
     const prefix = String(moduleWrapper[0]).replace('__dirname) {', '__dirname, __bnhImport) {');
     const wrappedSource = `${prefix}${sourceText}${moduleWrapper[1]}`;
@@ -2720,7 +2724,7 @@ function stripTypeScriptSource(source) {
   // Type annotations are recognized at JavaScript delimiters so ordinary
   // object-literal properties and strings are left untouched.
   result = result.replace(
-    /[!?]?\s*:\s*[A-Za-z_$][\w$]*(?:\s*<[^>\n]*>)?(?:\s*\[\s*\])?(?:\s*\|\s*[A-Za-z_$][\w$]*(?:\s*<[^>\n]*>)?(?:\s*\[\s*\])?)*(?=\s*(?:[,)=;{]|=>|$))/g,
+    /[!?]?\s*:\s*[A-Za-z_$][\w$]*(?:\s*<[^>\n]*>)?(?:\s*\[\s*\])?(?:\s*\|\s*[A-Za-z_$][\w$]*(?:\s*<[^>\n]*>)?(?:\s*\[\s*\])?)*(?=\s*(?:[,)=;{=]|$))/g,
     (annotation) => blankTypeScriptText(annotation),
   );
   result = result.replace(
@@ -6101,11 +6105,15 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
       url: nodeUrl, util: (() => {
         const inspectFn = (value, options) => nodeInspect(value, options ?? {});
         inspectFn.custom = Symbol.for('nodejs.util.inspect.custom');
-        const utilCompat = createUtilModule(Object.assign(Object.create(scope), {
-          Buffer,
-          process: processObject,
-          console: processObject._bnhConsole || scope.console,
-        }), resolveKeyObject);
+        const utilScope = Object.create(scope);
+        // Object.assign would route these writes through an inherited global
+        // process accessor when the runtime is hosted by Node.
+        Object.defineProperties(utilScope, {
+          Buffer: { configurable: true, enumerable: true, value: Buffer, writable: true },
+          process: { configurable: true, enumerable: true, value: processObject, writable: true },
+          console: { configurable: true, enumerable: true, value: processObject._bnhConsole || scope.console, writable: true },
+        });
+        const utilCompat = createUtilModule(utilScope, resolveKeyObject);
         const getCallSites = createGetCallSites();
         const getCallSite = (...args) => {
           processObject.emitWarning?.(
@@ -8468,7 +8476,12 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
   }
 
   async function execute(entry, options, stdout, stderr) {
-    installBrowserAbortSignalCompatibility(scope);
+    // The browser compatibility layer patches host AbortSignal methods. Keep
+    // Node-side consumers isolated because Node already provides these APIs.
+    const usesHostNodeGlobals = scope === globalThis
+      && scope.process?.release?.name === 'node'
+      && typeof scope.process?.versions?.node === 'string';
+    if (!usesHostNodeGlobals) installBrowserAbortSignalCompatibility(scope);
     scope.__BNH_BROWSER_WORKERS__ ||= new Set();
     if (options.workerThread) {
       environmentData.clear();
@@ -8645,6 +8658,10 @@ export function createRuntime({ globalObject = globalThis, version = 'browser-na
         })()
       : fullProcessData;
     const processObject = processData.processObject;
+    if (options.stdin !== undefined && processObject.stdin?.push) {
+      processObject.stdin.push(options.stdin);
+      processObject.stdin.push(null);
+    }
     Object.defineProperty(processObject, '_bnhTraceEventsUnavailable', {
       configurable: true,
       enumerable: false,

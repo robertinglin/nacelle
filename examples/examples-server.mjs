@@ -39,6 +39,8 @@ const mimeTypes = {
   '.js': 'application/javascript; charset=utf-8',
   '.mjs': 'application/javascript; charset=utf-8',
   '.jsx': 'application/javascript; charset=utf-8',
+  '.ts': 'application/javascript; charset=utf-8',
+  '.tsx': 'application/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml',
@@ -151,7 +153,11 @@ const targetUrl = process.argv.includes('--wasm')
   ? wasmUrl
   : (process.argv.includes('--vite-react') || process.argv.includes('--vite'))
     ? viteReactUrl
-    : expressUrl;
+    : process.argv.includes('--typescript')
+      ? `http://127.0.0.1:${port}/typescript.html`
+      : process.argv.includes('--bash')
+        ? `http://127.0.0.1:${port}/bash.html`
+        : expressUrl;
 
 console.log('\n======================================================');
 console.log('  🚀 browser-node Examples Server');
@@ -159,6 +165,8 @@ console.log('======================================================');
 console.log(`\n  Express Example:      \x1b[36m${expressUrl}\x1b[0m`);
 console.log(`  Vite + React Example: \x1b[36m${viteReactUrl}\x1b[0m`);
 console.log(`  WASM Addon Example:   \x1b[36m${wasmUrl}\x1b[0m\n`);
+console.log(`  Bash Shell Example:   \x1b[36mhttp://127.0.0.1:${port}/bash.html\x1b[0m`);
+console.log(`  TypeScript Example:   \x1b[36mhttp://127.0.0.1:${port}/typescript.html\x1b[0m\n`);
 console.log(`  Target URL:           \x1b[32m${targetUrl}\x1b[0m\n`);
 
 let browser = null;

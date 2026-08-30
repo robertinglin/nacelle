@@ -40,6 +40,27 @@ export interface RunScriptOptions {
   onStderr?: (chunk: string) => void;
   /** Abort signal to cancel or terminate execution */
   signal?: AbortSignal;
+  /** Initial standard input for shell pipelines and Node scripts */
+  stdin?: string | Uint8Array;
+  /** Timeout in milliseconds */
+  timeout?: number;
+}
+
+export interface BashOptions {
+  /** Additional positional arguments available to the final shell command */
+  args?: string[];
+  /** Additional environment variables */
+  env?: Record<string, string>;
+  /** Working directory */
+  cwd?: string;
+  /** Callback for stdout stream chunks */
+  onStdout?: (chunk: string) => void;
+  /** Callback for stderr stream chunks */
+  onStderr?: (chunk: string) => void;
+  /** Abort signal to cancel execution */
+  signal?: AbortSignal;
+  /** Initial standard input */
+  stdin?: string | Uint8Array;
   /** Timeout in milliseconds */
   timeout?: number;
 }
@@ -85,6 +106,8 @@ export interface ProcessRunOptions {
   onStderr?: (chunk: string) => void;
   /** Abort signal */
   signal?: AbortSignal;
+  /** Initial standard input */
+  stdin?: string | Uint8Array;
 }
 
 export interface ProcessHandle {
@@ -143,6 +166,7 @@ export class Nacelle {
   fetch(url: string, options?: RequestInit): Promise<Response>;
   run(options: ProcessRunOptions): Promise<ProcessHandle>;
   runScript(scriptName: string, options?: RunScriptOptions): Promise<ProcessHandle>;
+  bash(command: string, options?: BashOptions): Promise<ProcessHandle>;
   execute(code: string, options?: ProcessRunOptions): Promise<ProcessHandle>;
   on(event: string, listener: (...args: any[]) => void): this;
   off(event: string, listener: (...args: any[]) => void): this;
@@ -155,6 +179,40 @@ export function parseScriptCommand(cmdString: string): {
   env: Record<string, string>;
   tokens: string[];
 };
+
+export interface ShellWordPart {
+  text: string;
+  expandVariables: boolean;
+  glob: boolean;
+}
+
+export interface ShellWord {
+  type: 'word';
+  parts: ShellWordPart[];
+}
+
+export type ShellToken = ShellWord | {
+  type: 'operator';
+  value: string;
+};
+
+export interface ShellRedirect {
+  operator: string;
+  target?: ShellWord;
+}
+
+export interface ShellCommand {
+  words: ShellWord[];
+  redirects: ShellRedirect[];
+}
+
+export interface ShellPipeline {
+  connector: null | '&&' | '||' | ';';
+  commands: ShellCommand[];
+}
+
+export function tokenizeShellScript(command: string): ShellToken[];
+export function parseShellScript(command: string): ShellPipeline[];
 
 export function createRuntime(options?: any): any;
 export const runtime: any;

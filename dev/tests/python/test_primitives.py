@@ -20,6 +20,14 @@ class PrimitiveTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown primitive"):
             primitive_specs(("not-a-primitive",))
 
+    def test_shell_is_a_base_primitive(self) -> None:
+        spec = primitive_specs(("shell",))[0]
+        test = primitive_tests(("shell",))[0]
+
+        self.assertIn("base shell primitive", spec.goal)
+        self.assertEqual(test.path, ".bnh/primitives/shell.js")
+        self.assertIn("spawnSync", test.source_override)
+
     def test_expanded_contracts_are_registered_for_the_loop(self) -> None:
         names = ("globals", "data-encoding-serialization", "system-platform-crypto")
         tests = primitive_tests(names)

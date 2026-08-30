@@ -39,6 +39,19 @@ fs.unlinkSync(path);
 """,
     ),
     PrimitiveSpec(
+        "shell",
+        "Provide the base shell primitive for command lookup, environment forwarding, and exit status.",
+        """const assert = require('node:assert');
+const { spawnSync } = require('node:child_process');
+const result = spawnSync('/browser/node', ['-e', 'process.stdout.write(process.env.BNH_SHELL_PRIMITIVE)'], {
+  shell: true,
+  env: { ...process.env, BNH_SHELL_PRIMITIVE: 'shell-ok' },
+});
+assert.strictEqual(result.status, 0);
+assert.strictEqual(result.stdout.toString(), 'shell-ok');
+""",
+    ),
+    PrimitiveSpec(
         "network",
         "Provide the browser network boundary through the Node-facing fetch contract.",
         """const assert = require('node:assert');

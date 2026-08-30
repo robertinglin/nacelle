@@ -1746,7 +1746,10 @@ export class ClientHttp2Session extends EventEmitter {
           }
         });
       }
-      if (this._proxy) {
+      // Browser-local virtual servers and caller-supplied transports already
+      // have an in-realm route. Only unbound outbound sessions need the
+      // host-network proxy capability.
+      if (this._proxy && !this._server && !this._connection) {
         const result = await this._proxy.connect({
           target: `${this._authority.host}:${this._authority.port}`,
           hostname: this._authority.host,

@@ -28,12 +28,14 @@ function connect() {
   if (port) return port;
   try { port = api.runtime.connect({ name: PORT_NAME }); } catch { return null; }
   port.onMessage.addListener((message) => {
-    if (!message || typeof message.requestId !== 'string') return;
+    if (!message || !REQUEST_ID_PATTERN.test(String(message.requestId || ''))) return;
     if (message.type === 'response-start') {
       postToPage({ source: EXTENSION_SOURCE, type: 'response-start', requestId: message.requestId, response: message.response });
-    } else if (message.type === 'response-chunk' && message.body instanceof ArrayBuffer) {
-      postToPage({ source: EXTENSION_SOURCE, type: 'response-chunk', requestId: message.requestId, body: message.body }, [message.body]);
-      sendPort({ type: 'chunk-ack', requestId: message.requestId, sequence: message.sequence });
+    } else if (message.type === 'response-chunk' && message.body instanceof ArrayBuffer
+      && Number.isInteger(message.sequence) && message.sequence > 0) {
+      postToPage({ source: EXTENSION_SOURCE, type: 'response-chunk', requestId: message.requestId, sequence: message.sequence, body: message.body }, [message.body]);
+      // The page adapter acknowledges after its ReadableStream has capacity.
+      // This keeps a stalled page from making the extension drain the network.
     } else if (message.type === 'response-end') {
       requestIds.delete(message.requestId);
       postToPage({ source: EXTENSION_SOURCE, type: 'response-end', requestId: message.requestId });
@@ -49,7 +51,7 @@ function connect() {
         source: EXTENSION_SOURCE,
         type: 'response-error',
         requestId,
-        response: { ok: false, error: { code: 'ERR_NACELLE_PLUS_BRIDGE_DISCONNECTED', message: 'Nacelle+ transport disconnected' } },
+        response: { ok: false, error: { code: 'ERR_NACELLE_PLUS_TRANSPORT_LOST', message: 'Nacelle+ transport disconnected before the response completed' } },
       });
     }
     requestIds.clear();
@@ -69,6 +71,10 @@ window.addEventListener('message', (event) => {
   const message = event.data;
   if (!message || message.source !== PAGE_SOURCE || message.version !== 1
     || typeof message.requestId !== 'string' || !REQUEST_ID_PATTERN.test(message.requestId)) return;
+  if (message.type === 'chunk-ack' && Number.isInteger(message.sequence) && message.sequence > 0) {
+    sendPort({ type: 'chunk-ack', requestId: message.requestId, sequence: message.sequence });
+    return;
+  }
   if (message.type === 'cancel') {
     sendPort({ type: 'cancel', requestId: message.requestId });
     return;

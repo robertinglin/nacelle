@@ -15,7 +15,8 @@ function messageScope(onPostMessage) {
 test('Nacelle+ page adapter round-trips a request over the message bridge', async () => {
   let posted;
   const scope = messageScope((message, _transfer, respond) => {
-    if (message.type === 'request') posted = message;
+    if (message.type !== 'request') return;
+    posted = message;
     queueMicrotask(() => respond({
       data: {
         source: 'nacelle-plus-extension',
@@ -25,7 +26,7 @@ test('Nacelle+ page adapter round-trips a request over the message bridge', asyn
       },
     }));
     queueMicrotask(() => respond({
-      data: { source: 'nacelle-plus-extension', type: 'response-chunk', requestId: message.requestId, body: new TextEncoder().encode('streamed').buffer },
+      data: { source: 'nacelle-plus-extension', type: 'response-chunk', requestId: message.requestId, sequence: 1, body: new TextEncoder().encode('streamed').buffer },
     }));
     queueMicrotask(() => respond({
       data: { source: 'nacelle-plus-extension', type: 'response-end', requestId: message.requestId },
@@ -39,6 +40,26 @@ test('Nacelle+ page adapter round-trips a request over the message bridge', asyn
   assert.equal(posted.request.target, 'https://api.example.test/health');
   assert.equal(response.status, 200);
   assert.equal(await new Response(response.body).text(), 'streamed');
+  adapter.close();
+});
+
+test('Nacelle+ reports a deterministic error when the extension bridge is lost', async () => {
+  const scope = messageScope((message, _transfer, respond) => {
+    if (message.type !== 'request') return;
+    queueMicrotask(() => respond({
+      data: {
+        source: 'nacelle-plus-extension',
+        type: 'response-error',
+        requestId: message.requestId,
+        response: { ok: false, error: { code: 'ERR_NACELLE_PLUS_TRANSPORT_LOST', message: 'extension restarted' } },
+      },
+    }));
+  });
+  const adapter = createNacellePlusAdapter({ globalObject: scope, timeout: 100 });
+  await assert.rejects(
+    adapter.request({ target: 'https://api.example.test/restart', headers: {} }),
+    { code: 'ERR_NACELLE_PLUS_TRANSPORT_LOST' },
+  );
   adapter.close();
 });
 

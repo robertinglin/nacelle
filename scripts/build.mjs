@@ -28,7 +28,7 @@ for (const arg of args) {
 }
 
 console.log(`\n======================================================`);
-console.log(`  📦 Building browser-node for Node ${nodeVersion}`);
+console.log(`  📦 Building nacelle for Node ${nodeVersion}`);
 console.log(`======================================================\n`);
 
 // 1. Clean dist directory
@@ -72,14 +72,14 @@ fs.copyFileSync(path.join(srcDir, 'types.d.ts'), path.join(distDir, 'index.d.ts'
 
 // CJS wrapper
 const cjsWrapper = `
-// browser-node CJS wrapper
+// nacelle CJS wrapper
 module.exports = require('./index.js');
 `;
 fs.writeFileSync(path.join(distDir, 'index.cjs'), cjsWrapper.trim() + '\n');
 
 // Version metadata
 const versionMeta = {
-  name: 'browser-node',
+  name: 'nacelle',
   nodeTargetVersion: nodeVersion,
   buildTime: new Date().toISOString(),
 };

@@ -1,32 +1,32 @@
-# browser-node
+# nacelle
 
-**Full Node.js standard library and runtime executing entirely in the browser.**
+**Self-contained Node.js execution engine and virtual runtime in the browser.**
 
-Powered by WebAssembly, Web Workers, Virtual Filesystems (VFS), and in-browser networking, `browser-node` lets you run Node.js code, standard libraries, and npm packages directly inside client browsers with zero server execution.
+Powered by WebAssembly, Web Workers, Virtual Filesystems (VFS), and in-browser networking, `nacelle` lets you run Node.js code, standard libraries, and npm packages directly inside client browsers with zero server execution.
 
 ---
 
 ## Installation & Release Channels
 
-Install `browser-node` using your preferred package manager and release channel:
+Install `nacelle` using your preferred package manager and release channel:
 
 ```bash
 # Install the latest Node v22 browser runtime build
-npm install browser-node@v22
+npm install nacelle@n22
 
 # Or install the latest default release
-npm install browser-node@latest
+npm install nacelle@latest
 ```
 
 ### CDN / Direct Browser Import (ESM)
 
-You can import `browser-node` directly in browser scripts via modern CDNs:
+You can import `nacelle` directly in browser scripts via modern CDNs:
 
 ```html
 <script type="module">
-  import { BrowserNode } from 'https://esm.sh/browser-node@v22';
+  import { Nacelle } from 'https://esm.sh/nacelle@n22';
 
-  const node = await BrowserNode.create({
+  const node = await Nacelle.create({
     files: {
       '/app/index.js': `console.log('Hello from Node ' + process.version + ' in your browser!');`
     }
@@ -41,13 +41,13 @@ You can import `browser-node` directly in browser scripts via modern CDNs:
 
 ## Quick Start
 
-### 1. High-Level API (`BrowserNode`)
+### 1. High-Level API (`Nacelle`)
 
 ```javascript
-import { BrowserNode } from 'browser-node';
+import { Nacelle } from 'nacelle';
 
-// Initialize a browser Node instance
-const node = await BrowserNode.create({
+// Initialize an in-browser Node engine instance
+const node = await Nacelle.create({
   cwd: '/workspace',
   env: { NODE_ENV: 'development' },
   files: {
@@ -93,12 +93,12 @@ await node.npm.install('express');
 
 ## Subpath Exports
 
-- `browser-node` -> Main bundle (`BrowserNode`, `createRuntime`, `runtime`)
-- `browser-node/v22` -> Explicit Node v22 runtime entry
-- `browser-node/runtime` -> Low-level runtime assembly and module loader
-- `browser-node/worker` -> Dedicated Web Worker process script
-- `browser-node/sw` -> Virtual network gateway Service Worker
-- `browser-node/wasm/*` -> Precompiled native WebAssembly modules
+- `nacelle` -> Main bundle (`Nacelle`, `createRuntime`, `runtime`)
+- `nacelle/v22` -> Explicit Node v22 runtime entry
+- `nacelle/runtime` -> Low-level runtime assembly and module loader
+- `nacelle/worker` -> Dedicated Web Worker process script
+- `nacelle/sw` -> Virtual network gateway Service Worker
+- `nacelle/wasm/*` -> Precompiled native WebAssembly modules
 
 ---
 
@@ -123,4 +123,4 @@ Each example page includes a navigation menu (☰) at the top to easily switch b
 
 ## License
 
-MIT © Browser Node Team
+MIT © Nacelle Contributors

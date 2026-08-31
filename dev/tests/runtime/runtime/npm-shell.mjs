@@ -322,6 +322,74 @@ require('node:fs').writeFileSync('dist/result.txt', greeting);
   assert.equal(await node.fs.readFile('/node/dist/result.txt'), 'Hello Ada from tsc Compiler');
 });
 
+test('inline bash can orchestrate Next.js App Router server and build commands', async () => {
+  const nextLib = `
+const http = require('node:http');
+function createNextServer() {
+  const server = http.createServer((req, res) => {
+    if (req.url === '/api/hello') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', framework: 'Next.js 14 App Router' }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end('<h1>▲ Next.js 14 App Router</h1>');
+  });
+  return {
+    listen(port, cb) { return server.listen(port, '127.0.0.1', cb); },
+    close() { return server.close(); },
+  };
+}
+module.exports = { createNextServer };
+`;
+
+  const nextBin = `#!/usr/bin/env node
+const fs = require('node:fs');
+const http = require('node:http');
+const { createNextServer } = require('next');
+const cmd = process.argv[2] || 'dev';
+if (cmd === 'build') {
+  fs.mkdirSync('.next', { recursive: true });
+  fs.writeFileSync('.next/BUILD_ID', 'build-14.2.5');
+  console.log('✓ Next.js build completed');
+  process.exit(0);
+}
+const app = createNextServer();
+app.listen(3000, () => console.log('✓ Next.js dev server ready'));
+`;
+
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/package.json': JSON.stringify({
+        name: 'nextjs-fixture',
+        version: '14.2.5',
+        scripts: {
+          dev: 'next dev',
+          build: 'next build',
+        },
+      }),
+      '/node/node_modules/next/package.json': JSON.stringify({ name: 'next', version: '14.2.5', main: 'index.js' }),
+      '/node/node_modules/next/index.js': nextLib,
+      '/node/node_modules/next/bin/next': nextBin,
+      '/node/node_modules/.bin/next': '#!/usr/bin/env node\nrequire("../next/bin/next");\n',
+      '/node/app/page.tsx': 'export default function Page() { return <h1>▲ Next.js 14 App Router</h1>; }',
+    },
+  });
+
+  const buildChild = await node.bash('npm run build');
+  assert.equal(await buildChild.exit, 0);
+  assert.equal(await node.fs.readFile('/node/.next/BUILD_ID'), 'build-14.2.5');
+
+  const devChild = await node.bash('npm run dev');
+  await new Promise((r) => setTimeout(r, 100));
+  const res = await node.fetch('http://localhost:3000/api/hello');
+  const data = await res.json();
+  assert.equal(data.framework, 'Next.js 14 App Router');
+  assert.equal(data.status, 'ok');
+  devChild.kill();
+});
+
 test('npm scripts stream stdout chunks in real time before command exit', async () => {
   const node = await Nacelle.create({
     gateway: false,
@@ -344,4 +412,5 @@ test('npm scripts stream stdout chunks in real time before command exit', async 
   await child.exit;
   assert.deepEqual(streamed, ['server listening on 3000\n']);
 });
+
 

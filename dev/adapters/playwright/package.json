@@ -13,6 +13,7 @@
     "test:real-npm": "playwright test tests/express-real-npm.spec.mjs --workers=1",
     "test:vite-react": "playwright test tests/vite-react-demo.spec.mjs --workers=1",
     "test:typescript": "playwright test tests/typescript-demo.spec.mjs --workers=1",
+    "test:next": "playwright test tests/nextjs-demo.spec.mjs --workers=1",
     "test:browser": "node tests/run-browser-tests.mjs",
     "test:wasm": "playwright test tests/wasm-demo.spec.mjs --workers=1",
     "dev": "node ../../scripts/dev-express.mjs",

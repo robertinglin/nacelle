@@ -54,6 +54,7 @@ const testFiles = process.env.BNH_BROWSER_TEST_FILES
     'tests/express-iframe.spec.mjs',
     'tests/vite-react-demo.spec.mjs',
     'tests/typescript-demo.spec.mjs',
+    'tests/nextjs-demo.spec.mjs',
     'tests/bridge-runtime.spec.mjs',
     'tests/adapter-env.spec.mjs',
     'tests/node-test-loader-boundaries.spec.mjs',

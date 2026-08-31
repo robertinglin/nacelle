@@ -16,7 +16,25 @@ function runtimeFor(nodeVersion) {
 }
 
 export async function runProcessEntry(context) {
-  const descriptor = context.vfs;
+  const sourceDescriptor = context.vfs;
+  const descriptor = sourceDescriptor?.proxy?.rpc
+    ? {
+        ...sourceDescriptor,
+        proxy: {
+          ...sourceDescriptor.proxy,
+          adapter: {
+            request: async (request) => {
+              if (typeof context.process?.__bnhProxyRequest !== 'function') {
+                const error = new Error('proxy RPC is unavailable in this worker');
+                error.code = 'ERR_NACELLE_PROXY_RPC_UNAVAILABLE';
+                throw error;
+              }
+              return context.process.__bnhProxyRequest(request);
+            },
+          },
+        },
+      }
+    : sourceDescriptor;
   if (!descriptor?.capabilities || !descriptor.files) {
     const error = new Error('worker VFS descriptor is missing');
     error.code = 'ERR_INVALID_CAPABILITY';
@@ -49,6 +67,16 @@ export async function runProcessEntry(context) {
     (value) => context.stdout(value),
     (value) => context.stderr(value),
   );
+  const uncaught = context.process?.__bnhUncaughtException;
+  if (uncaught) {
+    const error = Object.assign(new Error(String(uncaught.message || uncaught)), {
+      name: uncaught.name || 'Error',
+      stack: uncaught.stack,
+      code: uncaught.code || 'ERR_WORKER_EXCEPTION',
+    });
+    delete context.process.__bnhUncaughtException;
+    throw error;
+  }
   // The outer browser worker owns the terminal frame. Preserve the code
   // computed by the injected runtime process so natural completion reports
   // process.exitCode instead of the bootstrap default of zero.

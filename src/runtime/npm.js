@@ -1,5 +1,37 @@
 import { unpackTarGz } from './tar.js';
 
+function npmSecurityError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function base64(bytes) {
+  let text = '';
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    text += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  }
+  if (typeof btoa === 'function') return btoa(text);
+  return globalThis.Buffer ? globalThis.Buffer.from(text, 'binary').toString('base64') : text;
+}
+
+async function verifyIntegrity(bytes, integrity, globalObject = globalThis) {
+  if (!integrity) return true;
+  const [algorithmName, expected] = String(integrity).split('-', 2);
+  const algorithm = ({
+    sha1: 'SHA-1',
+    sha256: 'SHA-256',
+    sha512: 'SHA-512',
+  })[String(algorithmName || '').toLowerCase()];
+  if (!['SHA-1', 'SHA-256', 'SHA-512'].includes(algorithm) || !expected) {
+    throw npmSecurityError('ERR_NPM_INTEGRITY', 'unsupported package integrity metadata');
+  }
+  if (!globalObject.crypto?.subtle) throw npmSecurityError('ERR_NPM_INTEGRITY', 'package integrity cannot be verified in this environment');
+  const digest = await globalObject.crypto.subtle.digest(algorithm, bytes);
+  if (base64(new Uint8Array(digest)) !== expected) throw npmSecurityError('ERR_NPM_INTEGRITY', 'package integrity verification failed');
+  return true;
+}
+
 export function parseSemver(v) {
   const clean = String(v || '').trim().replace(/^[=v]/, '');
   const match = clean.match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$/);
@@ -338,6 +370,8 @@ export class BrowserNpm {
     fetchFn = typeof fetch === 'function' ? fetch : null,
     globalObject = globalThis,
     proxyUrl = undefined,
+    limits = {},
+    lifecycleScripts = false,
   } = {}) {
     this.vfs = vfs;
     this.registry = registry.replace(/\/+$/, '');
@@ -364,6 +398,12 @@ export class BrowserNpm {
     const rawFetch = fetchFn || (typeof this.globalObject.fetch === 'function' ? this.globalObject.fetch : (typeof fetch === 'function' ? fetch : null));
     this.fetchFn = rawFetch ? (url, init) => rawFetch.call(this.globalObject, url, init) : null;
     this.installed = new Map(); // name -> version
+    this.limits = {
+      maxEntries: limits.maxEntries ?? 10_000,
+      maxExpandedBytes: limits.maxExpandedBytes ?? 128 * 1024 * 1024,
+      maxCompressionRatio: limits.maxCompressionRatio ?? 100,
+    };
+    this.lifecycleScripts = lifecycleScripts === true;
   }
 
   async fetchPackageMetadata(packageName, { onProgress = null } = {}) {
@@ -437,10 +477,11 @@ export class BrowserNpm {
     throw new Error(`No matching version found for ${metadata.name}@${range}`);
   }
 
-  async fetchTarball(tarballUrl, { name = '', version = '', onProgress = null } = {}) {
+  async fetchTarball(tarballUrl, { name = '', version = '', integrity = '', onProgress = null } = {}) {
     const cacheKey = `tarball:${tarballUrl}`;
     const cached = await this.cache.getTarball(cacheKey);
     if (cached) {
+      await verifyIntegrity(cached, integrity, this.globalObject);
       onProgress?.({ phase: 'cache-hit-tarball', name, version, bytes: cached.byteLength });
       return cached;
     }
@@ -448,6 +489,7 @@ export class BrowserNpm {
     const pkgKey = `pkg-tarball:${name}@${version}`;
     const cachedByPkg = await this.cache.getTarball(pkgKey);
     if (cachedByPkg) {
+      await verifyIntegrity(cachedByPkg, integrity, this.globalObject);
       onProgress?.({ phase: 'cache-hit-tarball', name, version, bytes: cachedByPkg.byteLength });
       return cachedByPkg;
     }
@@ -477,6 +519,7 @@ export class BrowserNpm {
     }
     const buffer = await response.arrayBuffer();
     const bytes = new Uint8Array(buffer);
+    await verifyIntegrity(bytes, integrity, this.globalObject);
     await this.cache.setTarball(cacheKey, bytes, { name, version });
     await this.cache.setTarball(pkgKey, bytes, { name, version });
     return bytes;
@@ -502,7 +545,14 @@ export class BrowserNpm {
     return Object.entries(deps).map(([name, range]) => `${name}@${range}`);
   }
 
-  async install(packageSpecs, { cwd = '/node', nodeModulesDir = null, onProgress = null, concurrency = 8 } = {}) {
+  async install(packageSpecs, {
+    cwd = '/node',
+    nodeModulesDir = null,
+    onProgress = null,
+    concurrency = 8,
+    lifecycleScripts = this.lifecycleScripts,
+    limits = this.limits,
+  } = {}) {
     let rawSpecs = packageSpecs;
     if (!rawSpecs || (Array.isArray(rawSpecs) && rawSpecs.length === 0)) {
       rawSpecs = await this.readPackageDependencies(cwd);
@@ -540,12 +590,16 @@ export class BrowserNpm {
         versionDoc = resolved.doc;
         const tarballUrl = versionDoc?.dist?.tarball;
         if (!tarballUrl) throw new Error(`Missing tarball URL for ${name}@${version}`);
-        tarballBytes = await this.fetchTarball(tarballUrl, { name, version, onProgress });
+        tarballBytes = await this.fetchTarball(tarballUrl, { name, version, integrity: versionDoc?.dist?.integrity, onProgress });
       }
 
       onProgress?.({ phase: 'unpacking', name, version });
       const pkgDir = `${targetNodeModules}/${name}`;
-      const entries = await unpackTarGz(tarballBytes, { stripPrefix: 'package/', targetDir: pkgDir }, this.globalObject);
+      const entries = await unpackTarGz(tarballBytes, {
+        stripPrefix: 'package/',
+        targetDir: pkgDir,
+        ...limits,
+      }, this.globalObject);
 
       let pkgFilesCount = 0;
       let pkgTotalBytes = 0;
@@ -575,6 +629,9 @@ export class BrowserNpm {
         for (const [binName, binRel] of binEntries) {
           const binPath = `${targetNodeModules}/.bin/${binName}`;
           const cleanRel = String(binRel).replace(/^\.\//, '');
+          if (!cleanRel || cleanRel.startsWith('/') || cleanRel.split('/').includes('..')) {
+            throw npmSecurityError('ERR_NPM_PACKAGE_PATH', `package bin escapes its package directory: ${binRel}`);
+          }
           const targetFile = `${pkgDir}/${cleanRel}`;
           filesToMount[binPath] = new TextEncoder().encode(
             `#!/usr/bin/env node\nrequire('${targetFile}');\n`
@@ -584,6 +641,10 @@ export class BrowserNpm {
 
       this.installed.set(name, version);
       results.push({ name, version, filesCount: pkgFilesCount, bytes: pkgTotalBytes });
+
+      if (lifecycleScripts && parsedPkgJson?.scripts && Object.keys(parsedPkgJson.scripts).some((name) => ['preinstall', 'install', 'postinstall'].includes(name))) {
+        throw npmSecurityError('ERR_NPM_LIFECYCLE_DENIED', 'npm lifecycle scripts require an explicit, separately sandboxed runner');
+      }
 
       // Enqueue dependencies from versionDoc or unpacked package.json
       let deps = versionDoc?.dependencies || parsedPkgJson?.dependencies || {};
@@ -611,6 +672,8 @@ export class BrowserNpm {
     };
   }
 }
+
+export { verifyIntegrity };
 
 /**
  * Parses an npm script command string into executable, arguments, and inline environment variables.

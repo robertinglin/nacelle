@@ -10,6 +10,13 @@ import { watchFrameAddress } from './runtime/frame-address.js';
 import { createBrowserNet } from './runtime/net.js';
 import { createBufferClass } from './runtime/buffer.js';
 import { createWasmAddonManager } from './runtime/wasm-addons.js';
+import { createOutputCollector } from './runtime/streams.js';
+import { createCapabilityManifest, capabilityDelta } from './runtime/policy.js';
+import { createCheckpointStore } from './runtime/checkpoints.js';
+import { createTraceRecorder, NacelleError } from './runtime/tracing.js';
+import { createSecretBroker } from './runtime/secrets.js';
+import { createGatewayRouteRegistry } from './runtime/gateway-routing.js';
+import { createCompatibilityLab } from './runtime/compatibility-lab.js';
 import {
   listNodeVersionProfiles,
   listSupportedNodeVersions,
@@ -33,6 +40,14 @@ export {
   createProxyConfig,
   createNegotiatedTransport,
   isBrowserFetchFailure,
+  createCapabilityManifest,
+  capabilityDelta,
+  createCheckpointStore,
+  createTraceRecorder,
+  NacelleError,
+  createSecretBroker,
+  createGatewayRouteRegistry,
+  createCompatibilityLab,
   listNodeVersionProfiles,
   listSupportedNodeVersions,
   nodeVersionAliases,
@@ -100,6 +115,27 @@ export class Nacelle {
     const cwd = options.cwd || '/node';
     const globalObject = options.globalObject || globalThis;
     const nodeProfile = resolveNodeVersionProfile(options.version || 'lts');
+    const nacellePlusOptions = options.nacellePlus === true
+      ? {}
+      : options.nacellePlus && typeof options.nacellePlus === 'object'
+        ? options.nacellePlus
+        : null;
+    const browserWorkerAvailable = typeof globalObject.Worker === 'function'
+      && typeof globalObject.MessageChannel === 'function';
+    const browserPage = Boolean(globalObject.navigator && !globalObject.process?.versions?.node);
+    const isolation = options.isolation
+      || nacellePlusOptions?.isolation
+      || (nacellePlusOptions && browserPage ? 'worker' : 'inline');
+    if (!['inline', 'worker'].includes(isolation)) {
+      const error = new TypeError(`unsupported Nacelle isolation mode: ${isolation}`);
+      error.code = 'ERR_NACELLE_ISOLATION_MODE';
+      throw error;
+    }
+    if (isolation === 'worker' && !browserWorkerAvailable) {
+      const error = new Error('worker isolation requires Worker and MessageChannel support');
+      error.code = 'ERR_NACELLE_ISOLATION_UNAVAILABLE';
+      throw error;
+    }
     const proxyConfig = options.proxy ? createProxyConfig(options.proxy, globalObject) : null;
     const env = {
       NODE_ENV: 'development',
@@ -141,11 +177,6 @@ export class Nacelle {
       mounts.unshift({ path: cwd, mode: 'read-write' });
     }
 
-    const nacellePlusOptions = options.nacellePlus === true
-      ? {}
-      : options.nacellePlus && typeof options.nacellePlus === 'object'
-        ? options.nacellePlus
-        : null;
     const transport = nacellePlusOptions
       ? createNacellePlusTransport({ ...nacellePlusOptions, globalObject })
       : null;
@@ -154,18 +185,21 @@ export class Nacelle {
       : { mode: 'virtual', enabled: false };
 
     // Reset runtime state with default grants
+    const defaultCapabilities = {
+      vfs: { mounts },
+      workers: { entryModules: ['*'], maxChildren: 8 },
+      ipc: { enabled: true },
+      signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
+      output: { maxBytes: 10 * 1024 * 1024, stdoutBytes: 4 * 1024 * 1024, stderrBytes: 4 * 1024 * 1024 },
+      envVars: { allowed: Object.keys(env) },
+      proxy: { mode: proxy.mode || 'virtual', enabled: proxy.enabled === true },
+    };
+    const capabilities = createCapabilityManifest({ ...defaultCapabilities, ...(options.capabilities || {}) });
     await runtime.reset({
       runId: `node-session-${Date.now()}`,
-      capabilities: {
-        vfs: { mounts },
-        workers: { entryModules: ['*'], maxChildren: 8 },
-        ipc: { enabled: true },
-        signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
-        output: { maxBytes: 10 * 1024 * 1024, stdoutBytes: 4 * 1024 * 1024, stderrBytes: 4 * 1024 * 1024 },
-        envVars: { allowed: Object.keys(env) },
-        proxy: { mode: proxy.mode || 'virtual', enabled: proxy.enabled === true },
-      },
+      capabilities,
       proxy,
+      isolation,
     });
 
     // Install Gateway Bridge with proper createBrowserNet instance
@@ -183,6 +217,10 @@ export class Nacelle {
       globalObject,
       transport,
       nodeProfile,
+      capabilities,
+      isolation,
+      gateway: options.gateway,
+      secrets: options.secrets,
     });
 
     // Seed initial files if provided
@@ -202,6 +240,12 @@ export class Nacelle {
     this._globalObject = config.globalObject;
     this._transport = config.transport || null;
     this._nodeProfile = config.nodeProfile;
+    this._capabilities = config.capabilities;
+    this._isolation = config.isolation || 'inline';
+    this._gatewayRoutes = createGatewayRouteRegistry();
+    this._gatewayRoute = config.gateway?.sessionScoped
+      ? this._gatewayRoutes.register({ clientId: config.gateway.clientId || `nacelle-${Date.now()}-${Math.random().toString(36).slice(2)}`, port: config.gateway.port || 3000 })
+      : null;
     this._listeners = new Map();
     this._npmCache = new BrowserNpmCache({ globalObject: this._globalObject });
     this._wasm = createWasmAddonManager({
@@ -210,6 +254,19 @@ export class Nacelle {
       globalObject: this._globalObject,
       writeFile: (path, bytes) => this.fs.writeFile(path, bytes),
       execute: (source) => this.execute(source),
+    });
+    this._checkpointStore = createCheckpointStore({
+      snapshot: () => this._runtime.vfs.snapshot(),
+      restore: async (snapshot) => {
+        this._runtime.vfs.reset();
+        await this._runtime.mount(snapshot.files || {}, { symlinks: snapshot.symlinks || [] });
+      },
+      metadata: { runtimeVersion: this._nodeProfile.runtimeVersion, capabilities: this._capabilities },
+    });
+    this._trace = createTraceRecorder();
+    this._secretBroker = createSecretBroker({
+      ...(config.secrets || {}),
+      globalObject: this._globalObject,
     });
   }
 
@@ -237,6 +294,28 @@ export class Nacelle {
   get nodeProfile() {
     return this._nodeProfile;
   }
+
+  get capabilities() {
+    return this._capabilities;
+  }
+
+  get secretBroker() {
+    return this._secretBroker;
+  }
+
+  get trace() {
+    return this._trace;
+  }
+
+  get gatewayRoute() {
+    return this._gatewayRoute;
+  }
+
+  checkpoint(metadata = {}) { return this._checkpointStore.create(metadata); }
+
+  rollback(checkpointId) { return this._checkpointStore.rollback(checkpointId); }
+
+  diff(checkpointId, snapshot) { return this._checkpointStore.diff(checkpointId, snapshot); }
 
   /**
    * Filesystem API (VFS)
@@ -279,6 +358,12 @@ export class Nacelle {
       vfs: this._runtime.vfs,
       cache: this._npmCache,
       globalObject: this._globalObject,
+      lifecycleScripts: this._capabilities?.npm?.lifecycleScripts === true,
+      limits: {
+        maxEntries: this._capabilities?.budgets?.npmEntries,
+        maxExpandedBytes: this._capabilities?.budgets?.npmBytes,
+        maxCompressionRatio: this._capabilities?.budgets?.npmCompressionRatio,
+      },
     });
 
     return {
@@ -391,7 +476,10 @@ export class Nacelle {
    */
   getVirtualUrl(port = 3000, pathname = '/') {
     let cleanPath = pathname || '/';
-    const vhostPrefix = `/__vhost__/${port}`;
+    const routePrefix = this._gatewayRoute && this._gatewayRoute.port === port
+      ? `/__vhost__/${this._gatewayRoute.routeId}/${port}`
+      : null;
+    const vhostPrefix = routePrefix || `/__vhost__/${port}`;
     if (cleanPath.startsWith(vhostPrefix)) {
       return cleanPath;
     }
@@ -427,7 +515,9 @@ export class Nacelle {
     if (options.onNavigate) {
       return watchFrameAddress(iframe, (rawAddress) => {
         // Strip the __vhost__/<port> prefix for user-facing clean URLs
-        const prefix = `/__vhost__/${port}`;
+        const prefix = this._gatewayRoute && this._gatewayRoute.port === port
+          ? `/__vhost__/${this._gatewayRoute.routeId}/${port}`
+          : `/__vhost__/${port}`;
         let cleanAddress = rawAddress;
         if (rawAddress.startsWith(prefix)) {
           cleanAddress = rawAddress.slice(prefix.length) || '/';
@@ -484,26 +574,44 @@ export class Nacelle {
     cwd = this._cwd,
     timeout = 30000,
     onStdout,
-    onStderr,
+      onStderr,
     stdin,
     signal,
+    capture = true,
+    tailBytes = 64 * 1024,
   }) {
     // Ensure the entry file is mounted in the runtime
     await this._runtime.mount({}, { signal });
 
-    const stdoutChunks = [];
-    const stderrChunks = [];
+    const output = createOutputCollector({
+      capture,
+      tailBytes,
+      overflow: 'truncate',
+      limits: {
+        total: this._runtime.capabilities?.manifest?.output?.maxBytes,
+        stdout: this._runtime.capabilities?.manifest?.output?.stdoutBytes,
+        stderr: this._runtime.capabilities?.manifest?.output?.stderrBytes,
+      },
+    });
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+    let killed = false;
+    let settled = false;
+    const trace = createTraceRecorder();
+    this._trace = trace;
+    const traceId = trace.start({ phase: 'run', entry, isolation: this._isolation });
 
     const handleStdout = (chunk) => {
       const text = typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk);
-      stdoutChunks.push(text);
+      output.write('stdout', new TextEncoder().encode(text));
       if (onStdout) onStdout(text);
       this.emit('stdout', text);
     };
 
     const handleStderr = (chunk) => {
       const text = typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk);
-      stderrChunks.push(text);
+      output.write('stderr', new TextEncoder().encode(text));
       if (onStderr) onStderr(text);
       this.emit('stderr', text);
     };
@@ -516,28 +624,42 @@ export class Nacelle {
         env: { ...this._env, ...env },
         timeout,
         stdin,
-        signal,
+        signal: controller.signal,
+        isolation: this._isolation,
       },
       handleStdout,
       handleStderr,
-    ).then((code) => {
-      const exitCode = typeof code === 'number' ? code : 0;
+    ).then(async (code) => {
+      await new Promise((resolve) => (this._globalObject.setTimeout || setTimeout)(resolve, 0));
+      settled = true;
+      signal?.removeEventListener?.('abort', onAbort);
+      const exitCode = killed ? 1 : typeof code === 'number' ? code : 0;
+      trace.event('exit', { entry, code: exitCode });
+      trace.finish(exitCode === 0 ? null : new NacelleError('ERR_NACELLE_PROCESS', `process exited with code ${exitCode}`, { traceId }));
       this.emit('exit', exitCode);
       return exitCode;
+    }).catch((error) => {
+      trace.finish(error, { entry, traceId });
+      throw error;
     });
 
     const processHandle = {
       exit: runPromise,
       stdoutText: async () => {
         await runPromise.catch(() => {});
-        return stdoutChunks.join('');
+        return new TextDecoder().decode(capture ? output.stdoutBytes : output.tail('stdout'));
       },
       stderrText: async () => {
         await runPromise.catch(() => {});
-        return stderrChunks.join('');
+        return new TextDecoder().decode(capture ? output.stderrBytes : output.tail('stderr'));
       },
+      output,
+      stats: (stream) => output.stats(stream),
       kill: async () => {
-        // Handled via signal abort
+        if (settled) return;
+        killed = true;
+        controller.abort();
+        await runPromise.catch(() => {});
       },
     };
 

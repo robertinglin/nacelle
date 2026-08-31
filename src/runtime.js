@@ -26,6 +26,8 @@ import {
   BrowserAsyncContextFrame,
   collectAsyncResources,
   createAsyncHooksModule,
+  isPromiseHandled,
+  setPromiseRejectionObserver,
 } from './runtime/async-hooks.js';
 import { EventEmitter, addAbortListener, getEventListeners, getMaxListeners, once } from './runtime/events.js';
 import { createVfs, fileURLToPath, pathToFileURL } from './runtime/vfs.js';
@@ -146,6 +148,7 @@ import { createInspectorModule, createInspectorPromisesModule } from './runtime/
 import { createTraceEventsModule, traceEventsUnavailableError } from './runtime/trace-events.js';
 import { createSeaModule } from './runtime/sea.js';
 import { createTtyModule } from './runtime/tty.js';
+import { createVersionedModuleCache } from './runtime/module-cache.js';
 
 const BUILTIN_NAMES = Object.freeze([
   'assert', 'assert/strict', 'buffer', 'console', 'constants', 'crypto', 'domain', 'events', 'fs', 'fs/promises', 'http', 'https', 'module', 'os',
@@ -2867,10 +2870,8 @@ const DEFAULT_RUNTIME_CAPABILITIES = Object.freeze({
 });
 
 function browserProcessVersions(scope, profile) {
-  const versions = { ...profile.versions };
-  const openssl = browserCryptoVersion(scope);
-  if (openssl) versions.openssl = openssl;
-  return Object.freeze(versions);
+  void scope;
+  return Object.freeze({ ...profile.versions });
 }
 
 function createProcess(scope, options, stdout, stderr, trackTask) {
@@ -2895,6 +2896,13 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
   let exiting = false;
   let exitEventEmitted = false;
   let beforeExitEventEmitted = false;
+  const closeOwnedServers = () => {
+    try {
+      for (const server of processObject._bnhHttpServers || []) server.close?.();
+    } finally {
+      processObject._bnhHttpServers?.clear?.();
+    }
+  };
   const stdin = new Readable({ read() {} });
   stdin.isTTY = false;
   installProcessStdinSurface(stdin);
@@ -2903,13 +2911,9 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     exitSignal = signal;
     exitRequested = true;
     exited = true;
-    try {
-      for (const server of processObject._bnhHttpServers || []) server.close?.();
-    } finally {
-      processObject._bnhHttpServers?.clear?.();
-      processObject._bnhReleaseTasks?.();
-      options.onSignal?.(signal);
-    }
+    closeOwnedServers();
+    processObject._bnhReleaseTasks?.();
+    options.onSignal?.(signal);
   };
   const dispatchUncaughtException = (error, origin = 'uncaughtException') => {
     const dispatch = () => {
@@ -3462,6 +3466,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
         processObject.emit('exit', exitCode);
       }
       exited = true;
+      closeOwnedServers();
       processObject._bnhReleaseTasks?.();
       for (const handle of timers) clearTimer(handle);
     },
@@ -3607,10 +3612,19 @@ function createCryptoShim(scope, Buffer, processObject) {
     return undefined;
   };
   const nodeSign = (...args) => {
+    if (String(args[0]).replaceAll('-', '').toUpperCase() === 'HMAC') {
+      const options = args[3] === undefined ? {} : args[3];
+      return sign(args[0], args[1], args[2], { ...options, globalObject: scope })
+        .then((value) => Buffer.from(value));
+    }
     const value = signSync(args[0], args[1], args[2], args[3], scope);
     return value === undefined ? wrapBuffer(sign)(...args) : Buffer.from(value);
   };
   const nodeVerify = (...args) => {
+    if (String(args[0]).replaceAll('-', '').toUpperCase() === 'HMAC') {
+      const options = args[4] === undefined ? {} : args[4];
+      return verify(args[0], args[1], args[2], args[3], { ...options, globalObject: scope });
+    }
     const value = verifySync(args[0], args[1], args[2], args[3], args[4], scope);
     return value === undefined ? verify(...args) : value;
   };
@@ -4217,6 +4231,8 @@ export function createRuntime({
   let esmExecutionTail = Promise.resolve();
   let dnsModule = createBrowserDns({ network: virtualNetwork });
   let proxyCapability = createProxyCapability();
+  let executionIsolation = 'inline';
+  const moduleCache = createVersionedModuleCache();
   const esmNamespaceCache = scope.__BNH_ESM_NAMESPACE_CACHE__ || new Map();
   scope.__BNH_ESM_NAMESPACE_CACHE__ = esmNamespaceCache;
   const cjsExportMetadata = scope.__BNH_CJS_EXPORT_METADATA__ || new WeakMap();
@@ -6652,6 +6668,7 @@ export function createRuntime({
               clearInterval: scope.clearInterval,
               setImmediate: scope.setImmediate,
               clearImmediate: scope.clearImmediate,
+              queueMicrotask: scope.queueMicrotask,
             };
             const childOwner = childProcess?.processObject || childProcess;
             scope.process = childOwner || scope.process;
@@ -8454,6 +8471,9 @@ export function createRuntime({
     const nativeClearTimeout = rootTimers?.clearTimeout || scope.clearTimeout.bind(scope);
     const nativeSetInterval = rootTimers?.setInterval || scope.setInterval.bind(scope);
     const nativeClearInterval = rootTimers?.clearInterval || scope.clearInterval.bind(scope);
+    const nativeQueueMicrotask = typeof scope.queueMicrotask === 'function'
+      ? scope.queueMicrotask.bind(scope)
+      : (callback) => nativeSetTimeout(callback, 0);
     if (!scope.__BNH_NATIVE_TIMERS__) {
       Object.defineProperty(scope, '__BNH_NATIVE_TIMERS__', {
         configurable: true,
@@ -8501,6 +8521,7 @@ export function createRuntime({
         }
       }
       for (const worker of scope.__BNH_BROWSER_WORKERS__ || []) {
+        if (worker.threadId === -1) continue;
         if (worker.terminal || ['exited', 'failed'].includes(worker.state)) continue;
         if (typeof worker.hasRef === 'function' && !worker.hasRef()) continue;
         return true;
@@ -8583,8 +8604,12 @@ export function createRuntime({
               ?.some((listener) => !isInternalMessageListener(listener));
             const flushInjectedMessages = () => {
               injectedMessageFlushQueued = false;
-              if (!hasUserMessageListener()) return;
-              for (const [message, handle] of pendingInjectedMessages.splice(0)) processObject.emit('message', message, handle);
+              if (options.workerThread && typeof processObject._bnhDeliverWorkerMessage !== 'function') return;
+              if (!options.workerThread && !hasUserMessageListener()) return;
+              for (const [message, handle] of pendingInjectedMessages.splice(0)) {
+                if (options.workerThread) processObject._bnhDeliverWorkerMessage?.(message, handle);
+                else processObject.emit('message', message, handle);
+              }
             };
             processObject.on('newListener', (name) => {
               if (name !== 'message' || injectedMessageFlushQueued) return;
@@ -8592,13 +8617,17 @@ export function createRuntime({
               queueMicrotask(flushInjectedMessages);
             });
             const onInjectedMessage = (message, handle) => {
-              if (hasUserMessageListener()) processObject.emit('message', message, handle);
+              if (options.workerThread) {
+                if (typeof processObject._bnhDeliverWorkerMessage === 'function') processObject._bnhDeliverWorkerMessage(message, handle);
+                else pendingInjectedMessages.push([message, handle]);
+              } else if (hasUserMessageListener()) processObject.emit('message', message, handle);
               else pendingInjectedMessages.push([message, handle]);
             };
             onInjectedMessage._bnhInternal = true;
             injectedProcess.on('message', (message, handle) => {
               onInjectedMessage(message, handle);
             });
+            processObject._bnhFlushInjectedMessages = flushInjectedMessages;
             injectedProcess.on('disconnect', () => {
               processObject.connected = false;
               processObject.emit('disconnect');
@@ -8639,6 +8668,7 @@ export function createRuntime({
     const clearTimer = processData.clearTimer;
     vfs.setTaskTracker?.(trackTask);
     vfs.setWarningEmitter?.(processObject.emitWarning?.bind(processObject));
+    vfs.setWatcherOwner?.(processObject);
     const diagnosticsChannels = createDiagnosticsModule();
     scope.__BNH_DIAGNOSTICS__ = diagnosticsChannels;
     const performancePrimitives = createPerformancePrimitives(scope, { fallback: 'virtual' });
@@ -8664,23 +8694,78 @@ export function createRuntime({
       ? (() => {
           const parentPort = new EventEmitter();
           let assignedOnMessage = null;
+          const pendingMessages = [];
+          let pendingMessageFlushQueued = false;
+          const hasMessageListener = () => parentPort.listenerCount('message') > 0
+            || typeof assignedOnMessage === 'function';
+          const flushPendingMessages = () => {
+            pendingMessageFlushQueued = false;
+            if (!hasMessageListener()) return;
+            for (const [value, handle] of pendingMessages.splice(0)) {
+              parentPort.emit('message', value, handle);
+              assignedOnMessage?.({
+                type: 'message',
+                data: value,
+                target: parentPort,
+                currentTarget: parentPort,
+                origin: '',
+                lastEventId: '',
+                source: null,
+                ports: [],
+              });
+            }
+          };
+          const queuePendingMessageFlush = () => {
+            if (pendingMessageFlushQueued) return;
+            pendingMessageFlushQueued = true;
+            queueMicrotask(flushPendingMessages);
+          };
           const onMessage = (value, handle) => {
             if (value?.__bnhThreadMessage || value?.__bnhThreadMessageResult) return;
             const adaptedValue = adaptWorkerData(value, scope);
-            parentPort.emit('message', adaptedValue, handle);
-            assignedOnMessage?.({
-              type: 'message',
-              data: adaptedValue,
-              target: parentPort,
-              currentTarget: parentPort,
-              origin: '',
-              lastEventId: '',
-              source: null,
-              ports: [],
-            });
+            if (hasMessageListener()) {
+              parentPort.emit('message', adaptedValue, handle);
+              assignedOnMessage?.({
+                type: 'message',
+                data: adaptedValue,
+                target: parentPort,
+                currentTarget: parentPort,
+                origin: '',
+                lastEventId: '',
+                source: null,
+                ports: [],
+              });
+            } else {
+              pendingMessages.push([adaptedValue, handle]);
+            }
           };
           onMessage._bnhInternal = true;
           processObject.on('message', onMessage);
+          processObject._bnhDeliverWorkerMessage = (value, handle) => {
+            const adaptedValue = adaptWorkerData(value, scope);
+            if (hasMessageListener()) {
+              parentPort.emit('message', adaptedValue, handle);
+              assignedOnMessage?.({
+                type: 'message',
+                data: adaptedValue,
+                target: parentPort,
+                currentTarget: parentPort,
+                origin: '',
+                lastEventId: '',
+                source: null,
+                ports: [],
+              });
+            } else {
+              pendingMessages.push([adaptedValue, handle]);
+            }
+          };
+          processObject._bnhFlushInjectedMessages?.();
+          parentPort.on('newListener', (name) => {
+            if (name === 'message') {
+              processObject._bnhFlushInjectedMessages?.();
+              queuePendingMessageFlush();
+            }
+          });
           parentPort.postMessage = (value, transferList) => processObject.send(value, transferList);
           parentPort.start = () => parentPort;
           parentPort.ref = () => parentPort;
@@ -8688,7 +8773,10 @@ export function createRuntime({
           Object.defineProperty(parentPort, 'onmessage', {
             configurable: true,
             get: () => assignedOnMessage,
-            set: (listener) => { assignedOnMessage = typeof listener === 'function' ? listener : null; },
+            set: (listener) => {
+              assignedOnMessage = typeof listener === 'function' ? listener : null;
+              if (assignedOnMessage) queuePendingMessageFlush();
+            },
           });
           parentPort.close = () => {
             processObject.removeListener('message', onMessage);
@@ -9895,6 +9983,7 @@ export function createRuntime({
       clearInterval: scope.clearInterval,
       setImmediate: scope.setImmediate,
       clearImmediate: scope.clearImmediate,
+      queueMicrotask: scope.queueMicrotask,
       fetch: scope.fetch,
       __bnh: scope.__bnh,
       primordials: scope.primordials,
@@ -9930,14 +10019,27 @@ export function createRuntime({
       childConsole._counts = new Map();
       builtins.console = childConsole;
     }
-    const onUnhandledRejection = (event) => {
+    const earlyUnhandledRejections = new WeakSet();
+    const dispatchUnhandledRejection = (promise, reason) => {
+      if (promise && (earlyUnhandledRejections.has(promise) || isPromiseHandled(promise))) return;
+      if (promise) earlyUnhandledRejections.add(promise);
       const dispatch = () => {
-        const handled = processObject.emit('unhandledRejection', event.reason, event.promise);
-        if (!handled) processObject._bnhDispatchUncaughtException?.(event.reason, 'unhandledRejection');
+        const handled = processObject.emit('unhandledRejection', reason, promise);
+        if (!handled) processObject._bnhDispatchUncaughtException?.(reason, 'unhandledRejection');
       };
       const runWithPromiseScope = processObject._bnhRunWithPromiseScope;
-      if (typeof runWithPromiseScope === 'function') runWithPromiseScope(event.promise, dispatch);
+      if (typeof runWithPromiseScope === 'function') runWithPromiseScope(promise, dispatch);
       else dispatch();
+    };
+    const restorePromiseRejectionObserver = setPromiseRejectionObserver((promise, reason) => {
+      nativeQueueMicrotask(() => dispatchUnhandledRejection(promise, reason));
+    });
+    const onUnhandledRejection = (event) => {
+      if (event.promise && (earlyUnhandledRejections.has(event.promise) || isPromiseHandled(event.promise))) {
+        event.preventDefault?.();
+        return;
+      }
+      dispatchUnhandledRejection(event.promise, event.reason);
       event.preventDefault?.();
     };
     if (typeof scope.addEventListener === 'function') scope.addEventListener('unhandledrejection', onUnhandledRejection);
@@ -10053,9 +10155,9 @@ export function createRuntime({
           && !hasReferencedIpc() && !hasReferencedWorkerParentPort()) {
           idleRounds += 1;
           // Browser fetch, worker, and rejection events settle on later task turns.
-          // Give beforeExit listeners a chance to revive the event loop once,
-          // matching Node's natural shutdown lifecycle.
-          if (idleRounds >= 32) {
+          // Four turns cover those deliveries while keeping short-lived runs
+          // from paying the browser's minimum timer delay repeatedly.
+          if (idleRounds >= 4) {
             if (processObject._emitBeforeExit?.()) {
               idleRounds = 0;
               continue;
@@ -10078,7 +10180,11 @@ export function createRuntime({
     } catch (error) {
       stderr(`${error?.stack || error}\n`);
       processObject.exitCode = 1;
-      if (injectedProcess && typeof injectedProcess.exit === 'function') {
+      // Preserve the uncaught boundary for process-entry. Browser Worker
+      // callers must receive an error event rather than only exit code 1.
+      processObject.__bnhUncaughtException = error;
+      if (injectedProcess) injectedProcess.__bnhUncaughtException = error;
+      if (!options.workerThread && injectedProcess && typeof injectedProcess.exit === 'function') {
         try { injectedProcess.exit(1); } catch { /* ignore */ }
       }
       if (String(error?.code || '').startsWith('ERR_UNSUPPORTED_')
@@ -10088,6 +10194,7 @@ export function createRuntime({
       for (const handle of timerHandles) clearTimer?.(handle);
       vfs.setTaskTracker?.(null);
       if (typeof scope.removeEventListener === 'function') scope.removeEventListener('unhandledrejection', onUnhandledRejection);
+      restorePromiseRejectionObserver();
       esmLoader.dispose();
       processObject._markExited?.();
       Object.assign(scope, previous);
@@ -10106,9 +10213,12 @@ export function createRuntime({
       virtualProcessLiveness.clear();
       environmentData.clear();
       esmNamespaceCache.clear();
+      moduleCache.clear();
+      executionIsolation = context.isolation || 'inline';
       if (context.signal?.aborted) return;
       runSpec = {
         runId: String(context.runId || context.metadata?.runId || `browser-${Date.now()}`),
+        variant: context.variant || context.metadata?.variant || null,
         capabilities: validateCapabilityManifest(context.capabilities),
         fixtures: context.fixtures,
       };
@@ -10183,6 +10293,18 @@ export function createRuntime({
     },
     async executeEntry(entry, options, stdout, stderr) {
       if (!mounted) throw new Error('runtime.mount() must be called before runtime.executeEntry()');
+      if (executionIsolation === 'worker' && !options.workerThread) {
+        const child = await runtime.spawn(['node', entry], {
+          ...options,
+          cwd: options.cwd || '/node',
+          env: options.env || {},
+          onStdout: stdout,
+          onStderr: stderr,
+        });
+        const code = await child.exit;
+        if (activeChild === child) activeChild = null;
+        return code;
+      }
       return execute(entry, { ...options, entry }, stdout, stderr);
     },
     exportArtifacts() {
@@ -10198,6 +10320,9 @@ export function createRuntime({
         throw error;
       }
       const allowedEnvironment = new Set(capabilities.manifest.envVars.allowed);
+      // The bridge injects this metadata key for every versioned browser run;
+      // it is not an ambient user-controlled environment grant.
+      if (runSpec?.variant) allowedEnvironment.add('BNH_VARIANT');
       for (const key of Object.keys(options.env || {})) {
         if (!allowedEnvironment.has(key)) {
           const error = new Error(`environment key is not granted: ${key}`);
@@ -10211,7 +10336,10 @@ export function createRuntime({
       const files = Object.fromEntries(
         vfs.snapshot({ copy: false }).artifacts.map(({ path, bytes }) => [path, bytes]),
       );
-      const spawnProxy = proxyCapability.adapter ? proxyCapability : capabilities.manifest.proxy;
+      const workerIsolation = executionIsolation === 'worker';
+      const spawnProxy = workerIsolation && proxyCapability.adapter
+        ? { ...capabilities.manifest.proxy, rpc: true }
+        : proxyCapability.adapter ? proxyCapability : capabilities.manifest.proxy;
       const childExecArgv = [];
       const valueTakingFlags = new Set(['--import', '--experimental-loader', '--loader', '--require', '--input-type']);
       for (let index = 1; index < argv.length - 1; index += 1) {
@@ -10246,10 +10374,18 @@ export function createRuntime({
         },
         stdout: capabilities.output.stdout,
         stderr: capabilities.output.stderr,
+        proxyAdapter: workerIsolation ? proxyCapability.adapter : undefined,
+        onStdout: options.onStdout,
+        onStderr: options.onStderr,
       };
-      const worker = proxyCapability.adapter
+      const worker = proxyCapability.adapter && !workerIsolation
         ? createVirtualProcess({ ...processOptions, scope, forceFallback: true })
         : capabilities.process.create(processOptions);
+      const outputListener = (record) => {
+        if (record.stream === 'stdout') processOptions.onStdout?.(record.bytes);
+        else processOptions.onStderr?.(record.bytes);
+      };
+      capabilities.output.on('data', outputListener);
       let artifacts = {};
       worker.on('message', (message) => {
         if (message?.type === 'bnh-artifacts') artifacts = message.artifacts || {};
@@ -10267,6 +10403,8 @@ export function createRuntime({
       };
       activeChild = child;
       worker.wait().then((terminal) => {
+        if (activeChild === child) activeChild = null;
+        capabilities.output.off('data', outputListener);
         stdout.end();
         stderr.end();
         child.structuredResult = {

@@ -188,7 +188,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(args.failure_limit, 0)
 
     def test_variants_select_source_ref_and_inherit_target_branch(self) -> None:
-        root = Path(__file__).resolve().parents[1]
+        root = Path(__file__).resolve().parents[2]
         base = load_config(root / "harness.example.toml", variant="v22")
         self.assertEqual(base.project.base_ref, "v22.x")
         self.assertEqual(base.project.target_repo_ref, "v22.x")
@@ -393,13 +393,13 @@ class ConfigTests(unittest.TestCase):
             run.assert_not_called()
 
     def test_example_preserves_playwright_port_placeholder(self) -> None:
-        root = Path(__file__).resolve().parents[1]
+        root = Path(__file__).resolve().parents[2]
         config = load_config(root / "harness.example.toml")
         self.assertIn("{port}", render(config.target.env["BNH_BROWSER_URL"], {}))
         self.assertIn("{port}", render(config.target.env["BNH_SERVER_COMMAND"], {}))
 
     def test_example_runs_the_full_primitive_phase_before_upstream_tests(self) -> None:
-        root = Path(__file__).resolve().parents[1]
+        root = Path(__file__).resolve().parents[2]
         config = load_config(root / "harness.example.toml")
 
         self.assertTrue(config.primitives.enabled)

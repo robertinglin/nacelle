@@ -101,7 +101,7 @@ class BuildAddonTests(unittest.TestCase):
             self.assertIn("-D_M_IX86", argv)
             self.assertIn("-DV8_TARGET_ARCH_IA32=1", argv)
             self.assertIn("-frtti", argv)
-            self.assertIn(str(Path(__file__).resolve().parents[1] / "src/browser_node_harness/addon_shims/node_rtti_shim.cc"), argv)
+            self.assertIn(str(Path(__file__).resolve().parents[2] / "harness/browser_node_harness/addon_shims/node_rtti_shim.cc"), argv)
             self.assertTrue(any(item.startswith("-I") for item in argv))
             self.assertTrue(Path(artifact.wasm).is_file())
             self.assertEqual(artifact.entry, "napi")

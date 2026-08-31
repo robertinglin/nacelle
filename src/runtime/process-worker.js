@@ -14,10 +14,12 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
   let disconnected = false;
   let userSequence = 0;
   let lastUserSequence = 0;
+  let proxySequence = 0;
   let exitCode = 0;
   let signalCode = null;
   const processExitSignal = {};
   const remoteHandles = new Map();
+  const proxyRequests = new Map();
 
   function errorRecord(error) {
     if (!error) return null;
@@ -54,6 +56,14 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
 
   function sendUserFrame(type, payload) {
     user.postMessage({ channel: USER, runId: identity.runId, childId: identity.childId, direction: 'child-to-parent', sequence: ++userSequence, type, payload });
+  }
+
+  function requestProxy(request) {
+    const requestId = String(identity.childId) + '-proxy-' + (++proxySequence);
+    return new Promise((resolve, reject) => {
+      proxyRequests.set(requestId, { resolve, reject });
+      sendUserFrame('message', { __bnhProxyRequest: { requestId, request } });
+    });
   }
 
   function createRemoteHandle(descriptor) {
@@ -110,6 +120,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     const listeners = new Map();
     const emitter = {
       on(name, listener) {
+        if (name !== 'newListener') this.emit('newListener', name, listener);
         const set = listeners.get(name) || [];
         set.push(listener);
         listeners.set(name, set);
@@ -192,7 +203,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     };
     process.config ||= { variables: { v8_enable_i18n_support: 1, openssl_quic: false, asan: 0, node_module_version: 127, napi_build_version: '10', node_use_amaro: true }, target_defaults: { default_configuration: 'Release' } };
     process.features ||= {
-      inspector: true,
+      inspector: false,
       debug: false,
       uv: false,
       ipv6: true,
@@ -281,6 +292,18 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     key = message.key;
     identity = message.identity;
     const process = makeEmitter();
+    const pendingMessages = [];
+    let pendingMessageFlushQueued = false;
+    const flushPendingMessages = () => {
+      pendingMessageFlushQueued = false;
+      if (process.listenerCount('message') === 0) return;
+      for (const [value, handle] of pendingMessages.splice(0)) emitProcess('message', value, handle);
+    };
+    process.on('newListener', (name) => {
+      if (name !== 'message' || pendingMessageFlushQueued) return;
+      pendingMessageFlushQueued = true;
+      queueMicrotask(flushPendingMessages);
+    });
     installProcessContract(process);
     const emitProcess = (name, ...args) => {
       try {
@@ -315,6 +338,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       argv: [...identity.argv],
       connected: true,
       exitCode: 0,
+      __bnhProxyRequest: requestProxy,
       cwd: () => identity.cwd,
       chdir: (value) => {
         const source = String(value);
@@ -397,12 +421,30 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         const target = remoteHandles.get(frame.payload?.handleId);
         if (target) target.emit(frame.payload.event, ...(frame.payload.args || []).map((value) => value?.id ? createRemoteHandle(value) : value));
       } else if (frame.type === 'message') {
-        if (frame.payload?.__bnhWorkerStdin) {
+        if (frame.payload?.__bnhProxyResponse) {
+          const response = frame.payload.__bnhProxyResponse;
+          const pending = proxyRequests.get(response.requestId);
+          if (!pending) return;
+          proxyRequests.delete(response.requestId);
+          if (response.error) {
+            pending.reject(Object.assign(new Error(response.error.message || 'proxy request failed'), response.error));
+          } else {
+            const result = response.result;
+            if (result?.__bnhResponse && typeof Response === 'function') {
+              pending.resolve(new Response(result.body || null, { status: result.status, statusText: result.statusText, headers: result.headers }));
+            } else {
+              pending.resolve(result);
+            }
+          }
+        } else if (frame.payload?.__bnhWorkerStdin) {
           process.stdin.push(frame.payload.value);
         } else if (frame.payload?.__bnhWorkerStdinEnd) {
           process.stdin.push(null);
         } else {
-          emitProcess('message', frame.payload, createRemoteHandle(frame.handle));
+          const value = frame.payload;
+          const handle = createRemoteHandle(frame.handle);
+          if (process.listenerCount('message') === 0) pendingMessages.push([value, handle]);
+          else emitProcess('message', value, handle);
         }
       }
     };

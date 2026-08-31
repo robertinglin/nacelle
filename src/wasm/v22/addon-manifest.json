@@ -8,72 +8,20 @@
     {
       "node": "internal/deps/sqlite.node",
       "wasm": "./sqlite.wasm",
-      "entry": "sqlite"
-    },
-    {
-      "node": "node_modules/better-sqlite3/build/Release/better_sqlite3.node",
-      "wasm": "./better_sqlite3.wasm",
-      "entry": "napi"
-    },
-    {
-      "node": "node_modules/sqlite3/build/Release/node_sqlite3.node",
-      "wasm": "./sqlite3.wasm",
-      "entry": "napi"
+      "entry": "sqlite",
+      "exports": ["sqlite3_open", "sqlite3_close", "sqlite3_exec", "sqlite3_prepare_v2", "sqlite3_step", "sqlite3_finalize", "sqlite3_column_count", "sqlite3_column_name", "sqlite3_column_type", "sqlite3_column_text", "sqlite3_column_int64", "sqlite3_column_double", "sqlite3_column_blob", "sqlite3_column_bytes", "sqlite3_bind_text", "sqlite3_bind_int64", "sqlite3_bind_double", "sqlite3_bind_blob", "sqlite3_bind_null", "sqlite3_errmsg", "sqlite3_changes", "sqlite3_total_changes", "sqlite3_last_insert_rowid", "malloc", "free"]
     },
     {
       "node": "internal/deps/zlib.node",
       "wasm": "./zlib.wasm",
-      "entry": "zlib"
-    },
-    {
-      "node": "internal/deps/brotli.node",
-      "wasm": "./brotli.wasm",
-      "entry": "brotli"
-    },
-    {
-      "node": "internal/deps/zstd.node",
-      "wasm": "./zstd.wasm",
-      "entry": "zstd"
-    },
-    {
-      "node": "internal/deps/llhttp.node",
-      "wasm": "./llhttp.wasm",
-      "entry": "llhttp"
-    },
-    {
-      "node": "internal/deps/simdutf.node",
-      "wasm": "./simdutf.wasm",
-      "entry": "simdutf"
-    },
-    {
-      "node": "internal/deps/ada.node",
-      "wasm": "./ada.wasm",
-      "entry": "ada"
-    },
-    {
-      "node": "internal/deps/cares.node",
-      "wasm": "./cares.wasm",
-      "entry": "cares"
-    },
-    {
-      "node": "internal/deps/uvwasi.node",
-      "wasm": "./uvwasi.wasm",
-      "entry": "uvwasi"
-    },
-    {
-      "node": "internal/deps/nghttp2.node",
-      "wasm": "./nghttp2.wasm",
-      "entry": "nghttp2"
+      "entry": "zlib",
+      "exports": ["deflateInit_", "deflate", "deflateEnd", "inflateInit_", "inflate", "inflateEnd", "crc32", "adler32", "malloc", "free"]
     },
     {
       "node": "build/Release/node_addon_napi.node",
       "wasm": "./node_addon_napi.wasm",
-      "entry": "napi"
-    },
-    {
-      "node": "node_modules/bcrypt/build/Release/bcrypt_lib.node",
-      "wasm": "./bcrypt.wasm",
-      "entry": "napi"
+      "entry": "napi",
+      "exports": ["napi_register_wasm_v1"]
     }
   ],
   "failures": [],

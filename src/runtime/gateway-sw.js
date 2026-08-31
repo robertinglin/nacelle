@@ -11,6 +11,7 @@ self.addEventListener('activate', (event) => {
 });
 
 const VHOST_PATTERN = /^https?:\/\/[^/]+\/(?:__vhost__|__bnh_vnet__)\/(\d+)(\/.*)?$/;
+const GATEWAY_PROTOCOL_VERSION = 1;
 const HARNESS_STATIC_PATTERNS = [
   /^\/runtime\//,
   /^\/wasm\//,
@@ -40,21 +41,23 @@ function parseVhostUrl(urlString, referrerString) {
     const urlObj = new URL(urlString, 'http://localhost');
 
     // 1. Direct vhost URL (e.g. /__vhost__/3000/api/info or /__bnh_vnet__/3000)
-    const directMatch = urlObj.pathname.match(/^\/(?:__vhost__|__bnh_vnet__)\/(\d+)(\/.*)?$/);
+    const directMatch = urlObj.pathname.match(/^\/(?:__vhost__|__bnh_vnet__)\/((?:r-[^/]+)\/)?(\d+)(\/.*)?$/);
     if (directMatch) {
-      const port = parseInt(directMatch[1], 10);
-      const subPath = directMatch[2] || '/';
+      const routeId = directMatch[1] ? directMatch[1].slice(0, -1) : null;
+      const port = parseInt(directMatch[2], 10);
+      const subPath = directMatch[3] || '/';
       // Fragments stay in the browser document location and never belong in an HTTP request.
-      return { port, targetUrl: subPath + urlObj.search, source: 'direct' };
+      return { port, routeId, version: Number(urlObj.searchParams.get('__bnh_gateway_version') || GATEWAY_PROTOCOL_VERSION), targetUrl: subPath + urlObj.search, source: 'direct' };
     }
 
     // 2. Referrer-based vhost URL (e.g. iframe navigating to root-relative /api/info)
     if (referrerString && !isHarnessStaticPath(urlObj.pathname)) {
       const refObj = new URL(referrerString, 'http://localhost');
-      const refMatch = refObj.pathname.match(/^\/(?:__vhost__|__bnh_vnet__)\/(\d+)/);
+      const refMatch = refObj.pathname.match(/^\/(?:__vhost__|__bnh_vnet__)\/((?:r-[^/]+)\/)?(\d+)/);
       if (refMatch) {
-        const port = parseInt(refMatch[1], 10);
-        return { port, targetUrl: urlObj.pathname + urlObj.search, source: 'referrer' };
+        const routeId = refMatch[1] ? refMatch[1].slice(0, -1) : null;
+        const port = parseInt(refMatch[2], 10);
+        return { port, routeId, version: Number(refObj.searchParams.get('__bnh_gateway_version') || GATEWAY_PROTOCOL_VERSION), targetUrl: urlObj.pathname + urlObj.search, source: 'referrer' };
       }
     }
   } catch {
@@ -71,7 +74,7 @@ self.addEventListener('fetch', (event) => {
     return;
   }
   if (virtualRequest?.source === 'referrer' && event.request.mode === 'navigate') {
-    event.respondWith(redirectToVirtualHost(event.request.url, virtualRequest.port));
+    event.respondWith(redirectToVirtualHost(event.request.url, virtualRequest.port, virtualRequest.routeId));
     return;
   }
 
@@ -91,10 +94,10 @@ self.addEventListener('fetch', (event) => {
             const clientVhost = parseVhostUrl(client.url);
             if (clientVhost) {
               if (event.request.mode === 'navigate') {
-                return redirectToVirtualHost(event.request.url, clientVhost.port);
+                return redirectToVirtualHost(event.request.url, clientVhost.port, clientVhost.routeId);
               }
               const targetUrl = urlObj.pathname + urlObj.search;
-              return await handleVirtualRequest(event.request, { port: clientVhost.port, targetUrl });
+              return await handleVirtualRequest(event.request, { port: clientVhost.port, routeId: clientVhost.routeId, version: clientVhost.version, targetUrl });
             }
           }
         } catch {
@@ -108,16 +111,13 @@ self.addEventListener('fetch', (event) => {
   }
 });
 
-function redirectToVirtualHost(urlString, port) {
+function redirectToVirtualHost(urlString, port, routeId = null) {
   const targetUrl = new URL(urlString);
-  targetUrl.pathname = `/__vhost__/${port}${targetUrl.pathname}`;
-  return new Response(null, {
-    status: 307,
-    headers: gatewayResponseHeaders({ location: targetUrl.href }),
-  });
+  targetUrl.pathname = `/__vhost__/${routeId ? `${routeId}/` : ''}${port}${targetUrl.pathname}`;
+  return Response.redirect(targetUrl.href, 307);
 }
 
-async function handleVirtualRequest(request, { port, targetUrl }) {
+async function handleVirtualRequest(request, { port, routeId = null, version = GATEWAY_PROTOCOL_VERSION, targetUrl }) {
   // Find an active window client to forward the request to
   const allClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
   if (!allClients || allClients.length === 0) {
@@ -132,9 +132,16 @@ async function handleVirtualRequest(request, { port, targetUrl }) {
   // Always route to the top-level host window containing the Node runtime. The
   // Service Worker Client API calls this frame type "top-level"; a navigating
   // iframe may be the first client returned while its old document is closing.
-  const targetClient = allClients.find((c) => c.frameType === 'top-level')
-    || allClients.find((c) => c.frameType === 'top')
-    || allClients[0];
+  if (version !== GATEWAY_PROTOCOL_VERSION) {
+    return new Response('Gateway protocol version mismatch', { status: 409, headers: gatewayResponseHeaders({ 'content-type': 'text/plain' }) });
+  }
+  const routeClients = routeId
+    ? allClients.filter((client) => parseVhostUrl(client.url)?.routeId === routeId)
+    : allClients;
+  const targetClient = routeClients.find((c) => c.frameType === 'top-level')
+    || routeClients.find((c) => c.frameType === 'top')
+    || routeClients[0];
+  if (!targetClient) return new Response('Gateway route is not bound to this client', { status: 409, headers: gatewayResponseHeaders({ 'content-type': 'text/plain' }) });
 
   const channel = new MessageChannel();
   const requestHeaders = {};
@@ -233,6 +240,8 @@ async function handleVirtualRequest(request, { port, targetUrl }) {
     targetClient.postMessage({
       type: 'bnh-vnet-request',
       port,
+      routeId,
+      protocolVersion: GATEWAY_PROTOCOL_VERSION,
       method: request.method,
       url: targetUrl,
       headers: requestHeaders,

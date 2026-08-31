@@ -285,6 +285,21 @@ function outputWrite(endpoint, value) {
   else throw new TypeError('output endpoint must provide write(), push(), or be a function');
 }
 
+async function serializeProxyResponse(response) {
+  if (!response || typeof response.arrayBuffer !== 'function' || !Number.isInteger(response.status)) return response;
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  const headers = response.headers && typeof response.headers.entries === 'function'
+    ? Object.fromEntries(response.headers.entries())
+    : {};
+  return {
+    __bnhResponse: true,
+    status: response.status,
+    statusText: response.statusText || '',
+    headers,
+    body: bytes,
+  };
+}
+
 function makeWritableEndpoint(endpoint) {
   if (endpoint && typeof endpoint.write === 'function') return ensureOutputStream(endpoint);
   if (Array.isArray(endpoint)) return new Writable({ write(chunk, _encoding, callback) { endpoint.push(typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk)); callback(); } });
@@ -833,6 +848,19 @@ export function createBrowserProcess(options = {}) {
       direction: 'parent',
       scope,
       onMessage: (value) => {
+        if (value?.__bnhProxyRequest?.requestId && options.proxyAdapter) {
+          const { requestId, request } = value.__bnhProxyRequest;
+          Promise.resolve()
+            .then(() => options.proxyAdapter.request(request))
+            .then(serializeProxyResponse)
+            .then((result) => child.send({ __bnhProxyResponse: true, requestId, result }))
+            .catch((error) => child.send({
+              __bnhProxyResponse: true,
+              requestId,
+              error: { name: error.name, message: error.message, code: error.code || 'ERR_NACELLE_PROXY' },
+            }));
+          return;
+        }
         events.emit('message', value);
         if (pendingTerminal && ipc.lastReceivedSequence >= pendingTerminal.lastUserSequence) {
           const frame = pendingTerminal;

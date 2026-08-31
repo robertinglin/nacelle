@@ -1,17 +1,6 @@
 const MODULE_NAMES = Object.freeze([
   'sqlite',
-  'better_sqlite3',
-  'sqlite3',
   'zlib',
-  'brotli',
-  'zstd',
-  'llhttp',
-  'nghttp2',
-  'simdutf',
-  'ada',
-  'cares',
-  'uvwasi',
-  'bcrypt',
   'node_addon_napi',
 ]);
 const MAX_MANIFEST_BYTES = 1024 * 1024;
@@ -248,27 +237,10 @@ export function createWasmAddonManager({
 
   async function probe(moduleName) {
     const artifact = await load(moduleName);
-    const code = moduleName === 'sqlite'
-      ? `
-        const { DatabaseSync } = require('node:sqlite');
-        const db = new DatabaseSync(':memory:');
-        db.exec('CREATE TABLE test (id INTEGER PRIMARY KEY, msg TEXT)');
-        db.prepare('INSERT INTO test (msg) VALUES (?)').run('hello wasm sqlite');
-        const row = db.prepare('SELECT * FROM test WHERE id = 1').get();
-        console.log(JSON.stringify({ status: 'ok', module: 'sqlite', row }));
-      `
-      : moduleName === 'zlib'
-        ? `
-          const zlib = require('node:zlib');
-          zlib.deflate('Hello from zlib wasm!', (deflateError, deflated) => {
-            if (deflateError) throw deflateError;
-            zlib.inflate(deflated, (inflateError, inflated) => {
-              if (inflateError) throw inflateError;
-              console.log(JSON.stringify({ status: 'ok', module: 'zlib', result: inflated.toString() }));
-            });
-          });
-        `
-        : `console.log(${JSON.stringify(JSON.stringify({ status: 'ok', module: String(moduleName) }))});`;
+    // Loading proves the artifact is present and has passed its integrity
+    // contract. Runtime wiring is intentionally tested by subsystem-specific
+    // parity suites, never by a self-consistent artifact round trip.
+    const code = `console.log(${JSON.stringify(JSON.stringify({ status: 'artifact-loaded', module: String(moduleName), path: artifact.path }))});`;
     const child = await execute(code);
     child.wasmArtifact = artifact;
     return child;

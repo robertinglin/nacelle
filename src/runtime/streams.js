@@ -3126,10 +3126,16 @@ export class OutputCollector extends EventEmitter {
     super();
     this.limits = outputLimits(options);
     this.transport = options.transport;
+    this.capture = options.capture !== false;
+    this.overflow = options.overflow ?? (options.tailBytes !== undefined ? 'truncate' : 'error');
+    this.tailBytes = Math.max(0, Number(options.tailBytes ?? 0));
     this.highWaterMark = options.highWaterMark ?? DEFAULT_HIGH_WATER_MARK;
     this._nextSequence = 0;
     this._totalBytes = 0;
+    this._streamBytes = { stdout: 0, stderr: 0 };
     this._bytes = { stdout: new Uint8Array(0), stderr: new Uint8Array(0) };
+    this._droppedBytes = { stdout: 0, stderr: 0 };
+    this._tails = { stdout: new Uint8Array(0), stderr: new Uint8Array(0) };
     this._records = [];
     const makeStream = (name) => new Writable({
       highWaterMark: this.highWaterMark,
@@ -3164,6 +3170,22 @@ export class OutputCollector extends EventEmitter {
     return this.bytes('stderr');
   }
 
+  stats(stream) {
+    const name = this._streamName(stream);
+    return {
+      stream: name,
+      bytes: this._bytes[name].byteLength,
+      droppedBytes: this._droppedBytes[name],
+      limit: Math.min(this.limits[name], this.limits.total),
+      retainedBytes: this._bytes[name].byteLength,
+      tailBytes: this._tails[name].byteLength,
+    };
+  }
+
+  tail(stream) {
+    return new Uint8Array(this._tails[this._streamName(stream)]);
+  }
+
   get combined() {
     return this.records();
   }
@@ -3179,23 +3201,47 @@ export class OutputCollector extends EventEmitter {
   }
 
   _write(stream, bytes, callback) {
-    const streamBytes = this._bytes[stream].byteLength + bytes.byteLength;
-    const totalBytes = this._totalBytes + bytes.byteLength;
+    const input = new Uint8Array(bytes);
+    this._tails[stream] = this._appendTail(this._tails[stream], input);
+    const streamBytes = this._streamBytes[stream] + input.byteLength;
+    const totalBytes = this._totalBytes + input.byteLength;
     const limit = Math.min(this.limits[stream], this.limits.total);
     const actual = this.limits[stream] <= this.limits.total ? streamBytes : totalBytes;
-    if (streamBytes > this.limits[stream] || totalBytes > this.limits.total) {
+    if (this.overflow === 'error' && (streamBytes > this.limits[stream] || totalBytes > this.limits.total)) {
       callback(new OutputLimitError(stream, limit, actual));
+      return;
+    }
+    const streamRemaining = Math.max(0, this.limits[stream] - this._streamBytes[stream]);
+    const totalRemaining = Math.max(0, this.limits.total - this._totalBytes);
+    const retainedLength = Math.min(input.byteLength, streamRemaining, totalRemaining);
+    const retained = input.subarray(0, retainedLength);
+    this._droppedBytes[stream] += input.byteLength - retainedLength;
+    if (!retained.byteLength) {
+      callback();
+      this.emit('drop', { stream, bytes: input.byteLength, stats: this.stats(stream) });
       return;
     }
     const record = {
       stream,
       sequence: this._nextSequence++,
-      bytes: new Uint8Array(bytes),
+      bytes: new Uint8Array(retained),
     };
-    this._records.push(record);
-    this._bytes[stream] = appendBytes(this._bytes[stream], bytes);
-    this._totalBytes = totalBytes;
+    this._streamBytes[stream] += retained.byteLength;
+    if (this.capture) {
+      this._records.push(record);
+      this._bytes[stream] = appendBytes(this._bytes[stream], retained);
+    }
+    this._totalBytes += retained.byteLength;
+    this.emit('data', { stream, sequence: record.sequence, bytes: new Uint8Array(record.bytes) });
     this._send(record, callback);
+  }
+
+  _appendTail(previous, bytes) {
+    if (!this.tailBytes) return new Uint8Array(0);
+    const combined = new Uint8Array(previous.byteLength + bytes.byteLength);
+    combined.set(previous);
+    combined.set(bytes, previous.byteLength);
+    return combined.subarray(Math.max(0, combined.byteLength - this.tailBytes)).slice();
   }
 
   _send(record, callback) {

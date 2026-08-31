@@ -106,6 +106,8 @@ const hostSetTimeout = typeof globalThis.setTimeout === 'function'
   ? globalThis.setTimeout.bind(globalThis)
   : null;
 let promisePatchInstalled = false;
+let promiseRejectionObserver = null;
+const handledPromises = new WeakSet();
 // A destroy hook changes Node's promise-hook mode. Browsers do not expose
 // that native transition, so defer the compatible boundary until user code
 // creates its next resolved promise.
@@ -121,6 +123,25 @@ const resourceFinalizer = typeof FinalizationRegistry === 'function'
     queueDestroy(asyncId);
   })
   : null;
+
+export function setPromiseRejectionObserver(observer) {
+  const previous = promiseRejectionObserver;
+  promiseRejectionObserver = typeof observer === 'function' ? observer : null;
+  return () => {
+    if (promiseRejectionObserver === observer || promiseRejectionObserver === null) {
+      promiseRejectionObserver = previous;
+    }
+  };
+}
+
+export function isPromiseHandled(promise) {
+  return handledPromises.has(promise);
+}
+
+function observePromiseRejection(promise, reason) {
+  if (handledPromises.has(promise)) return;
+  promiseRejectionObserver?.(promise, reason);
+}
 
 // Node gives queued destroy hooks a chance to run between long promise chains
 // while still keeping them behind the current nextTick/microtask turn.
@@ -401,6 +422,7 @@ function installPromiseHooks() {
   if (promisePatchInstalled) return;
   promisePatchInstalled = true;
   Promise.prototype.then = function patchedThen(onFulfilled, onRejected) {
+    if (typeof onRejected === 'function') handledPromises.add(this);
     const knownAsyncId = promiseIds.get(this);
     if (knownAsyncId === undefined && !isUserCodeActive()) {
       return originalThen.call(this, onFulfilled, onRejected);
@@ -455,6 +477,7 @@ function installPromiseHooks() {
         if (context) promiseContexts.set(result, context);
       }
     }
+    observePromiseRejection(result, reason);
     return result;
   };
   if (isBrowserRealm && globalThis.Promise === originalPromiseConstructor) {
@@ -462,15 +485,25 @@ function installPromiseHooks() {
       if (!new.target) throw new TypeError('Promises must be constructed via new');
       if (typeof executor !== 'function') throw new TypeError('Promise resolver is not a function');
       let resolvePromise;
-      let rejectPromise;
+      let rejectNative;
+      let settled = false;
       const result = new originalPromiseConstructor((resolve, reject) => {
-        resolvePromise = resolve;
-        rejectPromise = reject;
+        resolvePromise = (value) => {
+          if (settled) return;
+          settled = true;
+          resolve(value);
+        };
+        rejectNative = reject;
       });
       if (isUserCodeActive() && hooks.size > 0
           && (!promiseContextSwitchPending || hooks.size === 1)) {
         trackPromise(result);
       }
+      const rejectPromise = (reason) => {
+        if (settled) return;
+        settled = true;
+        rejectNative(reason);
+      };
       try {
         executor(resolvePromise, rejectPromise);
       } catch (error) {

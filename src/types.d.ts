@@ -32,15 +32,37 @@ export interface NacelleOptions {
   /** Initial virtual filesystem files */
   files?: Record<string, string | Uint8Array>;
   /** Enable Service Worker & iframe gateway (default: true) */
-  gateway?: boolean | { swPath?: string; scope?: string };
+  gateway?: boolean | { swPath?: string; scope?: string; sessionScoped?: boolean; clientId?: string; port?: number };
   /** Custom base URL for WASM binary fetching */
   wasmBaseUrl?: string;
   /** Global execution scope */
   globalObject?: any;
+  /** Guest-code execution boundary; browser worker isolation is fail-closed when unavailable */
+  isolation?: 'inline' | 'worker';
   /** Optional Nacelle+ privileged transport companion */
   nacellePlus?: boolean | NacellePlusOptions;
   /** Explicit Nacelle capability grant for privileged transport */
   proxy?: ProxyConfig;
+  /** Immutable, run-scoped capability manifest extensions */
+  capabilities?: CapabilityManifest;
+}
+
+export interface CapabilityManifest {
+  vfs?: Record<string, any>;
+  workers?: Record<string, any>;
+  ipc?: Record<string, any>;
+  signals?: Record<string, any>;
+  output?: Record<string, number>;
+  envVars?: { allowed: string[] };
+  proxy?: ProxyConfig;
+  network?: { origins: string[]; methods?: string[]; [key: string]: any };
+  npm?: { registries?: string[]; lifecycleScripts?: boolean; allowedScripts?: string[]; [key: string]: any };
+  secrets?: { names: string[]; [key: string]: any };
+  hostBridge?: { apis: string[]; [key: string]: any };
+  persistence?: { enabled?: boolean; namespaces?: string[]; [key: string]: any };
+  preview?: { ports?: number[]; [key: string]: any };
+  budgets?: Record<string, number>;
+  [key: string]: any;
 }
 
 export interface NpmProgressEvent {
@@ -102,6 +124,8 @@ export interface NacellePlusOptions {
   fallback?: boolean;
   /** Timeout for page/extension bridge requests in milliseconds */
   timeout?: number;
+  /** Guest-code isolation mode; browser pages fail closed when workers are unavailable */
+  isolation?: 'inline' | 'worker';
   /** Emit secret-free structured transport diagnostics when enabled */
   debug?: boolean | ((event: NacellePlusDiagnosticEvent) => void) | { enabled?: boolean; onEvent?: (event: NacellePlusDiagnosticEvent) => void };
 }
@@ -145,6 +169,14 @@ export interface NacellePlusDiagnosticEvent {
 }
 
 export function createProxyConfig(options?: ProxyConfig): ProxyConfig;
+export function createCapabilityManifest(manifest: CapabilityManifest): Readonly<CapabilityManifest>;
+export function capabilityDelta(previous: CapabilityManifest, next: CapabilityManifest): { added: Partial<CapabilityManifest>; removed: Partial<CapabilityManifest> };
+export function createCheckpointStore(options: { snapshot: () => any | Promise<any>; restore: (snapshot: any) => void | Promise<void>; metadata?: Record<string, any> }): any;
+export function createTraceRecorder(options?: { traceId?: string; maxEvents?: number }): any;
+export class NacelleError extends Error { code: string; details: Record<string, any>; traceId?: string; }
+export function createSecretBroker(options?: Record<string, any>): any;
+export function createGatewayRouteRegistry(options?: Record<string, any>): any;
+export function createCompatibilityLab(options: Record<string, any>): any;
 
 export interface PackageJson {
   name?: string;
@@ -189,6 +221,10 @@ export interface ProcessRunOptions {
   signal?: AbortSignal;
   /** Initial standard input */
   stdin?: string | Uint8Array;
+  /** Retain no complete output transcript when false */
+  capture?: boolean;
+  /** Retain only the final number of bytes per stream */
+  tailBytes?: number;
 }
 
 export type ExecuteOptions = Omit<ProcessRunOptions, 'entry'>;
@@ -204,6 +240,10 @@ export interface ProcessHandle {
   kill(signal?: string): Promise<void>;
   /** Structured execution result metadata */
   structuredResult?: any;
+  /** Bounded output collector */
+  output?: any;
+  /** Output accounting for one stream */
+  stats?(stream: 'stdout' | 'stderr'): { stream: string; bytes: number; droppedBytes: number; limit: number; retainedBytes: number; tailBytes: number };
   /** Present when the handle was created by wasm.probe(). */
   wasmArtifact?: WasmArtifact;
 }
@@ -227,6 +267,7 @@ export interface WasmArtifactManifest {
     node: string;
     wasm: string;
     entry: string;
+    exports?: readonly string[];
     bytes?: number;
     sha256?: string;
   }>[];
@@ -244,6 +285,10 @@ export class Nacelle {
   readonly virtualNetwork: any;
   readonly transport: any;
   readonly nodeProfile: NodeVersionProfile;
+  readonly capabilities: Readonly<CapabilityManifest>;
+  readonly secretBroker: any;
+  readonly trace: any;
+  readonly gatewayRoute: Readonly<{ routeId: string; clientId: string; port: number; version: number; expiresAt: number }> | null;
   readonly fs: {
     readFile(path: string, encoding?: string): Promise<string | Uint8Array>;
     writeFile(path: string, data: string | Uint8Array): Promise<void>;
@@ -286,6 +331,9 @@ export class Nacelle {
   runScript(scriptName: string, options?: RunScriptOptions): Promise<ProcessHandle>;
   bash(command: string, options?: BashOptions): Promise<ProcessHandle>;
   execute(code: string, options?: ExecuteOptions): Promise<ProcessHandle>;
+  checkpoint(metadata?: Record<string, any>): Promise<any>;
+  rollback(checkpointId: string): Promise<any>;
+  diff(checkpointId: string, snapshot?: any): string;
   on(event: string, listener: (...args: any[]) => void): this;
   off(event: string, listener: (...args: any[]) => void): this;
   emit(event: string, ...args: any[]): void;

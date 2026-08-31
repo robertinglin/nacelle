@@ -287,7 +287,7 @@
       nLink.textContent = 'Native full-page home';
     } else {
       nLink.id = 'native-about-link';
-      nLink.href = './about';
+      nLink.href = '/about';
       nLink.textContent = 'Native full-page /about';
     }
     nav.appendChild(nLink);
@@ -456,6 +456,11 @@ server.listen(5173, () => {
         ? 'Building production Vite + React bundle…'
         : 'Starting virtual Vite + React dev server…';
       if (activeAbortController) activeAbortController.abort();
+      if (activeServerProcess) {
+        await activeServerProcess.kill?.();
+        await activeServerProcess.exit?.catch?.(() => {});
+        activeServerProcess = null;
+      }
       activeAbortController = new AbortController();
       const signal = activeAbortController.signal;
 
@@ -480,7 +485,7 @@ server.listen(5173, () => {
         node.connectIframe(iframe, {
           port: 5173,
           autoLoad: false,
-          onNavigate: (cleanAddress) => { urlInput.value = cleanAddress; },
+          onNavigate: (_cleanAddress, rawAddress) => { urlInput.value = rawAddress; },
         });
 
         // Auto-install React 19 from package.json

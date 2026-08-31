@@ -10,7 +10,8 @@ explicitly granted HTTP transport when a page request is rejected by CORS.
 - Chrome Manifest V3 service worker and Firefox Manifest V2 background page
 - page/content-script message bridge with no page code execution in the extension
 - per-page-origin and target-origin permission grants
-- native `fetch` first, extension fetch fallback on browser network failures
+- native `fetch` first only for replay-safe `GET`/`HEAD`; unsafe methods go to
+  the privileged adapter before page fetch to avoid replaying side effects
 - manual redirect walking with a fresh grant check for every destination
 - long-lived port streaming with incremental response limits and cancellation
 - bounded request/response bodies and credentials omitted by default
@@ -116,8 +117,14 @@ const node = await Nacelle.create({
 When `nacellePlus` is enabled, Nacelle selects its existing capability-gated
 proxy path only when the Nacelle capability is explicitly granted. The
 extension's browser host permission and Nacelle's run-scoped capability are
-separate checks. The negotiated adapter tries the ordinary page fetch first and uses the
-extension only after that fetch rejects with a browser network failure. No
+separate checks. The negotiated adapter tries the ordinary page fetch first for
+safe methods and uses the extension only after that fetch rejects with a browser
+network failure. No
 extension is contacted for requests that already work normally. Grants are
 persistent until revoked from the extension popup; private-network targets
 need a separate explicit checkbox grant.
+
+When Nacelle+ is enabled from a browser page, guest execution uses the Web
+Worker boundary. Creation fails with `ERR_NACELLE_ISOLATION_UNAVAILABLE` when
+the page cannot provide both `Worker` and `MessageChannel`; it never silently
+falls back to page-realm execution.

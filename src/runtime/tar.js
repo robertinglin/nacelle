@@ -1,6 +1,26 @@
 import { decompress, compress } from './compression.js';
 
 const BLOCK_SIZE = 512;
+const DEFAULT_MAX_ENTRIES = 10_000;
+const DEFAULT_MAX_EXPANDED_BYTES = 128 * 1024 * 1024;
+const DEFAULT_MAX_COMPRESSION_RATIO = 100;
+
+function archiveError(code, message, details = {}) {
+  const error = new Error(message);
+  error.code = code;
+  error.details = details;
+  return error;
+}
+
+function validateArchiveName(name) {
+  const normalized = String(name).replace(/\\/g, '/');
+  if (normalized.startsWith('/') || /^[A-Za-z]:\//.test(normalized)) {
+    throw archiveError('ERR_ARCHIVE_PATH', `absolute archive path is not allowed: ${name}`);
+  }
+  const parts = normalized.split('/');
+  if (parts.some((part) => part === '..')) throw archiveError('ERR_ARCHIVE_PATH', `archive traversal is not allowed: ${name}`);
+  return normalized;
+}
 
 function decodeNullTerminatedString(bytes, offset, length, encoding = 'utf-8') {
   let end = offset;
@@ -38,12 +58,21 @@ function parsePaxHeader(paxBytes) {
   return metadata;
 }
 
-export function unpackTar(tarBytes, { stripPrefix = 'package/', targetDir = '' } = {}) {
+export function unpackTar(tarBytes, {
+  stripPrefix = 'package/',
+  targetDir = '',
+  maxEntries = DEFAULT_MAX_ENTRIES,
+  maxExpandedBytes = DEFAULT_MAX_EXPANDED_BYTES,
+} = {}) {
   const entries = [];
   const bytes = tarBytes instanceof Uint8Array ? tarBytes : new Uint8Array(tarBytes);
+  if (!Number.isInteger(maxEntries) || maxEntries < 1 || !Number.isInteger(maxExpandedBytes) || maxExpandedBytes < 0) {
+    throw archiveError('ERR_ARCHIVE_LIMIT', 'archive limits must be non-negative integers');
+  }
   let offset = 0;
   let nextOverrideName = null;
   let globalPax = {};
+  let expandedBytes = 0;
 
   while (offset + BLOCK_SIZE <= bytes.byteLength) {
     const header = bytes.subarray(offset, offset + BLOCK_SIZE);
@@ -75,6 +104,9 @@ export function unpackTar(tarBytes, { stripPrefix = 'package/', targetDir = '' }
     offset += BLOCK_SIZE;
     const dataBlocks = Math.ceil(size / BLOCK_SIZE);
     const dataEnd = offset + size;
+    if (!Number.isSafeInteger(size) || size < 0 || dataEnd > bytes.byteLength || offset + dataBlocks * BLOCK_SIZE > bytes.byteLength) {
+      throw archiveError('ERR_ARCHIVE_FORMAT', 'archive entry extends beyond the archive');
+    }
     const content = bytes.subarray(offset, dataEnd);
     offset += dataBlocks * BLOCK_SIZE;
 
@@ -96,23 +128,33 @@ export function unpackTar(tarBytes, { stripPrefix = 'package/', targetDir = '' }
       continue;
     }
 
+    if (!['0', '\0', '5'].includes(typeflag)) {
+      throw archiveError('ERR_ARCHIVE_PATH', `archive entry type is not allowed: ${typeflag}`);
+    }
+
     if (nextOverrideName) {
       name = nextOverrideName;
       nextOverrideName = null;
     }
 
-    let normalizedName = name.replace(/\\/g, '/');
+    let normalizedName = validateArchiveName(name);
     if (stripPrefix && normalizedName.startsWith(stripPrefix)) {
       normalizedName = normalizedName.slice(stripPrefix.length);
     }
-    normalizedName = normalizedName.replace(/^\/+/, '');
+    normalizedName = validateArchiveName(normalizedName);
     if (!normalizedName) continue;
+
+    if (entries.length >= maxEntries) throw archiveError('ERR_ARCHIVE_LIMIT', 'archive entry limit exceeded');
+    const isDir = typeflag === '5' || normalizedName.endsWith('/');
+    if (!isDir) {
+      expandedBytes += size;
+      if (expandedBytes > maxExpandedBytes) throw archiveError('ERR_ARCHIVE_LIMIT', 'archive expanded-byte limit exceeded');
+    }
 
     const fullPath = targetDir
       ? (targetDir.endsWith('/') ? `${targetDir}${normalizedName}` : `${targetDir}/${normalizedName}`)
       : normalizedName;
 
-    const isDir = typeflag === '5' || normalizedName.endsWith('/');
     entries.push({
       path: fullPath,
       name: normalizedName,
@@ -146,7 +188,13 @@ export async function decompressGzipBytes(tarGzBytes, globalObject = globalThis)
 }
 
 export async function unpackTarGz(tarGzBytes, options = {}, globalObject = globalThis) {
-  const tarBytes = await decompressGzipBytes(tarGzBytes, globalObject);
+  const input = tarGzBytes instanceof Uint8Array ? tarGzBytes : new Uint8Array(tarGzBytes);
+  const tarBytes = await decompressGzipBytes(input, globalObject);
+  const maxCompressionRatio = options.maxCompressionRatio ?? DEFAULT_MAX_COMPRESSION_RATIO;
+  if (!Number.isFinite(maxCompressionRatio) || maxCompressionRatio <= 0) throw archiveError('ERR_ARCHIVE_LIMIT', 'maxCompressionRatio must be positive');
+  if (input.byteLength > 0 && tarBytes.byteLength / input.byteLength > maxCompressionRatio) {
+    throw archiveError('ERR_ARCHIVE_LIMIT', 'archive compression ratio exceeded');
+  }
   return unpackTar(tarBytes, options);
 }
 

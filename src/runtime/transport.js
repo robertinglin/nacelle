@@ -49,12 +49,16 @@ export function createNegotiatedTransport({ globalObject = globalThis, adapter, 
   const request = async (proxyRequest) => {
     const target = String(proxyRequest?.target || proxyRequest?.url || '');
     if (!target) throw transportError('ERR_INVALID_TRANSPORT_REQUEST', 'a request target is required');
+    const method = String(proxyRequest.method || 'GET').toUpperCase();
+    // A browser failure is not proof that the request was not sent. Unsafe
+    // methods must be owned by the privileged adapter before any page fetch.
+    if (!['GET', 'HEAD'].includes(method)) return invokeAdapter(adapter, { ...proxyRequest, method });
     if (!fallback || !nativeFetch) return invokeAdapter(adapter, proxyRequest);
     try {
-      return await nativeFetch(target, requestInit(proxyRequest));
+      return await nativeFetch(target, requestInit({ ...proxyRequest, method }));
     } catch (error) {
       if (!isBrowserFetchFailure(error)) throw error;
-      return invokeAdapter(adapter, { ...proxyRequest, fallbackReason: 'cors' });
+      return invokeAdapter(adapter, { ...proxyRequest, method, fallbackReason: 'cors' });
     }
   };
 

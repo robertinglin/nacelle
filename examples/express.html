@@ -668,7 +668,7 @@ const server = app.listen(3000, () => {
         node.connectIframe(iframe, {
           port: 3000,
           autoLoad: false,
-          onNavigate: (cleanAddress) => { urlInput.value = cleanAddress; },
+          onNavigate: (_cleanAddress, rawAddress) => { urlInput.value = rawAddress; },
         });
 
         // Auto-install dependencies from package.json

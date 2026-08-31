@@ -388,6 +388,7 @@ app.listen(3000, () => console.log('✓ Next.js dev server ready'));
   assert.equal(data.framework, 'Next.js 14 App Router');
   assert.equal(data.status, 'ok');
   devChild.kill();
+  await devChild.exit;
 });
 
 test('npm scripts stream stdout chunks in real time before command exit', async () => {

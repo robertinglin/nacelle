@@ -163,6 +163,33 @@ export class Nacelle {
 
     const wasmBaseUrl = options.wasmBaseUrl
       || new URL(`./wasm/${nodeProfile.id}/`, import.meta.url).href;
+
+    // In browser environment, pre-cache core WASM artifacts
+    if (typeof globalObject.fetch === 'function' && !globalObject.process?.versions?.node) {
+      globalObject.__BNH_WASM_CACHE__ = globalObject.__BNH_WASM_CACHE__ || {};
+      const wasmNames = ['sqlite', 'zlib', 'brotli', 'zstd', 'node_addon_napi'];
+      await Promise.allSettled(wasmNames.map(async (name) => {
+        if (globalObject.__BNH_WASM_CACHE__[name]) return;
+        const candidateUrls = [
+          new URL(`./wasm/${nodeProfile.id}/${name}.wasm`, import.meta.url).href,
+          new URL(`./wasm/${name}.wasm`, import.meta.url).href,
+          `/wasm/${nodeProfile.id}/${name}.wasm`,
+          `/src/wasm/${nodeProfile.id}/${name}.wasm`,
+          `/wasm/${name}.wasm`
+        ];
+        for (const url of candidateUrls) {
+          try {
+            const res = await globalObject.fetch(url);
+            if (res.ok) {
+              const buf = await res.arrayBuffer();
+              globalObject.__BNH_WASM_CACHE__[name] = new Uint8Array(buf);
+              break;
+            }
+          } catch {}
+        }
+      }));
+    }
+
     const runtime = createRuntime({
       globalObject,
       nodeProfile,
@@ -543,8 +570,97 @@ export class Nacelle {
       path = parsed.pathname + parsed.search + parsed.hash;
     } catch { /* fallback */ }
 
-    const targetUrl = this.getVirtualUrl(port, path);
-    return this._globalObject.fetch(targetUrl, options);
+    if (this._globalObject.navigator?.serviceWorker?.controller) {
+      const targetUrl = this.getVirtualUrl(port, path);
+      return this._globalObject.fetch(targetUrl, options);
+    }
+
+    // Direct dispatch through virtual network when Service Worker is not controlling the page
+    return new Promise((resolve, reject) => {
+      const BufferClass = this._globalObject.Buffer || createBufferClass(this._globalObject);
+      const netModule = createBrowserNet({
+        network: this._runtime.virtualNetwork,
+        BufferClass,
+      });
+      const socket = netModule.connect({ port, host: '127.0.0.1' });
+      const method = (options.method || 'GET').toUpperCase();
+      const headers = { ...(options.headers || {}) };
+      if (!headers.host && !headers.Host) headers.host = `127.0.0.1:${port}`;
+      if (!headers.connection && !headers.Connection) headers.connection = 'close';
+
+      const reqLines = [`${method} ${path} HTTP/1.1`];
+      for (const [k, v] of Object.entries(headers)) {
+        reqLines.push(`${k}: ${v}`);
+      }
+      let bodyBytes = null;
+      if (options.body) {
+        if (typeof options.body === 'string') {
+          bodyBytes = new TextEncoder().encode(options.body);
+        } else if (options.body instanceof Uint8Array) {
+          bodyBytes = options.body;
+        }
+        if (bodyBytes && !headers['content-length'] && !headers['Content-Length']) {
+          reqLines.push(`content-length: ${bodyBytes.byteLength}`);
+        }
+      }
+      reqLines.push('');
+      reqLines.push('');
+
+      socket.write(new TextEncoder().encode(reqLines.join('\r\n')));
+      if (bodyBytes) socket.write(bodyBytes);
+
+      const chunks = [];
+      socket.on('data', (chunk) => {
+        chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+      });
+      socket.on('error', reject);
+      socket.on('close', () => {
+        const totalLength = chunks.reduce((acc, c) => acc + c.byteLength, 0);
+        const combined = new Uint8Array(totalLength);
+        let offset = 0;
+        for (const c of chunks) {
+          combined.set(c, offset);
+          offset += c.byteLength;
+        }
+        let headerEnd = -1;
+        for (let i = 0; i < combined.byteLength - 3; i += 1) {
+          if (combined[i] === 13 && combined[i + 1] === 10 && combined[i + 2] === 13 && combined[i + 3] === 10) {
+            headerEnd = i;
+            break;
+          }
+        }
+        let bodyOffset = headerEnd !== -1 ? headerEnd + 4 : combined.byteLength;
+        if (headerEnd === -1) {
+          for (let i = 0; i < combined.byteLength - 1; i += 1) {
+            if (combined[i] === 10 && combined[i + 1] === 10) {
+              headerEnd = i;
+              bodyOffset = i + 2;
+              break;
+            }
+          }
+        }
+        const headerText = headerEnd !== -1 ? new TextDecoder().decode(combined.subarray(0, headerEnd)) : '';
+        const rawBody = combined.subarray(bodyOffset);
+        const lines = headerText.split(/\r?\n/);
+        const statusMatch = (lines[0] || '').match(/^HTTP\/\d\.\d\s+(\d+)(?:\s+(.*))?$/);
+        const status = statusMatch ? parseInt(statusMatch[1], 10) : 200;
+        const statusText = statusMatch ? statusMatch[2] || 'OK' : 'OK';
+        const resHeaders = new Headers();
+        for (let i = 1; i < lines.length; i += 1) {
+          const colon = lines[i].indexOf(':');
+          if (colon !== -1) {
+            resHeaders.append(lines[i].slice(0, colon).trim(), lines[i].slice(colon + 1).trim());
+          }
+        }
+        const ResponseClass = globalThis.Response || this._globalObject.Response;
+        const res = new ResponseClass(rawBody, {
+          status,
+          statusText,
+          headers: resHeaders,
+        });
+        resolve(res);
+      });
+    });
   }
 
   /**

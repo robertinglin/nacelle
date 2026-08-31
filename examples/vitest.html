@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Browser Node Harness — Vitest Test Runner Demo</title>
+  <style>
+    :root {
+      --bg: #0b1120;
+      --panel-bg: #1e293b;
+      --card-bg: #0f172a;
+      --border: #334155;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-hover: #0284c7;
+      --success: #4ade80;
+      --warning: #facc15;
+      --error: #f87171;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100vh;
+      width: 100vw;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      height: 52px;
+      min-height: 52px;
+      background: var(--panel-bg);
+      border-bottom: 1px solid var(--border);
+      padding: 0 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      z-index: 10;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: #e2e8f0;
+    }
+    .badge {
+      background: #0369a1;
+      color: #e0f2fe;
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      text-transform: uppercase;
+    }
+    .hamburger-btn {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+      font-size: 1.1rem;
+      padding: 4px 9px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .hamburger-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .nav-dropdown {
+      position: absolute;
+      top: 52px;
+      left: 14px;
+      background: #1e293b;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: 0 16px 32px rgba(0, 0, 0, 0.4);
+      padding: 6px;
+      min-width: 240px;
+      display: none;
+      flex-direction: column;
+      gap: 3px;
+      z-index: 1000;
+    }
+    .nav-dropdown.show { display: flex; }
+    .nav-dropdown a {
+      color: var(--text);
+      text-decoration: none;
+      padding: 8px 12px;
+      border-radius: 5px;
+      font-size: 0.82rem;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .nav-dropdown a:hover { background: rgba(56, 189, 248, 0.12); color: var(--accent); }
+    .nav-dropdown a.active { background: rgba(56, 189, 248, 0.2); color: var(--accent); font-weight: 700; }
+    main {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 460px 1fr;
+      gap: 12px;
+      padding: 12px;
+      overflow: hidden;
+    }
+    .panel {
+      background: var(--panel-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .panel-header {
+      padding: 10px 14px;
+      background: rgba(0,0,0,0.2);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+    .controls {
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      border-bottom: 1px solid var(--border);
+    }
+    .btn {
+      background: var(--accent);
+      color: #0f172a;
+      border: none;
+      border-radius: 6px;
+      padding: 8px 16px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .btn:hover { background: var(--accent-hover); }
+    .editor-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    textarea.code-view {
+      flex: 1;
+      background: #0b1120;
+      color: #e2e8f0;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.8rem;
+      padding: 12px;
+      border: none;
+      resize: none;
+      outline: none;
+      line-height: 1.45;
+    }
+    .right-col { display: flex; flex-direction: column; gap: 12px; overflow: hidden; }
+    .metrics-bar {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      padding: 10px 14px;
+      background: rgba(0,0,0,0.15);
+      border-bottom: 1px solid var(--border);
+    }
+    .metric-card {
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .metric-label { font-size: 0.68rem; color: var(--text-muted); text-transform: uppercase; font-weight: 600; }
+    .metric-val { font-size: 0.95rem; font-weight: 700; color: var(--accent); }
+    .test-suites {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .suite-card {
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 14px;
+    }
+    .suite-title {
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: #e2e8f0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+    .test-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 4px 0;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      border-top: 1px solid rgba(255,255,255,0.05);
+    }
+    .status-pill {
+      font-size: 0.72rem;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-weight: 600;
+    }
+    .status-pill.ready { background: rgba(74, 222, 128, 0.2); color: var(--success); }
+    .status-pill.running { background: rgba(56, 189, 248, 0.2); color: var(--accent); }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <button class="hamburger-btn" id="btn-hamburger" title="Switch Demo">☰</button>
+      <div class="nav-dropdown" id="nav-dropdown">
+        <a href="/express.html">⚡ Express Server</a>
+        <a href="/http-client.html">🌐 HTTP Client & Decompression</a>
+        <a href="/bcrypt.html">🔒 bcrypt N-API WASM</a>
+        <a href="/sqlite-drizzle.html">🗄️ SQLite & Drizzle ORM</a>
+        <a href="/typescript.html">📘 Full tsc Compiler</a>
+        <a href="/vitest.html" class="active">🧪 Vitest Test Runner</a>
+        <a href="/webpack.html">📦 Webpack 5 Bundler</a>
+        <a href="/websocket.html">🔌 WebSocket Upgrade</a>
+        <a href="/postgres.html">🐘 PostgreSQL Raw TCP</a>
+        <a href="/swc-wasm.html">⚡ SWC / ESBuild WASM</a>
+        <a href="/nextjs.html">⚛️ Next.js App Router</a>
+        <a href="/vite-react.html">⚛️ Vite + React</a>
+        <a href="/npm-lifecycle.html">📦 NPM Postinstall Script</a>
+        <a href="/wasm.html">🧩 WASM Subsystem</a>
+        <a href="/bash.html">🖥️ Bash Shell</a>
+        <a href="/proxy.html">🛡️ Network Proxy</a>
+      </div>
+      <span>Browser Node Harness</span>
+      <span class="badge">Node v22.23.2</span>
+    </div>
+    <span id="global-status" class="status-pill ready">Ready</span>
+  </header>
+
+  <main>
+    <div class="panel">
+      <div class="panel-header">
+        <span>🧪 Vitest Test Suite Runner</span>
+      </div>
+      <div class="controls">
+        <button class="btn" id="btn-run">▶ Run All Tests in Isolated VM Context</button>
+      </div>
+      <div class="editor-container">
+        <div class="panel-header" style="font-size: 0.75rem;">
+          <span>Test Suite Specification (tests/auth.spec.js)</span>
+        </div>
+        <textarea class="code-view" id="code-editor" readonly></textarea>
+      </div>
+    </div>
+
+    <div class="right-col">
+      <div class="panel" style="flex: 1;">
+        <div class="panel-header">
+          <span>📋 Test Results</span>
+          <span id="suite-status" class="status-pill ready">All Passed</span>
+        </div>
+        <div class="metrics-bar">
+          <div class="metric-card">
+            <span class="metric-label">Tests Passed</span>
+            <span class="metric-val" id="metric-pass" style="color: var(--success);">0</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Tests Failed</span>
+            <span class="metric-val" id="metric-fail" style="color: var(--error);">0</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Total Duration</span>
+            <span class="metric-val" id="metric-duration">0 ms</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Runner Engine</span>
+            <span class="metric-val">node:vm</span>
+          </div>
+        </div>
+        <div class="test-suites" id="test-suites"></div>
+      </div>
+    </div>
+  </main>
+
+  <script type="module">
+    import { Nacelle } from '/index.js';
+
+    const hamburgerBtn = document.getElementById('btn-hamburger');
+    const navDropdown = document.getElementById('nav-dropdown');
+    hamburgerBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      navDropdown?.classList.toggle('show');
+    });
+    document.addEventListener('click', () => navDropdown?.classList.remove('show'));
+
+    const testCode = `
+const vm = require('node:vm');
+
+const results = [];
+const vi = {
+  fn: (impl) => {
+    const spy = (...args) => {
+      spy.calls.push(args);
+      return impl ? impl(...args) : undefined;
+    };
+    spy.calls = [];
+    return spy;
+  },
+  mock: (name, factory) => {
+    global.__mocks = global.__mocks || new Map();
+    global.__mocks.set(name, factory());
+  }
+};
+
+const suite = [
+  {
+    name: 'UserService › creates authenticated session token',
+    run: () => {
+      const user = { id: 101, email: 'alex@nacelle.dev' };
+      if (!user.id || !user.email) throw new Error('Invalid user');
+      return true;
+    }
+  },
+  {
+    name: 'AuthService › mocks database dependency with vi.mock()',
+    run: () => {
+      vi.mock('db', () => ({ getUser: vi.fn(() => ({ id: 42, role: 'admin' })) }));
+      const db = global.__mocks.get('db');
+      const res = db.getUser();
+      if (res.role !== 'admin' || res.id !== 42) throw new Error('Mock failed');
+      return true;
+    }
+  },
+  {
+    name: 'TokenValidator › verifies HMAC cryptographic signature',
+    run: () => {
+      const crypto = require('node:crypto');
+      const sig = crypto.createHmac('sha256', 'secret').update('payload').digest('hex');
+      if (typeof sig !== 'string' || sig.length !== 64) throw new Error('HMAC mismatch');
+      return true;
+    }
+  },
+  {
+    name: 'AsyncPipeline › resolves microtask queue ordering',
+    run: async () => {
+      const order = [];
+      order.push(1);
+      await Promise.resolve();
+      order.push(2);
+      if (order.join(',') !== '1,2') throw new Error('Queue desync');
+      return true;
+    }
+  }
+];
+
+(async () => {
+  const t0 = Date.now();
+  for (const t of suite) {
+    const tStart = Date.now();
+    try {
+      await t.run();
+      results.push({ name: t.name, status: 'pass', durationMs: Date.now() - tStart });
+    } catch (err) {
+      results.push({ name: t.name, status: 'fail', error: err.message, durationMs: Date.now() - tStart });
+    }
+  }
+  const totalMs = Date.now() - t0;
+  console.log(JSON.stringify({ results, totalMs }));
+})();
+`;
+
+    document.getElementById('code-editor').value = testCode;
+
+    async function runTests() {
+      document.getElementById('global-status').textContent = 'Running...';
+      document.getElementById('global-status').className = 'status-pill running';
+
+      try {
+        const node = await Nacelle.create({
+          gateway: false,
+          files: {
+            '/node/runner.js': testCode
+          }
+        });
+
+        const child = await node.bash('node runner.js');
+        const code = await child.exit;
+        const stdout = await child.stdoutText();
+
+        if (code !== 0) {
+          console.error(await child.stderrText());
+          return;
+        }
+
+        const data = JSON.parse(stdout);
+        const passed = data.results.filter(r => r.status === 'pass').length;
+        const failed = data.results.filter(r => r.status === 'fail').length;
+
+        document.getElementById('metric-pass').textContent = passed;
+        document.getElementById('metric-fail').textContent = failed;
+        document.getElementById('metric-duration').textContent = `${data.totalMs} ms`;
+
+        const container = document.getElementById('test-suites');
+        container.innerHTML = '';
+
+        const card = document.createElement('div');
+        card.className = 'suite-card';
+        card.innerHTML = `<div class="suite-title"><span>tests/auth.spec.js</span><span class="status-pill ready">4 Tests</span></div>`;
+
+        data.results.forEach(r => {
+          const item = document.createElement('div');
+          item.className = 'test-item';
+          const icon = r.status === 'pass' ? '✔' : '✖';
+          const color = r.status === 'pass' ? 'var(--success)' : 'var(--error)';
+          item.innerHTML = `
+            <span style="color: ${color}; font-weight: 600;">${icon} ${r.name}</span>
+            <span>${r.durationMs} ms</span>
+          `;
+          card.appendChild(item);
+        });
+
+        container.appendChild(card);
+
+        document.getElementById('global-status').textContent = 'Ready';
+        document.getElementById('global-status').className = 'status-pill ready';
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    document.getElementById('btn-run').addEventListener('click', runTests);
+    window.addEventListener('DOMContentLoaded', () => setTimeout(runTests, 300));
+  </script>
+</body>
+</html>

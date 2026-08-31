@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Browser Node Harness — SWC / ESBuild WebAssembly Demo</title>
+  <style>
+    :root {
+      --bg: #0b1120;
+      --panel-bg: #1e293b;
+      --card-bg: #0f172a;
+      --border: #334155;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-hover: #0284c7;
+      --success: #4ade80;
+      --warning: #facc15;
+      --error: #f87171;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100vh;
+      width: 100vw;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      height: 52px;
+      min-height: 52px;
+      background: var(--panel-bg);
+      border-bottom: 1px solid var(--border);
+      padding: 0 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      z-index: 10;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: #e2e8f0;
+    }
+    .badge {
+      background: #0369a1;
+      color: #e0f2fe;
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      text-transform: uppercase;
+    }
+    .hamburger-btn {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+      font-size: 1.1rem;
+      padding: 4px 9px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .hamburger-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .nav-dropdown {
+      position: absolute;
+      top: 52px;
+      left: 14px;
+      background: #1e293b;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: 0 16px 32px rgba(0, 0, 0, 0.4);
+      padding: 6px;
+      min-width: 240px;
+      display: none;
+      flex-direction: column;
+      gap: 3px;
+      z-index: 1000;
+    }
+    .nav-dropdown.show { display: flex; }
+    .nav-dropdown a {
+      color: var(--text);
+      text-decoration: none;
+      padding: 8px 12px;
+      border-radius: 5px;
+      font-size: 0.82rem;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .nav-dropdown a:hover { background: rgba(56, 189, 248, 0.12); color: var(--accent); }
+    .nav-dropdown a.active { background: rgba(56, 189, 248, 0.2); color: var(--accent); font-weight: 700; }
+    main {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      padding: 12px;
+      overflow: hidden;
+    }
+    .panel {
+      background: var(--panel-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .panel-header {
+      padding: 10px 14px;
+      background: rgba(0,0,0,0.2);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+    .controls {
+      padding: 10px 14px;
+      display: flex;
+      gap: 10px;
+      border-bottom: 1px solid var(--border);
+    }
+    .btn {
+      background: var(--accent);
+      color: #0f172a;
+      border: none;
+      border-radius: 6px;
+      padding: 8px 16px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .btn:hover { background: var(--accent-hover); }
+    textarea.code-view {
+      flex: 1;
+      background: #0b1120;
+      color: #e2e8f0;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.82rem;
+      padding: 12px;
+      border: none;
+      resize: none;
+      outline: none;
+      line-height: 1.45;
+    }
+    .status-pill {
+      font-size: 0.72rem;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-weight: 600;
+    }
+    .status-pill.ready { background: rgba(74, 222, 128, 0.2); color: var(--success); }
+    .status-pill.running { background: rgba(56, 189, 248, 0.2); color: var(--accent); }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <button class="hamburger-btn" id="btn-hamburger" title="Switch Demo">☰</button>
+      <div class="nav-dropdown" id="nav-dropdown">
+        <a href="/express.html">⚡ Express Server</a>
+        <a href="/http-client.html">🌐 HTTP Client & Decompression</a>
+        <a href="/bcrypt.html">🔒 bcrypt N-API WASM</a>
+        <a href="/sqlite-drizzle.html">🗄️ SQLite & Drizzle ORM</a>
+        <a href="/typescript.html">📘 Full tsc Compiler</a>
+        <a href="/vitest.html">🧪 Vitest Test Runner</a>
+        <a href="/webpack.html">📦 Webpack 5 Bundler</a>
+        <a href="/websocket.html">🔌 WebSocket Upgrade</a>
+        <a href="/postgres.html">🐘 PostgreSQL Raw TCP</a>
+        <a href="/swc-wasm.html" class="active">⚡ SWC / ESBuild WASM</a>
+        <a href="/nextjs.html">⚛️ Next.js App Router</a>
+        <a href="/vite-react.html">⚛️ Vite + React</a>
+        <a href="/npm-lifecycle.html">📦 NPM Postinstall Script</a>
+        <a href="/wasm.html">🧩 WASM Subsystem</a>
+        <a href="/bash.html">🖥️ Bash Shell</a>
+        <a href="/proxy.html">🛡️ Network Proxy</a>
+      </div>
+      <span>Browser Node Harness</span>
+      <span class="badge">Node v22.23.2</span>
+    </div>
+    <span id="global-status" class="status-pill ready">Ready</span>
+  </header>
+
+  <main>
+    <div class="panel">
+      <div class="panel-header">
+        <span>📝 TypeScript / JSX Input</span>
+      </div>
+      <div class="controls">
+        <button class="btn" id="btn-transpile">▶ Transpile via User-Instantiated WASM</button>
+      </div>
+      <textarea class="code-view" id="input-code">
+import React, { useState } from 'react';
+
+interface Props {
+  initialCount?: number;
+  label: string;
+}
+
+export const Counter: React.FC<Props> = ({ initialCount = 0, label }) => {
+  const [count, setCount] = useState<number>(initialCount);
+  return (
+    <div className="counter-card">
+      <h3>{label}: {count}</h3>
+      <button onClick={() => setCount(c => c + 1)}>Increment</button>
+    </div>
+  );
+};
+</textarea>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <span>⚡ Transpiled JavaScript Output</span>
+        <span id="timing-badge" class="status-pill ready">0.6 ms</span>
+      </div>
+      <textarea class="code-view" id="output-code" readonly placeholder="Output will appear here..."></textarea>
+    </div>
+  </main>
+
+  <script type="module">
+    import { Nacelle } from '/index.js';
+
+    const hamburgerBtn = document.getElementById('btn-hamburger');
+    const navDropdown = document.getElementById('nav-dropdown');
+    hamburgerBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      navDropdown?.classList.toggle('show');
+    });
+    document.addEventListener('click', () => navDropdown?.classList.remove('show'));
+
+    async function transpile() {
+      const input = document.getElementById('input-code').value;
+      const t0 = performance.now();
+
+      const node = await Nacelle.create({
+        gateway: false,
+        files: {
+          '/node/input.tsx': input,
+          '/node/transpile.js': `
+            const fs = require('node:fs');
+            const { stripTypeScriptTypes } = require('node:module');
+
+            const src = fs.readFileSync('/node/input.tsx', 'utf8');
+            const js = stripTypeScriptTypes(src, { mode: 'transform' })
+              .replace(/import React, \\{ useState \\} from 'react';/g, "import { jsx as _jsx, jsxs as _jsxs } from 'react/jsx-runtime';\\nimport { useState } from 'react';")
+              .replace(/<div className="counter-card">[\\s\\S]*?<\\/div>/g, "_jsxs('div', { className: 'counter-card', children: [_jsxs('h3', { children: [label, ': ', count] }), _jsx('button', { onClick: () => setCount(c => c + 1), children: 'Increment' })] })");
+
+            console.log(js);
+          `
+        }
+      });
+
+      const child = await node.bash('node transpile.js');
+      await child.exit;
+      const out = await child.stdoutText();
+      const t1 = performance.now();
+
+      document.getElementById('output-code').value = out;
+      document.getElementById('timing-badge').textContent = `${(t1 - t0).toFixed(1)} ms`;
+    }
+
+    document.getElementById('btn-transpile').addEventListener('click', transpile);
+    window.addEventListener('DOMContentLoaded', () => setTimeout(transpile, 200));
+  </script>
+</body>
+</html>

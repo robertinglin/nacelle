@@ -112,6 +112,15 @@ const server = createServer(async (req, res) => {
     if (pathname === '/proxy') pathname = '/proxy.html';
     if (pathname === '/typescript' || pathname === '/ts') pathname = '/typescript.html';
     if (pathname === '/bash' || pathname === '/sh') pathname = '/bash.html';
+    if (pathname === '/http-client' || pathname === '/client' || pathname === '/undici') pathname = '/http-client.html';
+    if (pathname === '/bcrypt') pathname = '/bcrypt.html';
+    if (pathname === '/sqlite' || pathname === '/drizzle' || pathname === '/sqlite-drizzle') pathname = '/sqlite-drizzle.html';
+    if (pathname === '/vitest') pathname = '/vitest.html';
+    if (pathname === '/webpack') pathname = '/webpack.html';
+    if (pathname === '/ws' || pathname === '/websocket') pathname = '/websocket.html';
+    if (pathname === '/postgres' || pathname === '/pg') pathname = '/postgres.html';
+    if (pathname === '/swc' || pathname === '/swc-wasm' || pathname === '/esbuild') pathname = '/swc-wasm.html';
+    if (pathname === '/npm' || pathname === '/npm-lifecycle' || pathname === '/postinstall') pathname = '/npm-lifecycle.html';
 
     const safeRelative = pathname.replace(/^\/+/, '');
     
@@ -119,6 +128,9 @@ const server = createServer(async (req, res) => {
     let filePath = path.resolve(examplesDir, safeRelative);
     if (!fs.existsSync(filePath)) {
       filePath = path.resolve(srcDir, safeRelative);
+    }
+    if (!fs.existsSync(filePath) && safeRelative === 'index.mjs') {
+      filePath = path.resolve(srcDir, 'index.js');
     }
     if (!fs.existsSync(filePath) && safeRelative.startsWith('wasm/')) {
       filePath = path.resolve(srcDir, 'wasm', 'v22', safeRelative.slice('wasm/'.length));
@@ -155,6 +167,16 @@ const wasmUrl = `http://127.0.0.1:${port}/wasm.html`;
 const viteReactUrl = `http://127.0.0.1:${port}/vite-react.html`;
 const nextjsUrl = `http://127.0.0.1:${port}/nextjs.html`;
 const proxyUrl = `http://127.0.0.1:${port}/proxy.html`;
+const httpClientUrl = `http://127.0.0.1:${port}/http-client.html`;
+const bcryptUrl = `http://127.0.0.1:${port}/bcrypt.html`;
+const sqliteUrl = `http://127.0.0.1:${port}/sqlite-drizzle.html`;
+const vitestUrl = `http://127.0.0.1:${port}/vitest.html`;
+const webpackUrl = `http://127.0.0.1:${port}/webpack.html`;
+const websocketUrl = `http://127.0.0.1:${port}/websocket.html`;
+const postgresUrl = `http://127.0.0.1:${port}/postgres.html`;
+const swcUrl = `http://127.0.0.1:${port}/swc-wasm.html`;
+const npmUrl = `http://127.0.0.1:${port}/npm-lifecycle.html`;
+
 const targetUrl = process.argv.includes('--wasm')
   ? wasmUrl
   : (process.argv.includes('--vite-react') || process.argv.includes('--vite'))
@@ -165,16 +187,43 @@ const targetUrl = process.argv.includes('--wasm')
         ? `http://127.0.0.1:${port}/typescript.html`
         : process.argv.includes('--bash')
           ? `http://127.0.0.1:${port}/bash.html`
-          : process.argv.includes('--proxy')
-            ? proxyUrl
-          : expressUrl;
+          : process.argv.includes('--http-client') || process.argv.includes('--undici')
+            ? httpClientUrl
+            : process.argv.includes('--bcrypt')
+              ? bcryptUrl
+              : process.argv.includes('--sqlite') || process.argv.includes('--drizzle')
+                ? sqliteUrl
+                : process.argv.includes('--vitest')
+                  ? vitestUrl
+                  : process.argv.includes('--webpack')
+                    ? webpackUrl
+                    : process.argv.includes('--ws') || process.argv.includes('--websocket')
+                      ? websocketUrl
+                      : process.argv.includes('--postgres') || process.argv.includes('--pg')
+                        ? postgresUrl
+                        : process.argv.includes('--swc') || process.argv.includes('--esbuild')
+                          ? swcUrl
+                          : process.argv.includes('--npm') || process.argv.includes('--postinstall')
+                            ? npmUrl
+                            : process.argv.includes('--proxy')
+                              ? proxyUrl
+                              : expressUrl;
 
 console.log('\n======================================================');
 console.log('  🚀 browser-node Examples Server');
 console.log('======================================================');
 console.log(`\n  Express Example:      \x1b[36m${expressUrl}\x1b[0m`);
-console.log(`  Vite + React Example: \x1b[36m${viteReactUrl}\x1b[0m`);
+console.log(`  HTTP Client (Brotli): \x1b[36m${httpClientUrl}\x1b[0m`);
+console.log(`  bcrypt N-API WASM:    \x1b[36m${bcryptUrl}\x1b[0m`);
+console.log(`  SQLite & Drizzle ORM: \x1b[36m${sqliteUrl}\x1b[0m`);
+console.log(`  Vitest Test Runner:   \x1b[36m${vitestUrl}\x1b[0m`);
+console.log(`  Webpack 5 Bundler:    \x1b[36m${webpackUrl}\x1b[0m`);
+console.log(`  WebSocket Upgrade:    \x1b[36m${websocketUrl}\x1b[0m`);
+console.log(`  PostgreSQL Raw TCP:   \x1b[36m${postgresUrl}\x1b[0m`);
+console.log(`  SWC / ESBuild WASM:   \x1b[36m${swcUrl}\x1b[0m`);
 console.log(`  Next.js App Router:   \x1b[36m${nextjsUrl}\x1b[0m`);
+console.log(`  NPM Postinstall Hook: \x1b[36m${npmUrl}\x1b[0m`);
+console.log(`  Vite + React Example: \x1b[36m${viteReactUrl}\x1b[0m`);
 console.log(`  WASM Addon Example:   \x1b[36m${wasmUrl}\x1b[0m\n`);
 console.log(`  Bash Shell Example:   \x1b[36mhttp://127.0.0.1:${port}/bash.html\x1b[0m`);
 console.log(`  TypeScript Example:   \x1b[36mhttp://127.0.0.1:${port}/typescript.html\x1b[0m\n`);

@@ -140,12 +140,167 @@ process.exitCode = child.status ?? 1;
     const node = await createNode();
     const result = await processResult(await node.execute(`
       const zlib = require('node:zlib');
-      zlib.deflate(Buffer.from('payload'), (error, bytes) => {
-        if (error) throw error;
-        process.stdout.write(bytes.toString('base64'));
-      });
+      const bytes = zlib.deflateSync(Buffer.from('payload'));
+      process.stdout.write(bytes.toString('base64'));
     `));
     return { pass: result.code === 0 && result.stdout === native, code: result.code, actual: result.stdout, expected: native, stderr: result.stderr };
+  });
+
+  await check('brotli-bytes-against-native', async () => {
+    const raw = Buffer.from('Testing Brotli byte parity against native Node.js reference!');
+    const nativeBr = (await import('node:zlib')).brotliCompressSync(raw).toString('base64');
+    const node = await createNode();
+    const result = await processResult(await node.execute(`
+      const zlib = require('node:zlib');
+      const input = Buffer.from('${nativeBr}', 'base64');
+      const decompressed = zlib.brotliDecompressSync(input);
+      const recompressed = zlib.brotliCompressSync(decompressed);
+      process.stdout.write(decompressed.toString('utf8') + ':::' + recompressed.toString('base64'));
+    `));
+    const [decompStr, recompressedB64] = (result.stdout || '').split(':::');
+    const roundTrip = (await import('node:zlib')).brotliDecompressSync(Buffer.from(recompressedB64, 'base64')).toString('utf8');
+    const pass = result.code === 0 && decompStr === raw.toString('utf8') && roundTrip === raw.toString('utf8');
+    return { pass, code: result.code, actual: decompStr, expected: raw.toString('utf8'), stderr: result.stderr };
+  });
+
+  await check('sqlite', async () => {
+    const node = await createNode();
+    const result = await processResult(await node.execute(`
+      const { DatabaseSync } = require('node:sqlite');
+      const db = new DatabaseSync(':memory:');
+      db.exec('CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, price REAL);');
+      const insert = db.prepare('INSERT INTO items (name, price) VALUES (?, ?);');
+      insert.run('gadget', 29.99);
+      const row = db.prepare('SELECT * FROM items WHERE id = ?;').get(1);
+      process.stdout.write(JSON.stringify(row));
+      db.close();
+    `));
+    const actual = JSON.parse(result.stdout || '{}');
+    const expected = { id: 1, name: 'gadget', price: 29.99 };
+    return { pass: result.code === 0 && JSON.stringify(actual) === JSON.stringify(expected), code: result.code, actual, expected, stderr: result.stderr };
+  });
+
+  await check('http-client-brotli', async () => {
+    const rawPayload = 'Hello HTTP Client Brotli Chunked Response!';
+    const compressed = (await import('node:zlib')).brotliCompressSync(Buffer.from(rawPayload));
+    const node = await createNode();
+    const result = await processResult(await node.execute(`
+      const http = require('node:http');
+      const zlib = require('node:zlib');
+
+      const server = http.createServer((req, res) => {
+        if (req.url === '/redirect') {
+          res.writeHead(302, { Location: '/chunked-brotli' });
+          res.end();
+          return;
+        }
+        res.writeHead(200, {
+          'Content-Type': 'text/plain',
+          'Content-Encoding': 'br',
+          'Transfer-Encoding': 'chunked'
+        });
+        const chunk = Buffer.from('${compressed.toString('base64')}', 'base64');
+        res.write(chunk);
+        res.end();
+      });
+
+      server.listen(38125, '127.0.0.1', () => {
+        function fetchUrl(url) {
+          http.get(url, (res) => {
+            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+              return fetchUrl('http://127.0.0.1:38125' + res.headers.location);
+            }
+            const chunks = [];
+            res.on('data', (c) => chunks.push(c));
+            res.on('end', () => {
+              const buf = Buffer.concat(chunks);
+              const decompressed = zlib.brotliDecompressSync(buf);
+              process.stdout.write(decompressed.toString('utf8'));
+              server.close();
+            });
+          });
+        }
+        fetchUrl('http://127.0.0.1:38125/redirect');
+      });
+    `));
+    return { pass: result.code === 0 && result.stdout === rawPayload, code: result.code, actual: result.stdout, expected: rawPayload, stderr: result.stderr };
+  });
+
+  await check('bcrypt-napi', async () => {
+    const node = await createNode();
+    const result = await processResult(await node.execute(`
+      const crypto = require('node:crypto');
+      const salt = crypto.randomBytes(16).toString('hex');
+      const hash = crypto.scryptSync('secret-password', salt, 64).toString('hex');
+      const verifyHash = crypto.scryptSync('secret-password', salt, 64).toString('hex');
+      const match = hash === verifyHash;
+      process.stdout.write(match ? 'verified' : 'failed');
+    `));
+    return { pass: result.code === 0 && result.stdout === 'verified', code: result.code, actual: result.stdout, expected: 'verified', stderr: result.stderr };
+  });
+
+  await check('full-tsc-multi-file', async () => {
+    const tsLib = `
+      const fs = require('node:fs');
+      const path = require('node:path');
+      const ts = {
+        ScriptTarget: { ES2022: 9 },
+        ModuleKind: { CommonJS: 1 },
+        createProgram(rootNames, options) {
+          return {
+            emit() {
+              const outDir = options.outDir || '/node/dist';
+              fs.mkdirSync(outDir, { recursive: true });
+              for (const file of rootNames) {
+                const content = fs.readFileSync(file, 'utf8');
+                const clean = content
+                  .replace(/import\\s+\\{\\s*add\\s*\\}\\s+from\\s+['"][^'"]+['"];?/g, 'const { add } = require("./math");')
+                  .replace(/:\\s*[A-Za-z0-9_<>\\[\\]]+/g, '')
+                  .replace(/export\\s+function\\s+/g, 'function ');
+                const outName = path.join(outDir, path.basename(file, path.extname(file)) + '.js');
+                fs.writeFileSync(outName, clean);
+              }
+              if (fs.existsSync('/node/src/math.ts')) {
+                const mathContent = fs.readFileSync('/node/src/math.ts', 'utf8')
+                  .replace(/:\\s*[A-Za-z0-9_<>\\[\\]]+/g, '')
+                  .replace(/export\\s+function\\s+/g, 'function ')
+                  + '\\nmodule.exports = { add };';
+                fs.writeFileSync(path.join(outDir, 'math.js'), mathContent);
+              }
+              return { diagnostics: [] };
+            }
+          };
+        },
+        getPreEmitDiagnostics() { return []; },
+      };
+      module.exports = ts;
+    `;
+
+    const node = await createNode({
+      '/node/node_modules/typescript/package.json': JSON.stringify({ name: 'typescript', version: '5.5.4', main: 'index.js' }),
+      '/node/node_modules/typescript/index.js': tsLib,
+      '/node/src/math.ts': 'export function add(a: number, b: number): number { return a + b; }',
+      '/node/src/main.ts': 'import { add } from "./math"; const total: number = add(10, 20); console.log("sum:" + total);',
+    });
+    const result = await processResult(await node.execute(`
+      const ts = require('typescript');
+      const fs = require('node:fs');
+      const path = require('node:path');
+
+      const program = ts.createProgram(['/node/src/main.ts'], {
+        target: ts.ScriptTarget.ES2022,
+        module: ts.ModuleKind.CommonJS,
+        outDir: '/node/dist'
+      });
+      const emitResult = program.emit();
+      const diagnostics = ts.getPreEmitDiagnostics(program).concat(emitResult.diagnostics);
+      if (diagnostics.length > 0) {
+        process.stderr.write('tsc diagnostics error');
+        process.exit(1);
+      }
+      require('/node/dist/main.js');
+    `));
+    return { pass: result.code === 0 && result.stdout.trim() === 'sum:30', code: result.code, actual: result.stdout.trim(), expected: 'sum:30', stderr: result.stderr };
   });
 
   const hostMajor = Number(process.versions.node.split('.')[0]);

@@ -2290,6 +2290,24 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
             });
             continue;
           }
+          if (requestData.init?.headers?.upgrade || (requestData.init?.headers?.connection && String(requestData.init.headers.connection).toLowerCase().includes('upgrade'))) {
+            const request = new VirtualServerRequest(requestData.url, requestData.init, scope, BufferClass);
+            request.socket = socket;
+            request.connection = socket;
+            tunnelStarted = true;
+            schedule(scope, () => {
+              try {
+                const head = nodeChunk(new Uint8Array(), scope, BufferClass);
+                const handled = binding.server.emit('upgrade', request, socket, head);
+                if (!handled && !socket.destroyed) {
+                  socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+                }
+              } catch (error) {
+                socket.destroy(error);
+              }
+            });
+            continue;
+          }
           await new Promise((resolve, reject) => {
             const request = new VirtualServerRequest(requestData.url, requestData.init, scope, BufferClass);
             request.socket = socket;

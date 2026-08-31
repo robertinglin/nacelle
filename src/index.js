@@ -164,29 +164,20 @@ export class Nacelle {
     const wasmBaseUrl = options.wasmBaseUrl
       || new URL(`./wasm/${nodeProfile.id}/`, import.meta.url).href;
 
-    // In browser environment, pre-cache core WASM artifacts
+    // Pre-cache core WASM binaries in browser environments using exact wasmBaseUrl
     if (typeof globalObject.fetch === 'function' && !globalObject.process?.versions?.node) {
       globalObject.__BNH_WASM_CACHE__ = globalObject.__BNH_WASM_CACHE__ || {};
-      const wasmNames = ['sqlite', 'zlib', 'brotli', 'zstd', 'node_addon_napi'];
-      await Promise.allSettled(wasmNames.map(async (name) => {
+      const coreWasm = ['sqlite', 'zlib', 'brotli', 'zstd'];
+      await Promise.allSettled(coreWasm.map(async (name) => {
         if (globalObject.__BNH_WASM_CACHE__[name]) return;
-        const candidateUrls = [
-          new URL(`./wasm/${nodeProfile.id}/${name}.wasm`, import.meta.url).href,
-          new URL(`./wasm/${name}.wasm`, import.meta.url).href,
-          `/wasm/${nodeProfile.id}/${name}.wasm`,
-          `/src/wasm/${nodeProfile.id}/${name}.wasm`,
-          `/wasm/${name}.wasm`
-        ];
-        for (const url of candidateUrls) {
-          try {
-            const res = await globalObject.fetch(url);
-            if (res.ok) {
-              const buf = await res.arrayBuffer();
-              globalObject.__BNH_WASM_CACHE__[name] = new Uint8Array(buf);
-              break;
-            }
-          } catch {}
-        }
+        try {
+          const url = new URL(`${name}.wasm`, wasmBaseUrl).href;
+          const res = await globalObject.fetch(url);
+          if (res.ok) {
+            const buf = await res.arrayBuffer();
+            globalObject.__BNH_WASM_CACHE__[name] = new Uint8Array(buf);
+          }
+        } catch {}
       }));
     }
 

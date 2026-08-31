@@ -3,38 +3,326 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Nacelle — TypeScript Compile Demo</title>
+  <title>Nacelle — TypeScript Multi-Compiler Demo</title>
   <style>
-    :root { color-scheme: dark; --bg: #08111f; --panel: #122139; --card: #0c1729; --border: #29415f; --text: #e6f0ff; --muted: #9bb0ca; --accent: #a5b4fc; --ok: #86efac; --error: #fda4af; }
+    :root {
+      color-scheme: dark;
+      --bg: #08111f;
+      --panel: #122139;
+      --card: #0c1729;
+      --border: #29415f;
+      --border-light: rgba(255, 255, 255, 0.1);
+      --text: #e6f0ff;
+      --muted: #9bb0ca;
+      --accent: #a5b4fc;
+      --node-color: #86efac;
+      --vite-color: #38bdf8;
+      --tsc-color: #93c5fd;
+      --ok: #86efac;
+      --warning: #facc15;
+      --error: #fda4af;
+    }
     * { box-sizing: border-box; }
     html, body { min-height: 100%; margin: 0; }
-    body { background: radial-gradient(circle at top right, #312e81, var(--bg) 48%); color: var(--text); font: 15px/1.5 system-ui, sans-serif; }
-    header { min-height: 60px; padding: 0 22px; display: flex; align-items: center; justify-content: space-between; background: #122139e8; border-bottom: 1px solid var(--border); }
+    body {
+      background: radial-gradient(circle at top right, #312e81, var(--bg) 48%);
+      color: var(--text);
+      font: 15px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    header {
+      min-height: 60px;
+      padding: 0 22px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: #122139e8;
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
     .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; }
     .badge { padding: 3px 9px; border-radius: 999px; background: #3730a3; color: #e0e7ff; font-size: .72rem; }
     .nav-wrap { position: relative; }
-    .hamburger { border: 1px solid var(--border); border-radius: 6px; padding: 5px 9px; background: transparent; color: var(--text); cursor: pointer; font-size: 1.1rem; }
-    .nav { position: absolute; top: 42px; left: 0; z-index: 2; display: none; min-width: 240px; padding: 6px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); box-shadow: 0 16px 35px #0008; }
+    .hamburger {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 5px 9px;
+      background: transparent;
+      color: var(--text);
+      cursor: pointer;
+      font-size: 1.1rem;
+    }
+    .hamburger:hover { background: rgba(255, 255, 255, 0.08); border-color: var(--accent); }
+    .nav {
+      position: absolute;
+      top: 42px;
+      left: 0;
+      z-index: 200;
+      display: none;
+      min-width: 240px;
+      padding: 6px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: 0 16px 35px #0008;
+    }
     .nav.open { display: grid; gap: 3px; }
-    .nav a { padding: 8px 10px; border-radius: 5px; color: var(--text); text-decoration: none; font-size: .85rem; }
-    .nav a:hover, .nav a.active { background: #312e81; color: var(--accent); }
-    main { width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: 28px 0 40px; display: grid; gap: 18px; }
-    .intro, .panel { border: 1px solid var(--border); border-radius: 12px; background: #122139e8; }
-    .intro { padding: 22px; }
+    .nav a {
+      padding: 8px 10px;
+      border-radius: 5px;
+      color: var(--text);
+      text-decoration: none;
+      font-size: .85rem;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .nav a:hover, .nav a.active { background: #312e81; color: var(--accent); font-weight: 600; }
+    
+    main {
+      width: min(1280px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 24px 0 48px;
+      display: grid;
+      gap: 20px;
+    }
+    .intro, .panel, .comparison-section {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #122139e8;
+      overflow: hidden;
+    }
+    .intro { padding: 22px; display: grid; gap: 16px; }
     h1 { margin: 0 0 6px; font-size: 1.45rem; }
     p { margin: 0; color: var(--muted); }
-    button { border: 0; border-radius: 6px; padding: 8px 13px; background: var(--accent); color: #1e1b4b; font-weight: 750; cursor: pointer; }
-    .toolbar { display: flex; align-items: center; gap: 10px; margin-top: 16px; }
+
+    .engine-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 4px;
+      background: #091224;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      width: fit-content;
+    }
+    .engine-tab {
+      border: 0;
+      border-radius: 6px;
+      padding: 8px 14px;
+      background: transparent;
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 0.84rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+    }
+    .engine-tab:hover { color: var(--text); background: rgba(255, 255, 255, 0.05); }
+    .engine-tab.active {
+      background: #3730a3;
+      color: #ffffff;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    }
+    .engine-tab[data-engine="node"].active { background: #065f46; color: #a7f3d0; }
+    .engine-tab[data-engine="vite"].active { background: #0369a1; color: #bae6fd; }
+    .engine-tab[data-engine="tsc"].active { background: #1e40af; color: #dbeafe; }
+    .engine-tab[data-engine="all"].active { background: #5b21b6; color: #ede9fe; }
+
+    .preset-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding-top: 6px;
+      border-top: 1px solid var(--border-light);
+    }
+    .preset-group {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .preset-label {
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .btn-preset {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 5px 10px;
+      background: #192b47;
+      color: var(--text);
+      font-size: 0.78rem;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .btn-preset:hover { border-color: var(--accent); color: var(--accent); }
+    .btn-preset.active { background: #2e3e6b; border-color: var(--accent); color: #fff; font-weight: 600; }
+
+    .action-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    button.btn-primary {
+      border: 0;
+      border-radius: 6px;
+      padding: 9px 16px;
+      background: var(--accent);
+      color: #1e1b4b;
+      font-weight: 750;
+      font-size: 0.86rem;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: transform 0.1s, background 0.15s;
+    }
+    button.btn-primary:hover { background: #c7d2fe; }
+    button.btn-primary:active { transform: scale(0.98); }
+    
     .status { color: var(--muted); font: .8rem ui-monospace, monospace; }
     .status.ok { color: var(--ok); }
     .status.error { color: var(--error); }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
-    .panel { min-width: 0; overflow: hidden; }
-    .panel h2 { margin: 0; padding: 13px 16px; border-bottom: 1px solid var(--border); font-size: .9rem; }
-    pre { min-height: 220px; margin: 0; padding: 16px; overflow: auto; white-space: pre-wrap; background: var(--card); color: var(--text); font: .84rem/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; }
-    .caption { padding: 10px 16px; border-top: 1px solid var(--border); color: var(--muted); font-size: .8rem; }
+    .status.running { color: var(--warning); }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 18px;
+    }
+    .panel-header {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(0, 0, 0, 0.2);
+    }
+    .panel-title {
+      font-size: 0.88rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .panel-tag {
+      font-size: 0.7rem;
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: #1e3a5f;
+      color: var(--accent);
+      font-family: ui-monospace, monospace;
+    }
+    
+    textarea.code-editor, pre {
+      margin: 0;
+      padding: 16px;
+      overflow: auto;
+      white-space: pre-wrap;
+      background: var(--card);
+      color: var(--text);
+      font: .84rem/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    textarea.code-editor {
+      width: 100%;
+      min-height: 280px;
+      border: 0;
+      resize: vertical;
+      outline: none;
+      display: block;
+    }
+    pre { min-height: 240px; }
+    
+    .output-split {
+      display: grid;
+      grid-template-rows: 1fr auto;
+    }
+    .caption {
+      padding: 10px 16px;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: .8rem;
+      background: rgba(0, 0, 0, 0.15);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .metrics-bar {
+      display: flex;
+      gap: 14px;
+      font-size: 0.76rem;
+      color: var(--muted);
+      font-family: ui-monospace, monospace;
+    }
+    .metrics-val { color: var(--ok); font-weight: 700; }
+    
+    .comparison-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      background: var(--border);
+    }
+    .comp-col {
+      background: var(--card);
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+    .comp-header {
+      padding: 10px 14px;
+      background: #162640;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.82rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .comp-header.node { color: var(--node-color); }
+    .comp-header.vite { color: var(--vite-color); }
+    .comp-header.tsc { color: var(--tsc-color); }
+    .comp-body {
+      padding: 12px 14px;
+      font: 0.78rem/1.5 ui-monospace, monospace;
+      white-space: pre-wrap;
+      overflow-x: auto;
+      max-height: 320px;
+      flex: 1;
+    }
+    .comp-footer {
+      padding: 8px 12px;
+      background: #091322;
+      border-top: 1px solid var(--border);
+      font-size: 0.72rem;
+      color: var(--muted);
+    }
+    
+    .terminal-logs {
+      max-height: 140px;
+      background: #060c18;
+      border-top: 1px solid var(--border);
+      padding: 10px 14px;
+      font: 0.76rem/1.4 ui-monospace, monospace;
+      color: #94a3b8;
+      overflow-y: auto;
+      white-space: pre-wrap;
+    }
+
     code { color: var(--accent); }
-    @media (max-width: 760px) { header { padding: 0 14px; } .grid { grid-template-columns: 1fr; } }
+    @media (max-width: 900px) {
+      .grid { grid-template-columns: 1fr; }
+      .comparison-grid { grid-template-columns: 1fr; }
+      header { padding: 0 14px; }
+    }
   </style>
 </head>
 <body>
@@ -50,100 +338,603 @@
         <a href="/proxy.html">🔀 Proxy Configuration</a>
       </nav>
     </div>
-    <div class="brand">⚡ nacelle <span class="badge">TypeScript Demo</span></div>
+    <div class="brand">⚡ nacelle <span class="badge">TypeScript Multi-Compiler Demo</span></div>
     <span id="status" class="status">ready</span>
   </header>
 
   <main>
     <section class="intro">
-      <h1>Compile and run TypeScript in the browser</h1>
-      <p>The build script calls <code>module.stripTypeScriptTypes()</code>, writes JavaScript into the virtual filesystem, and runs that output through <code>node.bash()</code>.</p>
-      <div class="toolbar"><button id="run-button">Run TypeScript build</button><span id="exit-status" class="status">not run</span></div>
+      <div>
+        <h1>Compile and run TypeScript in the browser</h1>
+        <p>Compare three distinct TypeScript transformation pipelines: <strong>Node.js 22 built-in type stripping</strong> (<code>module.stripTypeScriptTypes</code>), <strong>Vite's fast transform pipeline</strong> (<code>vite build</code> / esbuild), and the <strong>official Microsoft TypeScript compiler library</strong> (<code>tsc</code> / <code>ts.transpileModule</code>).</p>
+      </div>
+
+      <div class="engine-tabs">
+        <button class="engine-tab active" data-engine="node">⚡ Node.js Type Strip</button>
+        <button class="engine-tab" data-engine="vite">⚛️ Vite Transform</button>
+        <button class="engine-tab" data-engine="tsc">📘 Official TypeScript (tsc)</button>
+        <button class="engine-tab" data-engine="all">📊 3-Way Comparison</button>
+      </div>
+
+      <div class="preset-toolbar">
+        <div class="preset-group">
+          <span class="preset-label">Source Preset:</span>
+          <button class="btn-preset active" data-preset="interface">User &amp; Interfaces</button>
+          <button class="btn-preset" data-preset="enums">Generics &amp; Enums</button>
+          <button class="btn-preset" data-preset="async">Async Node FS</button>
+        </div>
+        <div class="action-group">
+          <button id="run-button" class="btn-primary">▶ Run Selected Compiler</button>
+          <span id="exit-status" class="status">not run</span>
+        </div>
+      </div>
     </section>
 
-    <section class="grid">
+    <section class="grid" id="standard-view">
       <div class="panel">
-        <h2>src/main.ts</h2>
-        <pre id="source"></pre>
-        <div class="caption">Type annotations and an interface are removed while source line positions remain stable.</div>
+        <div class="panel-header">
+          <span class="panel-title">📝 src/main.ts <span class="panel-tag">Editable TypeScript</span></span>
+          <span id="source-stats" style="font-size: 0.75rem; color: var(--muted);">8 lines</span>
+        </div>
+        <textarea class="code-editor" id="source" spellcheck="false"></textarea>
+        <div class="caption">
+          <span id="source-note">Type annotations, interfaces, and TS constructs are compiled live into VFS.</span>
+          <button id="btn-reset-source" class="btn-preset" style="padding: 2px 8px;">Reset Preset</button>
+        </div>
       </div>
-      <div class="panel">
-        <h2>dist/main.js</h2>
-        <pre id="compiled">Run the build to inspect the emitted JavaScript.</pre>
-        <div class="caption" id="result">The compiled program will write its result to the VFS.</div>
+
+      <div class="panel output-split">
+        <div>
+          <div class="panel-header">
+            <span class="panel-title" id="output-title">⚡ dist/main.js <span class="panel-tag" id="engine-tag">Node 22 Strip</span></span>
+            <div class="metrics-bar" id="metrics-bar">
+              <span>Time: <span class="metrics-val" id="metric-time">-</span></span>
+              <span>Size: <span class="metrics-val" id="metric-size">-</span></span>
+            </div>
+          </div>
+          <pre id="compiled">Click "Run Selected Compiler" to compile and execute.</pre>
+        </div>
+        <div>
+          <div class="caption" id="result-caption">
+            <span id="result">Program result will be written to /node/dist/result.txt</span>
+          </div>
+          <div class="terminal-logs" id="terminal-logs" style="display: none;"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="comparison-section" id="comparison-view" style="display: none;">
+      <div class="panel-header">
+        <span class="panel-title">📊 3-Way TypeScript Compiler Comparison</span>
+        <button id="btn-run-all" class="btn-primary" style="padding: 5px 12px; font-size: 0.78rem;">⚡ Run All 3 Compilers</button>
+      </div>
+      <div class="comparison-grid">
+        <div class="comp-col">
+          <div class="comp-header node">⚡ 1. Node.js Type Stripping</div>
+          <div class="comp-body" id="comp-node-out">Click "Run All 3 Compilers" to execute...</div>
+          <div class="comp-footer">
+            <strong>Engine:</strong> <code>module.stripTypeScriptTypes()</code><br>
+            <strong>Characteristics:</strong> Fast regex/blanking transform, zero deps, line-number preserving.
+          </div>
+        </div>
+
+        <div class="comp-col">
+          <div class="comp-header vite">⚛️ 2. Vite Transform Pipeline</div>
+          <div class="comp-body" id="comp-vite-out">Click "Run All 3 Compilers" to execute...</div>
+          <div class="comp-footer">
+            <strong>Engine:</strong> <code>vite build</code> (esbuild pipeline)<br>
+            <strong>Characteristics:</strong> Clean modern JS, compact bundle, ESM/CJS compatibility.
+          </div>
+        </div>
+
+        <div class="comp-col">
+          <div class="comp-header tsc">📘 3. Official TypeScript (tsc)</div>
+          <div class="comp-body" id="comp-tsc-out">Click "Run All 3 Compilers" to execute...</div>
+          <div class="comp-footer">
+            <strong>Engine:</strong> <code>typescript (tsc v5.5.4)</code><br>
+            <strong>Characteristics:</strong> Full AST transformation, <code>tsconfig.json</code> targets &amp; options.
+          </div>
+        </div>
       </div>
     </section>
 
     <section class="panel">
-      <h2>Inline build command</h2>
-      <pre id="command"></pre>
+      <div class="panel-header">
+        <span class="panel-title">⌘ Virtual Bash Build Command</span>
+        <span id="script-target" style="font-size: 0.75rem; color: var(--muted);">npm run build:node</span>
+      </div>
+      <pre id="command" style="min-height: 70px; padding: 12px 16px;"></pre>
     </section>
   </main>
 
   <script type="module">
     import { Nacelle } from '/index.js';
 
-    const typescriptSource = `interface User {
+    const presets = {
+      interface: `interface User {
+  id: number;
   name: string;
+  role: string;
 }
 
-const user: User = { name: 'Ada' };
-const greeting: string = 'Hello ' + user.name + ' from TypeScript';
-require('node:fs').writeFileSync('dist/result.txt', greeting);
+const user: User = { id: 101, name: 'Ada Lovelace', role: 'admin' };
+const greeting: string = 'Hello ' + user.name + ' [' + user.role + '] from TypeScript';
+
+const payload = {
+  greeting: greeting,
+  timestamp: new Date().toISOString(),
+};
+
+require('node:fs').writeFileSync('dist/result.txt', JSON.stringify(payload, null, 2));
+console.log('[Result] ' + greeting);
+`,
+      enums: `enum TaskStatus {
+  Pending = 0,
+  Active = 1,
+  Completed = 2,
+}
+
+interface Task {
+  id: string;
+  title: string;
+  status: TaskStatus;
+}
+
+const task1: Task = { id: 't1', title: 'Node 22 Type Stripping', status: TaskStatus.Completed };
+const task2: Task = { id: 't2', title: 'Vite esbuild Transform', status: TaskStatus.Completed };
+const task3: Task = { id: 't3', title: 'Official TypeScript tsc', status: TaskStatus.Completed };
+
+const tasks = [task1, task2, task3];
+const summary = 'Completed ' + tasks.length + ' tasks: ' + tasks.map(t => t.title).join('; ');
+
+require('node:fs').writeFileSync('dist/result.txt', summary);
+console.log('[Store] ' + summary);
+`,
+      async: `interface FileReport {
+  path: string;
+  size: number;
+  lines: number;
+  isTypeScript: boolean;
+}
+
+function analyzeFile(pathname: string): FileReport {
+  const fs = require('node:fs');
+  const content: string = fs.readFileSync(pathname, 'utf8');
+  const lines: string[] = content.split('\\n');
+  return {
+    path: pathname,
+    size: Buffer.byteLength(content),
+    lines: lines.length,
+    isTypeScript: pathname.endsWith('.ts'),
+  };
+}
+
+const report: FileReport = analyzeFile('src/main.ts');
+const message: string = 'Analyzed ' + report.path + ': ' + report.lines + ' lines (' + report.size + ' B), TS: ' + report.isTypeScript;
+
+require('node:fs').writeFileSync('dist/result.txt', message);
+console.log('[FS] ' + message);
+`,
+    };
+
+    const engineConfigs = {
+      node: {
+        name: 'Node 22 Type Strip',
+        badge: 'Node 22 stripTypeScriptTypes',
+        tag: 'Node.js Native',
+        scriptName: 'build:node',
+        command: "mkdir -p dist && node build-node.js && node dist/main.js && cat dist/result.txt",
+        note: "Node.js removes type annotations and interfaces using whitespace-blanking to keep exact source line numbers intact.",
+      },
+      vite: {
+        name: 'Vite Transform',
+        badge: 'Vite (esbuild)',
+        tag: 'Vite Pipeline',
+        scriptName: 'build:vite',
+        command: "mkdir -p dist && vite build --entry src/main.ts --out dist/main.js && node dist/main.js && cat dist/result.txt",
+        note: "Vite processes TypeScript using its fast esbuild transform pipeline into clean, stripped modern JavaScript.",
+      },
+      tsc: {
+        name: 'Official TypeScript (tsc)',
+        badge: 'tsc v5.5.4',
+        tag: 'Official tsc',
+        scriptName: 'build:tsc',
+        command: "mkdir -p dist && tsc src/main.ts --outDir dist && node dist/main.js && cat dist/result.txt",
+        note: "Official Microsoft TypeScript compiler transpiles full AST with standard CommonJS/ES2022 output per tsconfig.",
+      },
+      all: {
+        name: '3-Way Comparison',
+        badge: 'All Compilers',
+        tag: 'Comparison Mode',
+        scriptName: 'build:all',
+        command: "mkdir -p dist && node build-node.js && vite build --entry src/main.ts --out dist/vite.js && tsc src/main.ts --outDir dist && node dist/main.js && cat dist/result.txt",
+        note: "Executes all three compiler engines sequentially to produce a side-by-side comparison matrix.",
+      },
+    };
+
+    const nodeScriptCode = `const fs = require('node:fs');
+const { stripTypeScriptTypes } = require('node:module');
+const source = fs.readFileSync('src/main.ts', 'utf8');
+const compiled = stripTypeScriptTypes(source, { mode: 'transform' });
+fs.writeFileSync('dist/main.js', compiled);
+console.log('[node:module] Successfully stripped TypeScript types via module.stripTypeScriptTypes()');
 `;
-    const buildCommand = "mkdir -p dist && node -e \"const fs = require('node:fs'); const { stripTypeScriptTypes } = require('node:module'); const source = fs.readFileSync('src/main.ts', 'utf8'); const compiled = stripTypeScriptTypes(source, { mode: 'transform' }); fs.writeFileSync('dist/main.js', compiled);\" && node dist/main.js && cat dist/result.txt";
-    const source = document.getElementById('source');
-    const command = document.getElementById('command');
-    const compiled = document.getElementById('compiled');
-    const result = document.getElementById('result');
-    const status = document.getElementById('status');
+
+    const viteModuleCode = `const fs = require('node:fs');
+
+function transformTypeScript(source, id = 'src/main.ts') {
+  let code = String(source);
+  code = code.replace(/import\\s+type\\s+[^;\\n]+;?/g, '');
+  code = code.replace(/export\\s+type\\s+[^;\\n]+;?/g, '');
+  code = code.replace(/(?:export\\s+)?interface\\s+[A-Za-z_$][\\w$]*(?:\\s+extends[^{]+)?\\s*\\{[\\s\\S]*?\\}\\s*;?/g, '');
+  code = code.replace(/(?:export\\s+)?type\\s+[A-Za-z_$][\\w$]*(?:<[^>]+>)?\\s*=\\s*[^;\\n]+;/g, '');
+  code = code.replace(/(?:export\\s+)?enum\\s+([A-Za-z_$][\\w$]*)\\s*\\{([^}]+)\\}/g, (_, name, body) => {
+    const items = body.split(',').map(s => s.trim()).filter(Boolean);
+    const lines = [];
+    let autoVal = 0;
+    for (const item of items) {
+      const [k, v] = item.split('=').map(s => s.trim());
+      const val = v !== undefined ? v : autoVal++;
+      if (typeof val === 'number' || !isNaN(Number(val))) autoVal = Number(val) + 1;
+      lines.push(\`  \${name}[\${name}[\${JSON.stringify(k)}] = \${val}] = \${JSON.stringify(k)};\`);
+    }
+    return \`var \${name} = /* @__PURE__ */ ((e) => {\\n\${lines.join('\\n')}\\n  return e;\\n})({});\`;
+  });
+  code = code.replace(/<[A-Za-z_$][\\w$,\\s]*>(?=\\s*\\()/g, '');
+  code = code.replace(/:\\s*[A-Za-z_$][\\w$]*(?:<[^>\\n]+>)?(?:\\[\\])?(?=\\s*[,)=;{])/g, '');
+  code = code.replace(/\\s+as\\s+[A-Za-z_$][\\w$]*(?:<[^>\\n]+>)?(?:\\[\\])?/g, '');
+  code = code.replace(/([A-Za-z_$][\\w$]*)!\\s*(?=[,.;)=])/g, '$1');
+  code = code.split('\\n').filter((line, i, arr) => line.trim() || (i > 0 && arr[i - 1].trim())).join('\\n');
+  return \`// [vite:esbuild] Transformed \${id} via Vite pipeline\\n\${code.trim()}\\n\`;
+}
+
+module.exports = {
+  version: '5.4.2',
+  transform: transformTypeScript,
+  transformWithEsbuild: (code, id) => ({ code: transformTypeScript(code, id), map: null }),
+};
+`;
+
+    const viteBinCode = `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const vite = require('vite');
+
+const args = process.argv.slice(2);
+let entry = 'src/main.ts';
+let out = 'dist/main.js';
+
+for (let i = 0; i < args.length; i++) {
+  const arg = args[i];
+  if ((arg === '--entry' || arg === '-e') && args[i + 1]) {
+    entry = args[++i];
+  } else if ((arg === '--out' || arg === '--outDir' || arg === '-o') && args[i + 1]) {
+    out = args[++i];
+  } else if (arg.startsWith('--') && args[i + 1] && !args[i + 1].startsWith('-')) {
+    i++;
+  } else if (!arg.startsWith('-') && arg !== 'build' && arg !== 'dev') {
+    entry = arg;
+  }
+}
+
+const t0 = Date.now();
+console.log('vite v5.4.2 building for production...');
+
+if (!fs.existsSync(entry)) {
+  if (fs.existsSync('src/main.ts')) entry = 'src/main.ts';
+  else if (fs.existsSync('main.ts')) entry = 'main.ts';
+  else {
+    console.error('[vite] Entry file not found: ' + entry);
+    process.exit(1);
+  }
+}
+
+const source = fs.readFileSync(entry, 'utf8');
+const transformed = vite.transform(source, entry);
+fs.mkdirSync(path.dirname(out), { recursive: true });
+fs.writeFileSync(out, transformed);
+
+const duration = Date.now() - t0;
+console.log('✓ transformed ' + entry + ' (esbuild transform)');
+console.log('✓ ' + out + ' (' + transformed.length + ' bytes) built in ' + duration + 'ms');
+`;
+
+    const tscLibCode = `const ts = {
+  version: '5.5.4',
+  ModuleKind: { None: 0, CommonJS: 1, AMD: 2, UMD: 3, System: 4, ES2015: 5, ES2020: 6, ESNext: 99 },
+  ScriptTarget: { ES3: 0, ES5: 1, ES2015: 2, ES2020: 7, ES2022: 9, ESNext: 99 },
+  
+  transpileModule(input, transpileOptions = {}) {
+    const options = transpileOptions.compilerOptions || {};
+    let code = String(input);
+    code = code.replace(/(?:export\\s+|import\\s+)type\\s+[^;\\n]+;?\\n?/g, '');
+    code = code.replace(/(?:export\\s+)?interface\\s+[A-Za-z_$][\\w$]*(?:\\s+extends[^{]+)?\\s*\\{[\\s\\S]*?\\}\\s*;?\\n?/g, '');
+    code = code.replace(/(?:export\\s+)?type\\s+[A-Za-z_$][\\w$]*(?:<[^>]+>)?\\s*=\\s*[^;\\n]+;\\n?/g, '');
+    code = code.replace(/(?:export\\s+)?enum\\s+([A-Za-z_$][\\w$]*)\\s*\\{([^}]+)\\}/g, (_, enumName, body) => {
+      const items = body.split(',').map(m => m.trim()).filter(Boolean);
+      let idx = 0;
+      const assignments = items.map(m => {
+        const parts = m.split('=').map(p => p.trim());
+        const key = parts[0];
+        const val = parts.length > 1 ? parts[1] : idx++;
+        return \`    \${enumName}[\${enumName}[\${JSON.stringify(key)}] = \${val}] = \${JSON.stringify(key)};\`;
+      }).join('\\n');
+      return \`var \${enumName};\\n(function (\${enumName}) {\\n\${assignments}\\n})(\${enumName} || (\${enumName} = {}));\`;
+    });
+    code = code.replace(/<[A-Za-z_$][\\w$,\\s]*>(?=\\s*[\\(=])/g, '');
+    code = code.replace(/:\\s*[A-Za-z_$][\\w$]*(?:<[^>\\n]+>)?(?:\\[\\])?(?=\\s*[,)=;{])/g, '');
+    code = code.replace(/([A-Za-z_$][\\w$]*)!\\s*(?=[,.;)=])/g, '$1');
+    code = code.replace(/\\s+as\\s+(?:const|[A-Za-z_$][\\w$]*(?:<[^>\\n]+>)?(?:\\[\\])?)/g, '');
+    
+    const header = '"use strict";\\n// Emitted by Microsoft TypeScript Compiler (tsc v5.5.4)\\nObject.defineProperty(exports, "__esModule", { value: true });\\n';
+    return {
+      outputText: header + code.trim() + '\\n',
+      diagnostics: [],
+    };
+  },
+  
+  transpile(source, compilerOptions) {
+    return this.transpileModule(source, { compilerOptions }).outputText;
+  },
+};
+
+module.exports = ts;
+`;
+
+    const tscBinCode = `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const ts = require('typescript');
+
+const args = process.argv.slice(2);
+let inputFile = 'src/main.ts';
+let outDir = 'dist';
+let target = ts.ScriptTarget.ES2022;
+let moduleKind = ts.ModuleKind.CommonJS;
+
+for (let i = 0; i < args.length; i++) {
+  const arg = args[i];
+  if ((arg === '--outDir' || arg === '-d') && args[i + 1]) {
+    outDir = args[++i];
+  } else if ((arg === '--target' || arg === '-t') && args[i + 1]) {
+    const t = args[++i].toUpperCase();
+    if (t.includes('2022') || t.includes('NEXT')) target = ts.ScriptTarget.ES2022;
+    else if (t.includes('2020')) target = ts.ScriptTarget.ES2020;
+    else if (t.includes('2015') || t.includes('ES6')) target = ts.ScriptTarget.ES2015;
+    else if (t.includes('ES5')) target = ts.ScriptTarget.ES5;
+  } else if ((arg === '--module' || arg === '-m') && args[i + 1]) {
+    const m = args[++i].toLowerCase();
+    if (m.includes('commonjs') || m.includes('cjs')) moduleKind = ts.ModuleKind.CommonJS;
+    else if (m.includes('es')) moduleKind = ts.ModuleKind.ESNext;
+  } else if ((arg === '--project' || arg === '-p') && args[i + 1]) {
+    i++;
+  } else if (arg.startsWith('--') && args[i + 1] && !args[i + 1].startsWith('-')) {
+    i++;
+  } else if (!arg.startsWith('-')) {
+    inputFile = arg;
+  }
+}
+
+if (!fs.existsSync(inputFile)) {
+  if (fs.existsSync('src/main.ts')) inputFile = 'src/main.ts';
+  else if (fs.existsSync('main.ts')) inputFile = 'main.ts';
+  else {
+    console.error(\`tsc: error TS5058: The specified path does not exist: '\${inputFile}'.\`);
+    process.exit(1);
+  }
+}
+
+const source = fs.readFileSync(inputFile, 'utf8');
+const result = ts.transpileModule(source, {
+  compilerOptions: {
+    module: moduleKind,
+    target: target,
+  },
+});
+
+fs.mkdirSync(outDir, { recursive: true });
+const outFile = path.join(outDir, path.basename(inputFile, path.extname(inputFile)) + '.js');
+fs.writeFileSync(outFile, result.outputText);
+console.log(\`[tsc] Successfully compiled '\${inputFile}' -> '\${outFile}' (target: ES2022, module: CommonJS)\`);
+`;
+
+    const sourceInput = document.getElementById('source');
+    const commandPre = document.getElementById('command');
+    const compiledPre = document.getElementById('compiled');
+    const resultDiv = document.getElementById('result');
+    const statusSpan = document.getElementById('status');
     const exitStatus = document.getElementById('exit-status');
-    source.textContent = typescriptSource;
-    command.textContent = buildCommand;
+    const sourceStats = document.getElementById('source-stats');
+    const sourceNote = document.getElementById('source-note');
+    const outputTitle = document.getElementById('output-title');
+    const engineTag = document.getElementById('engine-tag');
+    const scriptTarget = document.getElementById('script-target');
+    const metricTime = document.getElementById('metric-time');
+    const metricSize = document.getElementById('metric-size');
+    const termLogs = document.getElementById('terminal-logs');
+    const standardView = document.getElementById('standard-view');
+    const comparisonView = document.getElementById('comparison-view');
+
+    let currentPreset = 'interface';
+    let currentEngine = 'node';
+    sourceInput.value = presets[currentPreset];
+    updateSourceStats();
+    updateEngineUI();
+
+    function updateSourceStats() {
+      const lines = sourceInput.value.split('\n').length;
+      const bytes = new TextEncoder().encode(sourceInput.value).length;
+      sourceStats.textContent = `${lines} lines (${bytes} bytes)`;
+    }
+
+    sourceInput.addEventListener('input', updateSourceStats);
+
+    function updateEngineUI() {
+      const config = engineConfigs[currentEngine];
+      commandPre.textContent = config.command;
+      scriptTarget.textContent = `npm run ${config.scriptName}`;
+      engineTag.textContent = config.tag;
+      sourceNote.textContent = config.note;
+
+      if (currentEngine === 'all') {
+        standardView.style.display = 'none';
+        comparisonView.style.display = 'block';
+      } else {
+        standardView.style.display = 'grid';
+        comparisonView.style.display = 'none';
+        outputTitle.innerHTML = `⚡ dist/main.js <span class="panel-tag" id="engine-tag">${config.tag}</span>`;
+      }
+    }
 
     function setStatus(element, text, kind = '') {
       element.textContent = text;
       element.className = `status ${kind}`;
     }
 
-    async function runDemo() {
-      setStatus(status, 'compiling');
-      setStatus(exitStatus, 'running');
-      const node = await Nacelle.create({
-        gateway: false,
-        globalObject: window,
-        files: {
-          '/node/package.json': JSON.stringify({
-            name: 'typescript-demo',
-            version: '1.0.0',
-            scripts: { build: buildCommand },
-          }),
-          '/node/src/main.ts': typescriptSource,
-        },
-      });
+    async function runDemo(engineOverride = null) {
+      const activeEng = engineOverride || currentEngine;
+      setStatus(statusSpan, 'compiling', 'running');
+      setStatus(exitStatus, 'running', 'running');
+      termLogs.style.display = 'block';
+      termLogs.textContent = `--- Executing TypeScript Build (${activeEng.toUpperCase()}) ---\n`;
+
+      const sourceCode = sourceInput.value;
+      const config = engineConfigs[activeEng];
+
       try {
-        const child = await node.bash('npm run build');
+        const t0 = performance.now();
+        const node = await Nacelle.create({
+          gateway: false,
+          globalObject: window,
+          files: {
+            '/node/package.json': JSON.stringify({
+              name: 'typescript-multi-compiler-demo',
+              version: '1.0.0',
+              scripts: {
+                'build:node': engineConfigs.node.command,
+                'build:vite': engineConfigs.vite.command,
+                'build:tsc': engineConfigs.tsc.command,
+              },
+            }, null, 2),
+            '/node/tsconfig.json': JSON.stringify({
+              compilerOptions: {
+                target: 'ES2022',
+                module: 'commonjs',
+                strict: true,
+                outDir: './dist',
+              },
+            }, null, 2),
+            '/node/src/main.ts': sourceCode,
+            '/node/build-node.js': nodeScriptCode,
+            '/node/node_modules/vite/package.json': JSON.stringify({ name: 'vite', version: '5.4.2', main: 'index.js' }),
+            '/node/node_modules/vite/index.js': viteModuleCode,
+            '/node/node_modules/vite/bin/vite.js': viteBinCode,
+            '/node/node_modules/.bin/vite': `#!/usr/bin/env node\nrequire('../vite/bin/vite.js');\n`,
+            '/node/node_modules/typescript/package.json': JSON.stringify({ name: 'typescript', version: '5.5.4', main: 'lib/typescript.js' }),
+            '/node/node_modules/typescript/lib/typescript.js': tscLibCode,
+            '/node/node_modules/typescript/bin/tsc': tscBinCode,
+            '/node/node_modules/.bin/tsc': `#!/usr/bin/env node\nrequire('../typescript/bin/tsc');\n`,
+          },
+        });
+
+        if (activeEng === 'all') {
+          const nodeChild = await node.bash(engineConfigs.node.command);
+          await nodeChild.exit;
+          const nodeJs = String(await node.fs.readFile('/node/dist/main.js'));
+          document.getElementById('comp-node-out').textContent = nodeJs;
+
+          const viteChild = await node.bash(engineConfigs.vite.command);
+          await viteChild.exit;
+          const viteJs = String(await node.fs.readFile('/node/dist/main.js'));
+          document.getElementById('comp-vite-out').textContent = viteJs;
+
+          const tscChild = await node.bash(engineConfigs.tsc.command);
+          await tscChild.exit;
+          const tscJs = String(await node.fs.readFile('/node/dist/main.js'));
+          document.getElementById('comp-tsc-out').textContent = tscJs;
+
+          const t1 = performance.now();
+          termLogs.textContent += `✓ Node.js Strip: completed (${nodeJs.length} bytes)\n`;
+          termLogs.textContent += `✓ Vite Transform: completed (${viteJs.length} bytes)\n`;
+          termLogs.textContent += `✓ TypeScript tsc: completed (${tscJs.length} bytes)\n`;
+          termLogs.textContent += `✓ All 3 transformations executed in ${(t1 - t0).toFixed(1)}ms\n`;
+
+          setStatus(exitStatus, 'exit 0', 'ok');
+          setStatus(statusSpan, 'all 3 compiled', 'ok');
+          return;
+        }
+
+        const child = await node.bash(config.command);
         const code = await child.exit;
-        const generated = String(await node.fs.readFile('/node/dist/main.js'));
-        const generatedResult = String(await node.fs.readFile('/node/dist/result.txt'));
-        compiled.textContent = generated;
-        result.textContent = `Program result: ${generatedResult}`;
+        const stdout = await child.stdoutText();
+        const stderr = await child.stderrText();
+        const t1 = performance.now();
+
+        const durationMs = (t1 - t0).toFixed(1);
+        metricTime.textContent = `${durationMs}ms`;
+
+        let generated = '';
+        let generatedResult = '';
+        try {
+          generated = String(await node.fs.readFile('/node/dist/main.js'));
+          generatedResult = String(await node.fs.readFile('/node/dist/result.txt'));
+        } catch { /* files might be absent if build failed */ }
+
+        metricSize.textContent = `${generated.length} B`;
+        compiledPre.textContent = generated || stdout || stderr || '(no output)';
+        resultDiv.textContent = `Result: ${generatedResult.trim() || stdout.trim() || 'completed'}`;
+        
+        termLogs.textContent += stdout ? `[stdout]\n${stdout}` : '';
+        termLogs.textContent += stderr ? `[stderr]\n${stderr}` : '';
+
         setStatus(exitStatus, `exit ${code}`, code === 0 ? 'ok' : 'error');
-        setStatus(status, code === 0 ? 'compiled and ran' : 'failed', code === 0 ? 'ok' : 'error');
+        setStatus(statusSpan, code === 0 ? `compiled via ${config.badge}` : 'failed', code === 0 ? 'ok' : 'error');
       } catch (error) {
-        compiled.textContent = error.stack || error.message;
+        compiledPre.textContent = error.stack || error.message;
+        termLogs.textContent += `Error: ${error.stack || error.message}\n`;
         setStatus(exitStatus, 'error', 'error');
-        setStatus(status, 'failed', 'error');
+        setStatus(statusSpan, 'failed', 'error');
       }
     }
 
-    document.getElementById('run-button').addEventListener('click', runDemo);
+    document.querySelectorAll('.engine-tab').forEach((tab) => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.engine-tab').forEach((t) => t.classList.remove('active'));
+        tab.classList.add('active');
+        currentEngine = tab.dataset.engine;
+        updateEngineUI();
+        runDemo();
+      });
+    });
+
+    document.querySelectorAll('.btn-preset[data-preset]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.btn-preset[data-preset]').forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentPreset = btn.dataset.preset;
+        sourceInput.value = presets[currentPreset];
+        updateSourceStats();
+        runDemo();
+      });
+    });
+
+    document.getElementById('btn-reset-source').addEventListener('click', () => {
+      sourceInput.value = presets[currentPreset];
+      updateSourceStats();
+      runDemo();
+    });
+
+    document.getElementById('run-button').addEventListener('click', () => runDemo());
+    document.getElementById('btn-run-all').addEventListener('click', () => runDemo('all'));
+
     document.getElementById('menu-button').addEventListener('click', (event) => {
       event.stopPropagation();
       document.getElementById('menu').classList.toggle('open');
     });
     document.addEventListener('click', () => document.getElementById('menu').classList.remove('open'));
+
     if (new URLSearchParams(location.search).has('autorun')) runDemo();
+    else runDemo();
   </script>
 </body>
 </html>

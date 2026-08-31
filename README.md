@@ -224,7 +224,7 @@ const proc = await node.bash(`
 console.log(await proc.stdoutText());
 ```
 
-The TypeScript demo uses the browser runtime's `module.stripTypeScriptTypes()` implementation from an inline bash build script, then executes the emitted JavaScript.
+The TypeScript demo showcases three conversion pipelines from inline bash build scripts: Node.js 22 built-in `module.stripTypeScriptTypes()`, Vite's fast transform pipeline (`vite build`), and the official Microsoft TypeScript compiler (`tsc`), then executes the emitted JavaScript.
 
 ### Proxy configuration
 

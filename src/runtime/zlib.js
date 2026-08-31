@@ -1,6 +1,83 @@
 import { AsyncResource } from './async-hooks.js';
 import { Transform } from './streams.js';
 import { UnsupportedWebCapabilityError } from './errors.js';
+import { fileURLToPath } from './vfs.js';
+
+let nodeFs = null;
+try {
+  if (typeof process !== 'undefined' && process.versions?.node) {
+    nodeFs = await import('node:fs');
+  }
+} catch {}
+
+function loadWasmBytes(name) {
+  if (globalThis.__BNH_WASM_CACHE__?.[name]) {
+    return globalThis.__BNH_WASM_CACHE__[name];
+  }
+  const candidateUrls = [
+    new URL(`../wasm/v22/${name}.wasm`, import.meta.url),
+    new URL(`../wasm/${name}.wasm`, import.meta.url),
+    new URL(`../v22/wasm/${name}.wasm`, import.meta.url),
+    new URL(`./wasm/v22/${name}.wasm`, import.meta.url),
+    new URL(`./wasm/${name}.wasm`, import.meta.url),
+  ];
+  if (typeof location !== 'undefined' && location.origin) {
+    candidateUrls.push(
+      new URL(`/wasm/v22/${name}.wasm`, location.origin),
+      new URL(`/wasm/${name}.wasm`, location.origin),
+      new URL(`/src/wasm/v22/${name}.wasm`, location.origin)
+    );
+  }
+  if (nodeFs) {
+    for (const candidate of candidateUrls) {
+      try {
+        const filePath = candidate.protocol === 'file:' ? fileURLToPath(candidate.href) : candidate.pathname;
+        if (nodeFs.existsSync(filePath)) {
+          return nodeFs.readFileSync(filePath);
+        }
+      } catch {}
+    }
+  }
+  if (globalThis.__BNH_VFS__?.fs?.readFileSync) {
+    for (const virtualPath of [`/node/internal/deps/${name}.node`, `/node/internal/deps/${name}.wasm`]) {
+      try {
+        const bytes = globalThis.__BNH_VFS__.fs.readFileSync(virtualPath);
+        if (bytes && bytes.byteLength > 0) return bytes;
+      } catch {}
+    }
+  }
+  if (typeof XMLHttpRequest !== 'undefined') {
+    for (const candidate of candidateUrls) {
+      try {
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', candidate.href, false);
+        xhr.responseType = 'arraybuffer';
+        xhr.send(null);
+        if (xhr.status === 200 && xhr.response) {
+          const bytes = new Uint8Array(xhr.response);
+          if (bytes.byteLength > 0) {
+            globalThis.__BNH_WASM_CACHE__ = globalThis.__BNH_WASM_CACHE__ || {};
+            globalThis.__BNH_WASM_CACHE__[name] = bytes;
+            return bytes;
+          }
+        }
+      } catch {}
+    }
+  }
+  return null;
+}
+
+const wasmInstances = {};
+function getWasmInstance(name) {
+  if (!wasmInstances[name]) {
+    const bytes = loadWasmBytes(name);
+    if (!bytes) return null;
+    const env = new Proxy({}, { get: () => () => 0 });
+    const wasi = new Proxy({}, { get: () => () => 0 });
+    wasmInstances[name] = new WebAssembly.Instance(new WebAssembly.Module(bytes), { env, wasi_snapshot_preview1: wasi });
+  }
+  return wasmInstances[name];
+}
 
 const SymbolNodeAsyncDispose = Symbol.for('nodejs.asyncDispose');
 const SymbolAsyncDispose = Symbol.asyncDispose || SymbolNodeAsyncDispose;
@@ -678,19 +755,222 @@ for (const Constructor of [ZstdCompress, ZstdDecompress]) {
   }
 }
 
+function toUint8Array(value) {
+  if (typeof value === 'string') return new TextEncoder().encode(value);
+  if (value instanceof Uint8Array) return value;
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  return new Uint8Array(0);
+}
+
+function wasmBrotliCompress(value, options = {}) {
+  validateBrotliOptions(options);
+  const inst = getWasmInstance('brotli');
+  if (!inst) throw new Error('brotli.wasm artifact unavailable');
+  const exp = inst.exports;
+  const mem = exp.memory;
+  const inputBytes = toUint8Array(value);
+
+  const inPtr = exp.malloc(inputBytes.length);
+  new Uint8Array(mem.buffer).set(inputBytes, inPtr);
+  const maxOut = inputBytes.length * 2 + 1024;
+  const outPtr = exp.malloc(maxOut);
+  const enc = exp.BrotliEncoderCreateInstance(0, 0, 0);
+  const stateBlock = exp.malloc(20);
+  const dv = new DataView(mem.buffer);
+  dv.setUint32(stateBlock, inputBytes.length, true);
+  dv.setUint32(stateBlock + 4, inPtr, true);
+  dv.setUint32(stateBlock + 8, maxOut, true);
+  dv.setUint32(stateBlock + 12, outPtr, true);
+
+  const res = exp.BrotliEncoderCompressStream(enc, 2, stateBlock, stateBlock + 4, stateBlock + 8, stateBlock + 12, 0);
+  if (!res) {
+    exp.BrotliEncoderDestroyInstance(enc);
+    exp.free(inPtr); exp.free(outPtr); exp.free(stateBlock);
+    throw new Error('Brotli compression failed');
+  }
+  const remainingOut = dv.getUint32(stateBlock + 8, true);
+  const compressedLen = maxOut - remainingOut;
+  const result = new Uint8Array(mem.buffer).slice(outPtr, outPtr + compressedLen);
+  exp.BrotliEncoderDestroyInstance(enc);
+  exp.free(inPtr); exp.free(outPtr); exp.free(stateBlock);
+  return result;
+}
+
+function wasmBrotliDecompress(value, options = {}) {
+  validateBrotliOptions(options);
+  const inst = getWasmInstance('brotli');
+  if (!inst) throw new Error('brotli.wasm artifact unavailable');
+  const exp = inst.exports;
+  const mem = exp.memory;
+  const inputBytes = toUint8Array(value);
+
+  const inPtr = exp.malloc(inputBytes.length);
+  new Uint8Array(mem.buffer).set(inputBytes, inPtr);
+  const maxOut = Math.max(inputBytes.length * 6, 4096);
+  const outPtr = exp.malloc(maxOut);
+  const dec = exp.BrotliDecoderCreateInstance(0, 0, 0);
+  const stateBlock = exp.malloc(20);
+  const dv = new DataView(mem.buffer);
+  dv.setUint32(stateBlock, inputBytes.length, true);
+  dv.setUint32(stateBlock + 4, inPtr, true);
+  dv.setUint32(stateBlock + 8, maxOut, true);
+  dv.setUint32(stateBlock + 12, outPtr, true);
+
+  const res = exp.BrotliDecoderDecompressStream(dec, stateBlock, stateBlock + 4, stateBlock + 8, stateBlock + 12, 0);
+  if (!res) {
+    exp.BrotliDecoderDestroyInstance(dec);
+    exp.free(inPtr); exp.free(outPtr); exp.free(stateBlock);
+    const err = new Error('Decompression failed');
+    err.code = 'ERR_BROTLI_DECOMPRESS_FAILED';
+    throw err;
+  }
+  const remainingOut = dv.getUint32(stateBlock + 8, true);
+  const decompressedLen = maxOut - remainingOut;
+  const result = new Uint8Array(mem.buffer).slice(outPtr, outPtr + decompressedLen);
+  exp.BrotliDecoderDestroyInstance(dec);
+  exp.free(inPtr); exp.free(outPtr); exp.free(stateBlock);
+  return result;
+}
+
+function wasmZstdCompress(value, options = {}) {
+  const inst = getWasmInstance('zstd');
+  if (!inst) throw new Error('zstd.wasm artifact unavailable');
+  const exp = inst.exports;
+  const inputBytes = toUint8Array(value);
+
+  const inPtr = exp.malloc(inputBytes.length);
+  new Uint8Array(exp.memory.buffer).set(inputBytes, inPtr);
+  const maxOut = exp.ZSTD_compressBound(inputBytes.length);
+  const outPtr = exp.malloc(maxOut);
+  const level = options.level ?? 3;
+  const compSize = exp.ZSTD_compress(outPtr, maxOut, inPtr, inputBytes.length, level);
+  if (exp.ZSTD_isError(compSize)) {
+    exp.free(inPtr); exp.free(outPtr);
+    throw new Error('Zstd compression failed');
+  }
+  const result = new Uint8Array(exp.memory.buffer).slice(outPtr, outPtr + compSize);
+  exp.free(inPtr); exp.free(outPtr);
+  return result;
+}
+
+function wasmZstdDecompress(value, options = {}) {
+  const inst = getWasmInstance('zstd');
+  if (!inst) throw new Error('zstd.wasm artifact unavailable');
+  const exp = inst.exports;
+  const inputBytes = toUint8Array(value);
+
+  const inPtr = exp.malloc(inputBytes.length);
+  new Uint8Array(exp.memory.buffer).set(inputBytes, inPtr);
+  const origSize = Number(exp.ZSTD_getFrameContentSize(inPtr, inputBytes.length));
+  const maxOut = (origSize > 0 && origSize < 100 * 1024 * 1024) ? origSize : Math.max(inputBytes.length * 5, 4096);
+  const outPtr = exp.malloc(maxOut);
+  const decSize = exp.ZSTD_decompress(outPtr, maxOut, inPtr, inputBytes.length);
+  if (exp.ZSTD_isError(decSize)) {
+    exp.free(inPtr); exp.free(outPtr);
+    throw new Error('Zstd decompression failed');
+  }
+  const result = new Uint8Array(exp.memory.buffer).slice(outPtr, outPtr + decSize);
+  exp.free(inPtr); exp.free(outPtr);
+  return result;
+}
+
+function wasmZlibDeflate(value, options = {}) {
+  const inst = getWasmInstance('zlib');
+  if (!inst) throw new Error('zlib.wasm artifact unavailable');
+  const exp = inst.exports;
+  const mem = exp.memory;
+  const inBytes = toUint8Array(value);
+
+  const inPtr = exp.malloc(inBytes.length);
+  new Uint8Array(mem.buffer).set(inBytes, inPtr);
+  const maxOut = inBytes.length * 2 + 1024;
+  const outPtr = exp.malloc(maxOut);
+  const strm = exp.malloc(64);
+  new Uint8Array(mem.buffer, strm, 64).fill(0);
+  const dv = new DataView(mem.buffer);
+  dv.setUint32(strm, inPtr, true);
+  dv.setUint32(strm + 4, inBytes.length, true);
+  dv.setUint32(strm + 12, outPtr, true);
+  dv.setUint32(strm + 16, maxOut, true);
+  const verPtr = exp.malloc(16);
+  new Uint8Array(mem.buffer).set(new TextEncoder().encode('1.3.1\0'), verPtr);
+  const level = options.level ?? 6;
+  exp.deflateInit_(strm, level, verPtr, 56);
+  exp.deflate(strm, 4);
+  const compLen = maxOut - dv.getUint32(strm + 16, true);
+  exp.deflateEnd(strm);
+  const out = new Uint8Array(mem.buffer).slice(outPtr, outPtr + compLen);
+  exp.free(inPtr); exp.free(outPtr); exp.free(strm); exp.free(verPtr);
+  return out;
+}
+
+function wasmZlibInflate(value, options = {}) {
+  const inst = getWasmInstance('zlib');
+  if (!inst) throw new Error('zlib.wasm artifact unavailable');
+  const exp = inst.exports;
+  const mem = exp.memory;
+  const inBytes = toUint8Array(value);
+
+  const inPtr = exp.malloc(inBytes.length);
+  new Uint8Array(mem.buffer).set(inBytes, inPtr);
+  const maxOut = Math.max(inBytes.length * 6, 4096);
+  const outPtr = exp.malloc(maxOut);
+  const strm = exp.malloc(64);
+  new Uint8Array(mem.buffer, strm, 64).fill(0);
+  const dv = new DataView(mem.buffer);
+  dv.setUint32(strm, inPtr, true);
+  dv.setUint32(strm + 4, inBytes.length, true);
+  dv.setUint32(strm + 12, outPtr, true);
+  dv.setUint32(strm + 16, maxOut, true);
+  const verPtr = exp.malloc(16);
+  new Uint8Array(mem.buffer).set(new TextEncoder().encode('1.3.1\0'), verPtr);
+  exp.inflateInit_(strm, verPtr, 56);
+  exp.inflate(strm, 4);
+  const decLen = maxOut - dv.getUint32(strm + 16, true);
+  exp.inflateEnd(strm);
+  const out = new Uint8Array(mem.buffer).slice(outPtr, outPtr + decLen);
+  exp.free(inPtr); exp.free(outPtr); exp.free(strm); exp.free(verPtr);
+  return out;
+}
+
+function wrapBufferResult(uint8Arr, BufferClass) {
+  if (BufferClass && typeof BufferClass.from === 'function') {
+    return BufferClass.from(uint8Arr.buffer, uint8Arr.byteOffset, uint8Arr.byteLength);
+  }
+  return uint8Arr;
+}
+
 function operation(value, format, mode, BufferClass, scope, optionsOrCallback, callback) {
   const done = typeof callback === 'function'
     ? callback
     : typeof optionsOrCallback === 'function' ? optionsOrCallback : undefined;
-  const result = (async () => {
-    const input = new scope.Blob([value]).stream();
+  const options = typeof optionsOrCallback === 'object' && optionsOrCallback !== null ? optionsOrCallback : {};
+
+  const execute = async () => {
     const streamFormat = typeof format === 'function' ? format(value, scope) : format;
-    const transformed = input.pipeThrough(createWebTransform(scope, streamFormat, mode));
-    return new Uint8Array(await new scope.Response(transformed).arrayBuffer());
-  })();
-  if (typeof done !== 'function') return result.then((output) => new BufferClass(output));
+    if (streamFormat === 'br') {
+      return mode === 'compress' ? wasmBrotliCompress(value, options) : wasmBrotliDecompress(value, options);
+    }
+    if (streamFormat === 'zstd') {
+      return mode === 'compress' ? wasmZstdCompress(value, options) : wasmZstdDecompress(value, options);
+    }
+    try {
+      const input = new scope.Blob([value]).stream();
+      const transformed = input.pipeThrough(createWebTransform(scope, streamFormat, mode));
+      return new Uint8Array(await new scope.Response(transformed).arrayBuffer());
+    } catch (webErr) {
+      if (streamFormat === 'deflate' || streamFormat === 'deflate-raw' || streamFormat === 'gzip') {
+        return mode === 'compress' ? wasmZlibDeflate(value, options) : wasmZlibInflate(value, options);
+      }
+      throw webErr;
+    }
+  };
+
+  const result = execute();
+  if (typeof done !== 'function') return result.then((output) => wrapBufferResult(output, BufferClass));
   return result.then(
-    (output) => done(null, new BufferClass(output)),
+    (output) => done(null, wrapBufferResult(output, BufferClass)),
     (error) => done(mode === 'decompress' ? zlibDataError(error) : error),
   );
 }
@@ -790,20 +1070,20 @@ export function createZlibShim(scope, BufferClass) {
     ZstdDecompress,
     createZstdCompress: createProperty(ZstdCompress, BufferClass, nativeScope),
     createZstdDecompress: createProperty(ZstdDecompress, BufferClass, nativeScope),
-    gzipSync(value) { syncUnavailable('compression', 'gzip', value); },
-    gunzipSync(value) { syncUnavailable('decompression', 'gunzip', value); },
-    deflateSync(value) { syncUnavailable('compression', 'deflate', value); },
-    deflateRawSync(value) { syncUnavailable('compression', 'deflateRaw', value); },
-    inflateRawSync(value) { syncUnavailable('decompression', 'inflateRaw', value); },
-    inflateSync(value) { syncUnavailable('decompression', 'inflate', value); },
+    gzipSync: (value, options) => wrapBufferResult(wasmZlibDeflate(value, options), BufferClass),
+    gunzipSync: (value, options) => wrapBufferResult(wasmZlibInflate(value, options), BufferClass),
+    deflateSync: (value, options) => wrapBufferResult(wasmZlibDeflate(value, options), BufferClass),
+    deflateRawSync: (value, options) => wrapBufferResult(wasmZlibDeflate(value, options), BufferClass),
+    inflateRawSync: (value, options) => wrapBufferResult(wasmZlibInflate(value, options), BufferClass),
+    inflateSync: (value, options) => wrapBufferResult(wasmZlibInflate(value, options), BufferClass),
     unzip: (value, optionsOrCallback, callback) => operation(value, (input, targetScope) => unzipFormat(input, targetScope), 'decompress', BufferClass, scope, optionsOrCallback, callback),
-    unzipSync(value) { syncUnavailable('decompression', 'unzip', value); },
-    brotliCompressSync(value) { syncUnavailable('Brotli compression', 'brotliCompress', value); },
-    brotliDecompressSync(value) { syncUnavailable('Brotli decompression', 'brotliDecompress', value); },
+    unzipSync: (value, options) => wrapBufferResult(wasmZlibInflate(value, options), BufferClass),
+    brotliCompressSync: (value, options) => wrapBufferResult(wasmBrotliCompress(value, options), BufferClass),
+    brotliDecompressSync: (value, options) => wrapBufferResult(wasmBrotliDecompress(value, options), BufferClass),
     zstdCompress: (value, optionsOrCallback, callback) => operation(value, 'zstd', 'compress', BufferClass, nativeScope, optionsOrCallback, callback),
     zstdDecompress: (value, optionsOrCallback, callback) => operation(value, 'zstd', 'decompress', BufferClass, nativeScope, optionsOrCallback, callback),
-    zstdCompressSync(value) { syncUnavailable('compression', 'zstdCompress', value); },
-    zstdDecompressSync(value) { syncUnavailable('decompression', 'zstdDecompress', value); },
+    zstdCompressSync: (value, options) => wrapBufferResult(wasmZstdCompress(value, options), BufferClass),
+    zstdDecompressSync: (value, options) => wrapBufferResult(wasmZstdDecompress(value, options), BufferClass),
   };
   for (const [name, value] of Object.entries(constants)) {
     if (name.startsWith('BROTLI')) continue;

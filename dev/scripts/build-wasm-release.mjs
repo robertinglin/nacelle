@@ -94,22 +94,26 @@ console.log(`Using Emscripten compiler: ${emcc}`);
 const nodeDeps = path.resolve(repoRoot, ".bnh-state", nodeVersion, "node", "deps");
 const artifacts = [];
 
-function validateWasmExports(outputPath, label, expectedExports = []) {
+function validateWasmExports(outputPath, label, expectedExports = [], minExportsFloor = 1) {
   if (!fs.existsSync(outputPath)) throw new Error(`${label} did not produce ${outputPath}`);
   const bytes = fs.readFileSync(outputPath);
   if (!WebAssembly.validate(bytes)) throw new Error(`${label} produced invalid WebAssembly`);
+  if (bytes.byteLength < 500) {
+    throw new Error(`${label} produced suspiciously small WebAssembly (${bytes.byteLength} bytes)`);
+  }
   const names = new Set(WebAssembly.Module.exports(new WebAssembly.Module(bytes)).map((item) => item.name));
   const missing = expectedExports.filter((name) => !names.has(name));
-  if (names.size < Math.max(1, expectedExports.length)) {
-    throw new Error(`${label} exported ${names.size} symbols; expected at least ${Math.max(1, expectedExports.length)}`);
+  const floor = Math.max(minExportsFloor, expectedExports.length);
+  if (names.size < floor) {
+    throw new Error(`${label} exported only ${names.size} symbols; expected at least ${floor}`);
   }
   if (missing.length) throw new Error(`${label} is missing required exports: ${missing.join(', ')}`);
   return { bytes: bytes.byteLength, exports: [...names].sort() };
 }
 
-function compileWasm(label, args, outputPath, expectedExports) {
+function compileWasm(label, args, outputPath, expectedExports, minExportsFloor) {
   execFileSync(emcc, args, { stdio: "inherit" });
-  return validateWasmExports(outputPath, label, expectedExports);
+  return validateWasmExports(outputPath, label, expectedExports, minExportsFloor);
 }
 
 function findFiles(dir, ext) {
@@ -127,7 +131,7 @@ function findFiles(dir, ext) {
   return results;
 }
 
-// 2. SQLite (node:sqlite, sqlite3, better-sqlite3)
+// 2. SQLite (node:sqlite)
 const sqliteSrc = path.join(nodeDeps, "sqlite", "sqlite3.c");
 if (fs.existsSync(sqliteSrc)) {
   console.log("-> Compiling sqlite.wasm...");
@@ -151,7 +155,7 @@ if (fs.existsSync(sqliteSrc)) {
     'sqlite3_column_bytes', 'sqlite3_bind_text', 'sqlite3_bind_int64', 'sqlite3_bind_double',
     'sqlite3_bind_blob', 'sqlite3_bind_null', 'sqlite3_errmsg', 'sqlite3_changes',
     'sqlite3_total_changes', 'sqlite3_last_insert_rowid', 'malloc', 'free',
-  ]);
+  ], 25);
 
   artifacts.push(
     { node: "internal/deps/sqlite.node", wasm: "./sqlite.wasm", entry: "sqlite", exports: [
@@ -181,7 +185,7 @@ if (fs.existsSync(zlibDir)) {
     "-Wl,--export-table",
     "--no-entry",
     "-o", path.join(outDir, "zlib.wasm"),
-  ], path.join(outDir, "zlib.wasm"), ['deflateInit_', 'deflate', 'deflateEnd', 'inflateInit_', 'inflate', 'inflateEnd', 'crc32', 'adler32', 'malloc', 'free']);
+  ], path.join(outDir, "zlib.wasm"), ['deflateInit_', 'deflate', 'deflateEnd', 'inflateInit_', 'inflate', 'inflateEnd', 'crc32', 'adler32', 'malloc', 'free'], 10);
 
   artifacts.push({ node: "internal/deps/zlib.node", wasm: "./zlib.wasm", entry: "zlib", exports: ['deflateInit_', 'deflate', 'deflateEnd', 'inflateInit_', 'inflate', 'inflateEnd', 'crc32', 'adler32', 'malloc', 'free'] });
 }
@@ -205,7 +209,7 @@ if (fs.existsSync(brotliDir)) {
     "-Wl,--export-table",
     "--no-entry",
     "-o", path.join(outDir, "brotli.wasm"),
-  ], path.join(outDir, "brotli.wasm"), ['BrotliEncoderCreateInstance', 'BrotliEncoderCompressStream', 'BrotliEncoderDestroyInstance', 'BrotliDecoderCreateInstance', 'BrotliDecoderDecompressStream', 'BrotliDecoderDestroyInstance', 'malloc', 'free']);
+  ], path.join(outDir, "brotli.wasm"), ['BrotliEncoderCreateInstance', 'BrotliEncoderCompressStream', 'BrotliEncoderDestroyInstance', 'BrotliDecoderCreateInstance', 'BrotliDecoderDecompressStream', 'BrotliDecoderDestroyInstance', 'malloc', 'free'], 8);
 
   artifacts.push({ node: "internal/deps/brotli.node", wasm: "./brotli.wasm", entry: "brotli", exports: ['BrotliEncoderCreateInstance', 'BrotliEncoderCompressStream', 'BrotliEncoderDestroyInstance', 'BrotliDecoderCreateInstance', 'BrotliDecoderDecompressStream', 'BrotliDecoderDestroyInstance', 'malloc', 'free'] });
 }
@@ -226,66 +230,29 @@ if (fs.existsSync(zstdDir)) {
     `-I${path.join(zstdDir, "common")}`,
     "-O2",
     "-sALLOW_MEMORY_GROWTH=1",
-    "-sEXPORTED_FUNCTIONS=_ZSTD_compress,_ZSTD_decompress,_ZSTD_compressBound,_ZSTD_getFrameContentSize,_ZSTD_isError",
+    "-sEXPORTED_FUNCTIONS=_ZSTD_compress,_ZSTD_decompress,_ZSTD_compressBound,_ZSTD_getFrameContentSize,_ZSTD_isError,_malloc,_free",
     "-sERROR_ON_UNDEFINED_SYMBOLS=0",
     "-Wl,--export-table",
     "--no-entry",
     "-o", path.join(outDir, "zstd.wasm"),
-  ], path.join(outDir, "zstd.wasm"), ['ZSTD_compress', 'ZSTD_decompress', 'ZSTD_compressBound', 'ZSTD_getFrameContentSize', 'ZSTD_isError']);
+  ], path.join(outDir, "zstd.wasm"), ['ZSTD_compress', 'ZSTD_decompress', 'ZSTD_compressBound', 'ZSTD_getFrameContentSize', 'ZSTD_isError', 'malloc', 'free'], 7);
 
-  artifacts.push({ node: "internal/deps/zstd.node", wasm: "./zstd.wasm", entry: "zstd", exports: ['ZSTD_compress', 'ZSTD_decompress', 'ZSTD_compressBound', 'ZSTD_getFrameContentSize', 'ZSTD_isError'] });
+  artifacts.push({ node: "internal/deps/zstd.node", wasm: "./zstd.wasm", entry: "zstd", exports: ['ZSTD_compress', 'ZSTD_decompress', 'ZSTD_compressBound', 'ZSTD_getFrameContentSize', 'ZSTD_isError', 'malloc', 'free'] });
 }
 
-// 6. llhttp (node:http)
-const llhttpDir = path.join(nodeDeps, "llhttp");
-if (fs.existsSync(llhttpDir)) {
-  console.log("-> Compiling llhttp.wasm...");
-  const llhttpSources = [path.join(llhttpDir, "src", "api.c"), path.join(llhttpDir, "src", "http.c"), path.join(llhttpDir, "src", "llhttp.c")].filter(fs.existsSync);
-  compileWasm('llhttp', [
-    ...llhttpSources,
-    `-I${path.join(llhttpDir, "include")}`,
-    "-O2",
-    "-sALLOW_MEMORY_GROWTH=1",
-    "-sEXPORTED_FUNCTIONS=_llhttp_init,_llhttp_execute,_llhttp_finish,_llhttp_settings_init,_llhttp_get_error_reason",
-    "-sERROR_ON_UNDEFINED_SYMBOLS=0",
-    "-Wl,--export-table",
-    "--no-entry",
-    "-o", path.join(outDir, "llhttp.wasm"),
-  ], path.join(outDir, "llhttp.wasm"), ['llhttp_init', 'llhttp_execute', 'llhttp_finish', 'llhttp_settings_init', 'llhttp_get_error_reason']);
-
-  artifacts.push({ node: "internal/deps/llhttp.node", wasm: "./llhttp.wasm", entry: "llhttp", exports: ['llhttp_init', 'llhttp_execute', 'llhttp_finish', 'llhttp_settings_init', 'llhttp_get_error_reason'] });
-}
-
-// 7. ada (node:url)
-const adaDir = path.join(nodeDeps, "ada");
-if (fs.existsSync(path.join(adaDir, "ada.cpp"))) {
-  console.log("-> Compiling ada.wasm...");
-  compileWasm('ada', [
-    path.join(adaDir, "ada.cpp"),
-    `-I${adaDir}`,
-    "-O2",
-    "-sALLOW_MEMORY_GROWTH=1",
-    "-sEXPORTED_FUNCTIONS=_ada_parse,_ada_get_href,_ada_get_pathname,_ada_get_search,_ada_free",
-    "-sERROR_ON_UNDEFINED_SYMBOLS=0",
-    "-Wl,--export-table",
-    "--no-entry",
-    "-o", path.join(outDir, "ada.wasm"),
-  ], path.join(outDir, "ada.wasm"), ['ada_parse', 'ada_get_href', 'ada_get_pathname', 'ada_get_search', 'ada_free']);
-
-  artifacts.push({ node: "internal/deps/ada.node", wasm: "./ada.wasm", entry: "ada", exports: ['ada_parse', 'ada_get_href', 'ada_get_pathname', 'ada_get_search', 'ada_free'] });
-}
-
-// 8. Standard Node-API bridge. Package-specific addons are only listed when
-// their own sources were compiled; a copied bridge is not an addon.
+// 6. Standard Node-API bridge.
 const napiWasm = path.join(outDir, "node_addon_napi.wasm");
-validateWasmExports(napiWasm, 'node_addon_napi', ['napi_register_wasm_v1']);
+validateWasmExports(napiWasm, 'node_addon_napi', ['napi_register_wasm_v1'], 1);
 artifacts.push({ node: "build/Release/node_addon_napi.node", wasm: "./node_addon_napi.wasm", entry: "napi", exports: ['napi_register_wasm_v1'] });
 
-// 13. Write Final Manifest
+// 7. Write Final Manifest
 const manifestPath = path.join(outDir, "addon-manifest.json");
 const manifest = {
-  version: 1,
+  version: 2,
   node_version: nodeVersion,
+  reference_version: "22.23.2",
+  abi: { modules: "127", napi: "10" },
+  artifact_compatibility: "browser-wasm-napi10",
   artifacts,
   failures: [],
   skipped: [],
@@ -293,3 +260,4 @@ const manifest = {
 
 fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
 console.log(`\n=== Release WASM Build Completed: ${artifacts.length} artifacts built into ${outDir} ===`);
+

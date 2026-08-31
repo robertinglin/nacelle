@@ -2,26 +2,97 @@
   "version": 2,
   "node_version": "v22",
   "reference_version": "22.23.2",
-  "abi": { "modules": "127", "napi": "10" },
+  "abi": {
+    "modules": "127",
+    "napi": "10"
+  },
   "artifact_compatibility": "browser-wasm-napi10",
   "artifacts": [
     {
       "node": "internal/deps/sqlite.node",
       "wasm": "./sqlite.wasm",
       "entry": "sqlite",
-      "exports": ["sqlite3_open", "sqlite3_close", "sqlite3_exec", "sqlite3_prepare_v2", "sqlite3_step", "sqlite3_finalize", "sqlite3_column_count", "sqlite3_column_name", "sqlite3_column_type", "sqlite3_column_text", "sqlite3_column_int64", "sqlite3_column_double", "sqlite3_column_blob", "sqlite3_column_bytes", "sqlite3_bind_text", "sqlite3_bind_int64", "sqlite3_bind_double", "sqlite3_bind_blob", "sqlite3_bind_null", "sqlite3_errmsg", "sqlite3_changes", "sqlite3_total_changes", "sqlite3_last_insert_rowid", "malloc", "free"]
+      "exports": [
+        "sqlite3_open",
+        "sqlite3_close",
+        "sqlite3_exec",
+        "sqlite3_prepare_v2",
+        "sqlite3_step",
+        "sqlite3_finalize",
+        "sqlite3_column_count",
+        "sqlite3_column_name",
+        "sqlite3_column_type",
+        "sqlite3_column_text",
+        "sqlite3_column_int64",
+        "sqlite3_column_double",
+        "sqlite3_column_blob",
+        "sqlite3_column_bytes",
+        "sqlite3_bind_text",
+        "sqlite3_bind_int64",
+        "sqlite3_bind_double",
+        "sqlite3_bind_blob",
+        "sqlite3_bind_null",
+        "sqlite3_errmsg",
+        "sqlite3_changes",
+        "sqlite3_total_changes",
+        "sqlite3_last_insert_rowid",
+        "malloc",
+        "free"
+      ]
     },
     {
       "node": "internal/deps/zlib.node",
       "wasm": "./zlib.wasm",
       "entry": "zlib",
-      "exports": ["deflateInit_", "deflate", "deflateEnd", "inflateInit_", "inflate", "inflateEnd", "crc32", "adler32", "malloc", "free"]
+      "exports": [
+        "deflateInit_",
+        "deflate",
+        "deflateEnd",
+        "inflateInit_",
+        "inflate",
+        "inflateEnd",
+        "crc32",
+        "adler32",
+        "malloc",
+        "free"
+      ]
+    },
+    {
+      "node": "internal/deps/brotli.node",
+      "wasm": "./brotli.wasm",
+      "entry": "brotli",
+      "exports": [
+        "BrotliEncoderCreateInstance",
+        "BrotliEncoderCompressStream",
+        "BrotliEncoderDestroyInstance",
+        "BrotliDecoderCreateInstance",
+        "BrotliDecoderDecompressStream",
+        "BrotliDecoderDestroyInstance",
+        "malloc",
+        "free"
+      ]
+    },
+    {
+      "node": "internal/deps/zstd.node",
+      "wasm": "./zstd.wasm",
+      "entry": "zstd",
+      "exports": [
+        "ZSTD_compress",
+        "ZSTD_decompress",
+        "ZSTD_compressBound",
+        "ZSTD_getFrameContentSize",
+        "ZSTD_isError",
+        "malloc",
+        "free"
+      ]
     },
     {
       "node": "build/Release/node_addon_napi.node",
       "wasm": "./node_addon_napi.wasm",
       "entry": "napi",
-      "exports": ["napi_register_wasm_v1"]
+      "exports": [
+        "napi_register_wasm_v1"
+      ]
     }
   ],
   "failures": [],

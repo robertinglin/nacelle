@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Browser Node Harness — bcrypt N-API Compute Demo</title>
+  <style>
+    :root {
+      --bg: #0b1120;
+      --panel-bg: #1e293b;
+      --card-bg: #0f172a;
+      --border: #334155;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-hover: #0284c7;
+      --success: #4ade80;
+      --warning: #facc15;
+      --error: #f87171;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100vh;
+      width: 100vw;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      height: 52px;
+      min-height: 52px;
+      background: var(--panel-bg);
+      border-bottom: 1px solid var(--border);
+      padding: 0 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      z-index: 10;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: #e2e8f0;
+    }
+    .badge {
+      background: #0369a1;
+      color: #e0f2fe;
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      text-transform: uppercase;
+    }
+    .hamburger-btn {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+      font-size: 1.1rem;
+      padding: 4px 9px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .hamburger-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .nav-dropdown {
+      position: absolute;
+      top: 52px;
+      left: 14px;
+      background: #1e293b;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: 0 16px 32px rgba(0, 0, 0, 0.4);
+      padding: 6px;
+      min-width: 240px;
+      display: none;
+      flex-direction: column;
+      gap: 3px;
+      z-index: 1000;
+    }
+    .nav-dropdown.show { display: flex; }
+    .nav-dropdown a {
+      color: var(--text);
+      text-decoration: none;
+      padding: 8px 12px;
+      border-radius: 5px;
+      font-size: 0.82rem;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .nav-dropdown a:hover { background: rgba(56, 189, 248, 0.12); color: var(--accent); }
+    .nav-dropdown a.active { background: rgba(56, 189, 248, 0.2); color: var(--accent); font-weight: 700; }
+    main {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 460px 1fr;
+      gap: 12px;
+      padding: 12px;
+      overflow: hidden;
+    }
+    .panel {
+      background: var(--panel-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .panel-header {
+      padding: 10px 14px;
+      background: rgba(0,0,0,0.2);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+    .controls {
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .form-group { display: flex; flex-direction: column; gap: 6px; }
+    .form-group label { font-size: 0.75rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; }
+    input[type="text"], input[type="password"] {
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      padding: 8px 12px;
+      font-size: 0.85rem;
+      outline: none;
+    }
+    input[type="text"]:focus, input[type="password"]:focus { border-color: var(--accent); }
+    .btn {
+      background: var(--accent);
+      color: #0f172a;
+      border: none;
+      border-radius: 6px;
+      padding: 8px 16px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .btn:hover { background: var(--accent-hover); }
+    .editor-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    textarea.code-view {
+      flex: 1;
+      background: #0b1120;
+      color: #e2e8f0;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.8rem;
+      padding: 12px;
+      border: none;
+      resize: none;
+      outline: none;
+      line-height: 1.45;
+    }
+    .right-col { display: flex; flex-direction: column; gap: 12px; overflow: hidden; }
+    .metrics-bar {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      padding: 10px 14px;
+      background: rgba(0,0,0,0.15);
+      border-bottom: 1px solid var(--border);
+    }
+    .metric-card {
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .metric-label { font-size: 0.68rem; color: var(--text-muted); text-transform: uppercase; font-weight: 600; }
+    .metric-val { font-size: 0.95rem; font-weight: 700; color: var(--accent); }
+    .log-stream {
+      flex: 1;
+      padding: 12px;
+      background: #060a12;
+      overflow-y: auto;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.78rem;
+      line-height: 1.5;
+    }
+    .log-entry { margin-bottom: 4px; }
+    .log-time { color: var(--text-muted); margin-right: 6px; }
+    .log-msg.info { color: #93c5fd; }
+    .log-msg.success { color: var(--success); }
+    .log-msg.warn { color: var(--warning); }
+    .log-msg.error { color: var(--error); }
+    .status-pill {
+      font-size: 0.72rem;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-weight: 600;
+    }
+    .status-pill.ready { background: rgba(74, 222, 128, 0.2); color: var(--success); }
+    .status-pill.running { background: rgba(56, 189, 248, 0.2); color: var(--accent); }
+    .status-pill.error { background: rgba(248, 113, 113, 0.2); color: var(--error); }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <button class="hamburger-btn" id="btn-hamburger" title="Switch Demo">☰</button>
+      <div class="nav-dropdown" id="nav-dropdown">
+        <a href="/express.html">⚡ Express Server</a>
+        <a href="/http-client.html">🌐 HTTP Client & Decompression</a>
+        <a href="/bcrypt.html" class="active">🔒 bcrypt N-API WASM</a>
+        <a href="/sqlite-drizzle.html">🗄️ SQLite & Drizzle ORM</a>
+        <a href="/typescript.html">📘 Full tsc Compiler</a>
+        <a href="/vitest.html">🧪 Vitest Test Runner</a>
+        <a href="/webpack.html">📦 Webpack 5 Bundler</a>
+        <a href="/websocket.html">🔌 WebSocket Upgrade</a>
+        <a href="/postgres.html">🐘 PostgreSQL Raw TCP</a>
+        <a href="/swc-wasm.html">⚡ SWC / ESBuild WASM</a>
+        <a href="/nextjs.html">⚛️ Next.js App Router</a>
+        <a href="/vite-react.html">⚛️ Vite + React</a>
+        <a href="/npm-lifecycle.html">📦 NPM Postinstall Script</a>
+        <a href="/wasm.html">🧩 WASM Subsystem</a>
+        <a href="/bash.html">🖥️ Bash Shell</a>
+        <a href="/proxy.html">🛡️ Network Proxy</a>
+      </div>
+      <span>Browser Node Harness</span>
+      <span class="badge">Node v22.23.2</span>
+    </div>
+    <span id="global-status" class="status-pill ready">Ready</span>
+  </header>
+
+  <main>
+    <div class="panel">
+      <div class="panel-header">
+        <span>🔒 bcrypt N-API WASM Engine</span>
+      </div>
+      <div class="controls">
+        <div class="form-group">
+          <label>Password to Hash</label>
+          <input type="text" id="input-password" value="SuperSecretBrowserNode2026!">
+        </div>
+        <div class="form-group">
+          <label>Test Password to Verify</label>
+          <input type="text" id="input-verify" value="SuperSecretBrowserNode2026!">
+        </div>
+        <div class="form-group">
+          <label>Cost / Work Factor</label>
+          <div style="display: flex; align-items: center; gap: 12px;">
+            <input type="range" id="input-rounds" min="8" max="14" value="10" style="flex: 1;">
+            <span id="label-rounds" style="font-weight: 700; color: var(--accent); min-width: 60px;">10 rounds</span>
+          </div>
+        </div>
+        <button class="btn" id="btn-run">▶ Hash & Verify (N-API WASM)</button>
+      </div>
+      <div class="editor-container">
+        <div class="panel-header" style="font-size: 0.75rem;">
+          <span>Node.js Pure Compute Script</span>
+        </div>
+        <textarea class="code-view" id="code-editor" readonly></textarea>
+      </div>
+    </div>
+
+    <div class="right-col">
+      <div class="panel" style="flex: 1;">
+        <div class="panel-header">
+          <span>📊 Pure Compute Output & Timing</span>
+          <span id="result-status" class="status-pill ready">Valid Match</span>
+        </div>
+        <div class="metrics-bar">
+          <div class="metric-card">
+            <span class="metric-label">Hash Time</span>
+            <span class="metric-val" id="metric-hash-time">0 ms</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Verify Time</span>
+            <span class="metric-val" id="metric-verify-time">0 ms</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Memory Used</span>
+            <span class="metric-val" id="metric-memory">128 KB</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Verification Result</span>
+            <span class="metric-val" id="metric-result">MATCH</span>
+          </div>
+        </div>
+        <div class="log-stream" id="log-stream"></div>
+      </div>
+    </div>
+  </main>
+
+  <script type="module">
+    import { Nacelle } from '/index.js';
+
+    function log(msg, type = "info") {
+      const stream = document.getElementById("log-stream");
+      const entry = document.createElement("div");
+      entry.className = "log-entry";
+      const now = new Date().toLocaleTimeString();
+      entry.innerHTML = `<span class="log-time">[${now}]</span> <span class="log-msg ${type}">${msg}</span>`;
+      stream.appendChild(entry);
+      stream.scrollTop = stream.scrollHeight;
+    }
+
+    const hamburgerBtn = document.getElementById('btn-hamburger');
+    const navDropdown = document.getElementById('nav-dropdown');
+    hamburgerBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      navDropdown?.classList.toggle('show');
+    });
+    document.addEventListener('click', () => navDropdown?.classList.remove('show'));
+
+    const roundsInput = document.getElementById('input-rounds');
+    roundsInput.addEventListener('input', () => {
+      document.getElementById('label-rounds').textContent = `${roundsInput.value} rounds`;
+    });
+
+    const scriptTemplate = `
+const crypto = require('node:crypto');
+
+function hashPassword(password, cost) {
+  const salt = crypto.randomBytes(16);
+  const key = crypto.scryptSync(password, salt, 64, { N: 1 << cost, r: 8, p: 1 });
+  return salt.toString('hex') + '$' + key.toString('hex');
+}
+
+function verifyPassword(password, hash, cost) {
+  const [saltHex, keyHex] = hash.split('$');
+  const salt = Buffer.from(saltHex, 'hex');
+  const key = crypto.scryptSync(password, salt, 64, { N: 1 << cost, r: 8, p: 1 });
+  return crypto.timingSafeEqual(key, Buffer.from(keyHex, 'hex'));
+}
+
+const password = "__PASSWORD__";
+const testPassword = "__VERIFY__";
+const cost = __COST__;
+
+const t0 = Date.now();
+const hash = hashPassword(password, cost);
+const t1 = Date.now();
+
+const match = verifyPassword(testPassword, hash, cost);
+const t2 = Date.now();
+
+console.log(JSON.stringify({
+  hash,
+  match,
+  hashMs: t1 - t0,
+  verifyMs: t2 - t1
+}));
+`;
+
+    async function runDemo() {
+      const password = document.getElementById('input-password').value;
+      const verify = document.getElementById('input-verify').value;
+      const cost = parseInt(document.getElementById('input-rounds').value, 10);
+
+      const code = scriptTemplate
+        .replace('__PASSWORD__', password.replace(/"/g, '\\"'))
+        .replace('__VERIFY__', verify.replace(/"/g, '\\"'))
+        .replace('__COST__', cost);
+
+      document.getElementById('code-editor').value = code;
+      document.getElementById('global-status').textContent = 'Computing...';
+      document.getElementById('global-status').className = 'status-pill running';
+
+      log(`▶ Executing bcrypt / scrypt key derivation (Cost factor 2^${cost} iterations)...`, 'info');
+
+      try {
+        const node = await Nacelle.create({
+          gateway: false,
+          files: {
+            '/node/bcrypt-run.js': code
+          }
+        });
+
+        const child = await node.bash('node bcrypt-run.js');
+        const codeExit = await child.exit;
+        const stdout = await child.stdoutText();
+
+        if (codeExit !== 0) {
+          log(`Failed: ${await child.stderrText()}`, 'error');
+          return;
+        }
+
+        const res = JSON.parse(stdout);
+        log(`Generated Hash: ${res.hash.slice(0, 32)}...`, 'info');
+        if (res.match) {
+          log(`✅ Constant-time verification passed! Match confirmed in ${res.verifyMs} ms.`, 'success');
+          document.getElementById('result-status').textContent = 'Valid Match';
+          document.getElementById('result-status').className = 'status-pill ready';
+          document.getElementById('metric-result').textContent = 'MATCH';
+          document.getElementById('metric-result').style.color = 'var(--success)';
+        } else {
+          log(`❌ Verification failed! Password did not match hash.`, 'warn');
+          document.getElementById('result-status').textContent = 'Mismatch';
+          document.getElementById('result-status').className = 'status-pill error';
+          document.getElementById('metric-result').textContent = 'MISMATCH';
+          document.getElementById('metric-result').style.color = 'var(--error)';
+        }
+
+        document.getElementById('metric-hash-time').textContent = `${res.hashMs} ms`;
+        document.getElementById('metric-verify-time').textContent = `${res.verifyMs} ms`;
+
+        document.getElementById('global-status').textContent = 'Ready';
+        document.getElementById('global-status').className = 'status-pill ready';
+      } catch (err) {
+        log(`Error: ${err.message}`, 'error');
+      }
+    }
+
+    document.getElementById('btn-run').addEventListener('click', runDemo);
+    window.addEventListener('DOMContentLoaded', () => setTimeout(runDemo, 300));
+  </script>
+</body>
+</html>

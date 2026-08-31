@@ -1,0 +1,574 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Browser Node Harness — HTTP Client & Brotli/Zstd Decompression Demo</title>
+  <style>
+    :root {
+      --bg: #0b1120;
+      --panel-bg: #1e293b;
+      --card-bg: #0f172a;
+      --border: #334155;
+      --border-light: rgba(255, 255, 255, 0.1);
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-hover: #0284c7;
+      --success: #4ade80;
+      --warning: #facc15;
+      --error: #f87171;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100vh;
+      width: 100vw;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      height: 52px;
+      min-height: 52px;
+      flex-shrink: 0;
+      background: var(--panel-bg);
+      border-bottom: 1px solid var(--border);
+      padding: 0 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      z-index: 10;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: #e2e8f0;
+      letter-spacing: -0.01em;
+    }
+    .badge {
+      background: #0369a1;
+      color: #e0f2fe;
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .hamburger-btn {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+      font-size: 1.1rem;
+      padding: 4px 9px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.15s ease;
+      line-height: 1;
+    }
+    .hamburger-btn:hover {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .nav-dropdown {
+      position: absolute;
+      top: 52px;
+      left: 14px;
+      background: #1e293b;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: 0 16px 32px rgba(0, 0, 0, 0.4);
+      padding: 6px;
+      min-width: 240px;
+      display: none;
+      flex-direction: column;
+      gap: 3px;
+      z-index: 1000;
+    }
+    .nav-dropdown.show { display: flex; }
+    .nav-dropdown a {
+      color: var(--text);
+      text-decoration: none;
+      padding: 8px 12px;
+      border-radius: 5px;
+      font-size: 0.82rem;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      transition: background 0.15s ease;
+    }
+    .nav-dropdown a:hover {
+      background: rgba(56, 189, 248, 0.12);
+      color: var(--accent);
+    }
+    .nav-dropdown a.active {
+      background: rgba(56, 189, 248, 0.2);
+      color: var(--accent);
+      font-weight: 700;
+    }
+    main {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 460px 1fr;
+      gap: 12px;
+      padding: 12px;
+      overflow: hidden;
+    }
+    .panel {
+      background: var(--panel-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .panel-header {
+      padding: 10px 14px;
+      background: rgba(0,0,0,0.2);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #e2e8f0;
+    }
+    .controls {
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .form-group label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .input-row {
+      display: flex;
+      gap: 8px;
+    }
+    input[type="text"], select {
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      padding: 8px 12px;
+      font-size: 0.85rem;
+      outline: none;
+      flex: 1;
+      font-family: inherit;
+    }
+    input[type="text"]:focus, select:focus {
+      border-color: var(--accent);
+    }
+    .btn {
+      background: var(--accent);
+      color: #0f172a;
+      border: none;
+      border-radius: 6px;
+      padding: 8px 16px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: background 0.15s;
+    }
+    .btn:hover { background: var(--accent-hover); }
+    .btn-secondary {
+      background: #334155;
+      color: var(--text);
+    }
+    .btn-secondary:hover { background: #475569; }
+    .editor-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    textarea.code-view {
+      flex: 1;
+      background: #0b1120;
+      color: #e2e8f0;
+      font-family: "JetBrains Mono", "Fira Code", monospace;
+      font-size: 0.8rem;
+      padding: 12px;
+      border: none;
+      resize: none;
+      outline: none;
+      line-height: 1.45;
+    }
+    .right-col {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      overflow: hidden;
+    }
+    .metrics-bar {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      padding: 10px 14px;
+      background: rgba(0,0,0,0.15);
+      border-bottom: 1px solid var(--border);
+    }
+    .metric-card {
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .metric-label {
+      font-size: 0.68rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      font-weight: 600;
+    }
+    .metric-val {
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: var(--accent);
+    }
+    .log-stream {
+      flex: 1;
+      padding: 12px;
+      background: #060a12;
+      overflow-y: auto;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.78rem;
+      line-height: 1.5;
+    }
+    .log-entry { margin-bottom: 4px; }
+    .log-time { color: var(--text-muted); margin-right: 6px; }
+    .log-msg.info { color: #93c5fd; }
+    .log-msg.success { color: var(--success); }
+    .log-msg.warn { color: var(--warning); }
+    .log-msg.error { color: var(--error); }
+    .log-msg.raw { color: #cbd5e1; }
+    .status-pill {
+      font-size: 0.72rem;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-weight: 600;
+    }
+    .status-pill.ready { background: rgba(74, 222, 128, 0.2); color: var(--success); }
+    .status-pill.running { background: rgba(56, 189, 248, 0.2); color: var(--accent); }
+    .status-pill.error { background: rgba(248, 113, 113, 0.2); color: var(--error); }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <button class="hamburger-btn" id="btn-hamburger" title="Switch Demo">☰</button>
+      <div class="nav-dropdown" id="nav-dropdown">
+        <a href="/express.html">⚡ Express Server</a>
+        <a href="/http-client.html" class="active">🌐 HTTP Client & Decompression</a>
+        <a href="/bcrypt.html">🔒 bcrypt N-API WASM</a>
+        <a href="/sqlite-drizzle.html">🗄️ SQLite & Drizzle ORM</a>
+        <a href="/typescript.html">📘 Full tsc Compiler</a>
+        <a href="/vitest.html">🧪 Vitest Test Runner</a>
+        <a href="/webpack.html">📦 Webpack 5 Bundler</a>
+        <a href="/websocket.html">🔌 WebSocket Upgrade</a>
+        <a href="/postgres.html">🐘 PostgreSQL Raw TCP</a>
+        <a href="/swc-wasm.html">⚡ SWC / ESBuild WASM</a>
+        <a href="/nextjs.html">⚛️ Next.js App Router</a>
+        <a href="/vite-react.html">⚛️ Vite + React</a>
+        <a href="/npm-lifecycle.html">📦 NPM Postinstall Script</a>
+        <a href="/wasm.html">🧩 WASM Subsystem</a>
+        <a href="/bash.html">🖥️ Bash Shell</a>
+        <a href="/proxy.html">🛡️ Network Proxy</a>
+      </div>
+      <span>Browser Node Harness</span>
+      <span class="badge">Node v22.23.2</span>
+    </div>
+    <div style="display: flex; align-items: center; gap: 10px;">
+      <span id="global-status" class="status-pill ready">Ready</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- Left Column: Controls & Source Code -->
+    <div class="panel">
+      <div class="panel-header">
+        <span>🌐 HTTP Client (undici / got)</span>
+      </div>
+      <div class="controls">
+        <div class="form-group">
+          <label>Target Encoding & Decompression Engine</label>
+          <div class="input-row">
+            <select id="compression-select">
+              <option value="br" selected>Brotli (brotli.wasm - High Compression)</option>
+              <option value="zstd">Zstandard (zstd.wasm - Ultra-Fast Decompress)</option>
+              <option value="gzip">Gzip (zlib.wasm - Standard Deflate)</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Request Options</label>
+          <div class="input-row">
+            <label style="display: flex; align-items: center; gap: 6px; font-size: 0.8rem; text-transform: none; color: var(--text);">
+              <input type="checkbox" id="chk-redirect" checked> Follow 302 Redirect
+            </label>
+            <label style="display: flex; align-items: center; gap: 6px; font-size: 0.8rem; text-transform: none; color: var(--text);">
+              <input type="checkbox" id="chk-chunked" checked> Chunked Transfer
+            </label>
+          </div>
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <button class="btn" id="btn-run" style="flex: 1;">▶ Send HTTP Client Request</button>
+          <button class="btn btn-secondary" id="btn-clear">Clear</button>
+        </div>
+      </div>
+      <div class="editor-container">
+        <div class="panel-header" style="font-size: 0.75rem;">
+          <span>Node Client Script (Virtual In-Browser VFS)</span>
+        </div>
+        <textarea class="code-view" id="code-editor" readonly></textarea>
+      </div>
+    </div>
+
+    <!-- Right Column: Wire Inspector & Logs -->
+    <div class="right-col">
+      <div class="panel" style="flex: 1;">
+        <div class="panel-header">
+          <span>📡 Wire Traffic, Decompressed Output & Metrics</span>
+          <span id="response-code" class="status-pill ready">200 OK</span>
+        </div>
+        <div class="metrics-bar">
+          <div class="metric-card">
+            <span class="metric-label">Decompressed Size</span>
+            <span class="metric-val" id="metric-orig-size">0 B</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Wire Bytes Received</span>
+            <span class="metric-val" id="metric-wire-size">0 B</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Compression Ratio</span>
+            <span class="metric-val" id="metric-ratio">0%</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Round-Trip Latency</span>
+            <span class="metric-val" id="metric-time">0 ms</span>
+          </div>
+        </div>
+        <div class="log-stream" id="log-stream"></div>
+      </div>
+    </div>
+  </main>
+
+  <script type="module">
+    import { Nacelle } from '/index.js';
+
+    function log(msg, type = "info") {
+      const stream = document.getElementById("log-stream");
+      const entry = document.createElement("div");
+      entry.className = "log-entry";
+      const now = new Date().toLocaleTimeString();
+      entry.innerHTML = `<span class="log-time">[${now}]</span> <span class="log-msg ${type}">${msg}</span>`;
+      stream.appendChild(entry);
+      stream.scrollTop = stream.scrollHeight;
+    }
+
+    const hamburgerBtn = document.getElementById('btn-hamburger');
+    const navDropdown = document.getElementById('nav-dropdown');
+    hamburgerBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      navDropdown?.classList.toggle('show');
+    });
+    document.addEventListener('click', () => navDropdown?.classList.remove('show'));
+
+    document.getElementById('btn-clear').addEventListener('click', () => {
+      document.getElementById('log-stream').innerHTML = '';
+    });
+
+    const clientScriptTemplate = `
+const http = require('node:http');
+const zlib = require('node:zlib');
+
+// 1. Virtual origin server responding with chunked compressed data
+const payloadText = "Nacelle in-browser Node engine delivers true native WASM Brotli/Zstd compression! " +
+  "This payload verifies that redirects, chunked transfer encoding, and WASM byte stream decompressors " +
+  "work seamlessly in the browser client with zero host server roundtrips.";
+
+const server = http.createServer((req, res) => {
+  if (req.url === '/redirect-origin') {
+    res.writeHead(302, { 'Location': '/stream-data' });
+    res.end();
+    return;
+  }
+  if (req.url === '/stream-data') {
+    const enc = req.headers['accept-encoding'] || '';
+    let compressed;
+    let encoding = 'identity';
+    if (enc.includes('br')) {
+      compressed = zlib.brotliCompressSync(Buffer.from(payloadText));
+      encoding = 'br';
+    } else if (enc.includes('zstd')) {
+      compressed = zlib.zstdCompressSync(Buffer.from(payloadText));
+      encoding = 'zstd';
+    } else {
+      compressed = zlib.gzipSync(Buffer.from(payloadText));
+      encoding = 'gzip';
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/plain',
+      'Content-Encoding': encoding,
+      'Transfer-Encoding': 'chunked',
+      'X-Original-Size': String(Buffer.byteLength(payloadText)),
+      'X-Wire-Size': String(compressed.byteLength)
+    });
+    // Stream chunks
+    res.write(compressed);
+    res.end();
+  }
+});
+
+server.listen(39201, '127.0.0.1', () => {
+  // 2. High-level client (undici / got style)
+  const redirects = [];
+  function fetchClient(url, targetEnc) {
+    const t0 = Date.now();
+    http.get(url, {
+      headers: { 'Accept-Encoding': targetEnc }
+    }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        redirects.push(url + ' -> ' + res.headers.location);
+        return fetchClient('http://127.0.0.1:39201' + res.headers.location, targetEnc);
+      }
+
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        const wireBytes = Buffer.concat(chunks);
+        const ce = res.headers['content-encoding'];
+        let decompressed;
+        if (ce === 'br') {
+          decompressed = zlib.brotliDecompressSync(wireBytes);
+        } else if (ce === 'zstd') {
+          decompressed = zlib.zstdDecompressSync(wireBytes);
+        } else if (ce === 'gzip') {
+          decompressed = zlib.gunzipSync(wireBytes);
+        } else {
+          decompressed = wireBytes;
+        }
+
+        const t1 = Date.now();
+        console.log(JSON.stringify({
+          status: res.statusCode,
+          encoding: ce,
+          wireSize: wireBytes.byteLength,
+          origSize: decompressed.byteLength,
+          latencyMs: t1 - t0,
+          text: decompressed.toString('utf8'),
+          headers: res.headers,
+          redirects
+        }));
+        server.close();
+      });
+    });
+  }
+
+  fetchClient('http://127.0.0.1:39201__START_URL__', '__TARGET_ENC__');
+});
+`;
+
+    document.getElementById('code-editor').value = clientScriptTemplate
+      .replace('__START_URL__', '/redirect-origin')
+      .replace('__TARGET_ENC__', 'br');
+
+    async function runDemo() {
+      const enc = document.getElementById('compression-select').value;
+      const followRedirect = document.getElementById('chk-redirect').checked;
+      const startUrl = followRedirect ? '/redirect-origin' : '/stream-data';
+
+      const script = clientScriptTemplate
+        .replace('__START_URL__', startUrl)
+        .replace('__TARGET_ENC__', enc);
+
+      document.getElementById('code-editor').value = script;
+      document.getElementById('global-status').textContent = 'Executing...';
+      document.getElementById('global-status').className = 'status-pill running';
+
+      log(`▶ Launching Nacelle HTTP Client (${enc.toUpperCase()} Accept-Encoding)...`, 'info');
+
+      try {
+        const node = await Nacelle.create({
+          gateway: false,
+          files: {
+            '/node/http-client.js': script
+          }
+        });
+
+        const child = await node.bash('node http-client.js');
+        const code = await child.exit;
+        const stdout = await child.stdoutText();
+        const stderr = await child.stderrText();
+
+        if (code !== 0) {
+          log(`Client exited with error code ${code}: ${stderr}`, 'error');
+          document.getElementById('global-status').textContent = 'Failed';
+          document.getElementById('global-status').className = 'status-pill error';
+          return;
+        }
+
+        const lines = stdout.trim().split('\n');
+        const jsonLine = lines.find(l => l.trim().startsWith('{')) || lines[lines.length - 1];
+        const result = JSON.parse(jsonLine);
+
+        if (result.redirects?.length) {
+          result.redirects.forEach(r => log(`🔀 Followed 302 Redirect: ${r}`, 'warn'));
+        }
+
+        log(`✅ HTTP ${result.status} Response received and decompressed via ${result.encoding.toUpperCase()} WASM engine!`, 'success');
+        log(`Headers: ${JSON.stringify(result.headers)}`, 'raw');
+        log(`Decompressed Payload: "${result.text}"`, 'info');
+
+        document.getElementById('metric-orig-size').textContent = result.origSize + ' B';
+        document.getElementById('metric-wire-size').textContent = result.wireSize + ' B';
+        const ratio = ((1 - (result.wireSize / result.origSize)) * 100).toFixed(1);
+        document.getElementById('metric-ratio').textContent = `${ratio}% saved`;
+        document.getElementById('metric-time').textContent = `${result.latencyMs} ms`;
+        document.getElementById('response-code').textContent = `${result.status} OK`;
+
+        document.getElementById('global-status').textContent = 'Ready';
+        document.getElementById('global-status').className = 'status-pill ready';
+      } catch (err) {
+        log(`Execution error: ${err.message}`, 'error');
+        document.getElementById('global-status').textContent = 'Error';
+        document.getElementById('global-status').className = 'status-pill error';
+      }
+    }
+
+    document.getElementById('btn-run').addEventListener('click', runDemo);
+    window.addEventListener('DOMContentLoaded', () => setTimeout(runDemo, 300));
+  </script>
+</body>
+</html>

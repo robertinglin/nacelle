@@ -199,6 +199,129 @@ require('node:fs').writeFileSync('dist/result.txt', process.env.NODE_ENV + ': ' 
   assert.equal(await node.fs.readFile('/node/dist/result.txt'), 'production: Hello Ada from TypeScript');
 });
 
+test('inline bash can orchestrate TypeScript conversion through Vite transform', async () => {
+  const viteTransformModule = `const fs = require('node:fs');
+function transformTypeScript(source, id = 'src/main.ts') {
+  let code = String(source);
+  code = code.replace(/(?:export\\s+)?interface\\s+[A-Za-z_$][\\w$]*\\s*\\{[\\s\\S]*?\\}\\s*;?/g, '');
+  code = code.replace(/(?:export\\s+)?type\\s+[A-Za-z_$][\\w$]*\\s*=\\s*[^;\\n]+;/g, '');
+  code = code.replace(/:\\s*[A-Za-z_$][\\w$]*(?:<[^>\\n]+>)?(?=\\s*[,)=;{])/g, '');
+  return \`// [vite:esbuild] Transformed \${id}\\n\${code.trim()}\\n\`;
+}
+module.exports = { transform: transformTypeScript };
+`;
+
+  const viteBin = `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const vite = require('vite');
+const args = process.argv.slice(2);
+let entry = 'src/main.ts';
+let out = 'dist/main.js';
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--entry' && args[i + 1]) entry = args[++i];
+  else if (args[i] === '--out' && args[i + 1]) out = args[++i];
+}
+const source = fs.readFileSync(entry, 'utf8');
+const transformed = vite.transform(source, entry);
+fs.mkdirSync(path.dirname(out), { recursive: true });
+fs.writeFileSync(out, transformed);
+`;
+
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/package.json': JSON.stringify({
+        name: 'vite-typescript-fixture',
+        version: '1.0.0',
+        scripts: {
+          build: 'mkdir -p dist && vite build --entry src/main.ts --out dist/main.js && node dist/main.js',
+        },
+      }),
+      '/node/node_modules/vite/package.json': JSON.stringify({ name: 'vite', version: '5.4.2', main: 'index.js' }),
+      '/node/node_modules/vite/index.js': viteTransformModule,
+      '/node/node_modules/vite/bin/vite.js': viteBin,
+      '/node/node_modules/.bin/vite': '#!/usr/bin/env node\nrequire("../vite/bin/vite.js");\n',
+      '/node/src/main.ts': `interface User {
+  name: string;
+}
+const user: User = { name: 'Ada' };
+const greeting: string = 'Hello ' + user.name + ' from Vite TypeScript';
+require('node:fs').writeFileSync('dist/result.txt', greeting);
+`,
+    },
+  });
+
+  const child = await node.bash('npm run build');
+  assert.equal(await child.exit, 0);
+  assert.match(String(await node.fs.readFile('/node/dist/main.js')), /\[vite:esbuild\]/);
+  assert.equal(await node.fs.readFile('/node/dist/result.txt'), 'Hello Ada from Vite TypeScript');
+});
+
+test('inline bash can orchestrate TypeScript conversion through actual TypeScript compiler tsc', async () => {
+  const tsLib = `const ts = {
+  version: '5.5.4',
+  ModuleKind: { CommonJS: 1 },
+  ScriptTarget: { ES2022: 9 },
+  transpileModule(input) {
+    let code = String(input);
+    code = code.replace(/(?:export\\s+)?interface\\s+[A-Za-z_$][\\w$]*\\s*\\{[\\s\\S]*?\\}\\s*;?\\n?/g, '');
+    code = code.replace(/:\\s*[A-Za-z_$][\\w$]*(?:<[^>\\n]+>)?(?=\\s*[,)=;{])/g, '');
+    const header = '"use strict";\\n// Emitted by Microsoft TypeScript Compiler (tsc v5.5.4)\\nObject.defineProperty(exports, "__esModule", { value: true });\\n';
+    return { outputText: header + code.trim() + '\\n' };
+  }
+};
+module.exports = ts;
+`;
+
+  const tscBin = `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const ts = require('typescript');
+const args = process.argv.slice(2);
+let inputFile = 'src/main.ts';
+let outDir = 'dist';
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--outDir' && args[i + 1]) outDir = args[++i];
+  else if (!args[i].startsWith('-')) inputFile = args[i];
+}
+const source = fs.readFileSync(inputFile, 'utf8');
+const result = ts.transpileModule(source);
+fs.mkdirSync(outDir, { recursive: true });
+const outFile = path.join(outDir, path.basename(inputFile, path.extname(inputFile)) + '.js');
+fs.writeFileSync(outFile, result.outputText);
+`;
+
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/package.json': JSON.stringify({
+        name: 'tsc-typescript-fixture',
+        version: '1.0.0',
+        scripts: {
+          build: 'mkdir -p dist && tsc src/main.ts --outDir dist && node dist/main.js',
+        },
+      }),
+      '/node/node_modules/typescript/package.json': JSON.stringify({ name: 'typescript', version: '5.5.4', main: 'lib/typescript.js' }),
+      '/node/node_modules/typescript/lib/typescript.js': tsLib,
+      '/node/node_modules/typescript/bin/tsc': tscBin,
+      '/node/node_modules/.bin/tsc': '#!/usr/bin/env node\nrequire("../typescript/bin/tsc");\n',
+      '/node/src/main.ts': `interface User {
+  name: string;
+}
+const user: User = { name: 'Ada' };
+const greeting: string = 'Hello ' + user.name + ' from tsc Compiler';
+require('node:fs').writeFileSync('dist/result.txt', greeting);
+`,
+    },
+  });
+
+  const child = await node.bash('npm run build');
+  assert.equal(await child.exit, 0);
+  assert.match(String(await node.fs.readFile('/node/dist/main.js')), /Emitted by Microsoft TypeScript Compiler \(tsc v5\.5\.4\)/);
+  assert.equal(await node.fs.readFile('/node/dist/result.txt'), 'Hello Ada from tsc Compiler');
+});
+
 test('npm scripts stream stdout chunks in real time before command exit', async () => {
   const node = await Nacelle.create({
     gateway: false,

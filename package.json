@@ -75,6 +75,7 @@
     "test:browser": "npm --prefix dev/adapters/playwright run test:browser",
     "test:browser:chromium": "BNH_BROWSER=chromium npm --prefix dev/adapters/playwright run test:browser",
     "test:browser:firefox": "BNH_BROWSER=firefox npm --prefix dev/adapters/playwright run test:browser",
+    "test:typescript": "npm --prefix dev/adapters/playwright run test:typescript",
     "test:full": "node scripts/test-alpha.mjs",
     "release:check": "node scripts/test-alpha.mjs --require-native",
     "examples": "node examples/examples-server.mjs",

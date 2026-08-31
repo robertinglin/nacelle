@@ -198,3 +198,27 @@ require('node:fs').writeFileSync('dist/result.txt', process.env.NODE_ENV + ': ' 
   assert.match(String(await node.fs.readFile('/node/dist/main.js')), /Hello ' \+ user\.name/);
   assert.equal(await node.fs.readFile('/node/dist/result.txt'), 'production: Hello Ada from TypeScript');
 });
+
+test('npm scripts stream stdout chunks in real time before command exit', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/package.json': JSON.stringify({
+        name: 'stream-fixture',
+        version: '1.0.0',
+        scripts: { start: 'node server.js' },
+      }),
+      '/node/server.js': `
+        process.stdout.write('server listening on 3000\\n');
+      `,
+    },
+  });
+
+  const streamed = [];
+  const child = await node.npm.run('start', {
+    onStdout: (chunk) => streamed.push(chunk),
+  });
+  await child.exit;
+  assert.deepEqual(streamed, ['server listening on 3000\n']);
+});
+

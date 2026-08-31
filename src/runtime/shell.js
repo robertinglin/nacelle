@@ -683,6 +683,7 @@ async function runNode(args, input, context, options) {
       return options.runNode({
         args: args.slice(index + 2), code, print: false, input, cwd: context.cwd, env: context.env,
         signal: context.signal, timeout: context.timeout,
+        onStdout: context.onStdout, onStderr: context.onStderr,
       });
     }
     if (flag === '-p' || flag === '--print') {
@@ -691,6 +692,7 @@ async function runNode(args, input, context, options) {
       return options.runNode({
         args: args.slice(index + 2), code, print: true, input, cwd: context.cwd, env: context.env,
         signal: context.signal, timeout: context.timeout,
+        onStdout: context.onStdout, onStderr: context.onStderr,
       });
     }
     if (flag === '--version' || flag === '-v') return result(0, `${options.nodeVersion || DEFAULT_NODE_VERSION}\n`);
@@ -702,6 +704,7 @@ async function runNode(args, input, context, options) {
   return options.runCommand({
     entry: shellPath(script, context.cwd), argv: args.slice(index + 1), cwd: context.cwd,
     env: context.env, stdin: input, signal: context.signal, timeout: context.timeout,
+    onStdout: context.onStdout, onStderr: context.onStderr,
   });
 }
 
@@ -758,11 +761,21 @@ async function runNpm(name, args, input, context, options) {
       stdin: input,
       signal: context.signal,
       timeout: context.timeout,
-      onStdout: (chunk) => stdout.push(String(chunk)),
-      onStderr: (chunk) => stderr.push(String(chunk)),
+      onStdout: (chunk) => {
+        const text = String(chunk);
+        stdout.push(text);
+        context.onStdout?.(text);
+      },
+      onStderr: (chunk) => {
+        const text = String(chunk);
+        stderr.push(text);
+        context.onStderr?.(text);
+      },
     });
     const code = await child.exit;
-    return result(code ?? 1, stdout.join(''), stderr.join(''));
+    const res = result(code ?? 1, stdout.join(''), stderr.join(''));
+    if (context.onStdout || context.onStderr) res.streamed = true;
+    return res;
   } catch (error) {
     return commandError('npm', error.message || String(error));
   }
@@ -781,6 +794,7 @@ async function runProgram(name, args, input, context, options) {
   return options.runCommand({
     entry: resolved.path, argv: args, cwd: context.cwd, env: context.env,
     stdin: input, signal: context.signal, timeout: context.timeout,
+    onStdout: context.onStdout, onStderr: context.onStderr,
   });
 }
 
@@ -793,7 +807,6 @@ async function executeSimple(command, context, options) {
     commandEnv[assignment.slice(0, separator)] = assignment.slice(separator + 1);
     wordIndex += 1;
   }
-  const commandContext = { ...context, env: commandEnv, shellState: context.shellState || context };
   const outputCapture = createCaptureDestination();
   const errorCapture = createCaptureDestination();
   let stdoutDestination = outputCapture;
@@ -807,16 +820,16 @@ async function executeSimple(command, context, options) {
       stderrDestination = stdoutDestination;
       continue;
     }
-    const target = (await expandWord(redirect.target, commandContext, { pathname: true }))[0];
-    const pathname = shellPath(target, commandContext.cwd);
+    const target = (await expandWord(redirect.target, { ...context, env: commandEnv }, { pathname: true }))[0];
+    const pathname = shellPath(target, context.cwd);
     if (redirect.operator === '<') {
-      const source = await readInputFile(pathname, commandContext, command.words[0] ? rawShellWord(command.words[0]) : 'shell');
+      const source = await readInputFile(pathname, { ...context, env: commandEnv }, command.words[0] ? rawShellWord(command.words[0]) : 'shell');
       if (typeof source === 'object') redirectError = source;
       else input = source;
       continue;
     }
     const append = redirect.operator === '>>' || redirect.operator === '2>>';
-    const fileDestination = await createFileDestination(pathname, append, commandContext);
+    const fileDestination = await createFileDestination(pathname, append, { ...context, env: commandEnv });
     destinations.push(fileDestination);
     if (redirect.operator === '2>' || redirect.operator === '2>>') stderrDestination = fileDestination;
     else if (redirect.operator === '>&' || redirect.operator === '&>') {
@@ -825,11 +838,22 @@ async function executeSimple(command, context, options) {
     } else stdoutDestination = fileDestination;
   }
 
+  const shouldStreamStdout = stdoutDestination.kind === 'capture' && (context.isLastInPipeline ?? true);
+  const shouldStreamStderr = stderrDestination.kind === 'capture';
+  const commandContext = {
+    ...context,
+    env: commandEnv,
+    shellState: context.shellState || context,
+    onStdout: shouldStreamStdout ? options.onStdout : undefined,
+    onStderr: shouldStreamStderr ? options.onStderr : undefined,
+  };
+
   let commandResult = result(0);
+  let rawResult = null;
   if (redirectError) commandResult = redirectError;
   else if (wordIndex < command.words.length) {
     const words = await expandWords(command.words.slice(wordIndex), commandContext);
-    const rawResult = await runProgram(words[0], words.slice(1), input, {
+    rawResult = await runProgram(words[0], words.slice(1), input, {
       ...commandContext,
       signal: options.signal,
       timeout: options.timeout,
@@ -850,6 +874,8 @@ async function executeSimple(command, context, options) {
     stdout: stdoutDestination.kind === 'capture' ? stdoutDestination.text : '',
     stderr: stderrDestination.kind === 'capture' ? stderrDestination.text : '',
     pipe: stdoutDestination.kind === 'capture' ? stdoutDestination.text : '',
+    streamedStdout: Boolean(rawResult?.streamed && shouldStreamStdout),
+    streamedStderr: Boolean(rawResult?.streamed && shouldStreamStderr),
   };
 }
 
@@ -857,13 +883,18 @@ async function executePipeline(pipeline, context, options) {
   let input = context.stdin || '';
   let stderr = '';
   let last = result(0);
+  let streamedStdout = false;
+  let streamedStderr = false;
   for (let index = 0; index < pipeline.commands.length; index += 1) {
-    const commandResult = await executeSimple(pipeline.commands[index], { ...context, stdin: input }, options);
+    const isLast = index === pipeline.commands.length - 1;
+    const commandResult = await executeSimple(pipeline.commands[index], { ...context, stdin: input, isLastInPipeline: isLast }, options);
     last = commandResult;
     stderr += commandResult.stderr;
     input = commandResult.pipe;
+    if (isLast && commandResult.streamedStdout) streamedStdout = true;
+    if (commandResult.streamedStderr) streamedStderr = true;
   }
-  return { code: last.code, stdout: last.stdout, stderr };
+  return { code: last.code, stdout: last.stdout, stderr, streamedStdout, streamedStderr };
 }
 
 /** Execute the supported npm-script subset of POSIX shell syntax. */
@@ -891,8 +922,8 @@ export async function runShellScript(command, options) {
     if (!shouldRun) continue;
     const pipelineResult = await executePipeline(pipeline, { ...state, stdin: shellText(options.stdin), shellState: state }, options);
     state.lastStatus = pipelineResult.code;
-    if (pipelineResult.stdout) options.onStdout?.(pipelineResult.stdout);
-    if (pipelineResult.stderr) options.onStderr?.(pipelineResult.stderr);
+    if (pipelineResult.stdout && !pipelineResult.streamedStdout) options.onStdout?.(pipelineResult.stdout);
+    if (pipelineResult.stderr && !pipelineResult.streamedStderr) options.onStderr?.(pipelineResult.stderr);
   }
   return { code: state.lastStatus, cwd: state.cwd, env: state.env };
 }

@@ -63,25 +63,23 @@ export class Nacelle {
     if (!browserNavigator || !('serviceWorker' in browserNavigator)) {
       return null;
     }
-    const controllerChange = new Promise((resolve) => {
-      let timeout;
-      const finish = () => {
-        globalObject.clearTimeout(timeout);
-        browserNavigator.serviceWorker.removeEventListener('controllerchange', finish);
-        resolve();
-      };
-      browserNavigator.serviceWorker.addEventListener('controllerchange', finish);
-      timeout = globalObject.setTimeout(finish, 2000);
-    });
-
     const registration = await browserNavigator.serviceWorker.register(swPath, {
       scope,
       updateViaCache: 'none',
     });
     await registration.update().catch(() => {});
     await browserNavigator.serviceWorker.ready;
-    if (!browserNavigator.serviceWorker.controller || registration.installing || registration.waiting) {
-      await controllerChange;
+    if (!browserNavigator.serviceWorker.controller) {
+      await new Promise((resolve) => {
+        let timeout;
+        const finish = () => {
+          globalObject.clearTimeout(timeout);
+          browserNavigator.serviceWorker.removeEventListener('controllerchange', finish);
+          resolve();
+        };
+        browserNavigator.serviceWorker.addEventListener('controllerchange', finish);
+        timeout = globalObject.setTimeout(finish, 100);
+      });
     }
     return registration;
   }
@@ -564,7 +562,7 @@ export class Nacelle {
       PATH: `${targetCwd}/node_modules/.bin:/node/node_modules/.bin:${this._env.PATH || ''}`,
       ...options.env,
     };
-    const runCommand = async ({ entry, argv, env, cwd, stdin, signal, timeout }) => {
+    const runCommand = async ({ entry, argv, env, cwd, stdin, signal, timeout, onStdout, onStderr }) => {
       const stdout = [];
       const stderr = [];
       const child = await this.run({
@@ -575,13 +573,21 @@ export class Nacelle {
         stdin,
         timeout,
         signal,
-        onStdout: (chunk) => stdout.push(String(chunk)),
-        onStderr: (chunk) => stderr.push(String(chunk)),
+        onStdout: (chunk) => {
+          const text = String(chunk);
+          stdout.push(text);
+          onStdout?.(text);
+        },
+        onStderr: (chunk) => {
+          const text = String(chunk);
+          stderr.push(text);
+          onStderr?.(text);
+        },
       });
       const code = await child.exit;
-      return { code: code ?? 1, stdout: stdout.join(''), stderr: stderr.join('') };
+      return { code: code ?? 1, stdout: stdout.join(''), stderr: stderr.join(''), streamed: Boolean(onStdout || onStderr) };
     };
-    const runInline = async ({ source, argv, env, cwd, stdin, signal, timeout }) => {
+    const runInline = async ({ source, argv, env, cwd, stdin, signal, timeout, onStdout, onStderr }) => {
       const stdout = [];
       const stderr = [];
       const child = await this.execute(source, {
@@ -591,11 +597,19 @@ export class Nacelle {
         stdin,
         timeout,
         signal,
-        onStdout: (chunk) => stdout.push(String(chunk)),
-        onStderr: (chunk) => stderr.push(String(chunk)),
+        onStdout: (chunk) => {
+          const text = String(chunk);
+          stdout.push(text);
+          onStdout?.(text);
+        },
+        onStderr: (chunk) => {
+          const text = String(chunk);
+          stderr.push(text);
+          onStderr?.(text);
+        },
       });
       const code = await child.exit;
-      return { code: code ?? 1, stdout: stdout.join(''), stderr: stderr.join('') };
+      return { code: code ?? 1, stdout: stdout.join(''), stderr: stderr.join(''), streamed: Boolean(onStdout || onStderr) };
     };
     const shellFs = {
       exists: this.fs.exists,

@@ -5,6 +5,7 @@ import process from 'node:process';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { listNodeVersionProfiles, resolveNodeVersionProfile } from '../src/versions/index.js';
+import { runVersionParity } from './version-parity-worker.mjs';
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const worker = path.join(scriptDirectory, 'version-parity-worker.mjs');
@@ -15,12 +16,13 @@ const profiles = versionArgument
   ? [resolveNodeVersionProfile(versionArgument.slice('--node-version='.length))]
   : listNodeVersionProfiles();
 
-const reports = profiles.map((profile) => {
+const reports = await Promise.all(profiles.map(async (profile) => {
   const result = spawnSync(process.execPath, [worker, `--node-version=${profile.id}`], {
     cwd: path.resolve(scriptDirectory, '..'),
     encoding: 'utf8',
   });
   if (!result.stdout.trim()) {
+    if (result.error?.code === 'EPERM') return runVersionParity(profile.id);
     return {
       profile: profile.id,
       status: 'semantic-drift',
@@ -29,7 +31,7 @@ const reports = profiles.map((profile) => {
     };
   }
   return JSON.parse(result.stdout);
-});
+}));
 
 const failed = reports.some((report) => report.status !== 'pass'
   || requireNative && report.nativeReference.status !== 'pass');

@@ -4207,7 +4207,8 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
           return;
         }
       }
-      const customCreateConnection = this._agent?.createConnection;
+      const isDataURL = virtualTarget?.protocol === 'data:';
+      const customCreateConnection = isDataURL ? null : this._agent?.createConnection;
       const customCreateSocket = this._agent?.createSocket;
       const createConnection = proxySupports(this._proxy, 'request') || environmentProxyConfig
         ? null

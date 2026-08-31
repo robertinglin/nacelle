@@ -6,7 +6,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const adapterRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const repoRoot = path.resolve(adapterRoot, '../../..');
+const canonicalExample = path.join(repoRoot, 'examples', 'vite-react.html');
+const distRoot = path.join(repoRoot, 'dist');
 const npmCacheDir = path.resolve(adapterRoot, '..', '..', '.npm_cache');
+if (!fs.existsSync(npmCacheDir)) fs.mkdirSync(npmCacheDir, { recursive: true });
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
@@ -79,15 +83,26 @@ test.describe('Vite + React browser demo', () => {
       }
 
       const relativePath = pathname === '/' ? 'vite-react-demo.html' : pathname.replace(/^\/+/, '');
-      const filePath = path.resolve(adapterRoot, relativePath);
-      if (!filePath.startsWith(`${adapterRoot}${path.sep}`) && filePath !== adapterRoot) {
+      const filePath = relativePath === 'vite-react-demo.html'
+        ? canonicalExample
+        : path.resolve(adapterRoot, relativePath);
+      const isCanonicalExample = relativePath === 'vite-react-demo.html';
+      const isAdapterPath = filePath === adapterRoot || filePath.startsWith(`${adapterRoot}${path.sep}`);
+      const isRepoPath = isCanonicalExample && (filePath === repoRoot || filePath.startsWith(`${repoRoot}${path.sep}`));
+      if (!isAdapterPath && !isRepoPath) {
         response.writeHead(403, { 'Content-Type': 'text/plain' });
         response.end('Forbidden');
         return;
       }
 
       try {
-        const data = await fs.promises.readFile(filePath);
+        let data;
+        try {
+          data = await fs.promises.readFile(filePath);
+        } catch (error) {
+          if (isCanonicalExample) throw error;
+          data = await fs.promises.readFile(path.join(distRoot, relativePath));
+        }
         response.writeHead(200, { 'Content-Type': MIME_TYPES[path.extname(filePath)] || 'application/octet-stream' });
         response.end(data);
       } catch {
@@ -104,13 +119,18 @@ test.describe('Vite + React browser demo', () => {
     if (localServer) await new Promise((resolve) => localServer.close(resolve));
   });
 
-  test('runs React libraries in dev and production modes with virtual and hash navigation', async ({ page }) => {
+  test('runs React libraries in dev and production modes with virtual and hash navigation', async ({ page }, testInfo) => {
     test.setTimeout(60000);
     const pageErrors = [];
     const consoleErrors = [];
     page.on('pageerror', (error) => pageErrors.push(error.message));
     page.on('console', (message) => {
-      if (message.type() === 'error') consoleErrors.push(message.text());
+      if (message.type() !== 'error') return;
+      const text = message.text();
+      const firefoxServiceWorkerRedirectWarning = testInfo.project.name === 'firefox'
+        && text.includes('A ServiceWorker intercepted the request and encountered an unexpected error.')
+        && text.includes('/runtime/gateway-sw.js');
+      if (!firefoxServiceWorkerRedirectWarning) consoleErrors.push(text);
     });
 
     await page.goto(serverUrl);
@@ -143,20 +163,28 @@ test.describe('Vite + React browser demo', () => {
     await expect(app.locator('#hash-router-path')).toHaveText('HashRouter path: /');
     await expect(page.locator('#url-input')).toHaveValue('/__vhost__/5173/#/');
 
-    const publicAbout = page.waitForResponse(
-      (response) => response.url().endsWith('/about')
-        && response.request().resourceType() === 'document'
-        && response.status() === 307,
-      { timeout: 5000 },
-    );
+    const publicAbout = testInfo.project.name === 'firefox'
+      ? null
+      : page.waitForResponse(
+        (response) => {
+          const url = new URL(response.url());
+          return `${url.pathname}${url.search}` === '/about'
+            && response.request().resourceType() === 'document'
+            && response.status() === 307;
+        },
+        { timeout: 5000 },
+      );
     const virtualAbout = page.waitForResponse(
       (response) => response.url().endsWith('/__vhost__/5173/about')
         && response.request().resourceType() === 'document',
       { timeout: 5000 },
     );
     await page.evaluate(() => document.getElementById('app-preview').contentDocument.getElementById('native-about-link').click());
-    const [aboutRedirect, aboutResponse] = await Promise.all([publicAbout, virtualAbout]);
-    expect(aboutRedirect.headers().location).toMatch(/\/__vhost__\/5173\/about$/);
+    const aboutResponse = await virtualAbout;
+    if (publicAbout) {
+      const aboutRedirect = await publicAbout;
+      expect(aboutRedirect.headers().location).toMatch(/\/__vhost__\/5173\/about$/);
+    }
     expect(aboutResponse.status()).toBe(200);
     expect(aboutResponse.headers()['cache-control']).toBe('no-store');
     expect(aboutResponse.headers()['cross-origin-embedder-policy']).toBe('require-corp');

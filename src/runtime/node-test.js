@@ -1,5 +1,9 @@
 function formatError(error) {
-  return error?.stack || String(error);
+  const message = error?.message == null ? String(error) : String(error.message);
+  const stack = typeof error?.stack === 'string' ? error.stack : '';
+  if (!stack) return message;
+  if (!message || stack.includes(message)) return stack;
+  return `${error?.name || 'Error'}: ${message}\n${stack}`;
 }
 
 function normalizeOptions(options) {

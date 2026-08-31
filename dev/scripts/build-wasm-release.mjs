@@ -94,6 +94,24 @@ console.log(`Using Emscripten compiler: ${emcc}`);
 const nodeDeps = path.resolve(repoRoot, ".bnh-state", nodeVersion, "node", "deps");
 const artifacts = [];
 
+function validateWasmExports(outputPath, label, expectedExports = []) {
+  if (!fs.existsSync(outputPath)) throw new Error(`${label} did not produce ${outputPath}`);
+  const bytes = fs.readFileSync(outputPath);
+  if (!WebAssembly.validate(bytes)) throw new Error(`${label} produced invalid WebAssembly`);
+  const names = new Set(WebAssembly.Module.exports(new WebAssembly.Module(bytes)).map((item) => item.name));
+  const missing = expectedExports.filter((name) => !names.has(name));
+  if (names.size < Math.max(1, expectedExports.length)) {
+    throw new Error(`${label} exported ${names.size} symbols; expected at least ${Math.max(1, expectedExports.length)}`);
+  }
+  if (missing.length) throw new Error(`${label} is missing required exports: ${missing.join(', ')}`);
+  return { bytes: bytes.byteLength, exports: [...names].sort() };
+}
+
+function compileWasm(label, args, outputPath, expectedExports) {
+  execFileSync(emcc, args, { stdio: "inherit" });
+  return validateWasmExports(outputPath, label, expectedExports);
+}
+
 function findFiles(dir, ext) {
   const results = [];
   if (!fs.existsSync(dir)) return results;
@@ -114,7 +132,7 @@ const sqliteSrc = path.join(nodeDeps, "sqlite", "sqlite3.c");
 if (fs.existsSync(sqliteSrc)) {
   console.log("-> Compiling sqlite.wasm...");
   const sqliteWasm = path.join(outDir, "sqlite.wasm");
-  execFileSync(emcc, [
+  compileWasm('sqlite', [
     sqliteSrc,
     "-O2",
     "-DSQLITE_ENABLE_JSON1",
@@ -126,15 +144,24 @@ if (fs.existsSync(sqliteSrc)) {
     "-Wl,--export-table",
     "--no-entry",
     "-o", sqliteWasm,
-  ], { stdio: "inherit" });
-
-  fs.copyFileSync(sqliteWasm, path.join(outDir, "better_sqlite3.wasm"));
-  fs.copyFileSync(sqliteWasm, path.join(outDir, "sqlite3.wasm"));
+  ], sqliteWasm, [
+    'sqlite3_open', 'sqlite3_close', 'sqlite3_exec', 'sqlite3_prepare_v2', 'sqlite3_step',
+    'sqlite3_finalize', 'sqlite3_column_count', 'sqlite3_column_name', 'sqlite3_column_type',
+    'sqlite3_column_text', 'sqlite3_column_int64', 'sqlite3_column_double', 'sqlite3_column_blob',
+    'sqlite3_column_bytes', 'sqlite3_bind_text', 'sqlite3_bind_int64', 'sqlite3_bind_double',
+    'sqlite3_bind_blob', 'sqlite3_bind_null', 'sqlite3_errmsg', 'sqlite3_changes',
+    'sqlite3_total_changes', 'sqlite3_last_insert_rowid', 'malloc', 'free',
+  ]);
 
   artifacts.push(
-    { node: "internal/deps/sqlite.node", wasm: "./sqlite.wasm", entry: "sqlite" },
-    { node: "node_modules/better-sqlite3/build/Release/better_sqlite3.node", wasm: "./better_sqlite3.wasm", entry: "napi" },
-    { node: "node_modules/sqlite3/build/Release/node_sqlite3.node", wasm: "./sqlite3.wasm", entry: "napi" }
+    { node: "internal/deps/sqlite.node", wasm: "./sqlite.wasm", entry: "sqlite", exports: [
+      'sqlite3_open', 'sqlite3_close', 'sqlite3_exec', 'sqlite3_prepare_v2', 'sqlite3_step',
+      'sqlite3_finalize', 'sqlite3_column_count', 'sqlite3_column_name', 'sqlite3_column_type',
+      'sqlite3_column_text', 'sqlite3_column_int64', 'sqlite3_column_double', 'sqlite3_column_blob',
+      'sqlite3_column_bytes', 'sqlite3_bind_text', 'sqlite3_bind_int64', 'sqlite3_bind_double',
+      'sqlite3_bind_blob', 'sqlite3_bind_null', 'sqlite3_errmsg', 'sqlite3_changes',
+      'sqlite3_total_changes', 'sqlite3_last_insert_rowid', 'malloc', 'free',
+    ] },
   );
 }
 
@@ -144,7 +171,7 @@ if (fs.existsSync(zlibDir)) {
   console.log("-> Compiling zlib.wasm...");
   const zlibSources = ["adler32.c", "crc32.c", "deflate.c", "infback.c", "inffast.c", "inflate.c", "inftrees.c", "trees.c", "zutil.c"]
     .map((f) => path.join(zlibDir, f)).filter(fs.existsSync);
-  execFileSync(emcc, [
+  compileWasm('zlib', [
     ...zlibSources,
     `-I${zlibDir}`,
     "-O2",
@@ -154,9 +181,9 @@ if (fs.existsSync(zlibDir)) {
     "-Wl,--export-table",
     "--no-entry",
     "-o", path.join(outDir, "zlib.wasm"),
-  ], { stdio: "inherit" });
+  ], path.join(outDir, "zlib.wasm"), ['deflateInit_', 'deflate', 'deflateEnd', 'inflateInit_', 'inflate', 'inflateEnd', 'crc32', 'adler32', 'malloc', 'free']);
 
-  artifacts.push({ node: "internal/deps/zlib.node", wasm: "./zlib.wasm", entry: "zlib" });
+  artifacts.push({ node: "internal/deps/zlib.node", wasm: "./zlib.wasm", entry: "zlib", exports: ['deflateInit_', 'deflate', 'deflateEnd', 'inflateInit_', 'inflate', 'inflateEnd', 'crc32', 'adler32', 'malloc', 'free'] });
 }
 
 // 4. Brotli (node:zlib brotli)
@@ -168,18 +195,19 @@ if (fs.existsSync(brotliDir)) {
     ...findFiles(path.join(brotliDir, "c", "dec"), ".c"),
     ...findFiles(path.join(brotliDir, "c", "enc"), ".c"),
   ];
-  execFileSync(emcc, [
+  compileWasm('brotli', [
     ...brotliSources,
     `-I${path.join(brotliDir, "c", "include")}`,
     "-O2",
     "-sALLOW_MEMORY_GROWTH=1",
+    "-sEXPORTED_FUNCTIONS=_BrotliEncoderCreateInstance,_BrotliEncoderCompressStream,_BrotliEncoderDestroyInstance,_BrotliDecoderCreateInstance,_BrotliDecoderDecompressStream,_BrotliDecoderDestroyInstance,_malloc,_free",
     "-sERROR_ON_UNDEFINED_SYMBOLS=0",
     "-Wl,--export-table",
     "--no-entry",
     "-o", path.join(outDir, "brotli.wasm"),
-  ], { stdio: "inherit" });
+  ], path.join(outDir, "brotli.wasm"), ['BrotliEncoderCreateInstance', 'BrotliEncoderCompressStream', 'BrotliEncoderDestroyInstance', 'BrotliDecoderCreateInstance', 'BrotliDecoderDecompressStream', 'BrotliDecoderDestroyInstance', 'malloc', 'free']);
 
-  artifacts.push({ node: "internal/deps/brotli.node", wasm: "./brotli.wasm", entry: "brotli" });
+  artifacts.push({ node: "internal/deps/brotli.node", wasm: "./brotli.wasm", entry: "brotli", exports: ['BrotliEncoderCreateInstance', 'BrotliEncoderCompressStream', 'BrotliEncoderDestroyInstance', 'BrotliDecoderCreateInstance', 'BrotliDecoderDecompressStream', 'BrotliDecoderDestroyInstance', 'malloc', 'free'] });
 }
 
 // 5. Zstd (node:zlib zstd)
@@ -192,19 +220,20 @@ if (fs.existsSync(zstdDir)) {
     ...findFiles(path.join(zstdDir, "decompress"), ".c"),
     ...findFiles(path.join(zstdDir, "dictBuilder"), ".c"),
   ];
-  execFileSync(emcc, [
+  compileWasm('zstd', [
     ...zstdSources,
     `-I${zstdDir}`,
     `-I${path.join(zstdDir, "common")}`,
     "-O2",
     "-sALLOW_MEMORY_GROWTH=1",
+    "-sEXPORTED_FUNCTIONS=_ZSTD_compress,_ZSTD_decompress,_ZSTD_compressBound,_ZSTD_getFrameContentSize,_ZSTD_isError",
     "-sERROR_ON_UNDEFINED_SYMBOLS=0",
     "-Wl,--export-table",
     "--no-entry",
     "-o", path.join(outDir, "zstd.wasm"),
-  ], { stdio: "inherit" });
+  ], path.join(outDir, "zstd.wasm"), ['ZSTD_compress', 'ZSTD_decompress', 'ZSTD_compressBound', 'ZSTD_getFrameContentSize', 'ZSTD_isError']);
 
-  artifacts.push({ node: "internal/deps/zstd.node", wasm: "./zstd.wasm", entry: "zstd" });
+  artifacts.push({ node: "internal/deps/zstd.node", wasm: "./zstd.wasm", entry: "zstd", exports: ['ZSTD_compress', 'ZSTD_decompress', 'ZSTD_compressBound', 'ZSTD_getFrameContentSize', 'ZSTD_isError'] });
 }
 
 // 6. llhttp (node:http)
@@ -212,128 +241,45 @@ const llhttpDir = path.join(nodeDeps, "llhttp");
 if (fs.existsSync(llhttpDir)) {
   console.log("-> Compiling llhttp.wasm...");
   const llhttpSources = [path.join(llhttpDir, "src", "api.c"), path.join(llhttpDir, "src", "http.c"), path.join(llhttpDir, "src", "llhttp.c")].filter(fs.existsSync);
-  execFileSync(emcc, [
+  compileWasm('llhttp', [
     ...llhttpSources,
     `-I${path.join(llhttpDir, "include")}`,
     "-O2",
     "-sALLOW_MEMORY_GROWTH=1",
+    "-sEXPORTED_FUNCTIONS=_llhttp_init,_llhttp_execute,_llhttp_finish,_llhttp_settings_init,_llhttp_get_error_reason",
     "-sERROR_ON_UNDEFINED_SYMBOLS=0",
     "-Wl,--export-table",
     "--no-entry",
     "-o", path.join(outDir, "llhttp.wasm"),
-  ], { stdio: "inherit" });
+  ], path.join(outDir, "llhttp.wasm"), ['llhttp_init', 'llhttp_execute', 'llhttp_finish', 'llhttp_settings_init', 'llhttp_get_error_reason']);
 
-  artifacts.push({ node: "internal/deps/llhttp.node", wasm: "./llhttp.wasm", entry: "llhttp" });
+  artifacts.push({ node: "internal/deps/llhttp.node", wasm: "./llhttp.wasm", entry: "llhttp", exports: ['llhttp_init', 'llhttp_execute', 'llhttp_finish', 'llhttp_settings_init', 'llhttp_get_error_reason'] });
 }
 
-// 7. simdutf (node:buffer, node:util)
-const simdutfDir = path.join(nodeDeps, "simdutf");
-if (fs.existsSync(path.join(simdutfDir, "simdutf.cpp"))) {
-  console.log("-> Compiling simdutf.wasm...");
-  execFileSync(emcc, [
-    path.join(simdutfDir, "simdutf.cpp"),
-    `-I${simdutfDir}`,
-    "-O2",
-    "-sALLOW_MEMORY_GROWTH=1",
-    "-sERROR_ON_UNDEFINED_SYMBOLS=0",
-    "-Wl,--export-table",
-    "--no-entry",
-    "-o", path.join(outDir, "simdutf.wasm"),
-  ], { stdio: "inherit" });
-
-  artifacts.push({ node: "internal/deps/simdutf.node", wasm: "./simdutf.wasm", entry: "simdutf" });
-}
-
-// 8. ada (node:url)
+// 7. ada (node:url)
 const adaDir = path.join(nodeDeps, "ada");
 if (fs.existsSync(path.join(adaDir, "ada.cpp"))) {
   console.log("-> Compiling ada.wasm...");
-  execFileSync(emcc, [
+  compileWasm('ada', [
     path.join(adaDir, "ada.cpp"),
     `-I${adaDir}`,
     "-O2",
     "-sALLOW_MEMORY_GROWTH=1",
+    "-sEXPORTED_FUNCTIONS=_ada_parse,_ada_get_href,_ada_get_pathname,_ada_get_search,_ada_free",
     "-sERROR_ON_UNDEFINED_SYMBOLS=0",
     "-Wl,--export-table",
     "--no-entry",
     "-o", path.join(outDir, "ada.wasm"),
-  ], { stdio: "inherit" });
+  ], path.join(outDir, "ada.wasm"), ['ada_parse', 'ada_get_href', 'ada_get_pathname', 'ada_get_search', 'ada_free']);
 
-  artifacts.push({ node: "internal/deps/ada.node", wasm: "./ada.wasm", entry: "ada" });
+  artifacts.push({ node: "internal/deps/ada.node", wasm: "./ada.wasm", entry: "ada", exports: ['ada_parse', 'ada_get_href', 'ada_get_pathname', 'ada_get_search', 'ada_free'] });
 }
 
-// 9. cares (node:dns)
-const caresDir = path.join(nodeDeps, "cares");
-if (fs.existsSync(caresDir)) {
-  console.log("-> Compiling cares.wasm...");
-  const caresSources = findFiles(path.join(caresDir, "src", "lib"), ".c")
-    .filter((f) => !f.includes("win32") && !f.includes("android") && !f.includes("mac") && !f.endsWith("win.c"));
-  execFileSync(emcc, [
-    ...caresSources,
-    `-I${path.join(caresDir, "include")}`,
-    `-I${path.join(caresDir, "src", "lib")}`,
-    `-I${path.join(caresDir, "src", "lib", "include")}`,
-    `-I${path.join(caresDir, "src", "lib", "dsa")}`,
-    `-I${path.join(caresDir, "config", "linux")}`,
-    "-DHAVE_CONFIG_H",
-    "-O2",
-    "-sALLOW_MEMORY_GROWTH=1",
-    "-sERROR_ON_UNDEFINED_SYMBOLS=0",
-    "-Wl,--export-table",
-    "--no-entry",
-    "-o", path.join(outDir, "cares.wasm"),
-  ], { stdio: "inherit" });
-
-  artifacts.push({ node: "internal/deps/cares.node", wasm: "./cares.wasm", entry: "cares" });
-}
-
-// 10. uvwasi (node:wasi)
-const uvwasiDir = path.join(nodeDeps, "uvwasi");
-if (fs.existsSync(uvwasiDir)) {
-  console.log("-> Compiling uvwasi.wasm...");
-  const uvwasiSources = findFiles(path.join(uvwasiDir, "src"), ".c");
-  execFileSync(emcc, [
-    ...uvwasiSources,
-    `-I${path.join(uvwasiDir, "include")}`,
-    `-I${path.join(nodeDeps, "uv", "include")}`,
-    "-O2",
-    "-sALLOW_MEMORY_GROWTH=1",
-    "-sERROR_ON_UNDEFINED_SYMBOLS=0",
-    "-Wl,--export-table",
-    "--no-entry",
-    "-o", path.join(outDir, "uvwasi.wasm"),
-  ], { stdio: "inherit" });
-
-  artifacts.push({ node: "internal/deps/uvwasi.node", wasm: "./uvwasi.wasm", entry: "uvwasi" });
-}
-
-// 11. nghttp2 (node:http2)
-const nghttp2Dir = path.join(nodeDeps, "nghttp2");
-if (fs.existsSync(nghttp2Dir)) {
-  console.log("-> Compiling nghttp2.wasm...");
-  const nghttp2Sources = findFiles(path.join(nghttp2Dir, "lib"), ".c");
-  execFileSync(emcc, [
-    ...nghttp2Sources,
-    `-I${path.join(nghttp2Dir, "lib", "includes")}`,
-    "-include", "arpa/inet.h",
-    "-O2",
-    "-sALLOW_MEMORY_GROWTH=1",
-    "-sERROR_ON_UNDEFINED_SYMBOLS=0",
-    "-Wl,--export-table",
-    "--no-entry",
-    "-o", path.join(outDir, "nghttp2.wasm"),
-  ], { stdio: "inherit" });
-
-  artifacts.push({ node: "internal/deps/nghttp2.node", wasm: "./nghttp2.wasm", entry: "nghttp2" });
-}
-
-// 12. bcrypt & Node-API Addon
-const standardWasm = fs.readFileSync(path.join(outDir, "node_addon_napi.wasm"));
-fs.writeFileSync(path.join(outDir, "bcrypt.wasm"), standardWasm);
-artifacts.push(
-  { node: "build/Release/node_addon_napi.node", wasm: "./node_addon_napi.wasm", entry: "napi" },
-  { node: "node_modules/bcrypt/build/Release/bcrypt_lib.node", wasm: "./bcrypt.wasm", entry: "napi" }
-);
+// 8. Standard Node-API bridge. Package-specific addons are only listed when
+// their own sources were compiled; a copied bridge is not an addon.
+const napiWasm = path.join(outDir, "node_addon_napi.wasm");
+validateWasmExports(napiWasm, 'node_addon_napi', ['napi_register_wasm_v1']);
+artifacts.push({ node: "build/Release/node_addon_napi.node", wasm: "./node_addon_napi.wasm", entry: "napi", exports: ['napi_register_wasm_v1'] });
 
 // 13. Write Final Manifest
 const manifestPath = path.join(outDir, "addon-manifest.json");

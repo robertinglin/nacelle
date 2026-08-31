@@ -1,5 +1,5 @@
 const SHARED_BROWSER_FEATURES = Object.freeze({
-  inspector: true,
+  inspector: false,
   debug: false,
   uv: false,
   ipv6: true,

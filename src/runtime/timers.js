@@ -32,8 +32,13 @@ export function installAbortSignalTimeout(scope = globalThis) {
     const delay = Number(milliseconds);
     if (!Number.isInteger(delay) || delay < 0) throw new RangeError('delay must be a non-negative integer');
     const controller = new AbortControllerClass();
-    if (typeof scope.setTimeout !== 'function') throw new TypeError('setTimeout is unavailable');
-    const timer = scope.setTimeout(() => controller.abort(timeoutReason(scope)), delay);
+    const runtimeSetTimeout = scope.process?._bnhSetTimer;
+    const timer = typeof runtimeSetTimeout === 'function'
+      ? runtimeSetTimeout.call(scope.process, () => controller.abort(timeoutReason(scope)), delay)
+      : typeof scope.setTimeout === 'function'
+        ? scope.setTimeout(() => controller.abort(timeoutReason(scope)), delay)
+        : null;
+    if (!timer && typeof scope.setTimeout !== 'function' && typeof runtimeSetTimeout !== 'function') throw new TypeError('setTimeout is unavailable');
     timer?.unref?.();
     return controller.signal;
   };

@@ -98,7 +98,7 @@ class RuntimeLinkTests(unittest.TestCase):
             source = self._make_source(root)
             target = root / "integration"
             target.mkdir()
-            script = Path(__file__).parents[1] / "link-runtime.py"
+            script = Path(__file__).parents[2] / "scripts" / "link-runtime.py"
 
             result = subprocess.run(
                 [

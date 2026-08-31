@@ -75,7 +75,7 @@ const node = await Nacelle.create({
   }
 });
 
-// Run a script in an isolated Web Worker child process
+// Run a script in an isolated Web Worker child process (browser runtimes)
 const proc = await node.run({ entry: '/workspace/server.js' });
 
 // Read stdout
@@ -94,10 +94,15 @@ await node.npm.install('express');
 ## Features
 
 - 🌐 **60+ Node Built-in Modules**: `node:fs`, `node:http`, `node:http2`, `node:tls`, `node:crypto`, `node:buffer`, `node:stream`, `node:events`, `node:path`, `node:process`, `node:child_process`, `node:worker_threads`, `node:zlib`, `node:sqlite`, `node:net`, `node:dgram`, `node:dns`, `node:test`, `node:vm`, `node:v8`, `node:os`, `node:assert`, and more.
-- ⚡ **WebAssembly C/C++ Addon Engine**: Precompiled native dependencies including `sqlite3`, `better-sqlite3`, `zlib`, `brotli`, `zstd`, `llhttp`, `nghttp2`, `simdutf`, `ada`, `cares`, `uvwasi`, and standard N-API (`node_addon_napi`).
+- ⚡ **WebAssembly Artifact Loader**: Integrity-checked, export-validated low-level `sqlite`, `zlib`, and standard Node-API bridge artifacts. A listed artifact is not described as a working Node binding until a subsystem parity test wires and verifies it.
 - 📁 **Virtual POSIX Filesystem (VFS)**: Isolated in-memory filesystem with synchronous and asynchronous operations, streams, and file descriptors.
-- 🧵 **Web Worker Isolation**: True multi-threaded process execution via Web Workers with IPC and structured stdout/stderr streams.
+- 🧵 **Web Worker Isolation**: Optional true multi-threaded process execution via Web Workers with IPC; browser Nacelle+ requests fail closed when the boundary is unavailable.
 - 📦 **In-Browser NPM Installer**: Direct npm package resolution, tarball downloading, and untarring right inside the browser VFS.
+- 🔒 **Run-Scoped Capability Policy**: Immutable grants for VFS, workers, network, npm, preview, persistence, host bridges, and named secrets, with auditable grant deltas.
+- 🧰 **Bounded Process Output**: Streaming callbacks plus byte limits, tail retention, and dropped-byte accounting for untrusted workloads.
+- ⏪ **Content-Addressed Checkpoints**: Workspace snapshots with metadata, diffs, rollback, and deterministic content identities.
+- 🔎 **Structured Failure Traces**: Stable error codes, bounded event history, and secret-redacted run diagnostics.
+- 🔑 **Named Secret Broker**: Origin-bound request signatures without exposing raw secret material to guest code.
 - 🔒 **Security & Isolation**: Strict capability boundary architecture with zero server-side dependencies.
 
 ---
@@ -110,7 +115,7 @@ await node.npm.install('express');
 - `nacelle/runtime` -> Low-level runtime assembly and module loader
 - `nacelle/worker` -> Dedicated Web Worker process script
 - `nacelle/sw` -> Virtual network gateway Service Worker
-- `nacelle/wasm/*` -> Precompiled native WebAssembly modules
+- `nacelle/wasm/*` -> Integrity-checked WebAssembly artifacts listed by the selected release manifest
 - `nacelle/support` / `nacelle/version` -> Shipped aliases, profile hashes, and
   WASM artifact-set identity
 
@@ -121,7 +126,7 @@ application path can be supplied with `wasmBaseUrl`:
 const node = await Nacelle.create({
   wasmBaseUrl: new URL('/nacelle/v22/wasm/', location.href).href,
 });
-const artifact = await node.wasm.load('bcrypt');
+const artifact = await node.wasm.load('node_addon_napi');
 console.log(artifact.path, artifact.bytes);
 ```
 
@@ -137,6 +142,12 @@ npm run examples
 
 # Run Vite + React in-browser IDE example
 npm run examples:vite-react
+
+# Inspect the shipped WASM artifacts and export contracts
+npm run check:wasm
+
+# Build and inspect every published package export
+npm run verify:package
 
 # Run Native WASM Addons example
 npm run examples:wasm
@@ -161,14 +172,27 @@ Each example page includes a navigation menu (☰) at the top to easily switch b
 For APIs that reject ordinary browser requests because of CORS, the optional
 `nacelle-plus/extension` companion provides a capability-gated HTTP transport
 for Chrome and Firefox. Nacelle remains the only runtime: native page fetch is
-attempted first, and the extension is contacted only after a browser network
-failure. The Nacelle run must explicitly grant its proxy capability; the
-extension's per-origin permission is a separate check. See
+attempted first only for replay-safe `GET` and `HEAD` requests. Unsafe methods
+are sent to the privileged adapter before any page fetch, because a browser
+failure does not prove that a non-idempotent request was not sent. The Nacelle
+run must explicitly grant its proxy capability; the extension's per-origin
+permission is a separate check. See
 [`nacelle-plus/README.md`](nacelle-plus/README.md) for setup, streaming, and
 permission handling.
 
 The supported Node release-line audit and upgrade policy are in
 [`docs/node-version-support.md`](docs/node-version-support.md).
+
+### Run policy and recovery
+
+Capabilities are validated once when a runtime is created and are available as
+`node.capabilities`. Network methods are selected before a request is issued:
+`GET` and `HEAD` may try the page fetch before a privileged fallback, while
+unsafe methods go directly to the privileged adapter. Process output is bounded
+by the run manifest; `handle.stats('stdout')` reports retained and dropped
+bytes. Checkpoints are exposed through `node.checkpoint()`, `node.diff()`, and
+`node.rollback()`. Secrets are available through `node.secretBroker` only as
+named, origin-bound signatures.
 
 ### Alpha build and release commands
 
@@ -176,6 +200,8 @@ The supported Node release-line audit and upgrade policy are in
 npm run versions
 npm run build
 npm run validate:versions
+npm run check:wasm
+npm run verify:package
 npm run parity
 npm run test:full
 ```

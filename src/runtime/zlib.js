@@ -225,7 +225,9 @@ function createWebTransform(scope, format, mode) {
   // zlib is created before the runtime installs Node-compatible web streams
   // on the page global. Keep compression on the browser-native stream graph;
   // otherwise the shim recursively constructs itself and mixes stream brands.
-  const nativeFormat = format === 'br' || format === 'brotli' ? 'deflate-raw' : format;
+  // Never substitute a different wire format: mislabeled deflate is worse than
+  // an explicit unsupported-boundary error for callers negotiating Brotli.
+  const nativeFormat = format;
   try {
     return new Constructor(nativeFormat);
   } catch (error) {

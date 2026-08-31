@@ -5,6 +5,9 @@ import { inspect as runtimeInspect } from './assert.js';
 export const kWeakHandler = Symbol.for('nodejs.internal.event_target.weakHandler');
 
 const abortSignalCompatibilityKey = Symbol.for('bnh.abort-signal-compatibility');
+const moduleHostSetTimeout = typeof globalThis.setTimeout === 'function'
+  ? globalThis.setTimeout.bind(globalThis)
+  : null;
 
 function bytes(value) {
   if (value instanceof Uint8Array) return value;
@@ -2491,17 +2494,26 @@ function installAbortSignalCompatibility(scope) {
   }
 
   if (typeof AbortSignalClass.timeout === 'function') {
-    const nativeTimeout = AbortSignalClass.timeout.bind(AbortSignalClass);
+    const fallbackSetTimeout = moduleHostSetTimeout
+      || scope.__BNH_NATIVE_TIMERS__?.setTimeout
+      || (typeof scope.setTimeout === 'function' ? scope.setTimeout.bind(scope) : null);
     const timeout = (milliseconds) => {
-      const nativeSignal = nativeTimeout(milliseconds);
-      trackSignal(nativeSignal);
       const controller = new scope.AbortController();
+      const delay = Number(milliseconds);
+      if (!Number.isFinite(delay) || delay < 0 || Math.floor(delay) !== delay) {
+        const error = new RangeError('The value of "delay" is out of range. It must be an integer.');
+        error.code = 'ERR_OUT_OF_RANGE';
+        throw error;
+      }
       const abort = () => controller.abort(new scope.DOMException(
         'The operation was aborted due to timeout',
         'TimeoutError',
       ));
-      if (nativeSignal.aborted) abort();
-      else nativeSignal.addEventListener('abort', abort, { once: true, [kWeakHandler]: true });
+      const runtimeSetTimeout = scope.process?._bnhSetTimer;
+      const timer = typeof runtimeSetTimeout === 'function'
+        ? runtimeSetTimeout.call(scope.process, abort, delay)
+        : (typeof scope.setTimeout === 'function' ? scope.setTimeout.bind(scope) : fallbackSetTimeout)?.(abort, delay);
+      timer?.unref?.();
       trackSignal(controller.signal);
       return controller.signal;
     };

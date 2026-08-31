@@ -75,6 +75,7 @@ const child = spawn(process.execPath, [
   'test',
   ...testFiles,
   '--workers=1',
+  ...(process.env.BNH_BROWSER_TEST_GREP ? ['--grep', process.env.BNH_BROWSER_TEST_GREP] : []),
   `--browser=${process.env.BNH_BROWSER || 'chromium'}`,
 ], {
   cwd: adapterRoot,

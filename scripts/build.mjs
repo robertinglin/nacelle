@@ -85,6 +85,12 @@ function stageWasm(profile, targetDirectory) {
     if (!fs.existsSync(source)) throw new Error(`Missing ${profile.id} WASM artifact: ${filename}`);
     const bytes = fs.readFileSync(source);
     if (!WebAssembly.validate(bytes)) throw new Error(`Invalid ${profile.id} WASM artifact: ${filename}`);
+    if (!Array.isArray(artifact.exports) || artifact.exports.length === 0) {
+      throw new Error(`Missing export contract for ${profile.id} WASM artifact: ${filename}`);
+    }
+    const exportedNames = new Set(WebAssembly.Module.exports(new WebAssembly.Module(bytes)).map((item) => item.name));
+    const missingExports = artifact.exports.filter((name) => !exportedNames.has(name));
+    if (missingExports.length) throw new Error(`Invalid ${profile.id} WASM export contract for ${filename}: ${missingExports.join(', ')}`);
     fs.copyFileSync(source, path.join(targetDirectory, filename));
     return { ...artifact, wasm: `./${filename}`, bytes: bytes.byteLength, sha256: sha256(bytes) };
   });
@@ -177,6 +183,21 @@ function profileMetadata(profile, wasm, revision) {
   };
 }
 
+function assertPublishedExports() {
+  const targets = [];
+  const visit = (value) => {
+    if (typeof value === 'string') targets.push(value);
+    else if (value && typeof value === 'object') Object.values(value).forEach(visit);
+  };
+  visit(packageJSON.exports);
+  for (const target of targets) {
+    if (!target.startsWith('./dist/')) continue;
+    const relative = target.slice(2);
+    const candidate = path.join(repositoryRoot, relative.replace(/\/\*$/, ''));
+    if (!fs.existsSync(candidate)) throw new Error(`Published export target is missing from the build: ${target}`);
+  }
+}
+
 const defaultProfile = selectedVersion(process.argv.slice(2));
 const profiles = listNodeVersionProfiles();
 const revision = sourceRevision();
@@ -226,6 +247,8 @@ fs.writeFileSync(
   path.join(outputDirectory, 'version.json'),
   `${JSON.stringify(metadata.find((item) => item.nodeTargetVersion === defaultProfile.id), null, 2)}\n`,
 );
+
+assertPublishedExports();
 
 console.log(`  ✓ default: ${defaultProfile.id}`);
 console.log(`  ✓ output: ${path.relative(repositoryRoot, outputDirectory)}/`);

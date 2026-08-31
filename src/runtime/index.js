@@ -15,6 +15,7 @@ import { createHttp2Module } from './http2.js';
 import { createPerformancePrimitives } from './perf.js';
 import { createStorageAdapters } from './storage.js';
 import { createVfs } from './vfs.js';
+import { createCapabilityManifest as createPolicyManifest, capabilityDelta } from './policy.js';
 
 const CAPABILITY_KEYS = Object.freeze([
   'vfs',
@@ -25,6 +26,13 @@ const CAPABILITY_KEYS = Object.freeze([
   'envVars',
   'process.env',
   'proxy',
+  'network',
+  'npm',
+  'secrets',
+  'hostBridge',
+  'persistence',
+  'preview',
+  'budgets',
 ]);
 
 const SIGNALS = Object.freeze(['SIGTERM', 'SIGINT', 'SIGKILL']);
@@ -140,6 +148,7 @@ export function validateCapabilityManifest(manifest) {
       throw capabilityError('ERR_INVALID_CAPABILITY', `unknown capability grant: ${key}`, { key });
     }
   }
+  const policyManifest = createPolicyManifest(manifest);
   const envVars = normalizeEnvironmentGrant(manifest.envVars);
   if (manifest['process.env'] !== undefined) {
     const processEnv = normalizeEnvironmentGrant(manifest['process.env']);
@@ -189,6 +198,9 @@ export function validateCapabilityManifest(manifest) {
     output: { ...output },
     envVars,
     proxy,
+    ...Object.fromEntries(['network', 'npm', 'secrets', 'hostBridge', 'persistence', 'preview', 'budgets']
+      .filter((key) => policyManifest[key] !== undefined)
+      .map((key) => [key, policyManifest[key]])),
   });
   canonical['process.env'] = canonical.envVars;
   return Object.freeze(canonical);
@@ -200,7 +212,7 @@ export function assembleBrowserCapabilities(runSpec, { globalObject = globalThis
     throw capabilityError('ERR_INVALID_CAPABILITY', 'runSpec.runId is required', { key: 'runId' });
   }
   const manifest = validateCapabilityManifest(runSpec.capabilities);
-  const vfs = createVfs({ mounts: manifest.vfs.mounts, fixtures: runSpec.fixtures });
+  const vfs = createVfs({ mounts: manifest.vfs.mounts, fixtures: runSpec.fixtures, watchQuota: manifest.budgets?.watchers });
   const output = createOutputCollector({
     transport,
     highWaterMark: manifest.output.highWaterMark,
@@ -263,6 +275,7 @@ export {
   getEventListeners,
   getMaxListeners,
 } from './events.js';
+export { createCapabilityManifest, capabilityDelta } from './policy.js';
 export {
   createNetworkPrimitives,
   createBrowserNetworkGlobals,

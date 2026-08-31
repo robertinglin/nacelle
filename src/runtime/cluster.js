@@ -393,7 +393,12 @@ function makePrimaryCluster(options) {
   if (processObject && typeof processObject === 'object') processStates.set(processObject, primaryState);
   const baseEnvironment = normalizeEnvironment(options.environment || processObject?.env);
   const run = options.workerRun || options.run;
-  const activeProcess = () => options.scope?.process || processObject;
+  const activeProcess = () => {
+    const candidate = options.scope?.process;
+    return candidate && typeof candidate === 'object' && processStates.has(candidate)
+      ? candidate
+      : processObject;
+  };
   const currentProcessSettings = () => {
     const currentProcess = activeProcess();
     return {
@@ -415,6 +420,7 @@ function makePrimaryCluster(options) {
       clearInterval: scope.clearInterval,
       setImmediate: scope.setImmediate,
       clearImmediate: scope.clearImmediate,
+      queueMicrotask: scope.queueMicrotask,
     };
     scope.process = parentProcess;
     if (timers) Object.assign(scope, timers);
@@ -422,6 +428,8 @@ function makePrimaryCluster(options) {
       return callback();
     } finally {
       Object.assign(scope, previous);
+      scope.process = parentProcess;
+      if (timers) Object.assign(scope, timers);
     }
   };
   const terminateWorker = (worker, state) => {

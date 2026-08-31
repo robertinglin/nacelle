@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url';
+import { deflateSync } from 'node:zlib';
 import { Nacelle, resolveNodeVersionProfile } from '../src/index.js';
 
 async function processResult(handle) {
@@ -132,6 +133,19 @@ process.exitCode = child.status ?? 1;
       });
     `));
     return { pass: result.code === 0 && result.stdout === 'payload', code: result.code, actual: result.stdout, expected: 'payload', stderr: result.stderr };
+  });
+
+  await check('zlib-bytes-against-native', async () => {
+    const native = deflateSync(Buffer.from('payload')).toString('base64');
+    const node = await createNode();
+    const result = await processResult(await node.execute(`
+      const zlib = require('node:zlib');
+      zlib.deflate(Buffer.from('payload'), (error, bytes) => {
+        if (error) throw error;
+        process.stdout.write(bytes.toString('base64'));
+      });
+    `));
+    return { pass: result.code === 0 && result.stdout === native, code: result.code, actual: result.stdout, expected: native, stderr: result.stderr };
   });
 
   const hostMajor = Number(process.versions.node.split('.')[0]);

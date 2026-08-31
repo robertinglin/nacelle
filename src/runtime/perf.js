@@ -723,7 +723,6 @@ function createVirtualHistogram(performance) {
         lastRecordTime = undefined;
       },
       record(value, count = 1) {
-        if (!enabled) return;
         if (typeof value !== 'number') {
           const error = new TypeError('The "val" argument must be of type number');
           error.code = 'ERR_INVALID_ARG_TYPE';
@@ -752,7 +751,7 @@ function createVirtualHistogram(performance) {
           error.code = 'ERR_OUT_OF_RANGE';
           throw error;
         }
-        if (enabled) samples.push(Number(value));
+        samples.push(Number(value));
       },
       add(other) {
         const otherState = other?.[stateKey];
@@ -1366,7 +1365,12 @@ export function createPerformancePrimitives(globalObject = globalThis, options =
   const eventLoopUtilization = virtual
     ? createVirtualEventLoopUtilization(nativePerformance, globalObject)
     : undefined;
-  const nodeTiming = virtual ? createVirtualNodeTiming(nativePerformance, globalObject) : undefined;
+  // Node's startup timing values cannot be reconstructed from browser
+  // performance entries without inventing host lifecycle data. Keep the
+  // surface explicitly unsupported while retaining virtual metrics elsewhere.
+  const nodeTiming = options.nodeTiming === true && virtual
+    ? createVirtualNodeTiming(nativePerformance, globalObject)
+    : undefined;
   const timerify = createTimerify(
     nativePerformance,
     observerParts.recordEntry || (() => {}),

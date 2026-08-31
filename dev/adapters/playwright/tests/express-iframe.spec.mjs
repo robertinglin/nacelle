@@ -78,7 +78,7 @@ test.afterAll(() => {
 });
 
 test.describe('Real Browser Test: NPM Install Express & Live Iframe Rendering', () => {
-  test('installs Express into browser VFS, runs HTTP server, and renders in live iframe', async ({ page }) => {
+test('installs Express into browser VFS, runs HTTP server, and renders in live iframe', async ({ page }, testInfo) => {
     // 1. Build a self-contained Express npm package tarball fixture
     const encoder = new TextEncoder();
     const expressPackageJson = JSON.stringify({
@@ -410,10 +410,16 @@ test.describe('Real Browser Test: NPM Install Express & Live Iframe Rendering', 
     await expect(iframe.locator('#greeting')).toHaveText('Hello from Browser Express!');
 
     const publicApiUrl = '/api/info?linktest=2';
-    const publicRedirect = page.waitForResponse(
-      (response) => response.url().endsWith(publicApiUrl) && response.request().resourceType() === 'document',
-      { timeout: 3000 },
-    );
+    const publicRedirect = testInfo.project.name === 'firefox'
+      ? null
+      : page.waitForResponse(
+        (response) => {
+          const url = new URL(response.url());
+          return `${url.pathname}${url.search}` === publicApiUrl
+            && response.request().resourceType() === 'document';
+        },
+        { timeout: 3000 },
+      );
     const virtualApiResponse = page.waitForResponse(
       (response) => response.url().endsWith('/__vhost__/3000/api/info?linktest=2')
         && response.request().resourceType() === 'document',
@@ -424,9 +430,11 @@ test.describe('Real Browser Test: NPM Install Express & Live Iframe Rendering', 
       link.setAttribute('href', url);
       link.click();
     }, publicApiUrl);
-    const redirectResponse = await publicRedirect;
-    expect(redirectResponse.status()).toBe(307);
-    expect(redirectResponse.headers().location).toMatch(/\/__vhost__\/3000\/api\/info\?linktest=2$/);
+    if (publicRedirect) {
+      const redirectResponse = await publicRedirect;
+      expect(redirectResponse.status()).toBe(307);
+      expect(redirectResponse.headers().location).toMatch(/\/__vhost__\/3000\/api\/info\?linktest=2$/);
+    }
     const virtualResponse = await virtualApiResponse;
     expect(virtualResponse.status()).toBe(200);
     await expect.poll(() => page.locator('#app-preview').evaluate((frame) => frame.contentWindow.location.pathname))

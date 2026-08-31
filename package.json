@@ -63,6 +63,8 @@
     "build": "node scripts/build.mjs --node-version=v22",
     "build:all-supported": "node scripts/build.mjs",
     "build:v22": "node scripts/build.mjs --node-version=v22",
+    "check:wasm": "node scripts/check-wasm-manifest.mjs --node-version=v22",
+    "verify:package": "node scripts/build.mjs --node-version=v22 && npm_config_cache=\"${TMPDIR:-/tmp}/nacelle-npm-cache-$$\" npm pack --dry-run --json --ignore-scripts | node scripts/check-package-artifacts.mjs",
     "versions": "node scripts/version-support.mjs",
     "validate:versions": "node scripts/validate-version-support.mjs --node-version=v22",
     "parity": "node scripts/parity-report.mjs --node-version=v22",

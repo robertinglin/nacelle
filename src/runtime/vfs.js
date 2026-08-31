@@ -729,6 +729,9 @@ export function createVfs(options = {}) {
   if (!directories.has('/')) directories.add('/');
   const mounts = new Map();
   const watchers = new Map();
+  const watchersByOwner = new Map();
+  const watchQuota = options.watchQuota === undefined ? Infinity : options.watchQuota;
+  let watcherOwner = null;
   const descriptors = new Map();
   const hardLinks = new Map();
   const fileHandleRecords = new Set();
@@ -2995,6 +2998,8 @@ export function createVfs(options = {}) {
     const options = watchOptions(typeof optionsValue === 'function' ? undefined : optionsValue);
     const path = resolve(pathValue);
     statPath(path);
+    const activeWatchers = [...watchers.values()].reduce((count, list) => count + list.length, 0);
+    if (activeWatchers >= watchQuota) throw vfsError('ERR_FS_WATCH_LIMIT', path, 'watch', 'VFS watcher quota exceeded');
     const emitter = new EventEmitter();
     const resource = new AsyncResource('FSEVENTWRAP');
     const queue = [];
@@ -3003,6 +3008,8 @@ export function createVfs(options = {}) {
     let closed = false;
     let referenced = true;
     let failure;
+    const owner = options.owner || watcherOwner;
+    const ownerClose = () => emitter.close();
     const onAbort = () => emitter._fail(abortError(options.signal.reason));
     if (callback) emitter.on('change', callback);
     if (options.persistent === false) referenced = false;
@@ -3024,6 +3031,17 @@ export function createVfs(options = {}) {
       if (remaining.length) watchers.set(path, remaining);
       else watchers.delete(path);
       options.signal?.removeEventListener?.('abort', onAbort);
+      if (owner) {
+        const owned = watchersByOwner.get(owner);
+        if (owned) {
+          owned.delete(emitter);
+          if (!owned.size) watchersByOwner.delete(owner);
+        }
+        owner.off?.('exit', ownerClose);
+        owner.off?.('close', ownerClose);
+        owner.removeEventListener?.('exit', ownerClose);
+        owner.removeEventListener?.('close', ownerClose);
+      }
       for (const waiter of waiters.splice(0)) waiter.resolve({ value: undefined, done: true });
       resource.emitDestroy();
       emitter.emit('close');
@@ -3055,6 +3073,18 @@ export function createVfs(options = {}) {
     });
     list.push(emitter);
     watchers.set(path, list);
+    if (owner) {
+      const owned = watchersByOwner.get(owner) || new Set();
+      owned.add(emitter);
+      watchersByOwner.set(owner, owned);
+      if (owner.once) {
+        owner.once('exit', ownerClose);
+        owner.once('close', ownerClose);
+      } else {
+        owner.addEventListener?.('exit', ownerClose, { once: true });
+        owner.addEventListener?.('close', ownerClose, { once: true });
+      }
+    }
     if (options.signal) {
       options.signal.addEventListener('abort', onAbort, { once: true });
       if (options.signal.aborted) queueMicrotask(onAbort);
@@ -3237,6 +3267,7 @@ export function createVfs(options = {}) {
     for (const mountRecord of mounts.values()) directories.add(mountRecord.path);
     for (const list of watchers.values()) for (const watcher of list) watcher.close();
     watchers.clear();
+    watchersByOwner.clear();
   }
 
   function setWarningEmitter(emitter) {
@@ -3756,6 +3787,9 @@ export function createVfs(options = {}) {
       activeRequestTracker = typeof tracker === 'function' ? tracker : null;
     },
     setWarningEmitter,
+    setWatcherOwner(owner) {
+      watcherOwner = owner || null;
+    },
     collectGarbage,
     mount,
     seed: mount,

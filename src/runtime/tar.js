@@ -139,7 +139,9 @@ export function unpackTar(tarBytes, {
     }
 
     let normalizedName = validateArchiveName(name);
-    if (archivePrefix === 'package/' && !normalizedName.startsWith('package/')) {
+    if (archivePrefix === 'package/' && normalizedName === 'package' && typeflag === '5') {
+      normalizedName = '';
+    } else if (archivePrefix === 'package/' && !normalizedName.startsWith('package/')) {
       // npm normally packs files below package/, but some valid registry
       // packages use their package name as the archive root instead. npm
       // installs the contents of either root directly into node_modules.

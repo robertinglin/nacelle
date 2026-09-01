@@ -222,6 +222,7 @@
     }
     .status-pill.ready { background: rgba(74, 222, 128, 0.2); color: var(--success); }
     .status-pill.running { background: rgba(56, 189, 248, 0.2); color: var(--accent); }
+    .status-pill.failed { background: rgba(248, 113, 113, 0.2); color: var(--error); }
   </style>
 </head>
 <body>
@@ -347,10 +348,23 @@ Auth.run();
     document.getElementById('code-editor').value = testCode;
 
     let nodeInstance = null;
+    let testsRunning = false;
+
+    const testNames = [
+      'UserService › creates authenticated session token',
+      'TokenValidator › verifies HMAC cryptographic signature',
+      'AsyncPipeline › resolves microtask queue ordering',
+      'SessionStore › checks crypto random bytes entropy',
+    ];
 
     async function runTests() {
+      if (testsRunning) return;
+      testsRunning = true;
+
       document.getElementById('global-status').textContent = 'Running...';
       document.getElementById('global-status').className = 'status-pill running';
+      document.getElementById('suite-status').textContent = 'Running...';
+      document.getElementById('suite-status').className = 'status-pill running';
 
       const t0 = performance.now();
       try {
@@ -370,30 +384,39 @@ Auth.run();
         const stdout = await child.stdoutText();
         const stderr = await child.stderrText();
         const t1 = performance.now();
+        const output = `${stdout}\n${stderr}`;
+        const extractCount = (label) => {
+          const match = output.match(new RegExp(`\\b${label}:\\s*(\\d+)`, 'i'));
+          return match ? Number(match[1]) : null;
+        };
+        const total = extractCount('Total') ?? testNames.length;
+        const reportedPassed = extractCount('Passed');
+        const skipped = extractCount('Skipped') ?? 0;
+        const passed = reportedPassed ?? (code === 0 ? total : 0);
+        const failed = code === 0 ? Math.max(0, total - passed - skipped) : Math.max(1, total - passed - skipped);
+        const succeeded = code === 0 && failed === 0;
+        const hasTestSummary = reportedPassed !== null;
 
-        document.getElementById('metric-pass').textContent = '4';
-        document.getElementById('metric-fail').textContent = code === 0 ? '0' : '1';
+        document.getElementById('metric-pass').textContent = String(passed);
+        document.getElementById('metric-fail').textContent = String(failed);
         document.getElementById('metric-duration').textContent = `${(t1 - t0).toFixed(1)} ms`;
+        document.getElementById('suite-status').textContent = succeeded
+          ? `${passed} Tests Passed`
+          : hasTestSummary ? `${failed} Tests Failed` : `Runner Failed (exit ${code})`;
+        document.getElementById('suite-status').className = `status-pill ${succeeded ? 'ready' : 'failed'}`;
 
         const container = document.getElementById('test-suites');
         container.innerHTML = '';
 
         const card = document.createElement('div');
         card.className = 'suite-card';
-        card.innerHTML = `<div class="suite-title"><span>tests/auth.test.js (uvu)</span><span class="status-pill ready">4 Tests Passed</span></div>`;
+        card.innerHTML = `<div class="suite-title"><span>tests/auth.test.js (uvu)</span><span class="status-pill ${succeeded ? 'ready' : 'failed'}">${succeeded ? `${passed} Tests Passed` : hasTestSummary ? `${failed} Tests Failed` : `Runner exited ${code}`}</span></div>`;
 
-        const tests = [
-          'UserService › creates authenticated session token',
-          'TokenValidator › verifies HMAC cryptographic signature',
-          'AsyncPipeline › resolves microtask queue ordering',
-          'SessionStore › checks crypto random bytes entropy',
-        ];
-
-        tests.forEach(name => {
+        testNames.forEach(name => {
           const item = document.createElement('div');
           item.className = 'test-item';
           item.innerHTML = `
-            <span style="color: var(--success); font-weight: 600;">✔ ${name}</span>
+            <span style="color: ${succeeded ? 'var(--success)' : 'var(--accent)'}; font-weight: 600;">${succeeded ? '✔' : '•'} ${name}${succeeded ? '' : ' (not reported)'}</span>
             <span>&lt; 1 ms</span>
           `;
           card.appendChild(item);
@@ -408,10 +431,23 @@ Auth.run();
           container.appendChild(outBox);
         }
 
-        document.getElementById('global-status').textContent = 'Ready';
-        document.getElementById('global-status').className = 'status-pill ready';
+        if (stderr.trim()) {
+          const errorBox = document.createElement('pre');
+          errorBox.style.cssText = 'background: #2a1115; padding: 10px; border-radius: 6px; border: 1px solid var(--error); color: #fca5a5; font-size: 0.75rem; margin-top: 10px; white-space: pre-wrap;';
+          errorBox.textContent = `stderr (exit ${code}):\n${stderr.trim()}`;
+          container.appendChild(errorBox);
+        }
+
+        document.getElementById('global-status').textContent = succeeded ? 'Ready' : `Failed (exit ${code})`;
+        document.getElementById('global-status').className = `status-pill ${succeeded ? 'ready' : 'failed'}`;
       } catch (err) {
         console.error(err);
+        document.getElementById('suite-status').textContent = 'Runner Error';
+        document.getElementById('suite-status').className = 'status-pill failed';
+        document.getElementById('global-status').textContent = 'Failed';
+        document.getElementById('global-status').className = 'status-pill failed';
+      } finally {
+        testsRunning = false;
       }
     }
 

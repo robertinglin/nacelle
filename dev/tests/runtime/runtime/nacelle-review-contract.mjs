@@ -65,6 +65,32 @@ test('nested synchronous children restore host scheduling globals before the nex
   assert.equal(globalThis.queueMicrotask, hostQueueMicrotask);
 });
 
+test('gateway initialization waits until the service worker controls the page', async () => {
+  const serviceWorker = new EventTarget();
+  const registration = {
+    active: { state: 'activated' },
+    update: async () => {},
+  };
+  serviceWorker.controller = null;
+  serviceWorker.register = async () => registration;
+  serviceWorker.ready = Promise.resolve(registration);
+
+  let settled = false;
+  const initialization = Nacelle.initServiceWorker('/runtime/gateway-sw.js', '/', {
+    navigator: { serviceWorker },
+  }).then((result) => {
+    settled = true;
+    return result;
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+
+  serviceWorker.controller = { state: 'activated' };
+  serviceWorker.dispatchEvent(new Event('controllerchange'));
+  assert.equal(await initialization, registration);
+});
+
 test('tar extraction rejects traversal, absolute paths, symlinks, and resource exhaustion', async () => {
   const traversal = packTar([{ path: 'package/../../escape.txt', data: new Uint8Array([1]) }]);
   assert.throws(() => unpackTar(traversal, { stripPrefix: 'package/', targetDir: '/app' }), { code: 'ERR_ARCHIVE_PATH' });

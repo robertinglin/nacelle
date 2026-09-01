@@ -92,15 +92,16 @@ export class Nacelle {
     await registration.update().catch(() => {});
     await browserNavigator.serviceWorker.ready;
     if (!browserNavigator.serviceWorker.controller) {
+      // Direct runtime fetches have a fallback path, but iframe navigations do not.
+      // Do not report gateway readiness until this page is actually controlled.
       await new Promise((resolve) => {
-        let timeout;
         const finish = () => {
-          globalObject.clearTimeout(timeout);
+          if (!browserNavigator.serviceWorker.controller) return;
           browserNavigator.serviceWorker.removeEventListener('controllerchange', finish);
           resolve();
         };
         browserNavigator.serviceWorker.addEventListener('controllerchange', finish);
-        timeout = globalObject.setTimeout(finish, 100);
+        finish();
       });
     }
     return registration;

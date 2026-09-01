@@ -48,6 +48,7 @@ import { createTlsModule } from './runtime/tls.js';
 import { createHttp2Module } from './runtime/http2.js';
 import { createPerformancePrimitives } from './runtime/perf.js';
 import { createWasmContract } from './runtime/wasm.js';
+import { installErrorStackCompatibility } from './runtime/error-stack.js';
 import {
   aesGcmDecrypt,
   aesGcmEncrypt,
@@ -3475,8 +3476,8 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     argv0: options.argv0 ?? 'node',
     env,
     moduleLoadList: [],
-    pid: 1,
-    ppid: 0,
+    pid: options.pid ?? 1,
+    ppid: options.ppid ?? 0,
     debugPort: 9229,
     platform: 'linux',
     arch: 'x64',
@@ -4402,6 +4403,7 @@ export function createRuntime({
   wasmBaseUrl,
 } = {}) {
   const scope = globalObject;
+  installErrorStackCompatibility(scope);
   const legacyVersion = /^(?:node@?|n|v)?\d+(?:\..*)?$/.test(String(version || '')) ? version : null;
   const resolvedProfile = resolveNodeVersionProfile(nodeProfile?.id || nodeVersion || legacyVersion || 'lts');
   let vfs = createVfs();
@@ -6742,6 +6744,8 @@ export function createRuntime({
           return {
             cwd,
             env,
+            pid: 10000 + id,
+            ppid: Number(owner?.pid || 0),
             command: executable,
             commandArgs: (Array.isArray(args) ? args : []).map(String),
             argv: [executable, ...(Array.isArray(args) ? args : [])].map(String),
@@ -7959,6 +7963,8 @@ export function createRuntime({
                 argv,
                 argv0: prepared.argv0,
                 execPath: prepared.command,
+                pid: prepared.pid,
+                ppid: prepared.ppid,
                 env,
                 cwd,
                 abortOnUncaughtException,

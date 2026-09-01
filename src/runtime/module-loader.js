@@ -35,6 +35,12 @@ function decodeStaticString(value) {
     .replace(/\\([\\'"`])/g, '$1');
 }
 
+function stripHashbang(source) {
+  return String(source).replace(/^#![^\r\n]*(?:\r\n|\n|$)/, (hashbang) => (
+    hashbang.endsWith('\n') ? '\n' : ''
+  ));
+}
+
 function isWellFormedString(value) {
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index);
@@ -1403,7 +1409,10 @@ export function createModuleLoader({
       if (isWasmBytes(loaded.source)) return wasmModuleSource(loaded.source, loadedResolved, processOverride);
       const loadedText = sourceText(loaded.source);
       if (loaded.format === 'json') return `export default ${JSON.stringify(JSON.parse(loadedText))};`;
-      if (loaded.format === 'module') return `${bindProcess(await rewriteImportsAsync(loadedText, loadedResolved, processOverride), processOverride)}\n//# sourceURL=${loadedResolved}`;
+      if (loaded.format === 'module') {
+        const moduleText = stripHashbang(loadedText);
+        return `${bindProcess(await rewriteImportsAsync(moduleText, loadedResolved, processOverride), processOverride)}\n//# sourceURL=${loadedResolved}`;
+      }
       return cjsModuleSource(loadedResolved, loadedText, processOverride);
     }
     if (isBuiltinSpecifier(resolved)) return builtinModuleSource(resolved, builtinValue);
@@ -1420,7 +1429,8 @@ export function createModuleLoader({
     if (resolved.endsWith('.json')) return `export default ${JSON.stringify(JSON.parse(sourceText(value)))};`;
     const loadedText = sourceText(value);
     if (moduleFormat(resolved) !== 'module') return cjsModuleSource(resolved, loadedText, processOverride);
-    return `${bindProcess(await rewriteImportsAsync(loadedText, resolved, processOverride), processOverride)}\n//# sourceURL=${resolved}`;
+    const moduleText = stripHashbang(loadedText);
+    return `${bindProcess(await rewriteImportsAsync(moduleText, resolved, processOverride), processOverride)}\n//# sourceURL=${resolved}`;
   };
 
   const moduleURLAsync = async (resolved, processOverride) => {

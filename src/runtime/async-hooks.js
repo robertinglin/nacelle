@@ -866,7 +866,7 @@ export class AsyncResource {
 
 export function createAsyncHooksModule(scope = globalThis) {
   installPromiseHooks();
-  installTaskHooks(scope);
+  if (isBrowserRealm) installTaskHooks(scope);
   return {
     createHook: (callbacks) => new AsyncHook(callbacks),
     executionAsyncId: () => executionId,

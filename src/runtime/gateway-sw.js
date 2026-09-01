@@ -172,7 +172,7 @@ async function handleVirtualRequest(request, { port, routeId = null, version = G
       }));
     }, 15000);
 
-    channel.port1.onmessage = (msgEvent) => {
+    const onResponseMessage = (msgEvent) => {
       const message = msgEvent.data;
       if (!message) return;
 
@@ -204,6 +204,7 @@ async function handleVirtualRequest(request, { port, routeId = null, version = G
         }
       } else if (message.type === 'bnh-vnet-response-end') {
         clearTimeout(timeout);
+        channel.port1.removeEventListener?.('message', onResponseMessage);
         channel.port1.close();
         let totalLen = 0;
         for (const c of bodyChunks) totalLen += c.byteLength;
@@ -229,6 +230,7 @@ async function handleVirtualRequest(request, { port, routeId = null, version = G
         }));
       } else if (message.type === 'bnh-vnet-response-error') {
         clearTimeout(timeout);
+        channel.port1.removeEventListener?.('message', onResponseMessage);
         channel.port1.close();
         resolve(new Response(`Virtual Network Error: ${message.error || 'Connection refused'}`, {
           status: 502,
@@ -236,6 +238,8 @@ async function handleVirtualRequest(request, { port, routeId = null, version = G
         }));
       }
     };
+    channel.port1.addEventListener('message', onResponseMessage);
+    channel.port1.start?.();
 
     targetClient.postMessage({
       type: 'bnh-vnet-request',

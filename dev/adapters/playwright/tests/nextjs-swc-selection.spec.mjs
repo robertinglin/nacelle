@@ -638,12 +638,19 @@ test.describe('Next.js SWC package selection', () => {
       milestones.push('file-written');
       const child = await node.run({ entry: '/node/server.js', timeout: 20000 });
       milestones.push('run-returned');
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      milestones.push('requesting');
-      const response = await Promise.race([
-        node.fetch('http://127.0.0.1:3000/'),
-        new Promise((_, reject) => setTimeout(() => reject(new Error(`request timed out: ${milestones.join(',')}`)), 5000)),
-      ]);
+      const deadline = Date.now() + 5000;
+      let response;
+      while (!response) {
+        milestones.push('requesting');
+        try {
+          response = await node.fetch('http://127.0.0.1:3000/');
+        } catch (error) {
+          if (error?.code !== 'ECONNREFUSED' || Date.now() >= deadline) {
+            throw new Error(`${error.message} (${milestones.join(',')})`);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      }
       const body = await response.text();
       milestones.push('response');
       await Promise.race([child.kill(), new Promise((resolve) => setTimeout(resolve, 1000))]);
@@ -682,11 +689,16 @@ test.describe('Next.js SWC package selection', () => {
         server.listen(3000);
       `);
       const child = await node.run({ entry: '/node/server.js', timeout: 20000 });
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      const response = await Promise.race([
-        node.fetch('http://127.0.0.1:3000/'),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('stream response timed out')), 5000)),
-      ]);
+      const deadline = Date.now() + 5000;
+      let response;
+      while (!response) {
+        try {
+          response = await node.fetch('http://127.0.0.1:3000/');
+        } catch (error) {
+          if (error?.code !== 'ECONNREFUSED' || Date.now() >= deadline) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      }
       const body = await response.text();
       await Promise.race([child.kill(), new Promise((resolve) => setTimeout(resolve, 1000))]);
       return { status: response.status, body };

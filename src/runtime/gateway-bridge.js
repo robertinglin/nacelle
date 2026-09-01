@@ -268,6 +268,7 @@ export function installGatewayBridge({ net, globalObject = globalThis } = {}) {
       if (body && body.byteLength > 0) {
         socket.write(body);
       }
+      responsePort.start?.();
     } catch (err) {
       responsePort.postMessage({
         type: 'bnh-vnet-response-error',

@@ -1,5 +1,6 @@
 import { expect, test } from 'playwright/test';
 import http from 'node:http';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +10,7 @@ const repoRoot = path.resolve(adapterRoot, '../../..');
 const canonicalExample = path.join(repoRoot, 'examples', 'typescript.html');
 const distRoot = path.join(repoRoot, 'dist');
 const srcRoot = path.join(repoRoot, 'src');
+const npmCacheDir = path.join(repoRoot, '.npm_cache');
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -31,9 +33,27 @@ function setIsolationHeaders(response) {
 
 test.describe('TypeScript multi-compiler browser demo', () => {
   test.beforeAll(async () => {
+    await fs.promises.mkdir(npmCacheDir, { recursive: true });
     localServer = http.createServer(async (request, response) => {
       setIsolationHeaders(response);
       const pathname = new URL(request.url, 'http://127.0.0.1').pathname;
+
+      if (pathname.startsWith('/__npm_proxy__/')) {
+        const targetUrl = decodeURIComponent(pathname.slice('/__npm_proxy__/'.length));
+        const cacheKey = crypto.createHash('sha256').update(targetUrl).digest('hex');
+        const cachePath = path.join(npmCacheDir, `${cacheKey}${targetUrl.endsWith('.tgz') ? '.tgz' : '.json'}`);
+        if (fs.existsSync(cachePath)) {
+          response.writeHead(200, { 'Content-Type': targetUrl.endsWith('.tgz') ? 'application/octet-stream' : 'application/json; charset=utf-8' });
+          response.end(await fs.promises.readFile(cachePath));
+          return;
+        }
+        const upstream = await fetch(targetUrl, { headers: { accept: 'application/json, application/octet-stream' } });
+        const bytes = Buffer.from(await upstream.arrayBuffer());
+        await fs.promises.writeFile(cachePath, bytes);
+        response.writeHead(upstream.status, { 'Content-Type': upstream.headers.get('content-type') || 'application/octet-stream' });
+        response.end(bytes);
+        return;
+      }
 
       if (pathname === '/' || pathname === '/typescript.html') {
         const data = await fs.promises.readFile(canonicalExample);
@@ -77,7 +97,10 @@ test.describe('TypeScript multi-compiler browser demo', () => {
     const pageErrors = [];
     page.on('pageerror', (error) => pageErrors.push(error.message));
     page.on('console', (message) => {
-      if (message.type() === 'error') consoleErrors.push(message.text());
+      if (message.type() === 'error') {
+        const location = message.location();
+        consoleErrors.push(`${message.text()} (${location.url})`);
+      }
     });
 
     // 1. Initial Page Load (Node.js Type Stripping Mode)
@@ -107,8 +130,10 @@ test.describe('TypeScript multi-compiler browser demo', () => {
     await expect(status).toHaveText(/compiled via tsc v5.5.4/, { timeout: 25000 });
     await expect(exitStatus).toHaveText('exit 0');
     const tscEmitted = await compiled.textContent();
-    expect(tscEmitted).toContain('Emitted by Microsoft TypeScript Compiler (tsc v5.5.4)');
-    expect(tscEmitted).toContain('Object.defineProperty(exports, "__esModule"');
+    expect(tscEmitted).toMatch(/\bvar user\s*=/);
+    expect(tscEmitted).toContain("require('node:fs')");
+    expect(tscEmitted).not.toContain('interface User');
+    expect(tscEmitted).not.toContain(': User');
     expect(await resultCaption.textContent()).toContain('Ada Lovelace');
 
     // 4. Switch to 3-Way Comparison Matrix Mode
@@ -122,7 +147,7 @@ test.describe('TypeScript multi-compiler browser demo', () => {
 
     await expect(nodeCol).toContainText('Ada Lovelace');
     await expect(viteCol).toContainText('[vite:esbuild]');
-    await expect(tscCol).toContainText('Emitted by Microsoft TypeScript Compiler');
+    await expect(tscCol).toContainText(/\bvar user\s*=/);
 
     // 5. Test Switching Presets (Generics & Enums)
     await page.locator('.btn-preset[data-preset="enums"]').click();

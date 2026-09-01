@@ -87,6 +87,75 @@ test.describe('browser-native VFS and module loading', () => {
     expect(result.stdout).toContain('module resolution completed');
   });
 
+  test('shares and invalidates the CommonJS require cache like Node', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const fs = require('node:fs');
+      const manifestPath = '/node/cache/manifest.json';
+      fs.mkdirSync('/node/cache', { recursive: true });
+      fs.writeFileSync(manifestPath, JSON.stringify({ version: 1 }));
+
+      const first = require(manifestPath);
+      assert.strictEqual(first.version, 1);
+      assert.strictEqual(require.cache[manifestPath].exports, first);
+      assert.ok(Object.values(require.cache).some((module) => module?.filename === manifestPath));
+
+      fs.writeFileSync(manifestPath, JSON.stringify({ version: 2 }));
+      assert.strictEqual(require(manifestPath).version, 1);
+
+      delete require.cache[manifestPath];
+      assert.strictEqual(require.cache[manifestPath], undefined);
+      assert.strictEqual(require(manifestPath).version, 2);
+      process.stdout.write('CommonJS require cache completed');
+    `, { entryPath: '/node/cache/main.cjs' });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('CommonJS require cache completed');
+  });
+
+  test('provides the standard readline line and terminal-control contract', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert/strict');
+        const { PassThrough } = require('node:stream');
+        const readline = require('node:readline');
+        const input = new PassThrough();
+        const outputChunks = [];
+        const output = { write: (chunk) => { outputChunks.push(String(chunk)); return true; } };
+        const interfaceInstance = readline.createInterface({ input, output, terminal: false });
+        const lines = [];
+        interfaceInstance.on('line', (line) => lines.push(line));
+        const closed = new Promise((resolve) => interfaceInstance.once('close', resolve));
+        input.end('first\\r\\nsecond\\nlast');
+        await closed;
+        assert.deepStrictEqual(lines, ['first', 'second', 'last']);
+
+        const iteratorInput = new PassThrough();
+        const iterator = readline.createInterface({ input: iteratorInput, terminal: false });
+        const iteratorLines = (async () => {
+          const values = [];
+          for await (const line of iterator) values.push(line);
+          return values;
+        })();
+        iteratorInput.end('one\\n two\\n');
+        assert.deepStrictEqual(await iteratorLines, ['one', ' two']);
+
+        readline.cursorTo(output, 2, 3);
+        readline.moveCursor(output, -1, 1);
+        readline.clearLine(output, 0);
+        readline.clearScreenDown(output);
+        assert.strictEqual(outputChunks.join(''), '\\u001b[4;3H\\u001b[1D\\u001b[1B\\u001b[2K\\u001b[0J');
+        process.stdout.write('readline contract completed');
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `, { entryPath: '/node/readline/main.cjs' });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('readline contract completed');
+  });
+
   test('reports existing native addons as a Node-style unsupported boundary', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       import assert from 'node:assert/strict';
@@ -139,5 +208,67 @@ test.describe('browser-native VFS and module loading', () => {
 
     await expectPass(expect, result);
     expect(result.stdout).toContain('commonjs native addon boundary completed');
+  });
+
+  test('initializes VFS write streams before readable pipes deliver data', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert/strict');
+        const fs = require('node:fs');
+        const { once, Readable } = require('node:stream');
+        fs.mkdirSync('/node/streams', { recursive: true });
+        const output = fs.createWriteStream('/node/streams/output.txt');
+        assert.ok(output._writableState);
+        assert.strictEqual(output._writableState.defaultEncoding, 'utf8');
+        Readable.from(['native pipe']).pipe(output);
+        await once(output, 'finish');
+        assert.strictEqual(fs.readFileSync('/node/streams/output.txt', 'utf8'), 'native pipe');
+        const constructed = new fs.WriteStream('/node/streams/constructed.txt');
+        assert.ok(constructed._writableState);
+        Readable.from(['constructed pipe']).pipe(constructed);
+        await once(constructed, 'finish');
+        assert.strictEqual(fs.readFileSync('/node/streams/constructed.txt', 'utf8'), 'constructed pipe');
+        process.stdout.write('VFS write stream pipe completed');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `);
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('VFS write stream pipe completed');
+  });
+
+  test('initializes write streams through graceful-fs-style constructor wrappers', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert/strict');
+        const fs = require('node:fs');
+        const { once, Readable } = require('node:stream');
+        fs.mkdirSync('/node/streams', { recursive: true });
+        const NativeWriteStream = fs.WriteStream;
+        function WrappedWriteStream(path, options) {
+          if (this instanceof WrappedWriteStream) {
+            NativeWriteStream.apply(this, arguments);
+            return this;
+          }
+          return WrappedWriteStream.apply(Object.create(WrappedWriteStream.prototype), arguments);
+        }
+        WrappedWriteStream.prototype = Object.create(NativeWriteStream.prototype);
+        WrappedWriteStream.prototype.constructor = WrappedWriteStream;
+        const output = new WrappedWriteStream('/node/streams/wrapped.txt');
+        assert.ok(output._writableState);
+        Readable.from(['wrapped pipe']).pipe(output);
+        await once(output, 'finish');
+        assert.strictEqual(fs.readFileSync('/node/streams/wrapped.txt', 'utf8'), 'wrapped pipe');
+        process.stdout.write('wrapped VFS write stream completed');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `);
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('wrapped VFS write stream completed');
   });
 });

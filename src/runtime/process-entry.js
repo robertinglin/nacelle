@@ -2,6 +2,7 @@ import { createRuntime } from '../runtime.js';
 import { PROCESS_WORKER_SOURCE } from './process-worker.js';
 import { installProcessContract } from './process.js';
 import { resolveNodeVersionProfile } from '../versions/index.js';
+import { createRemoteVirtualNetwork } from './virtual-network.js';
 
 const runtimes = new Map();
 
@@ -42,31 +43,48 @@ export async function runProcessEntry(context) {
   }
   const { profile, runtime } = runtimeFor(descriptor.nodeVersion);
   installProcessContract(context.process, { nodeProfile: profile });
+  context.process.on?.('exit', (code) => context.stderr(`[bnh-entry-exit-debug] code=${code} stack=${new Error().stack}\n`));
+  const remoteVirtualNetwork = context.networkPort
+    ? createRemoteVirtualNetwork({ port: context.networkPort })
+    : null;
+  // Network telemetry uses a control frame, not guest IPC. It cannot affect
+  // the guest's own channel lifecycle or ordering when a process exits.
+  if (descriptor.networkTelemetry !== true) delete context.process.__bnhNetworkEvent;
   await runtime.reset({
     runId: context.process.runId,
     capabilities: descriptor.capabilities,
     proxy: descriptor.proxy,
-    virtualNetwork: descriptor.virtualNetwork,
+    virtualNetwork: remoteVirtualNetwork
+      ? { shared: true, network: remoteVirtualNetwork.network }
+      : descriptor.virtualNetwork,
   });
   await runtime.mount(descriptor.files, { symlinks: descriptor.symlinks });
-  const code = await runtime.executeEntry(
-    descriptor.entry,
-    {
-      processObject: context.process,
-      argv: context.process.argv,
-      execArgv: descriptor.execArgv || [],
-      env: context.process.env,
-      cwd: context.process.cwd(),
-      workerThread: Boolean(descriptor.workerThread),
-      threadId: descriptor.threadId,
-      threadName: descriptor.threadName,
-      workerData: descriptor.workerData,
-      environmentData: descriptor.environmentData,
-      resourceLimits: descriptor.resourceLimits,
-    },
-    (value) => context.stdout(value),
-    (value) => context.stderr(value),
-  );
+  let code;
+  try {
+    code = await runtime.executeEntry(
+      descriptor.entry,
+      {
+        processObject: context.process,
+        argv: context.process.argv,
+        execArgv: descriptor.execArgv || [],
+        env: context.process.env,
+        cwd: context.process.cwd(),
+        workerThread: Boolean(descriptor.workerThread),
+        threadId: descriptor.threadId,
+        threadName: descriptor.threadName,
+        workerData: descriptor.workerData,
+        environmentData: descriptor.environmentData,
+        resourceLimits: descriptor.resourceLimits,
+      },
+      (value) => context.stdout(value),
+      (value) => context.stderr(value),
+    );
+  } catch (error) {
+    context.stderr(`${error?.stack || error}\n`);
+    throw error;
+  } finally {
+    remoteVirtualNetwork?.close();
+  }
   const uncaught = context.process?.__bnhUncaughtException;
   if (uncaught) {
     const error = Object.assign(new Error(String(uncaught.message || uncaught)), {

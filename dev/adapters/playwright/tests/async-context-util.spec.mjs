@@ -89,7 +89,8 @@ test.describe('browser-native async context and util primitives', () => {
           }, 0));
 
           const resource = new AsyncResource('BrowserResource');
-          assert.strictEqual(executionAsyncResource(), rootResource);
+          assert.notStrictEqual(executionAsyncResource(), rootResource);
+          assert.notStrictEqual(executionAsyncResource(), resource);
           resource.runInAsyncScope(() => {
             assert.strictEqual(executionAsyncResource(), resource);
             assert.strictEqual(storage.getStore().name, 'outer');

@@ -1,6 +1,6 @@
 # Security model
 
-Browser Node Harness executes four classes of untrusted code:
+Nacelle Harness executes four classes of untrusted code:
 
 1. upstream Node.js tests;
 2. coding-agent output and any commands the agent runs;

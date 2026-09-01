@@ -1,3 +1,3 @@
-"""Browser Node Harness."""
+"""Nacelle Harness."""
 
 __version__ = "0.1.0"

@@ -121,7 +121,7 @@ async function handleVirtualRequest(request, { port, routeId = null, version = G
   // Find an active window client to forward the request to
   const allClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
   if (!allClients || allClients.length === 0) {
-    return new Response('No active Browser Node Harness page found to handle virtual request', {
+    return new Response('No active Nacelle Harness page found to handle virtual request', {
       status: 502,
       headers: gatewayResponseHeaders({
         'content-type': 'text/plain; charset=utf-8',

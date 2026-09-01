@@ -3,19 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Browser Node Harness — Next.js 14 App Router in Browser</title>
+  <title>Nacelle Harness — Next.js 16 App Router</title>
   <style>
     :root {
       --bg: #090d16;
       --panel: #131b2e;
       --card: #0c1220;
       --border: #233354;
-      --border-light: rgba(255, 255, 255, 0.1);
       --text: #f1f5f9;
       --muted: #94a3b8;
       --accent: #38bdf8;
-      --next-black: #000000;
-      --next-white: #ffffff;
       --success: #4ade80;
       --warning: #facc15;
       --error: #f87171;
@@ -148,6 +145,7 @@
       gap: 12px;
       padding: 12px;
       overflow: hidden;
+      height: calc(100vh - 56px);
     }
     .panel {
       min-height: 0;
@@ -157,6 +155,7 @@
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      height: 100%;
     }
     .panel-header {
       height: 38px;
@@ -173,10 +172,11 @@
     }
     .file-tabs {
       display: flex;
-      gap: 2px;
+      gap: 4px;
       overflow-x: auto;
       height: 100%;
       align-items: flex-end;
+      scrollbar-width: thin;
     }
     .file-tab {
       padding: 6px 12px;
@@ -204,9 +204,11 @@
       display: flex;
       flex-direction: column;
       background: var(--card);
+      overflow: hidden;
     }
     textarea.code-editor {
       flex: 1;
+      min-height: 0;
       width: 100%;
       background: transparent;
       color: #f8fafc;
@@ -219,6 +221,7 @@
       outline: none;
       white-space: pre;
       overflow: auto;
+      scrollbar-width: thin;
     }
     .editor-toolbar {
       padding: 8px 12px;
@@ -229,12 +232,15 @@
       justify-content: space-between;
       font-size: 0.76rem;
       color: var(--muted);
+      flex-shrink: 0;
     }
     .right-split {
       min-height: 0;
       display: grid;
       grid-template-rows: 1.15fr 0.85fr;
       gap: 12px;
+      height: 100%;
+      overflow: hidden;
     }
     .preview-container {
       flex: 1;
@@ -243,6 +249,7 @@
       flex-direction: column;
       background: #ffffff;
       position: relative;
+      overflow: hidden;
     }
     .address-bar {
       height: 38px;
@@ -294,12 +301,16 @@
       display: grid;
       grid-template-columns: 1fr 1fr;
       min-height: 0;
+      height: 100%;
+      overflow: hidden;
     }
     .terminal-col {
       display: flex;
       flex-direction: column;
       min-width: 0;
+      min-height: 0;
       background: #070b14;
+      overflow: hidden;
     }
     .terminal-col + .terminal-col { border-left: 1px solid var(--border); }
     .terminal-title {
@@ -311,13 +322,18 @@
       color: var(--muted);
       text-transform: uppercase;
       letter-spacing: 0.05em;
+      flex-shrink: 0;
     }
     .terminal-body {
       flex: 1;
+      min-height: 0;
       padding: 8px 10px;
       overflow-y: auto;
+      overflow-x: hidden;
       font: 0.75rem/1.4 ui-monospace, monospace;
       white-space: pre-wrap;
+      word-break: break-all;
+      scrollbar-width: thin;
     }
     .stdout-line { color: #38bdf8; }
     .stderr-line { color: #f87171; }
@@ -325,7 +341,7 @@
     .net-line { color: #4ade80; }
 
     @media (max-width: 900px) {
-      main { grid-template-columns: 1fr; overflow-y: auto; }
+      main { grid-template-columns: 1fr; height: auto; overflow-y: auto; }
       body { overflow: auto; }
       .right-split { min-height: 600px; }
     }
@@ -346,7 +362,7 @@
         <a href="/websocket.html">🔌 WebSocket Upgrade</a>
         <a href="/postgres.html">🐘 PostgreSQL Raw TCP</a>
         <a href="/swc-wasm.html">⚡ SWC / ESBuild WASM</a>
-        <a href="/nextjs.html" class="active">⚛️ Next.js App Router</a>
+        <a href="/nextjs.html" class="active">▲ Next.js 16 App Router</a>
         <a href="/vite-react.html">⚛️ Vite + React</a>
         <a href="/npm-lifecycle.html">📦 NPM Postinstall Script</a>
         <a href="/wasm.html">🧩 WASM Subsystem</a>
@@ -355,7 +371,7 @@
       </div>
       <div class="brand">
         ⚡ nacelle
-        <span class="badge">▲ Next.js 14 App Router</span>
+        <span class="badge">▲ Next.js 16 App Router</span>
       </div>
       <span class="status-dot" id="server-status" title="Server Status"></span>
     </div>
@@ -373,10 +389,12 @@
       <div class="panel-header">
         <div class="file-tabs" id="file-tabs">
           <button class="file-tab active" data-file="app/page.tsx">app/page.tsx</button>
+          <button class="file-tab" data-file="app/layout.tsx">app/layout.tsx</button>
           <button class="file-tab" data-file="app/about/page.tsx">app/about/page.tsx</button>
           <button class="file-tab" data-file="app/dashboard/page.tsx">app/dashboard/page.tsx</button>
           <button class="file-tab" data-file="app/api/hello/route.ts">app/api/hello/route.ts</button>
-          <button class="file-tab" data-file="next.config.js">next.config.js</button>
+          <button class="file-tab" data-file="next.config.mjs">next.config.mjs</button>
+          <button class="file-tab" data-file="package.json">package.json</button>
         </div>
         <button class="btn btn-primary" id="btn-apply-code" style="padding: 4px 10px; font-size: 0.74rem;">⚡ Apply &amp; Reload</button>
       </div>
@@ -384,7 +402,7 @@
         <textarea class="code-editor" id="code-editor" spellcheck="false"></textarea>
         <div class="editor-toolbar">
           <span id="file-stats">app/page.tsx — 0 lines</span>
-          <span>In-Browser VFS Node 22 Environment</span>
+          <span>Native Next.js JSX · Nacelle Node 22 · SWC WASM fallback</span>
         </div>
       </div>
     </div>
@@ -397,10 +415,10 @@
           <span style="color: var(--muted); font-size: 0.76rem; font-weight: 700;">URL:</span>
           <input class="address-input" id="url-input" value="/" />
           <div class="quick-routes">
-            <button class="btn-route" onclick="navigateFrame('/')">/</button>
-            <button class="btn-route" onclick="navigateFrame('/about')">/about</button>
-            <button class="btn-route" onclick="navigateFrame('/dashboard')">/dashboard</button>
-            <button class="btn-route" onclick="navigateFrame('/api/hello')">/api/hello</button>
+            <button class="btn-route" data-route="/">/</button>
+            <button class="btn-route" data-route="/about">/about</button>
+            <button class="btn-route" data-route="/dashboard">/dashboard</button>
+            <button class="btn-route" data-route="/api/hello">/api/hello</button>
             <button class="btn btn-primary" id="btn-go" style="padding: 3px 8px; font-size: 0.74rem;">Go</button>
           </div>
         </div>
@@ -424,148 +442,111 @@
   <script type="module">
     import { Nacelle } from '/index.js';
 
-    // Next.js Project File Fixtures
+    // This is a normal Next.js App Router project. Nacelle only supplies the
+    // Node runtime and VFS; Next owns the compiler, renderer, router, and CLI.
     const files = {
-      'app/page.tsx': `// Next.js App Router — Home Page (app/page.tsx)
-import React from 'react';
-
-export default function HomePage() {
-  const timestamp = new Date().toISOString();
-  return (
-    <div style={{ fontFamily: 'system-ui, sans-serif', padding: '32px 24px', maxWidth: '800px', margin: '0 auto', color: '#0f172a' }}>
-      <header style={{ borderBottom: '1px solid #e2e8f0', paddingBottom: '16px', marginBottom: '24px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <span style={{ fontSize: '24px', fontWeight: '800' }}>▲ Next.js 14 App Router</span>
-          <span style={{ background: '#000', color: '#fff', fontSize: '11px', padding: '2px 8px', borderRadius: '12px', fontWeight: '600' }}>In-Browser Node 22</span>
-        </div>
-        <p style={{ margin: '6px 0 0', color: '#64748b', fontSize: '14px' }}>
-          Server-rendered React components and API routes executing entirely in WebAssembly &amp; VFS.
-        </p>
-      </header>
-
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '16px', marginBottom: '24px' }}>
-        <a href="/about" style={{ padding: '16px', borderRadius: '8px', border: '1px solid #cbd5e1', textDecoration: 'none', color: '#0f172a', background: '#f8fafc', display: 'block' }}>
-          <div style={{ fontWeight: '700', fontSize: '15px', marginBottom: '4px' }}>ℹ️ /about &rarr;</div>
-          <div style={{ fontSize: '13px', color: '#64748b' }}>SSR Metadata &amp; Architecture Details</div>
-        </a>
-
-        <a href="/dashboard" style={{ padding: '16px', borderRadius: '8px', border: '1px solid #cbd5e1', textDecoration: 'none', color: '#0f172a', background: '#f8fafc', display: 'block' }}>
-          <div style={{ fontWeight: '700', fontSize: '15px', marginBottom: '4px' }}>📊 /dashboard &rarr;</div>
-          <div style={{ fontSize: '13px', color: '#64748b' }}>Live Interactive Analytics &amp; Metrics</div>
-        </a>
-
-        <a href="/api/hello" style={{ padding: '16px', borderRadius: '8px', border: '1px solid #cbd5e1', textDecoration: 'none', color: '#0f172a', background: '#f8fafc', display: 'block' }}>
-          <div style={{ fontWeight: '700', fontSize: '15px', marginBottom: '4px' }}>⚡ /api/hello &rarr;</div>
-          <div style={{ fontSize: '13px', color: '#64748b' }}>Server Action JSON Endpoint</div>
-        </a>
-      </div>
-
-      <div style={{ background: '#f1f5f9', borderRadius: '8px', padding: '16px', fontSize: '13px', border: '1px solid #e2e8f0' }}>
-        <div style={{ fontWeight: '700', color: '#334155', marginBottom: '6px' }}>⚡ Runtime Diagnostics:</div>
-        <div>Server Render Timestamp: <code>{timestamp}</code></div>
-        <div>Runtime Environment: <code>Browser Node (Nacelle Node 22)</code></div>
-        <div>VFS Mount: <code>/node/app/page.tsx</code></div>
-      </div>
-    </div>
-  );
-}
-`,
-
-      'app/about/page.tsx': `// Next.js App Router — About Page (app/about/page.tsx)
-import React from 'react';
+      'app/layout.tsx': `import type { ReactNode } from 'react';
 
 export const metadata = {
-  title: 'About — Next.js in Browser',
-  description: 'Server Components and Streaming in Browser Node',
+  title: 'Nacelle + Next.js',
+  description: 'Native Next.js JSX running under Nacelle',
 };
 
-export default function AboutPage() {
+export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <div style={{ fontFamily: 'system-ui, sans-serif', padding: '32px 24px', maxWidth: '800px', margin: '0 auto', color: '#0f172a' }}>
-      <a href="/" style={{ fontSize: '13px', color: '#0284c7', textDecoration: 'none', fontWeight: '600' }}>&larr; Back to Home</a>
-      <h1 style={{ fontSize: '22px', fontWeight: '800', marginTop: '12px', marginBottom: '8px' }}>About Next.js In-Browser Engine</h1>
-      <p style={{ color: '#64748b', fontSize: '14px', lineHeight: '1.6' }}>
-        This demonstration proves that Next.js Server Components, App Router layouts, and full-stack API routes can run inside browser WebAssembly without native host subprocesses.
-      </p>
-
-      <div style={{ marginTop: '20px', borderTop: '1px solid #e2e8f0', paddingTop: '16px' }}>
-        <h3 style={{ fontSize: '15px', fontWeight: '700', margin: '0 0 10px' }}>Key Architecture Highlights:</h3>
-        <ul style={{ fontSize: '13px', color: '#334155', lineHeight: '1.8', paddingLeft: '20px', margin: 0 }}>
-          <li><strong>Zero Native Subprocesses:</strong> All Node HTTP servers and Next.js handlers execute inside JavaScript / WASM threads.</li>
-          <li><strong>App Router &amp; Route Matching:</strong> File-system-based routing with automatic route compilation.</li>
-          <li><strong>Integrated API Routes:</strong> Standard <code>NextResponse.json()</code> server endpoints with full streaming capabilities.</li>
-          <li><strong>Cross-Origin Isolation:</strong> Runs alongside COOP/COEP isolation with instant Hot Module updates.</li>
-        </ul>
-      </div>
-    </div>
+    <html lang="en">
+      <body style={{ margin: 0, fontFamily: 'system-ui, sans-serif', color: '#0f172a' }}>
+        {children}
+      </body>
+    </html>
   );
 }
 `,
 
-      'app/dashboard/page.tsx': `// Next.js App Router — Dashboard (app/dashboard/page.tsx)
-import React from 'react';
+      'app/page.tsx': `export default function Page() {
+  return <h1>Hello Next.js!</h1>;
+}
+`,
+
+      'app/about/page.tsx': `export default function AboutPage() {
+  return (
+    <main style={{ maxWidth: 800, margin: '0 auto', padding: '32px 24px' }}>
+      <a href="/">← Back to home</a>
+      <h1>About the Next.js runtime</h1>
+      <p>
+        This route is a real Server Component. There is no createElement wrapper,
+        custom renderer, or replacement server in this project.
+      </p>
+    </main>
+  );
+}
+`,
+
+      'app/dashboard/page.tsx': `const metrics = [
+  ['Router', 'App Router'],
+  ['Compiler', 'Next.js SWC'],
+  ['Source', 'TypeScript + JSX'],
+  ['Runtime', 'Nacelle Node 22'],
+] as const;
 
 export default function DashboardPage() {
-  const metrics = [
-    { label: 'Active Routes', value: '4 routes', delta: '+100%' },
-    { label: 'VFS Memory', value: '1.2 MB', delta: 'Nominal' },
-    { label: 'SSR Latency', value: '< 2ms', delta: 'Zero-overhang' },
-    { label: 'Node Version', value: 'v22.23.2', delta: 'Full Parity' },
-  ];
-
   return (
-    <div style={{ fontFamily: 'system-ui, sans-serif', padding: '32px 24px', maxWidth: '800px', margin: '0 auto', color: '#0f172a' }}>
-      <a href="/" style={{ fontSize: '13px', color: '#0284c7', textDecoration: 'none', fontWeight: '600' }}>&larr; Back to Home</a>
-      <h1 style={{ fontSize: '22px', fontWeight: '800', marginTop: '12px', marginBottom: '8px' }}>📊 Next.js Analytics Dashboard</h1>
-      <p style={{ color: '#64748b', fontSize: '14px', marginBottom: '20px' }}>
-        Real-time telemetry and virtual server status.
-      </p>
-
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px', marginBottom: '24px' }}>
-        {metrics.map((m, idx) => (
-          <div key={idx} style={{ background: '#f8fafc', border: '1px solid #cbd5e1', borderRadius: '8px', padding: '14px' }}>
-            <div style={{ fontSize: '12px', color: '#64748b', fontWeight: '600' }}>{m.label}</div>
-            <div style={{ fontSize: '20px', fontWeight: '800', color: '#0f172a', margin: '4px 0' }}>{m.value}</div>
-            <div style={{ fontSize: '11px', color: '#16a34a', fontWeight: '600' }}>{m.delta}</div>
+    <main style={{ maxWidth: 800, margin: '0 auto', padding: '32px 24px' }}>
+      <a href="/">← Back to home</a>
+          <h1>Next.js runtime diagnostics</h1>
+      <div style={{ display: 'grid', gap: 12, gridTemplateColumns: 'repeat(2, 1fr)' }}>
+        {metrics.map(([label, value]) => (
+          <div key={label} style={{ border: '1px solid #cbd5e1', borderRadius: 8, padding: 14 }}>
+            <div style={{ color: '#64748b', fontSize: 12 }}>{label}</div>
+            <strong>{value}</strong>
           </div>
         ))}
       </div>
-
-      <div style={{ padding: '16px', background: '#0f172a', color: '#f8fafc', borderRadius: '8px', fontSize: '12px', fontFamily: 'monospace' }}>
-        <div style={{ color: '#38bdf8', fontWeight: '700', marginBottom: '4px' }}>[Next.js Server Telemetry]</div>
-        <div>status: 200 OK | port: 3000 | mode: development | engine: nacelle-v22</div>
-      </div>
-    </div>
+    </main>
   );
 }
 `,
 
-      'app/api/hello/route.ts': `// Next.js App Router — API Route (app/api/hello/route.ts)
-import { NextResponse } from 'next/server';
+      'app/api/hello/route.ts': `import { NextResponse } from 'next/server';
 
-export async function GET(request: Request) {
+export function GET(request: Request) {
   return NextResponse.json({
-    status: 'success',
-    message: 'Hello from Next.js 14 App Router running inside Browser Node Harness!',
-    framework: 'Next.js 14.2.5',
-    nodeVersion: process.version || 'v22.23.2',
-    timestamp: new Date().toISOString(),
-    engine: 'Nacelle Browser Runtime',
-    uptimeSeconds: Math.floor(process.uptime ? process.uptime() : 1),
+    message: 'Hello from a native Next.js route',
+    url: request.url,
+    nodeVersion: process.version,
   });
 }
 `,
 
-      'next.config.js': `/** @type {import('next').NextConfig} */
+      'next.config.mjs': `/** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  poweredByHeader: false,
-  env: {
-    APP_NAME: 'Next.js In-Browser',
-  },
 };
 
-module.exports = nextConfig;
+export default nextConfig;
+`,
+
+  'package.json': `{
+  "name": "nextjs-app-router",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --webpack",
+    "build": "next build --webpack",
+    "start": "next start"
+  },
+  "dependencies": {
+    "next": "16.3.3",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/node": "26.4.0",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "typescript": "5.9.3"
+  }
+}
 `,
     };
 
@@ -581,6 +562,7 @@ module.exports = nextConfig;
 
     let currentFile = 'app/page.tsx';
     let node = null;
+    let activeProcess = null;
     let currentMode = 'dev';
 
     codeEditor.value = files[currentFile];
@@ -625,280 +607,146 @@ module.exports = nextConfig;
       termNetwork.scrollTop = termNetwork.scrollHeight;
     }
 
-    // Next.js Server & Module Definitions for In-Browser Execution
-    const nextModuleCode = `const http = require('node:http');
-const fs = require('node:fs');
-const path = require('node:path');
-
-function createNextServer(options = {}) {
-  const dev = options.dev !== false;
-  const dir = options.dir || '/node';
-
-  function renderPage(pathname) {
-    const cleanPath = pathname.split('?')[0];
-    if (cleanPath === '/' || cleanPath === '/index') {
-      return renderComponent('app/page.tsx', 'Next.js 14 App Router');
-    }
-    if (cleanPath === '/about') {
-      return renderComponent('app/about/page.tsx', 'About — Next.js in Browser');
-    }
-    if (cleanPath === '/dashboard') {
-      return renderComponent('app/dashboard/page.tsx', 'Next.js Analytics Dashboard');
-    }
-    if (cleanPath === '/api/hello') {
-      return {
-        type: 'json',
-        data: JSON.stringify({
-          status: 'success',
-          message: 'Hello from Next.js 14 App Router running inside Browser Node Harness!',
-          framework: 'Next.js 14.2.5',
-          nodeVersion: 'v22.23.2',
-          timestamp: new Date().toISOString(),
-          engine: 'Nacelle Browser Runtime',
-          uptimeSeconds: Math.floor(process.uptime ? process.uptime() : 1),
-        }, null, 2),
-      };
-    }
-    return {
-      type: 'html',
-      status: 404,
-      html: '<div style="font-family:system-ui;padding:40px;text-align:center;"><h2>404 — Page Not Found</h2><p><a href="/">Return Home</a></p></div>',
-    };
-  }
-
-  function renderComponent(filePath, title) {
-    let content = '';
-    try {
-      content = fs.readFileSync(path.resolve(dir, filePath), 'utf8');
-    } catch {
-      content = 'Page content not found in VFS: ' + filePath;
+    function logGuestNetwork(event) {
+      if (event?.phase === 'request') {
+        logNetwork(`${event.method} ${event.url} · ${event.transport}`);
+      } else if (event?.phase === 'response') {
+        const size = event.contentLength ? ` · ${event.contentLength} bytes` : '';
+        logNetwork(`${event.status} ${event.url} · ${event.transport}${size}`);
+      } else if (event?.phase === 'error') {
+        logNetwork(`ERROR ${event.method} ${event.url} · ${event.error?.message || 'request failed'}`);
+      } else if (event?.phase === 'cache-hit') {
+        logNetwork(`CACHE HIT ${event.method} ${event.url} · ${event.transport}`);
+      } else if (event?.phase === 'cache-store') {
+        logNetwork(`CACHED ${event.method} ${event.url} · ${event.transport}`);
+      }
     }
 
-    // Dynamic Server Rendering
-    const isDashboard = filePath.includes('dashboard');
-    const isAbout = filePath.includes('about');
-
-    let bodyHtml = '';
-    if (isAbout) {
-      bodyHtml = '<div style="font-family:system-ui,sans-serif;padding:32px 24px;max-width:800px;margin:0 auto;color:#0f172a;">' +
-        '<a href="/" style="font-size:13px;color:#0284c7;text-decoration:none;font-weight:600;">&larr; Back to Home</a>' +
-        '<h1 style="font-size:22px;font-weight:800;margin-top:12px;margin-bottom:8px;">About Next.js In-Browser Engine</h1>' +
-        '<p style="color:#64748b;font-size:14px;line-height:1.6;">This demonstration proves that Next.js Server Components, App Router layouts, and full-stack API routes can run inside browser WebAssembly without native host subprocesses.</p>' +
-        '<div style="margin-top:20px;border-top:1px solid #e2e8f0;padding-top:16px;">' +
-        '<h3 style="font-size:15px;font-weight:700;margin:0 0 10px;">Key Architecture Highlights:</h3>' +
-        '<ul style="font-size:13px;color:#334155;line-height:1.8;padding-left:20px;margin:0;">' +
-        '<li><strong>Zero Native Subprocesses:</strong> All Node HTTP servers and Next.js handlers execute inside JavaScript / WASM threads.</li>' +
-        '<li><strong>App Router &amp; Route Matching:</strong> File-system-based routing with automatic route compilation.</li>' +
-        '<li><strong>Integrated API Routes:</strong> Standard <code>NextResponse.json()</code> server endpoints with full streaming capabilities.</li>' +
-        '<li><strong>Cross-Origin Isolation:</strong> Runs alongside COOP/COEP isolation with instant Hot Module updates.</li>' +
-        '</ul></div></div>';
-    } else if (isDashboard) {
-      bodyHtml = '<div style="font-family:system-ui,sans-serif;padding:32px 24px;max-width:800px;margin:0 auto;color:#0f172a;">' +
-        '<a href="/" style="font-size:13px;color:#0284c7;text-decoration:none;font-weight:600;">&larr; Back to Home</a>' +
-        '<h1 style="font-size:22px;font-weight:800;margin-top:12px;margin-bottom:8px;">📊 Next.js Analytics Dashboard</h1>' +
-        '<p style="color:#64748b;font-size:14px;margin-bottom:20px;">Real-time telemetry and virtual server status.</p>' +
-        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:24px;">' +
-        '<div style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:8px;padding:14px;"><div style="font-size:12px;color:#64748b;font-weight:600;">Active Routes</div><div style="font-size:20px;fontWeight:800;color:#0f172a;margin:4px 0;">4 routes</div><div style="font-size:11px;color:#16a34a;font-weight:600;">+100%</div></div>' +
-        '<div style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:8px;padding:14px;"><div style="font-size:12px;color:#64748b;font-weight:600;">VFS Memory</div><div style="font-size:20px;fontWeight:800;color:#0f172a;margin:4px 0;">1.2 MB</div><div style="font-size:11px;color:#16a34a;font-weight:600;">Nominal</div></div>' +
-        '<div style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:8px;padding:14px;"><div style="font-size:12px;color:#64748b;font-weight:600;">SSR Latency</div><div style="font-size:20px;fontWeight:800;color:#0f172a;margin:4px 0;">&lt; 2ms</div><div style="font-size:11px;color:#16a34a;font-weight:600;">Zero-overhang</div></div>' +
-        '<div style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:8px;padding:14px;"><div style="font-size:12px;color:#64748b;font-weight:600;">Node Version</div><div style="font-size:20px;fontWeight:800;color:#0f172a;margin:4px 0;">v22.23.2</div><div style="font-size:11px;color:#16a34a;font-weight:600;">Full Parity</div></div>' +
-        '</div>' +
-        '<div style="padding:16px;background:#0f172a;color:#f8fafc;border-radius:8px;font-size:12px;font-family:monospace;">' +
-        '<div style="color:#38bdf8;fontWeight:700;margin-bottom:4px;">[Next.js Server Telemetry]</div>' +
-        '<div>status: 200 OK | port: 3000 | mode: development | engine: nacelle-v22</div></div></div>';
-    } else {
-      bodyHtml = '<div style="font-family:system-ui,sans-serif;padding:32px 24px;max-width:800px;margin:0 auto;color:#0f172a;">' +
-        '<header style="border-bottom:1px solid #e2e8f0;padding-bottom:16px;margin-bottom:24px;">' +
-        '<div style="display:flex;align-items:center;gap:8px;"><span style="font-size:24px;font-weight:800;">▲ Next.js 14 App Router</span>' +
-        '<span style="background:#000;color:#fff;font-size:11px;padding:2px 8px;border-radius:12px;font-weight:600;">In-Browser Node 22</span></div>' +
-        '<p style="margin:6px 0 0;color:#64748b;font-size:14px;">Server-rendered React components and API routes executing entirely in WebAssembly &amp; VFS.</p></header>' +
-        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:24px;">' +
-        '<a href="/about" style="padding:16px;border-radius:8px;border:1px solid #cbd5e1;text-decoration:none;color:#0f172a;background:#f8fafc;display:block;"><div style="font-weight:700;font-size:15px;margin-bottom:4px;">ℹ️ /about &rarr;</div><div style="font-size:13px;color:#64748b;">SSR Metadata &amp; Architecture Details</div></a>' +
-        '<a href="/dashboard" style="padding:16px;border-radius:8px;border:1px solid #cbd5e1;text-decoration:none;color:#0f172a;background:#f8fafc;display:block;"><div style="font-weight:700;font-size:15px;margin-bottom:4px;">📊 /dashboard &rarr;</div><div style="font-size:13px;color:#64748b;">Live Interactive Analytics &amp; Metrics</div></a>' +
-        '<a href="/api/hello" style="padding:16px;border-radius:8px;border:1px solid #cbd5e1;text-decoration:none;color:#0f172a;background:#f8fafc;display:block;"><div style="font-weight:700;font-size:15px;margin-bottom:4px;">⚡ /api/hello &rarr;</div><div style="font-size:13px;color:#64748b;">Server Action JSON Endpoint</div></a></div>' +
-        '<div style="background:#f1f5f9;border-radius:8px;padding:16px;font-size:13px;border:1px solid #e2e8f0;">' +
-        '<div style="font-weight:700;color:#334155;margin-bottom:6px;">⚡ Runtime Diagnostics:</div>' +
-        '<div>Server Render Timestamp: <code>' + new Date().toISOString() + '</code></div>' +
-        '<div>Runtime Environment: <code>Browser Node (Nacelle Node 22)</code></div>' +
-        '<div>VFS Mount: <code>/node/' + filePath + '</code></div></div></div>';
-    }
-
-    const html = '<!doctype html><html><head><meta charset="utf-8"><title>' + title + '</title>' +
-      '<meta name="viewport" content="width=device-width,initial-scale=1">' +
-      '<style>body{margin:0;background:#ffffff;}code{background:#e2e8f0;padding:2px 5px;border-radius:4px;font-size:12px;font-family:ui-monospace,monospace;}</style>' +
-      '<script>' +
-      'document.addEventListener("click", function(e) {' +
-      '  var a = e.target.closest("a");' +
-      '  if (a && a.getAttribute("href") && a.getAttribute("href").startsWith("/")) {' +
-      '    e.preventDefault();' +
-      '    var dest = a.getAttribute("href");' +
-      '    window.parent.postMessage({ type: "next-navigate", url: dest }, "*");' +
-      '  }' +
-      '});' +
-      '<\\/script>' +
-      '</head><body>' + bodyHtml + '</body></html>';
-
-    return { type: 'html', status: 200, html };
-  }
-
-  const server = http.createServer((req, res) => {
-    const result = renderPage(req.url || '/');
-    if (result.type === 'json') {
-      res.writeHead(200, {
-        'Content-Type': 'application/json; charset=utf-8',
-        'X-Powered-By': 'Next.js 14.2.5',
-      });
-      res.end(result.data);
-    } else {
-      res.writeHead(result.status || 200, {
-        'Content-Type': 'text/html; charset=utf-8',
-        'X-Powered-By': 'Next.js 14.2.5',
-      });
-      res.end(result.html);
-    }
-  });
-
-  return {
-    listen(port, callback) {
-      return server.listen(port, '127.0.0.1', callback);
-    },
-    close() {
-      return server.close();
-    },
-  };
-}
-
-module.exports = {
-  createNextServer,
-  default: createNextServer,
-};
-`;
-
-    const nextBinCode = `#!/usr/bin/env node
-const http = require('node:http');
-const { createNextServer } = require('next');
-
-const command = process.argv[2] || 'dev';
-const port = parseInt(process.env.PORT || '3000', 10);
-
-console.log('  ▲ Next.js 14.2.5');
-console.log('  - Local:        http://localhost:' + port);
-console.log('  - Environments: .env.local');
-console.log('  - Mode:         ' + (command === 'build' ? 'production build' : command === 'start' ? 'production server' : 'development'));
-
-if (command === 'build') {
-  console.log('✓ Creating an optimized production build...');
-  console.log('✓ Compiled successfully in 180ms');
-  console.log('✓ Emitted routes: / (SSR), /about (Static), /dashboard (SSR), /api/hello (Function)');
-  process.exit(0);
-}
-
-const app = createNextServer({ dev: command === 'dev' });
-app.listen(port, () => {
-  console.log('✓ Ready in 140ms');
-});
-`;
-
-    const nextServerPackage = JSON.stringify({
-      name: 'next',
-      version: '14.2.5',
-      main: 'index.js',
-      bin: { next: './bin/next' },
-    }, null, 2);
-
+    // Global navigation function
     window.navigateFrame = (route = '/') => {
       urlInput.value = route;
       logNetwork(`HTTP GET ${route}`);
       if (node) {
-        node.connectIframe(iframe, { port: 3000, path: route, autoLoad: true });
+        node.connectIframe(iframe, {
+          port: 3000,
+          path: route,
+          autoLoad: true,
+          onNavigate: (address) => {
+            urlInput.value = address;
+            logNetwork(`Navigated to ${address}`);
+          },
+        });
       }
     };
 
-    window.addEventListener('message', (event) => {
-      if (event.data && event.data.type === 'next-navigate' && event.data.url) {
-        window.navigateFrame(event.data.url);
-      }
+    // Quick route buttons
+    document.querySelectorAll('.btn-route').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        window.navigateFrame(btn.dataset.route);
+      });
     });
 
+    // Go button & Enter key
     document.getElementById('btn-go').addEventListener('click', () => {
       window.navigateFrame(urlInput.value.trim() || '/');
     });
-
     urlInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') document.getElementById('btn-go').click();
     });
 
+    async function waitForNextServer(port = 3000) {
+      const deadline = Date.now() + 30000;
+      let lastError;
+      while (Date.now() < deadline) {
+        try {
+          const response = await node.fetch(`http://localhost:${port}/`, { cache: 'no-store' });
+          if (response.ok) return;
+          const body = await response.text();
+          logTerminal(`[bnh-next-probe-debug] status=${response.status} body-tail=${body.slice(-1800)}`, 'stderr');
+          throw new Error(`Next.js returned HTTP ${response.status}: ${body.slice(0, 400)}`);
+        } catch (error) {
+          lastError = error;
+          if (error?.message?.startsWith('Next.js returned HTTP')) throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      throw lastError || new Error(`Next.js did not accept requests on port ${port}`);
+    }
+
     async function launchNextApp(mode = 'dev') {
       currentMode = mode;
       serverStatus.className = 'status-dot loading';
-      logTerminal(`--- Launching Next.js [next ${mode}] ---`, 'system');
+      logTerminal(`--- Booting stock Next.js 16 App Router (${mode}) ---`, 'system');
 
       try {
-        const vfsFiles = {
-          '/node/package.json': JSON.stringify({
-            name: 'nextjs-app',
-            version: '1.0.0',
-            scripts: {
-              dev: 'next dev',
-              build: 'next build',
-              start: 'next start',
+        if (!node) {
+          logTerminal('Creating Nacelle Node 22 runtime...', 'system');
+          node = await Nacelle.create({
+            cwd: '/node',
+            globalObject: window,
+            isolation: 'worker',
+            capabilities: {
+              network: {
+                origins: ['https://registry.npmjs.org'],
+                methods: ['GET', 'HEAD'],
+              },
             },
-          }, null, 2),
-          '/node/node_modules/next/package.json': nextServerPackage,
-          '/node/node_modules/next/index.js': nextModuleCode,
-          '/node/node_modules/next/server.js': nextModuleCode,
-          '/node/node_modules/next/bin/next': nextBinCode,
-          '/node/node_modules/.bin/next': `#!/usr/bin/env node\nrequire('../next/bin/next');\n`,
-        };
+          });
+        }
 
         for (const [filePath, content] of Object.entries(files)) {
-          vfsFiles[`/node/${filePath}`] = content;
+          await node.fs.writeFile(`/node/${filePath}`, content);
         }
-
-        if (!node) {
-          node = await Nacelle.create({
-            globalObject: window,
-            files: vfsFiles,
-          });
-
-          node.connectIframe(iframe, {
-            port: 3000,
-            autoLoad: false,
-            onNavigate: (cleanAddress) => {
-              urlInput.value = cleanAddress;
-              logNetwork(`Navigated to ${cleanAddress}`);
-            },
-          });
-        } else {
-          for (const [p, c] of Object.entries(vfsFiles)) {
-            await node.fs.writeFile(p, c);
-          }
-        }
-
-        if (mode === 'build') {
-          const child = await node.bash('npm run build');
-          const code = await child.exit;
-          const out = await child.stdoutText();
-          const err = await child.stderrText();
-          if (out) logTerminal(out, 'stdout');
-          if (err) logTerminal(err, 'stderr');
-          serverStatus.className = code === 0 ? 'status-dot active' : 'status-dot error';
-          return;
-        }
-
-        // Run next dev or next start
-        const child = await node.bash(`npm run ${mode}`, {
-          onStdout: (data) => logTerminal(data, 'stdout'),
-          onStderr: (data) => logTerminal(data, 'stderr'),
+        logTerminal('Installing stock Next.js dependencies...', 'system');
+        await node.npm.install({
+          onProgress: (event) => {
+            if (event.phase === 'fetching-meta' || event.phase === 'downloading-tarball') {
+              logNetwork(`[NPM] ${event.phase}: GET ${event.url || event.name}`);
+            } else if (event.phase === 'unpacking') {
+              logNetwork(`[NPM] ${event.phase}: ${event.name}@${event.version || ''}`);
+            }
+          },
         });
+        logTerminal('✓ stock Next.js 16 dependencies installed', 'system');
+        if (activeProcess) {
+          try { await activeProcess.kill(); } catch {}
+        }
 
-        // Wait brief tick for server readiness
-        await new Promise((r) => setTimeout(r, 200));
-        serverStatus.className = 'status-dot active';
-        window.navigateFrame(urlInput.value || '/');
+        let booted = false;
+        const onReady = async () => {
+          if (booted) return;
+          try {
+            // Next 16 prints its startup banner before the App Router finishes
+            // creating request handlers. Probe the real virtual port so the
+            // iframe sees the same server a native browser would reach.
+            const nextServerFiles = await node.fs.readdir('/node/.next/dev/server').catch(() => []);
+            logTerminal(`[bnh-next-files-debug] /node/.next/dev/server ${JSON.stringify(nextServerFiles)}`, 'stderr');
+            await waitForNextServer();
+            booted = true;
+            serverStatus.className = 'status-dot active';
+            window.navigateFrame(urlInput.value || '/');
+          } catch (error) {
+            serverStatus.className = 'status-dot error';
+            logTerminal(`Error: name=${error.name || typeof error} message=${error.message || ''} code=${error.code || ''} stack=${error.stack || String(error)}`, 'stderr');
+          }
+        };
+        const processHandle = await node.npm.run(mode, {
+          onNetwork: logGuestNetwork,
+          onStdout: (chunk) => {
+            logTerminal(chunk, 'stdout');
+            if (chunk.includes('Ready in')) setTimeout(onReady, 50);
+          },
+          onStderr: (chunk) => logTerminal(chunk, 'stderr'),
+        });
+        activeProcess = processHandle;
+        processHandle.exit.then(
+          (code) => logTerminal(`[lifecycle-debug] Next process exited code=${code} terminal=${JSON.stringify(processHandle.terminalRecord || processHandle.terminal || null)}`, 'stderr'),
+          (error) => logTerminal(`[lifecycle-debug] Next process failed ${error?.stack || error}`, 'stderr'),
+        );
+        processHandle.on?.('terminal', (record) => logTerminal(`[lifecycle-debug] terminal ${JSON.stringify(record)}`, 'stderr'));
       } catch (err) {
         serverStatus.className = 'status-dot error';
-        logTerminal(`Error: ${err.stack || err.message}`, 'stderr');
+          logTerminal(`Error: name=${err.name || typeof err} message=${err.message || ''} code=${err.code || ''} stack=${err.stack || String(err)}`, 'stderr');
       }
     }
 
@@ -911,7 +759,7 @@ app.listen(port, () => {
       if (node) {
         await node.fs.writeFile(`/node/${currentFile}`, files[currentFile]);
         logNetwork(`Updated /node/${currentFile} in VFS`);
-        await window.navigateFrame(urlInput.value || '/');
+        await launchNextApp(currentMode);
       }
     });
 

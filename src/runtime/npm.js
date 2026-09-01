@@ -6,6 +6,28 @@ function npmSecurityError(code, message) {
   return error;
 }
 
+function platformMatches(rule, value) {
+  if (!rule) return true;
+  const rules = Array.isArray(rule) ? rule.map(String) : [String(rule)];
+  const excluded = rules.some((item) => item.startsWith('!') && item.slice(1) === value);
+  if (excluded) return false;
+  const allowed = rules.filter((item) => !item.startsWith('!'));
+  return allowed.length === 0 || allowed.includes(value);
+}
+
+function packageSupportsPlatform(packageManifest, platform, arch, libc) {
+  return platformMatches(packageManifest?.os, platform)
+    && platformMatches(packageManifest?.cpu, arch)
+    && platformMatches(packageManifest?.libc, libc);
+}
+
+function isBrowserNativePackage(name, platform) {
+  if (platform !== 'browser') return false;
+  const packageName = String(name);
+  return packageName === 'sharp'
+    || /(?:^|-)\b(?:aix|android|darwin|freebsd|linux|openbsd|sunos|win32)\b(?:-|$)/i.test(packageName);
+}
+
 function base64(bytes) {
   let text = '';
   for (let index = 0; index < bytes.length; index += 0x8000) {
@@ -372,6 +394,12 @@ export class BrowserNpm {
     proxyUrl = undefined,
     limits = {},
     lifecycleScripts = false,
+    // The package install target is deliberately not the host-shaped Node
+    // identity. Browser Nacelle cannot execute a native .node addon, so npm
+    // must reject OS-specific optional packages before downloading them.
+    platform = 'browser',
+    arch = 'browser',
+    libc = 'browser',
   } = {}) {
     this.vfs = vfs;
     this.registry = registry.replace(/\/+$/, '');
@@ -400,10 +428,13 @@ export class BrowserNpm {
     this.installed = new Map(); // name -> version
     this.limits = {
       maxEntries: limits.maxEntries ?? 10_000,
-      maxExpandedBytes: limits.maxExpandedBytes ?? 128 * 1024 * 1024,
+      maxExpandedBytes: limits.maxExpandedBytes ?? 256 * 1024 * 1024,
       maxCompressionRatio: limits.maxCompressionRatio ?? 100,
     };
     this.lifecycleScripts = lifecycleScripts === true;
+    this.platform = platform;
+    this.arch = arch;
+    this.libc = libc;
   }
 
   async fetchPackageMetadata(packageName, { onProgress = null } = {}) {
@@ -562,15 +593,22 @@ export class BrowserNpm {
     }
     const specs = Array.isArray(rawSpecs) ? rawSpecs : [rawSpecs];
     const targetNodeModules = nodeModulesDir || (cwd.endsWith('/') ? `${cwd}node_modules` : `${cwd}/node_modules`);
-    const queue = specs.map((spec) => parsePackageSpec(spec));
+    const queue = specs.map((spec) => ({ ...parsePackageSpec(spec), optional: false }));
     const results = [];
     const visited = new Set();
     const filesToMount = {};
 
-    const processItem = async ({ name, range }) => {
+    const processItem = async ({ name, range, optional = false }) => {
       const visitKey = `${name}@${range}`;
       if (visited.has(visitKey) || this.installed.has(name)) return;
       visited.add(visitKey);
+      // Platform-specific optional packages are native delivery variants in
+      // the npm graph. Skip them before metadata/tarball work; Next.js will
+      // select and, when needed, download its own WASM package at runtime.
+      if (isBrowserNativePackage(name, this.platform)) {
+        onProgress?.({ phase: 'optional-skipped', name, range, reason: 'browser-native-addon' });
+        return;
+      }
 
       let versionDoc = null;
       let version = null;
@@ -588,6 +626,10 @@ export class BrowserNpm {
         const resolved = this.resolveVersion(metadata, range);
         version = resolved.version;
         versionDoc = resolved.doc;
+        if (optional && !packageSupportsPlatform(versionDoc, this.platform, this.arch, this.libc)) {
+          onProgress?.({ phase: 'optional-skipped', name, range, reason: 'platform-mismatch' });
+          return;
+        }
         const tarballUrl = versionDoc?.dist?.tarball;
         if (!tarballUrl) throw new Error(`Missing tarball URL for ${name}@${version}`);
         tarballBytes = await this.fetchTarball(tarballUrl, { name, version, integrity: versionDoc?.dist?.integrity, onProgress });
@@ -604,10 +646,11 @@ export class BrowserNpm {
       let pkgFilesCount = 0;
       let pkgTotalBytes = 0;
       let parsedPkgJson = null;
+      const packageFiles = {};
 
       for (const entry of entries) {
         if (entry.type === 'file' && entry.data) {
-          filesToMount[entry.path] = entry.data;
+          packageFiles[entry.path] = entry.data;
           pkgFilesCount += 1;
           pkgTotalBytes += entry.data.byteLength;
 
@@ -619,6 +662,12 @@ export class BrowserNpm {
           }
         }
       }
+
+      if (optional && !packageSupportsPlatform(parsedPkgJson, this.platform, this.arch, this.libc)) {
+        onProgress?.({ phase: 'optional-skipped', name, range, reason: 'platform-mismatch' });
+        return;
+      }
+      Object.assign(filesToMount, packageFiles);
 
       // Link package "bin" scripts into node_modules/.bin/
       if (parsedPkgJson && parsedPkgJson.bin) {
@@ -641,28 +690,54 @@ export class BrowserNpm {
 
       this.installed.set(name, version);
       results.push({ name, version, filesCount: pkgFilesCount, bytes: pkgTotalBytes });
+      onProgress?.({ phase: 'installed', name, version });
 
       if (lifecycleScripts && parsedPkgJson?.scripts && Object.keys(parsedPkgJson.scripts).some((name) => ['preinstall', 'install', 'postinstall'].includes(name))) {
         throw npmSecurityError('ERR_NPM_LIFECYCLE_DENIED', 'npm lifecycle scripts require an explicit, separately sandboxed runner');
       }
 
-      // Enqueue dependencies from versionDoc or unpacked package.json
-      let deps = versionDoc?.dependencies || parsedPkgJson?.dependencies || {};
+      // npm installs ordinary dependencies and the platform-compatible subset
+      // of optionalDependencies. Peer dependencies are resolved by the caller's
+      // dependency graph, as npm does when the peer is already present.
+      const deps = {
+        ...(versionDoc?.dependencies || {}),
+        ...(parsedPkgJson?.dependencies || {}),
+      };
       for (const [depName, depRange] of Object.entries(deps)) {
         if (!this.installed.has(depName)) {
-          queue.push({ name: depName, range: depRange });
+          queue.push({ name: depName, range: depRange, optional: false });
         }
+      }
+      const optionalDeps = {
+        ...(versionDoc?.optionalDependencies || {}),
+        ...(parsedPkgJson?.optionalDependencies || {}),
+      };
+      for (const [depName, depRange] of Object.entries(optionalDeps)) {
+        if (!this.installed.has(depName)) {
+          queue.push({ name: depName, range: depRange, optional: true });
+        }
+      }
+    };
+
+    const processQueueItem = async (item) => {
+      try {
+        await processItem(item);
+      } catch (error) {
+        if (!item.optional) throw error;
+        onProgress?.({ phase: 'optional-failed', name: item.name, range: item.range, error });
       }
     };
 
     while (queue.length > 0) {
       const batch = queue.splice(0, concurrency);
-      await Promise.all(batch.map((item) => processItem(item)));
+      await Promise.all(batch.map(processQueueItem));
     }
 
     // Mount all unpacked files into VFS
     if (this.vfs && typeof this.vfs.mount === 'function') {
+      onProgress?.({ phase: 'mounting', name: 'node_modules', count: Object.keys(filesToMount).length });
       await this.vfs.mount(filesToMount);
+      onProgress?.({ phase: 'mounted', name: 'node_modules', count: Object.keys(filesToMount).length });
     }
 
     return {

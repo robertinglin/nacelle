@@ -1,7 +1,16 @@
 import { expect } from 'playwright/test';
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { browserRuntimeURL, expectPass, test } from './harness-test-helpers.mjs';
 
 test.skip(!browserRuntimeURL, 'set BNH_TEST_URL to a browser runtime harness page');
+
+const zlibWasm = new Uint8Array(await readFile(
+  fileURLToPath(new URL('../../../../src/wasm/v22/zlib.wasm', import.meta.url)),
+));
+const brotliWasm = new Uint8Array(await readFile(
+  fileURLToPath(new URL('../../../../src/wasm/v22/brotli.wasm', import.meta.url)),
+));
 
 test.describe('browser runtime platform primitives', () => {
   test('provides deterministic browser-native node:os methods and constants', async ({ harnessPage }) => {
@@ -101,6 +110,84 @@ test.describe('browser runtime platform primitives', () => {
         process.exitCode = 1;
       });
     `);
+
+    await expectPass(expect, result);
+  });
+
+  test('streams gzip output incrementally through the browser compression stream', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+      const assert = require('node:assert');
+      const zlib = require('node:zlib');
+      const input = Buffer.alloc(16 * 1024 * 1024);
+      let random = 0x12345678;
+      for (let index = 0; index < input.length; index += 1) {
+        random = (Math.imul(random, 1664525) + 1013904223) >>> 0;
+        input[index] = random >>> 24;
+      }
+      const stream = zlib.createGzip();
+      const chunks = [];
+      const errors = [];
+      const ended = new Promise((resolve, reject) => {
+        stream.once('end', resolve);
+        stream.once('error', reject);
+      });
+      stream.on('data', (chunk) => chunks.push(chunk));
+      stream.on('error', (error) => errors.push(error));
+      for (let offset = 0; offset < input.length; offset += 64 * 1024) {
+        const accepted = stream.write(input.subarray(offset, offset + 64 * 1024));
+        if (!accepted) {
+          await new Promise((resolve, reject) => {
+            const onDrain = () => {
+              stream.off('error', onError);
+              resolve();
+            };
+            const onError = (error) => {
+              stream.off('drain', onDrain);
+              reject(error);
+            };
+            stream.once('drain', onDrain);
+            stream.once('error', onError);
+          });
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.strictEqual(errors.length, 0, errors[0]?.stack || 'gzip stream error');
+      assert.ok(chunks.length > 0, 'gzip must produce output before the writable closes');
+      assert.ok(chunks.length <= 128, 'gzip output was split into too many chunks: ' + chunks.length);
+      stream.end();
+      await ended;
+      const compressed = Buffer.concat(chunks);
+      assert.deepStrictEqual([...compressed.subarray(0, 2)], [0x1f, 0x8b]);
+      const decoded = zlib.gunzipSync(compressed);
+      assert.strictEqual(decoded.length, input.length);
+      assert.strictEqual(decoded[0], input[0]);
+      assert.strictEqual(decoded[decoded.length - 1], input[input.length - 1]);
+      const raw = zlib.deflateRawSync(input);
+      const rawDecoded = zlib.inflateRawSync(raw);
+      assert.strictEqual(rawDecoded.length, input.length);
+      assert.strictEqual(rawDecoded[0], input[0]);
+      assert.strictEqual(rawDecoded[rawDecoded.length - 1], input[input.length - 1]);
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, { files: { '/node/internal/deps/zlib.wasm': zlibWasm } });
+
+    await expectPass(expect, result);
+  });
+
+  test('loads the WASI-linked Brotli codec and round trips native zlib calls', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (() => {
+      const assert = require('node:assert');
+      const zlib = require('node:zlib');
+      const input = Buffer.from('browser-native Brotli');
+      const compressed = zlib.brotliCompressSync(input);
+      assert.ok(compressed.length > 0);
+      assert.deepStrictEqual([...zlib.brotliDecompressSync(compressed)], [...input]);
+      })();
+    `, { files: { '/node/internal/deps/brotli.wasm': brotliWasm } });
 
     await expectPass(expect, result);
   });

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Browser Node Harness — SQLite & Drizzle ORM Demo</title>
+  <title>Nacelle Harness — SQLite & Drizzle ORM Demo</title>
   <style>
     :root {
       --bg: #0b1120;
@@ -256,7 +256,7 @@
         <a href="/bash.html">🖥️ Bash Shell</a>
         <a href="/proxy.html">🛡️ Network Proxy</a>
       </div>
-      <span>Browser Node Harness</span>
+      <span>Nacelle Harness</span>
       <span class="badge">Node v22.23.2</span>
     </div>
     <span id="global-status" class="status-pill ready">Ready</span>
@@ -353,10 +353,11 @@
 
     const dbCodeTemplate = `
 const { DatabaseSync } = require('node:sqlite');
-const db = new DatabaseSync(':memory:');
+const { sqliteTable, text, integer } = require('drizzle-orm/sqlite-core');
+const { drizzle } = require('drizzle-orm/better-sqlite3');
 
-// 1. Create Drizzle-style typed table schema
-db.exec(\`
+const rawDb = new DatabaseSync(':memory:');
+rawDb.exec(\`
   CREATE TABLE users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -366,27 +367,64 @@ db.exec(\`
   );
 \`);
 
-// 2. Prepare statements
-const insert = db.prepare('INSERT INTO users (name, email, role, created_at) VALUES (?, ?, ?, ?);');
-const selectAll = db.prepare('SELECT id, name, email, role, created_at FROM users ORDER BY id ASC;');
+const sqlite = {
+  prepare(sql) {
+    const stmt = rawDb.prepare(sql);
+    let isRaw = false;
+    return {
+      run(...params) { return stmt.run(...params); },
+      all(...params) {
+        const rows = stmt.all(...params);
+        if (isRaw) return rows.map(r => Object.values(r));
+        return rows;
+      },
+      get(...params) {
+        const row = stmt.get(...params);
+        if (isRaw && row) return Object.values(row);
+        return row;
+      },
+      values(...params) {
+        const rows = stmt.all(...params);
+        return rows.map(r => Object.values(r));
+      },
+      raw(flag = true) {
+        isRaw = !!flag;
+        return this;
+      }
+    };
+  },
+  exec(sql) { return rawDb.exec(sql); }
+};
+
+const users = sqliteTable('users', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  name: text('name').notNull(),
+  email: text('email').notNull(),
+  role: text('role').notNull().default('Member'),
+  createdAt: integer('created_at').notNull(),
+});
+
+const db = drizzle(sqlite, { schema: { users } });
 
 const now = Date.now();
-insert.run('Alice Adams', 'alice@example.com', 'Admin', now - 60000);
-insert.run('Bob Builder', 'bob@example.com', 'Engineer', now - 30000);
-insert.run('Charlie Brown', 'charlie@example.com', 'Designer', now - 10000);
+db.insert(users).values({ name: 'Alice Adams', email: 'alice@example.com', role: 'Admin', createdAt: now - 60000 }).run();
+db.insert(users).values({ name: 'Bob Builder', email: 'bob@example.com', role: 'Engineer', createdAt: now - 30000 }).run();
+db.insert(users).values({ name: 'Charlie Brown', email: 'charlie@example.com', role: 'Designer', createdAt: now - 10000 }).run();
 
 __EXTRA_INSERTS__
 
-const rows = selectAll.all();
+const rows = db.select().from(users).all();
 console.log(JSON.stringify({ rows, count: rows.length }));
-db.close();
+rawDb.close();
 `;
+
+    let nodeInstance = null;
 
     async function runQuery() {
       let extraCode = '';
       if (window.__addedUsers?.length) {
-        extraCode = window.__addedUsers.map(u => 
-          `insert.run('${u.name}', '${u.email}', '${u.role}', Date.now());`
+        extraCode = window.__addedUsers.map(u =>
+          `db.insert(users).values({ name: '${u.name}', email: '${u.email}', role: '${u.role}', createdAt: Date.now() }).run();`
         ).join('\n');
       }
 
@@ -394,17 +432,22 @@ db.close();
       document.getElementById('code-editor').value = script;
 
       const t0 = performance.now();
-      log('▶ Executing SQLite DatabaseSync query...', 'info');
+      log('▶ Executing Drizzle ORM queries over SQLite...', 'info');
 
       try {
-        const node = await Nacelle.create({
-          gateway: false,
-          files: {
-            '/node/query.js': script
-          }
-        });
+        if (!nodeInstance) {
+          nodeInstance = await Nacelle.create({
+            gateway: false,
+            cwd: '/node',
+          });
+          log('📦 Installing drizzle-orm@0.33.0 from npm...', 'info');
+          await nodeInstance.npm.install('drizzle-orm@0.33.0');
+          log('✓ drizzle-orm ready in VFS', 'success');
+        }
 
-        const child = await node.bash('node query.js');
+        await nodeInstance.fs.writeFile('/node/query.js', script);
+
+        const child = await nodeInstance.bash('node query.js');
         const code = await child.exit;
         const stdout = await child.stdoutText();
         const t1 = performance.now();
@@ -415,7 +458,7 @@ db.close();
         }
 
         const data = JSON.parse(stdout);
-        log(`✅ Query returned ${data.count} rows in ${(t1 - t0).toFixed(1)} ms`, 'success');
+        log(`✅ Drizzle ORM query returned ${data.count} rows in ${(t1 - t0).toFixed(1)} ms`, 'success');
 
         document.getElementById('metric-time').textContent = `${(t1 - t0).toFixed(1)} ms`;
         document.getElementById('metric-rows').textContent = data.count;
@@ -430,7 +473,7 @@ db.close();
             <td>${r.name}</td>
             <td>${r.email}</td>
             <td><span class="badge" style="background: #334155;">${r.role}</span></td>
-            <td style="color: var(--text-muted);">${new Date(r.created_at).toLocaleTimeString()}</td>
+            <td style="color: var(--text-muted);">${new Date(r.createdAt || r.created_at).toLocaleTimeString()}</td>
           `;
           tbody.appendChild(tr);
         });

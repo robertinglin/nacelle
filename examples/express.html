@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Browser Node Harness — Express in Browser Demo</title>
+  <title>Nacelle Harness — Express in Browser Demo</title>
   <style>
     :root {
       --bg: #0b1120;
@@ -654,7 +654,7 @@ const server = app.listen(3000, () => {
       activeAbortController = new AbortController();
       const signal = activeAbortController.signal;
 
-      logTerminal('--- Booting Browser Node Runtime ---', 'system');
+      logTerminal('--- Booting Nacelle Runtime ---', 'system');
 
       if (!node) {
         node = await Nacelle.create({

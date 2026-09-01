@@ -582,7 +582,7 @@ class GitManager:
     def commit_integration(self, message: str) -> str:
         self._git(
             "-c",
-            "user.name=Browser Node Harness",
+            "user.name=Nacelle Harness",
             "-c",
             "user.email=browser-node-harness@localhost",
             "commit",

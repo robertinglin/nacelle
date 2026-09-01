@@ -70,7 +70,7 @@ test("wasm-demo.html loads and verifies all 14 WebAssembly modules in browser", 
   page.on("console", (msg) => browserLogs.push(msg.text()));
 
   await page.goto(serverUrl);
-  await expect(page.locator("header .brand")).toContainText("Browser Node Harness");
+  await expect(page.locator("header .brand")).toContainText("Nacelle Harness");
   await expect(page.locator("#manifest-info")).toContainText("Node v22 Manifest");
 
   // Verify all 14 probes achieve "Ready (200 OK)"

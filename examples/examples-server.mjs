@@ -64,7 +64,16 @@ const server = createServer(async (req, res) => {
     }
 
     if (pathname.startsWith('/__npm_proxy__/')) {
-      const targetUrl = pathname.slice('/__npm_proxy__/'.length);
+      let targetUrl;
+      try {
+        targetUrl = decodeURIComponent(pathname.slice('/__npm_proxy__/'.length));
+        const parsedTarget = new URL(targetUrl);
+        if (!['http:', 'https:'].includes(parsedTarget.protocol)) throw new Error('unsupported protocol');
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end('Invalid NPM proxy target');
+        return;
+      }
       const cacheKey = crypto.createHash('sha256').update(targetUrl).digest('hex');
       const ext = targetUrl.endsWith('.tgz') ? '.tgz' : '.json';
       const cacheFile = path.join(npmCacheDir, `${cacheKey}${ext}`);
@@ -123,7 +132,7 @@ const server = createServer(async (req, res) => {
     if (pathname === '/npm' || pathname === '/npm-lifecycle' || pathname === '/postinstall') pathname = '/npm-lifecycle.html';
 
     const safeRelative = pathname.replace(/^\/+/, '');
-    
+
     // Resolve location: check examples/, src/, and versioned wasm
     let filePath = path.resolve(examplesDir, safeRelative);
     if (!fs.existsSync(filePath)) {
@@ -210,23 +219,23 @@ const targetUrl = process.argv.includes('--wasm')
                               : expressUrl;
 
 console.log('\n======================================================');
-console.log('  🚀 browser-node Examples Server');
+console.log('  🚀 Nacelle Examples Server');
 console.log('======================================================');
 console.log(`\n  Express Example:      \x1b[36m${expressUrl}\x1b[0m`);
 console.log(`  HTTP Client (Brotli): \x1b[36m${httpClientUrl}\x1b[0m`);
-console.log(`  bcrypt N-API WASM:    \x1b[36m${bcryptUrl}\x1b[0m`);
-console.log(`  SQLite & Drizzle ORM: \x1b[36m${sqliteUrl}\x1b[0m`);
-console.log(`  Vitest Test Runner:   \x1b[36m${vitestUrl}\x1b[0m`);
-console.log(`  Webpack 5 Bundler:    \x1b[36m${webpackUrl}\x1b[0m`);
-console.log(`  WebSocket Upgrade:    \x1b[36m${websocketUrl}\x1b[0m`);
-console.log(`  PostgreSQL Raw TCP:   \x1b[36m${postgresUrl}\x1b[0m`);
-console.log(`  SWC / ESBuild WASM:   \x1b[36m${swcUrl}\x1b[0m`);
-console.log(`  Next.js App Router:   \x1b[36m${nextjsUrl}\x1b[0m`);
-console.log(`  NPM Postinstall Hook: \x1b[36m${npmUrl}\x1b[0m`);
+console.log(`  bcryptjs (on NPM):    \x1b[36m${bcryptUrl}\x1b[0m`);
+console.log(`  Drizzle ORM (on NPM): \x1b[36m${sqliteUrl}\x1b[0m`);
+console.log(`  uvu Runner (on NPM):  \x1b[36m${vitestUrl}\x1b[0m`);
+console.log(`  Rollup (on NPM):      \x1b[36m${webpackUrl}\x1b[0m`);
+console.log(`  ws (on NPM):          \x1b[36m${websocketUrl}\x1b[0m`);
+console.log(`  PostgreSQL Wire Proto:\x1b[36m${postgresUrl}\x1b[0m`);
+console.log(`  Type Stripping:       \x1b[36m${swcUrl}\x1b[0m`);
+console.log(`  React SSR (on NPM):   \x1b[36m${nextjsUrl}\x1b[0m`);
+console.log(`  NPM Package Lifecycle:\x1b[36m${npmUrl}\x1b[0m`);
 console.log(`  Vite + React Example: \x1b[36m${viteReactUrl}\x1b[0m`);
 console.log(`  WASM Addon Example:   \x1b[36m${wasmUrl}\x1b[0m\n`);
 console.log(`  Bash Shell Example:   \x1b[36mhttp://127.0.0.1:${port}/bash.html\x1b[0m`);
-console.log(`  TypeScript Example:   \x1b[36mhttp://127.0.0.1:${port}/typescript.html\x1b[0m\n`);
+console.log(`  TypeScript (on NPM):  \x1b[36mhttp://127.0.0.1:${port}/typescript.html\x1b[0m\n`);
 console.log(`  Proxy Config Example: \x1b[36m${proxyUrl}\x1b[0m\n`);
 console.log(`  Target URL:           \x1b[32m${targetUrl}\x1b[0m\n`);
 

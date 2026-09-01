@@ -227,11 +227,12 @@ export function createModuleLoader({
   builtins,
   globalObject = globalThis,
   evaluateCommonJS,
+  resolveBuiltin,
   runModuleHook: sharedRunModuleHook,
   defaultModuleType = 'commonjs',
 } = {}) {
   const registeredHooks = sharedRunModuleHook ? [] : wrapSynchronousLoadHook(builtins?.module);
-  const cache = new Map();
+  const cache = Object.create(null);
   const moduleURLs = new Map();
   const importCache = new Map();
   const nativeSpecifierHints = new Map();
@@ -259,9 +260,45 @@ export function createModuleLoader({
   const builtinName = (specifier) => String(specifier).startsWith('node:')
     ? String(specifier).slice(5)
     : String(specifier);
-  const builtin = (specifier) => {
+  const processIds = new WeakMap();
+  let nextProcessId = 1;
+  const processKey = (processOverride) => {
+    if (!processOverride || (typeof processOverride !== 'object' && typeof processOverride !== 'function')) return '';
+    let id = processIds.get(processOverride);
+    if (id === undefined) {
+      id = nextProcessId++;
+      processIds.set(processOverride, id);
+    }
+    return `-process-${id}`;
+  };
+  const cacheKey = (resolved, processOverride) => `${resolved}\u0000${processKey(processOverride)}`;
+  const sharedNamespace = (resolved, processOverride) => {
+    const entry = globalObject.__BNH_ESM_NAMESPACE_CACHE__?.get?.(resolved);
+    if (entry instanceof Map) return entry.get(processOverride || null);
+    return processOverride ? undefined : entry;
+  };
+  const storeSharedNamespace = (resolved, processOverride, namespace) => {
+    const namespaceCache = globalObject.__BNH_ESM_NAMESPACE_CACHE__;
+    if (!namespaceCache?.set) return;
+    const entry = namespaceCache.get(resolved);
+    if (entry instanceof Map) {
+      entry.set(processOverride || null, namespace);
+      return;
+    }
+    if (!processOverride) {
+      namespaceCache.set(resolved, namespace);
+      return;
+    }
+    const perProcess = new Map();
+    if (entry !== undefined) perProcess.set(null, entry);
+    perProcess.set(processOverride, namespace);
+    namespaceCache.set(resolved, perProcess);
+  };
+  const builtin = (specifier, processOverride) => {
     const name = builtinName(specifier);
     if (!hasBuiltin(name)) return undefined;
+    const overridden = resolveBuiltin?.(name, processOverride);
+    if (overridden !== undefined) return overridden;
     return builtins[name] ?? builtins[`node:${name}`];
   };
   const isBuiltinSpecifier = (specifier) => hasBuiltin(builtinName(specifier));
@@ -588,7 +625,9 @@ export function createModuleLoader({
     if (file) return file;
     const entry = packageEntry(base);
     if (typeof entry === 'string') {
-      const packageFile = fileCandidates(posix.join(base, entry)).find((candidate) => hasFile(candidate));
+      const target = posix.join(base, entry);
+      const packageFile = fileCandidates(target).find((candidate) => hasFile(candidate))
+        || directoryCandidates(target).find((candidate) => hasFile(candidate));
       if (packageFile) return packageFile;
     }
     return directoryCandidates(base).find((candidate) => hasFile(candidate));
@@ -768,7 +807,7 @@ export function createModuleLoader({
     ].join('\n');
   };
 
-  const cjsModuleSource = (resolved, source) => {
+  const cjsModuleSource = (resolved, source, processOverride) => {
     const analysis = cjsExportNames(resolved, source);
     if (analysis.esmSyntax) return `throw new SyntaxError(${quote("Unexpected token 'export'")});`;
     let evaluated = false;
@@ -777,12 +816,12 @@ export function createModuleLoader({
       if (!evaluated) {
         if (resolved.startsWith('custom-')) {
           const module = { exports: {} };
-          const require = (specifier) => evaluate(specifier, resolved);
+          const require = (specifier) => evaluate(specifier, resolved, {}, processOverride);
           const fn = new Function('exports', 'require', 'module', '__filename', '__dirname', source);
           fn(module.exports, require, module, resolved, posix.dirname(resolved));
           exports = module.exports;
         } else {
-          exports = evaluateCommonJS(resolved, resolved);
+          exports = evaluateCommonJS(resolved, resolved, processOverride);
         }
         evaluated = true;
       }
@@ -833,11 +872,11 @@ export function createModuleLoader({
     return isImport ? 'default' : clause.split(',')[0].trim();
   };
 
-  function rewriteSpecifier(specifier, importer, exportName) {
+  function rewriteSpecifier(specifier, importer, exportName, processOverride) {
     specifier = decodeStaticString(specifier);
     const resolved = hookURLToSpecifier(runResolveHooks(specifier, importer).url);
     if (exportName && cjsHasEsmSyntax(resolved)) return invalidCjsModuleURL(specifier, exportName);
-    const url = moduleURL(resolved);
+    const url = moduleURL(resolved, processOverride);
     nativeSpecifierHints.set(url, specifier);
     return url;
   }
@@ -900,7 +939,21 @@ export function createModuleLoader({
     return masked.join('');
   };
 
-  function rewriteImports(source, importer) {
+  const hasTopLevelProcessBinding = (source) => {
+    const masked = maskJavaScriptLiterals(source);
+    return /(?:^|[;\n])\s*(?:export\s+)?(?:const|let|var|function|class)\s+(?:process\b|[({[][^;\n}]*\bprocess\b)/m.test(masked)
+      || /(?:^|[;\n])\s*import\s+(?:process\b|\*\s+as\s+process\b|[^;\n]*\bas\s+process\b|\{[^}\n]*\bprocess\b[^}\n]*\})/m.test(masked);
+  };
+
+  const bindProcess = (source, processOverride) => {
+    if (!processOverride || hasTopLevelProcessBinding(source)) return source;
+    const token = register(() => {
+      return processOverride;
+    });
+    return `const process = globalThis[${quote(registryName)}][${quote(token)}]();\n${source}`;
+  };
+
+  function rewriteImports(source, importer, processOverride) {
     let rewritten = String(source);
     const rewriteStatic = (pattern, exportAware) => {
       const masked = maskJavaScriptLiterals(rewritten);
@@ -918,6 +971,7 @@ export function createModuleLoader({
           specifier,
           importer,
           exportAware ? requestedExportName(prefix) : undefined,
+          processOverride,
         ));
         rewritten = `${rewritten.slice(0, start)}${replacement}${rewritten.slice(start + specifier.length + 2)}`;
       }
@@ -931,7 +985,13 @@ export function createModuleLoader({
       false,
     );
     if (/\bimport\s*\(/.test(rewritten)) {
-      const token = register((dynamicSpecifier, options) => importModule(dynamicSpecifier, importer, {}, options));
+      const token = register((dynamicSpecifier, options) => importModule(
+        dynamicSpecifier,
+        importer,
+        {},
+        options,
+        processOverride,
+      ));
       rewritten = rewritten.replace(/\bimport\s*\(/g, `globalThis[${quote(registryName)}][${quote(token)}](`);
     }
     if (/\bimport\.meta\.resolve\b/.test(rewritten)) {
@@ -963,11 +1023,11 @@ export function createModuleLoader({
     return value.includes(';base64,') ? atob(encoded) : decodeURIComponent(encoded);
   };
 
-  const dataModuleSource = (value) => {
+  const dataModuleSource = (value, processOverride) => {
     const mime = value.slice(5, value.indexOf(',')).split(';', 1)[0].toLowerCase();
     const source = decodeDataBody(value);
     if (mime === 'application/json') return `export default ${JSON.stringify(JSON.parse(source))};`;
-    return `${rewriteImports(source, value)}\n//# sourceURL=${value}`;
+    return `${bindProcess(rewriteImports(source, value, processOverride), processOverride)}\n//# sourceURL=${value}`;
   };
 
   const isWasmBytes = (value) => {
@@ -982,7 +1042,7 @@ export function createModuleLoader({
       && bytes[0] === 0x00 && bytes[1] === 0x61 && bytes[2] === 0x73 && bytes[3] === 0x6d;
   };
 
-  const wasmModuleSource = (value, resolved) => {
+  const wasmModuleSource = (value, resolved, processOverride) => {
     const bytes = value instanceof Uint8Array
       ? value
       : value instanceof ArrayBuffer
@@ -1004,7 +1064,7 @@ export function createModuleLoader({
         alias: `__bnhWasmDependency${index}`,
         moduleName,
         names: [...names],
-        url: moduleURL(dependency),
+        url: moduleURL(dependency, processOverride),
       };
     });
     const importObject = dependencies.length === 0 ? 'undefined' : `{\n${dependencies.map(({ alias, moduleName, names }) => (
@@ -1020,22 +1080,22 @@ export function createModuleLoader({
     ].join('\n');
   };
 
-  function moduleSource(resolved) {
-    const builtinValue = builtin(resolved);
+  function moduleSource(resolved, processOverride) {
+    const builtinValue = builtin(resolved, processOverride);
     const format = isBuiltinSpecifier(resolved) ? 'builtin'
       : resolved.startsWith('data:') ? 'module'
       : resolved.endsWith('.json') ? 'json' : moduleFormat(resolved);
     const loaded = runLoadHooks(resolved, format);
     const loadedResolved = loaded.url ? hookURLToSpecifier(loaded.url) : resolved;
     if (loaded.format === 'builtin' && isBuiltinSpecifier(loadedResolved)) {
-      return builtinModuleSource(loadedResolved, builtin(loadedResolved));
+      return builtinModuleSource(loadedResolved, builtin(loadedResolved, processOverride));
     }
     if (loaded.source !== undefined && loaded.source !== null) {
-      if (isWasmBytes(loaded.source)) return wasmModuleSource(loaded.source, loadedResolved);
+      if (isWasmBytes(loaded.source)) return wasmModuleSource(loaded.source, loadedResolved, processOverride);
       const loadedText = sourceText(loaded.source);
       if (loaded.format === 'json') return `export default ${JSON.stringify(JSON.parse(loadedText))};`;
-      if (loaded.format === 'module') return `${rewriteImports(loadedText, loadedResolved)}\n//# sourceURL=${loadedResolved}`;
-      return cjsModuleSource(loadedResolved, loadedText);
+      if (loaded.format === 'module') return `${bindProcess(rewriteImports(loadedText, loadedResolved, processOverride), processOverride)}\n//# sourceURL=${loadedResolved}`;
+      return cjsModuleSource(loadedResolved, loadedText, processOverride);
     }
     if (isBuiltinSpecifier(resolved)) return builtinModuleSource(resolved, builtinValue);
     if (resolved.startsWith('node:')) {
@@ -1054,7 +1114,7 @@ export function createModuleLoader({
             ? new Uint8Array(fileBytes.buffer, fileBytes.byteOffset || 0, fileBytes.byteLength)
             : new TextEncoder().encode(String(fileBytes || ''));
       if (isWasmModuleBytes(rawBytes)) {
-        return wasmModuleSource(rawBytes, resolved);
+        return wasmModuleSource(rawBytes, resolved, processOverride);
       }
       return nativeAddonModuleSource(resolved);
     }
@@ -1065,35 +1125,38 @@ export function createModuleLoader({
       if (error?.code === 'MODULE_NOT_FOUND') return missingModuleSource(resolved);
       throw error;
     }
-    if (isWasmBytes(value)) return wasmModuleSource(value, resolved);
+    if (isWasmBytes(value)) return wasmModuleSource(value, resolved, processOverride);
     if (resolved.endsWith('.json')) {
       return `export default ${JSON.stringify(JSON.parse(sourceText(value)))};`;
     }
-    if (moduleFormat(resolved) !== 'module') return cjsModuleSource(resolved, sourceText(value));
-    return `${rewriteImports(sourceText(value), resolved)}\n//# sourceURL=${resolved}`;
+    const loadedText = sourceText(value);
+    if (moduleFormat(resolved) !== 'module') return cjsModuleSource(resolved, loadedText, processOverride);
+    return `${bindProcess(rewriteImports(loadedText, resolved, processOverride), processOverride)}\n//# sourceURL=${resolved}`;
   }
 
-  function moduleURL(resolved) {
-    if (moduleURLs.has(resolved)) return moduleURLs.get(resolved);
-    const source = moduleSource(resolved);
+  function moduleURL(resolved, processOverride) {
+    const key = cacheKey(resolved, processOverride);
+    if (moduleURLs.has(key)) return moduleURLs.get(key);
+    const source = moduleSource(resolved, processOverride);
     // Native ESM caches by URL for the lifetime of the browser realm. Give
     // each runtime loader a private fragment so a second virtual child using
     // the same VFS path executes its own module instance.
-    const url = `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}`;
-    moduleURLs.set(resolved, url);
+    const url = `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}${processKey(processOverride)}`;
+    moduleURLs.set(key, url);
     return url;
   }
 
-  const evaluate = (specifier, importer, globals) => {
+  const evaluate = (specifier, importer, globals, processOverride) => {
     const resolved = resolve(specifier, importer, ['node', 'require']);
-    const builtinValue = builtin(resolved);
+    const moduleCacheKey = cacheKey(resolved, processOverride);
+    const builtinValue = builtin(resolved, processOverride);
     if (isBuiltinSpecifier(resolved)) return builtinValue;
     if (resolved.startsWith('node:')) {
       const error = new Error(`Cannot find builtin module '${specifier}'`);
       error.code = 'MODULE_NOT_FOUND';
       throw error;
     }
-    if (resolved.startsWith('data:')) return importData(resolved);
+    if (resolved.startsWith('data:')) return importData(resolved, undefined, processOverride);
     if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) {
       const fileBytes = readFile(resolved);
       const rawBytes = fileBytes instanceof Uint8Array
@@ -1105,26 +1168,26 @@ export function createModuleLoader({
             : new TextEncoder().encode(String(fileBytes || ''));
       if (isWasmModuleBytes(rawBytes)) {
         const exports = loadWasmAddon(rawBytes, { name: posix.basename(resolved, NATIVE_ADDON_EXTENSION) });
-        cache.set(resolved, { exports, id: resolved, filename: resolved, loaded: true });
+        cache[moduleCacheKey] = { exports, id: resolved, filename: resolved, loaded: true };
         return exports;
       }
       unsupportedNativeAddon(resolved);
     }
-    if (cache.has(resolved)) return cache.get(resolved).exports;
+    if (Object.hasOwn(cache, moduleCacheKey)) return cache[moduleCacheKey].exports;
     if (evaluateCommonJS && moduleFormat(resolved) !== 'module' && !resolved.endsWith('.json')) {
-      const exports = evaluateCommonJS(resolved, importer);
-      cache.set(resolved, { exports, id: resolved, filename: resolved, loaded: true });
+      const exports = evaluateCommonJS(resolved, importer, processOverride);
+      cache[moduleCacheKey] = { exports, id: resolved, filename: resolved, loaded: true };
       return exports;
     }
     const rawSource = read(resolved, importer).value;
     const source = sourceText(rawSource);
     const module = { exports: {}, id: resolved, filename: resolved, loaded: false, parent: null, children: [] };
     if (!mainModule) mainModule = module;
-    cache.set(resolved, module);
+    cache[moduleCacheKey] = module;
     if (resolved.endsWith('.json')) module.exports = JSON.parse(source);
     else {
       const dirname = posix.dirname(resolved);
-      const require = (child) => evaluate(child, resolved, globals);
+      const require = (child) => evaluate(child, resolved, globals, processOverride);
       require.resolve = (child) => resolve(child, resolved, ['node', 'require']);
       require.cache = cache;
       require.main = mainModule;
@@ -1133,7 +1196,7 @@ export function createModuleLoader({
       const names = Object.keys(globals || {});
       const fn = new Function('exports', 'require', 'module', '__filename', '__dirname', '__bnhImport', ...names, transformed);
       const result = fn(module.exports, require, module, resolved, dirname,
-        (child, options) => importModule(child, resolved, globals, options),
+        (child, options) => importModule(child, resolved, globals, options, processOverride),
         ...names.map((name) => globals[name]));
       module.promise = result && typeof result.then === 'function' ? result : null;
     }
@@ -1141,7 +1204,7 @@ export function createModuleLoader({
     return module.exports;
   };
 
-  const importData = async (value, options) => {
+  const importData = async (value, options, processOverride) => {
     const comma = value.indexOf(',');
     const mime = value.slice(5, comma < 0 ? value.length : comma).split(';', 1)[0].toLowerCase();
     const attributes = options?.with;
@@ -1178,7 +1241,7 @@ export function createModuleLoader({
       }
       throw packageError('ERR_IMPORT_ATTRIBUTE_TYPE_INCOMPATIBLE', 'Module type attribute is incompatible with JavaScript');
     }
-    return import(moduleURL(value), options);
+    return import(moduleURL(value, processOverride), options);
   };
 
   // Experimental loaders are allowed to provide an asynchronous `load` hook.
@@ -1246,7 +1309,7 @@ export function createModuleLoader({
     return { ...result, url: result.url || url };
   };
 
-  const rewriteImportsAsync = async (source, importer) => {
+  const rewriteImportsAsync = async (source, importer, processOverride) => {
     let rewritten = String(source);
     const patterns = [
       {
@@ -1269,13 +1332,14 @@ export function createModuleLoader({
         const prefix = original[2];
         const quoteOffset = original[0].indexOf(original[3], original[1].length + prefix.length);
         const resolved = hookURLToSpecifier((await runResolveHooksAsync(specifier, importer)).url);
-        const url = await moduleURLAsync(resolved);
+        const url = await moduleURLAsync(resolved, processOverride);
         nativeSpecifierHints.set(url, specifier);
         // Keep the native namespace alongside the generated module URL. A
         // later dynamic import can then reuse the already-instantiated module
         // even when its virtual backing file has been removed meanwhile.
-        if (moduleFormat(resolved) === 'module' && !importCache.has(resolved)) {
-          importCache.set(resolved, import(url));
+        const resolvedKey = cacheKey(resolved, processOverride);
+        if (moduleFormat(resolved) === 'module' && !importCache.has(resolvedKey)) {
+          importCache.set(resolvedKey, import(url));
         }
         if (exportAware && requestedExportName(prefix) && resolved.endsWith('.json')) {
           return {
@@ -1301,7 +1365,7 @@ export function createModuleLoader({
     if (/\bimport\s*\(/.test(rewritten)) {
       const token = register((dynamicSpecifier, options) => {
         const pending = globalObject.process?.__bnhModuleRegistrationPromises;
-        const load = () => importModule(dynamicSpecifier, importer, {}, options);
+        const load = () => importModule(dynamicSpecifier, importer, {}, options, processOverride);
         return pending?.length ? Promise.all([...pending]).then(load) : load();
       });
       rewritten = rewritten.replace(/\bimport\s*\(/g, `globalThis[${quote(registryName)}][${quote(token)}](`);
@@ -1325,22 +1389,22 @@ export function createModuleLoader({
     return rewritten;
   };
 
-  const moduleSourceAsync = async (resolved) => {
-    const builtinValue = builtin(resolved);
+  const moduleSourceAsync = async (resolved, processOverride) => {
+    const builtinValue = builtin(resolved, processOverride);
     const format = isBuiltinSpecifier(resolved) ? 'builtin'
       : /^[A-Za-z][A-Za-z\d+.-]*:/.test(resolved) ? 'module'
       : resolved.endsWith('.json') ? 'json' : moduleFormat(resolved);
     const loaded = await runLoadHooksAsync(resolved, format);
     const loadedResolved = loaded.url ? hookURLToSpecifier(loaded.url) : resolved;
     if (loaded.format === 'builtin' && isBuiltinSpecifier(loadedResolved)) {
-      return builtinModuleSource(loadedResolved, builtin(loadedResolved));
+      return builtinModuleSource(loadedResolved, builtin(loadedResolved, processOverride));
     }
     if (loaded.source !== undefined && loaded.source !== null) {
-      if (isWasmBytes(loaded.source)) return wasmModuleSource(loaded.source, loadedResolved);
+      if (isWasmBytes(loaded.source)) return wasmModuleSource(loaded.source, loadedResolved, processOverride);
       const loadedText = sourceText(loaded.source);
       if (loaded.format === 'json') return `export default ${JSON.stringify(JSON.parse(loadedText))};`;
-      if (loaded.format === 'module') return `${await rewriteImportsAsync(loadedText, loadedResolved)}\n//# sourceURL=${loadedResolved}`;
-      return cjsModuleSource(loadedResolved, loadedText);
+      if (loaded.format === 'module') return `${bindProcess(await rewriteImportsAsync(loadedText, loadedResolved, processOverride), processOverride)}\n//# sourceURL=${loadedResolved}`;
+      return cjsModuleSource(loadedResolved, loadedText, processOverride);
     }
     if (isBuiltinSpecifier(resolved)) return builtinModuleSource(resolved, builtinValue);
     if (resolved.startsWith('node:')) {
@@ -1349,37 +1413,40 @@ export function createModuleLoader({
       throw error;
     }
     if (resolved.startsWith('data:')) {
-      return `${await rewriteImportsAsync(decodeDataBody(resolved), resolved)}\n//# sourceURL=${resolved}`;
+      return `${bindProcess(await rewriteImportsAsync(decodeDataBody(resolved), resolved, processOverride), processOverride)}\n//# sourceURL=${resolved}`;
     }
     const value = read(resolved, resolved).value;
-    if (isWasmBytes(value)) return wasmModuleSource(value, resolved);
+    if (isWasmBytes(value)) return wasmModuleSource(value, resolved, processOverride);
     if (resolved.endsWith('.json')) return `export default ${JSON.stringify(JSON.parse(sourceText(value)))};`;
-    if (moduleFormat(resolved) !== 'module') return cjsModuleSource(resolved, sourceText(value));
-    return `${await rewriteImportsAsync(sourceText(value), resolved)}\n//# sourceURL=${resolved}`;
+    const loadedText = sourceText(value);
+    if (moduleFormat(resolved) !== 'module') return cjsModuleSource(resolved, loadedText, processOverride);
+    return `${bindProcess(await rewriteImportsAsync(loadedText, resolved, processOverride), processOverride)}\n//# sourceURL=${resolved}`;
   };
 
-  const moduleURLAsync = async (resolved) => {
-    if (moduleURLs.has(resolved)) return moduleURLs.get(resolved);
-    if (asyncModuleURLs.has(resolved)) return asyncModuleURLs.get(resolved);
+  const moduleURLAsync = async (resolved, processOverride) => {
+    const key = cacheKey(resolved, processOverride);
+    if (moduleURLs.has(key)) return moduleURLs.get(key);
+    if (asyncModuleURLs.has(key)) return asyncModuleURLs.get(key);
     const promise = (async () => {
-      const source = await moduleSourceAsync(resolved);
-      asyncModuleSources.set(resolved, source);
-      const url = `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}_${moduleSequence++}`;
-      moduleURLs.set(resolved, url);
+      const source = await moduleSourceAsync(resolved, processOverride);
+      asyncModuleSources.set(key, source);
+      const url = `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}_${moduleSequence++}${processKey(processOverride)}`;
+      moduleURLs.set(key, url);
       return url;
     })();
-    asyncModuleURLs.set(resolved, promise);
+    asyncModuleURLs.set(key, promise);
     promise.catch(() => {
-      if (asyncModuleURLs.get(resolved) === promise) asyncModuleURLs.delete(resolved);
+      if (asyncModuleURLs.get(key) === promise) asyncModuleURLs.delete(key);
     });
     return promise;
   };
 
-  const importNative = async (resolved) => {
-    if (!importCache.has(resolved)) {
+  const importNative = async (resolved, processOverride) => {
+    const key = cacheKey(resolved, processOverride);
+    if (!importCache.has(key)) {
       let url;
       try {
-        url = await moduleURLAsync(resolved);
+        url = await moduleURLAsync(resolved, processOverride);
       } catch (error) {
         if (error?.code === 'MODULE_NOT_FOUND') {
           error.code = 'ERR_MODULE_NOT_FOUND';
@@ -1387,8 +1454,8 @@ export function createModuleLoader({
         }
         throw error;
       }
-      importCache.set(resolved, import(url).then((namespace) => {
-        globalObject.__BNH_ESM_NAMESPACE_CACHE__?.set?.(resolved, namespace);
+      importCache.set(key, import(url).then((namespace) => {
+        storeSharedNamespace(resolved, processOverride, namespace);
         return namespace;
       }).catch((error) => {
         if (error?.code === 'MODULE_NOT_FOUND') {
@@ -1405,7 +1472,7 @@ export function createModuleLoader({
         throw error;
       }));
     }
-    return importCache.get(resolved);
+    return importCache.get(key);
   };
 
   const validateImportAttributes = (resolved, options) => {
@@ -1430,32 +1497,34 @@ export function createModuleLoader({
     throw packageError('ERR_IMPORT_ATTRIBUTE_UNSUPPORTED', `Import attribute type "${attributes.type}" is not supported`);
   };
 
-  const importModule = async (specifier, importer, globals, options) => {
+  const importModule = async (specifier, importer, globals, options, processOverride) => {
     const resolvedResult = await runResolveHooksAsync(specifier, importer);
     const resolved = hookURLToSpecifier(resolvedResult.url);
-    if (resolved.startsWith('data:')) return importData(resolved, options);
+    if (resolved.startsWith('data:')) return importData(resolved, options, processOverride);
     if (resolved.startsWith('http:') || resolved.startsWith('https:')) {
       validateImportAttributes(resolved, options);
-      const url = await moduleURLAsync(resolved);
+      const url = await moduleURLAsync(resolved, processOverride);
       return import(url);
     }
     if (!resolved.startsWith('node:') && /^[A-Za-z][A-Za-z\d+.-]*:/.test(resolved)) {
       validateImportAttributes(resolved, options);
-      const url = await moduleURLAsync(resolved);
+      const url = await moduleURLAsync(resolved, processOverride);
       return import(url);
     }
     validateImportAttributes(resolved, options);
     if (resolved.endsWith('.json') && options?.with?.type !== 'json') {
       throw packageError('ERR_IMPORT_ATTRIBUTE_MISSING', 'Module import attribute "type" is required for JSON modules');
     }
-    const moduleMocks = globalObject.process?.__bnhModuleMocks || globalObject.__bnhModuleMocks;
+    const moduleMocks = processOverride?.__bnhModuleMocks
+      || globalObject.process?.__bnhModuleMocks
+      || globalObject.__bnhModuleMocks;
     const moduleMock = moduleMocks?.get(resolved)
       || moduleMocks?.get(resolved.startsWith('node:') ? resolved.slice(5) : undefined);
     if (moduleMock?.active) return moduleMock.getNamespace();
-    const sharedNamespace = globalObject.__BNH_ESM_NAMESPACE_CACHE__?.get?.(resolved);
-    if (sharedNamespace) {
-      if (!Object.hasOwn(sharedNamespace, '__esModule')) return sharedNamespace;
-      const importNamespace = { ...sharedNamespace };
+    const shared = sharedNamespace(resolved, processOverride);
+    if (shared) {
+      if (!Object.hasOwn(shared, '__esModule')) return shared;
+      const importNamespace = { ...shared };
       delete importNamespace.__esModule;
       Object.defineProperty(importNamespace, Symbol.toStringTag, { value: 'Module' });
       return importNamespace;
@@ -1464,21 +1533,22 @@ export function createModuleLoader({
       throw packageError('ERR_UNKNOWN_BUILTIN_MODULE', `No such built-in module: ${resolved.slice(5)}`);
     }
     if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) unsupportedNativeAddon(resolved);
-    if (importCache.has(resolved)) return importCache.get(resolved);
+    const key = cacheKey(resolved, processOverride);
+    if (importCache.has(key)) return importCache.get(key);
     // Native ESM modules are materialized into data URLs before evaluation. Keep
     // using that captured graph on later imports: the backing virtual file may
     // have been removed or replaced after the static import was prepared, but
     // Node's ESM cache is keyed by the module URL rather than fresh file reads.
-    if (asyncModuleSources.has(resolved)) {
-      const source = asyncModuleSources.get(resolved);
-      const url = moduleURLs.get(resolved)
-        || `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}_${moduleSequence++}`;
+    if (asyncModuleSources.has(key)) {
+      const source = asyncModuleSources.get(key);
+      const url = moduleURLs.get(key)
+        || `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}_${moduleSequence++}${processKey(processOverride)}`;
       return import(url);
     }
-    if (isBuiltinSpecifier(resolved) || moduleFormat(resolved) === 'module') return importNative(resolved);
+    if (isBuiltinSpecifier(resolved) || moduleFormat(resolved) === 'module') return importNative(resolved, processOverride);
     let exports;
     try {
-      exports = evaluate(resolved, importer, globals);
+      exports = evaluate(resolved, importer, globals, processOverride);
     } catch (error) {
       if (error?.code === 'ENOENT' || error?.code === 'MODULE_NOT_FOUND') {
         const missing = new Error(`Cannot find module '${specifier}' imported from '${importer}'`);
@@ -1488,13 +1558,13 @@ export function createModuleLoader({
       }
       throw error;
     }
-    const module = cache.get(resolved);
+    const module = cache[key];
     if (module?.promise) await module.promise;
     const namespace = {
       default: exports,
       ...(exports && (typeof exports === 'object' || typeof exports === 'function') ? exports : {}),
     };
-    importCache.set(resolved, namespace);
+    importCache.set(key, namespace);
     return namespace;
   };
 
@@ -1502,8 +1572,8 @@ export function createModuleLoader({
     cache,
     resolve,
     resolveWithHooks: (specifier, importer) => runResolveHooks(specifier, importer),
-    require: (specifier, importer, globals = {}) => evaluate(specifier, importer, globals),
-    import: (specifier, importer = '/node/index.mjs', globals = {}, options) => importModule(specifier, importer, globals, options),
+    require: (specifier, importer, globals = {}, processOverride) => evaluate(specifier, importer, globals, processOverride),
+    import: (specifier, importer = '/node/index.mjs', globals = {}, options, processOverride) => importModule(specifier, importer, globals, options, processOverride),
     syncBuiltinESMExports,
     normalize,
     moduleURL,

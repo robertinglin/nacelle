@@ -54,6 +54,27 @@ const kOutgoingHeaders = Symbol('outgoingHeaders');
 const kOutgoingSocket = Symbol('outgoingSocket');
 const kOutgoingHighWaterMark = Symbol('outgoingHighWaterMark');
 const outgoingMessageState = new WeakMap();
+let httpDebugCount = 0;
+let httpLifecycleDebugCount = 0;
+
+function httpDebug(scope, message) {
+  if (httpDebugCount >= 40) return;
+  httpDebugCount += 1;
+  (scope.process?.stderr || globalThis.process?.stderr)?.write?.(`[bnh-http-debug] ${message}\n`);
+}
+
+function httpLifecycleDebug(scope, message) {
+  if (httpLifecycleDebugCount >= 80) return;
+  httpLifecycleDebugCount += 1;
+  (scope.process?.stderr || globalThis.process?.stderr)?.write?.(`[bnh-http-lifecycle] ${message}\n`);
+}
+
+function rawResponseDebug(response, message) {
+  const request = response?._request;
+  const socket = request?.socket || request?.connection;
+  if (!socket?._server) return;
+  httpLifecycleDebug(response._scope, `raw url=${request.url} ${message}`);
+}
 
 const METHODS = Object.freeze([
   'GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'CONNECT', 'TRACE',
@@ -1906,7 +1927,10 @@ class VirtualServerResponse extends Writable {
         if (responseSocket && typeof responseSocket._bytesWritten === 'number') {
           responseSocket._bytesWritten += chunk.byteLength;
         }
-        schedule(scope, callback);
+        schedule(scope, () => {
+          rawResponseDebug(this, `write-callback bytes=${chunk.byteLength}`);
+          callback();
+        });
       },
       final(callback) {
         this._finalizeResponse(callback);
@@ -1931,6 +1955,10 @@ class VirtualServerResponse extends Writable {
     this._flushResponse = flush;
     this._headersFlushed = false;
     this._completedResponse = false;
+    this.on('prefinish', () => rawResponseDebug(this, 'prefinish'));
+    this.on('finish', () => rawResponseDebug(this, 'finish'));
+    this.on('close', () => rawResponseDebug(this, 'close'));
+    this.on('error', (error) => rawResponseDebug(this, `error=${error?.code || error?.message || error}`));
   }
 
   setHeader(name, value) {
@@ -1971,6 +1999,7 @@ class VirtualServerResponse extends Writable {
     else this.statusMessage ||= STATUS_CODES[this.statusCode] || 'unknown';
     for (const [name, value] of headerEntries(headers)) this.setHeader(name, value);
     this.headersSent = true;
+    rawResponseDebug(this, `writeHead status=${this.statusCode}`);
     return this;
   }
 
@@ -2061,15 +2090,18 @@ class VirtualServerResponse extends Writable {
       statusMessage: this.statusMessage,
       headers: this.getHeaders(),
     });
+    rawResponseDebug(this, `flushHeaders status=${this.statusCode} body=${Boolean(this._responseBody)}`);
     return this;
   }
 
   write(...args) {
+    rawResponseDebug(this, `write args=${args.length} ended=${this.writableEnded}`);
     this.flushHeaders();
     return Writable.prototype.write.apply(this, args);
   }
 
   end(...args) {
+    rawResponseDebug(this, `end args=${args.length} ended=${this.writableEnded}`);
     this.headersSent = true;
     return Writable.prototype.end.apply(this, args);
   }
@@ -2090,6 +2122,7 @@ class VirtualServerResponse extends Writable {
     this._completedResponse = true;
     const body = concatenate(this._chunks);
     const responseBody = this._request.method === 'HEAD' ? new Uint8Array() : body;
+    rawResponseDebug(this, `finalize status=${this.statusCode} bytes=${responseBody.byteLength}`);
     this._completeResponse({
       statusCode: this.statusCode,
       statusMessage: this.statusMessage,
@@ -2238,6 +2271,7 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
   }
 
   function writeRawResponse(socket, result) {
+    httpDebug(scope, `write-raw-response status=${result.statusCode} bytes=${result.body?.byteLength || 0}`);
     const headers = { ...result.headers };
     if (!Object.keys(headers).some((name) => name.toLowerCase() === 'content-length')) {
       headers['content-length'] = String(result.body?.byteLength || 0);
@@ -2253,6 +2287,13 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
   }
 
   function attachRawSocket(binding, socket) {
+    httpDebug(scope, `attach-raw-socket data-listeners=${socket?.listenerCount?.('data') || 0} flowing=${socket?.readableFlowing}`);
+    globalThis.__bnhGatewayLogs?.push?.({
+      type: 'http-attach-raw-socket',
+      listeners: socket?.listenerCount?.('data'),
+      flowing: socket?.readableFlowing,
+      server: Boolean(socket?._server),
+    });
     let input = new Uint8Array();
     let endedByPeer = false;
     let tunnelStarted = false;
@@ -2268,9 +2309,11 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
     async function drain() {
       if (processing) return;
       processing = true;
+      httpDebug(scope, `raw-drain queue=${queue.length}`);
       try {
         while (queue.length) {
           const requestData = queue.shift();
+          httpDebug(scope, `raw-request method=${requestData.method} url=${requestData.url}`);
           if (requestData.connect) {
             const request = new VirtualServerRequest(requestData.url, requestData.init, scope, BufferClass);
             request.url = requestData.target;
@@ -2279,8 +2322,11 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
             tunnelStarted = true;
             schedule(scope, () => {
               try {
+                httpDebug(scope, `raw-dispatch method=${requestData.method} url=${requestData.url}`);
                 const head = nodeChunk(requestData.head, scope, BufferClass);
-                const handled = binding.server.emit('connect', request, socket, head);
+                const handled = binding.server._runInOwnerContext(
+                  () => binding.server.emit('connect', request, socket, head),
+                );
                 if (!handled && !socket.destroyed) {
                   socket.end('HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n');
                 }
@@ -2298,7 +2344,9 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
             schedule(scope, () => {
               try {
                 const head = nodeChunk(new Uint8Array(), scope, BufferClass);
-                const handled = binding.server.emit('upgrade', request, socket, head);
+                const handled = binding.server._runInOwnerContext(
+                  () => binding.server.emit('upgrade', request, socket, head),
+                );
                 if (!handled && !socket.destroyed) {
                   socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
                 }
@@ -2314,6 +2362,7 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
             request.connection = socket;
             const response = new VirtualServerResponse(request, scope, BufferClass, (result) => {
               try {
+                rawResponseDebug(response, `complete-callback status=${result.statusCode} bytes=${result.body?.byteLength || 0}`);
                 writeRawResponse(socket, result);
                 resolve();
               } catch (error) {
@@ -2324,7 +2373,11 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
               try {
                 const beginFn = request.begin || VirtualServerRequest.prototype.begin;
                 if (typeof beginFn === 'function') beginFn.call(request);
-                binding.server._runInOwnerContext(() => binding.server.emit('request', request, response));
+                httpDebug(scope, `raw-dispatch method=${requestData.method} url=${requestData.url}`);
+                const handled = binding.server._runInOwnerContext(() => request._runInAsyncScope(
+                  () => binding.server.emit('request', request, response),
+                ));
+                rawResponseDebug(response, `dispatch-return handled=${handled} finished=${response.writableFinished} ended=${response.writableEnded}`);
               } catch (error) {
                 globalThis.__bnhGatewayLogs?.push?.({ type: 'drain-emit-error', message: error?.message, stack: error?.stack });
                 reject(error);
@@ -2346,6 +2399,7 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
     socket.on('data', (chunk) => {
       if (tunnelStarted) return;
       try {
+        httpDebug(scope, `raw-data bytes=${chunk.byteLength}`);
         globalThis.__bnhGatewayLogs?.push?.({ type: 'http-raw-socket-data', len: chunk.byteLength });
         input = appendBytes(input, toBytes(chunk, scope));
         while (true) {
@@ -2363,7 +2417,7 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
         void drain();
       } catch (error) {
         globalThis.__bnhGatewayLogs?.push?.({ type: 'http-raw-socket-error', message: error.message, stack: error.stack });
-        binding.server.emit('clientError', error, socket);
+        binding.server._runInOwnerContext(() => binding.server.emit('clientError', error, socket));
         if (!socket.destroyed) socket.destroy();
       }
     });
@@ -2402,8 +2456,19 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
     const binding = { server, protocol, host, port, rawServer: null, closed: false };
     bindings.push(binding);
     if (netModule?.createServer) {
-      binding.rawServer = netModule.createServer({ allowHalfOpen: true }, (socket) => attachRawSocket(binding, socket));
-      binding.rawServer.on?.('error', (error) => server.emit('error', error));
+      binding.rawServer = netModule.createServer(
+        { allowHalfOpen: true },
+        (socket) => {
+          httpDebug(scope, `raw-connection data-listeners=${socket?.listenerCount?.('data') || 0} server=${Boolean(socket?._server)}`);
+          globalThis.__bnhGatewayLogs?.push?.({
+            type: 'http-raw-connection',
+            listeners: socket?.listenerCount?.('data'),
+            server: Boolean(socket?._server),
+          });
+          return server._runInOwnerContext(() => attachRawSocket(binding, socket));
+        },
+      );
+      binding.rawServer.on?.('error', (error) => server._runInOwnerContext(() => server.emit('error', error)));
       binding.rawServer.listen(port, host);
       if (server._unrefRequested) binding.rawServer.unref?.();
     }
@@ -2586,7 +2651,7 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
           // incoming-message resource before dispatching it so
           // executionAsyncResource() and continuation-local state survive
           // both timers and native async-function awaits.
-          request._runInAsyncScope(() => binding.server._runInOwnerContext(
+          binding.server._runInOwnerContext(() => request._runInAsyncScope(
             () => binding.server.emit('request', request, response),
           ));
           request.begin();
@@ -2762,14 +2827,17 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask, ow
       this.maxHeadersCount = null;
       this._bound = null;
       this._tcpResource = null;
-      this._ownerProcess = scope.process || ownerProcess;
       this._taskRelease = null;
       this._taskTracker = trackTask;
       this._unrefRequested = false;
       this._closeRequested = false;
       this._closeEmitted = false;
       this._connections = 0;
-      this._ownerProcess = scope.process || ownerProcess || null;
+      // The compatibility module is created while the child is executing, but
+      // Next can construct its HTTP server later from an async callback after
+      // the child execution frame has been restored. The explicit module
+      // owner is the stable process identity for that entire server lifetime.
+      this._ownerProcess = ownerProcess || scope.process || null;
       if (this._ownerProcess) {
         this._ownerProcess._bnhHttpServers ||= new Set();
         this._ownerProcess._bnhHttpServers.add(this);
@@ -2822,6 +2890,7 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask, ow
           this._bound = bound;
           this._tcpResource = new AsyncResource('TCPSERVERWRAP');
           this._taskRelease = this._unrefRequested ? null : trackTask?.() || null;
+          httpDebug(scope, `server-listen pid=${this._ownerProcess?.pid || ''} tracked=${Boolean(this._taskRelease)} servers=${this._ownerProcess?._bnhHttpServers?.size || 0}`);
           this._closeRequested = false;
           this._closeEmitted = false;
           this[kConnectionsCheckingInterval]._destroyed = false;

@@ -6,7 +6,7 @@ const html = `<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Browser Node Harness — Node v22 WASMs Live Demo</title>
+  <title>Nacelle Harness — Node v22 WASMs Live Demo</title>
   <style>
     :root {
       --bg: #0b1120;
@@ -223,7 +223,7 @@ const html = `<!doctype html>
 
   <header>
     <div class="brand">
-      <span>⚡ Browser Node Harness</span>
+      <span>⚡ Nacelle Harness</span>
       <span class="badge">Node.js v22 WASMs</span>
     </div>
     <div class="controls">

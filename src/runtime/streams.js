@@ -721,7 +721,9 @@ export class Readable extends EventEmitter {
       this._readableState.readableListening = true;
       this._readableState.needReadable = true;
     }
-    if (name === 'data') this._readableState.dataListening = true;
+    if (name === 'data') {
+      this._readableState.dataListening = true;
+    }
     if (name === 'data') this.resume();
     if (name === 'readable' && !this._flowing) {
       if (!this._ended && (this.readableHighWaterMark === 0
@@ -1094,15 +1096,17 @@ export class Readable extends EventEmitter {
   _scheduleFlowDrain() {
     if (this._flowDrainScheduled) return;
     this._flowDrainScheduled = true;
-    queueMicrotask(() => {
+    const drain = () => {
       this._flowDrainScheduled = false;
       if (!this._flowing || (this._destroyed && !this._error)) return;
       while (this._flowing && this._buffer.length) {
-        this.emit('data', this.read(this.readableHighWaterMark));
+        const chunk = this.read();
+        this.emit('data', chunk);
       }
       this._maybeEmitEnd();
       if (this._flowing && !this._ended && !this._reading) this._readOnce();
-    });
+    };
+    queueMicrotask(drain);
   }
 
   resume() {
@@ -1114,7 +1118,7 @@ export class Readable extends EventEmitter {
     if (this._resumeScheduled) return this;
     this._resumeScheduled = true;
     this._readableState.resumeScheduled = true;
-    queueMicrotask(() => {
+    const resume = () => {
       this._resumeScheduled = false;
       this._readableState.resumeScheduled = false;
       if (!this._flowing || this._destroyed) return;
@@ -1122,14 +1126,18 @@ export class Readable extends EventEmitter {
         this._resumePending = false;
         this.emit('resume');
       }
-      while (this._flowing && this._buffer.length) this.emit('data', this.read(this.readableHighWaterMark));
+      while (this._flowing && this._buffer.length) {
+        const chunk = this.read();
+        this.emit('data', chunk);
+      }
       this._maybeEmitEnd();
       while (this._flowing && !this._ended && !this._reading) {
         this._readProduced = false;
         this._readOnce();
         if (!this._readProduced) break;
       }
-    });
+    };
+    queueMicrotask(resume);
     return this;
   }
 
@@ -1196,7 +1204,9 @@ export class Readable extends EventEmitter {
         this.pause();
       }
     };
-    const onEnd = () => destination.end();
+    const onEnd = () => {
+      destination.end();
+    };
     const onDrain = () => {
       this._blockedPipes.delete(destination);
       if (this._blockedPipes.size === 0) this.resume();
@@ -1289,7 +1299,12 @@ export class Readable extends EventEmitter {
 
   _maybeEmitEnd() {
     if (this._ended && !this._buffer.length && !this._endEmitted && !this._destroyed) {
-      if (!this._flowing && this.listenerCount('readable') && !this._readableDispatching) {
+      // A readable listener delays end until buffered data is consumed, but it
+      // must not delay end once the buffer is empty. Consumers such as Next's
+      // pull loops remove both wait listeners while reading the final chunk,
+      // then attach them again after observing readableEnded === false.
+      if (!this._flowing && this.listenerCount('readable') && !this._readableDispatching
+        && !this.listenerCount('end')) {
         this._scheduleReadable();
         return;
       }
@@ -2160,8 +2175,13 @@ class WritableImpl extends EventEmitter {
       size = 1;
     } else {
       try {
+        const writeState = this._writableState;
+        const writeStateAgain = this._writableState;
+        if (!writeState || !writeStateAgain || writeState !== writeStateAgain) {
+          throw new TypeError('Writable state missing');
+        }
         const selectedEncoding = encoding === undefined || encoding === null
-          ? this._writableState.defaultEncoding
+          ? writeState.defaultEncoding
           : encoding === 'buffer' ? encoding : normalizeWritableEncoding(encoding);
         if (typeof chunk === 'string' && !this.decodeStrings) {
           bytes = chunk;
@@ -2490,10 +2510,6 @@ Writable.WritableState.prototype.getBuffer = function getBuffer() {
 Object.defineProperty(Writable.WritableState.prototype, 'bufferedRequestCount', {
   configurable: true,
   get() { return this.buffered?.length || 0; },
-});
-Object.defineProperty(Writable, Symbol.hasInstance, {
-  configurable: true,
-  value(value) { return Boolean(value && value._writableState); },
 });
 defineAsyncDispose(Writable.prototype);
 

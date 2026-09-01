@@ -589,6 +589,10 @@ if (typeof globalThis.window === 'object' || typeof globalThis.document === 'obj
 // constructor for core modules that use FunctionPrototypeCall.
 export function EventEmitter(...args) {
   if (new.target) {
+    if (new.target.name === 'WriteStream') {
+      globalThis.process?.stderr?.write?.(`[bnh-event-debug] WriteStream super target=${String(new.target).slice(0, 500)} `
+        + `protoKeys=${Object.getOwnPropertyNames(new.target.prototype || {}).join(',')}\n`);
+    }
     const emitter = new BrowserEventEmitter(...args);
     if (new.target.prototype && new.target.prototype !== BrowserEventEmitter.prototype) {
       Object.setPrototypeOf(emitter, new.target.prototype);

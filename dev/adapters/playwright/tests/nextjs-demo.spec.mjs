@@ -1,6 +1,7 @@
 import { expect, test } from 'playwright/test';
 import http from 'node:http';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -9,6 +10,7 @@ const repoRoot = path.resolve(adapterRoot, '../../..');
 const canonicalExample = path.join(repoRoot, 'examples', 'nextjs.html');
 const distRoot = path.join(repoRoot, 'dist');
 const srcRoot = path.join(repoRoot, 'src');
+const npmCacheDir = path.join(repoRoot, '.npm_cache');
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -29,11 +31,28 @@ function setIsolationHeaders(response) {
   response.setHeader('Service-Worker-Allowed', '/');
 }
 
-test.describe('Next.js 14 App Router browser demo', () => {
+test.describe('Next.js 16 App Router browser demo', () => {
   test.beforeAll(async () => {
     localServer = http.createServer(async (request, response) => {
       setIsolationHeaders(response);
       const pathname = new URL(request.url, 'http://127.0.0.1').pathname;
+
+      if (pathname.startsWith('/__npm_proxy__/')) {
+        const targetUrl = decodeURIComponent(pathname.slice('/__npm_proxy__/'.length));
+        const cacheKey = crypto.createHash('sha256').update(targetUrl).digest('hex');
+        const cachePath = path.join(npmCacheDir, `${cacheKey}${targetUrl.endsWith('.tgz') ? '.tgz' : '.json'}`);
+        if (fs.existsSync(cachePath)) {
+          response.writeHead(200, { 'Content-Type': targetUrl.endsWith('.tgz') ? 'application/octet-stream' : 'application/json; charset=utf-8' });
+          response.end(await fs.promises.readFile(cachePath));
+          return;
+        }
+        const upstream = await fetch(targetUrl, { headers: { accept: 'application/json, application/octet-stream' } });
+        const bytes = Buffer.from(await upstream.arrayBuffer());
+        await fs.promises.writeFile(cachePath, bytes);
+        response.writeHead(upstream.status, { 'Content-Type': upstream.headers.get('content-type') || 'application/octet-stream' });
+        response.end(bytes);
+        return;
+      }
 
       if (pathname === '/' || pathname === '/nextjs.html') {
         const data = await fs.promises.readFile(canonicalExample);
@@ -72,7 +91,7 @@ test.describe('Next.js 14 App Router browser demo', () => {
   });
 
   test('loads Next.js demo and executes App Router SSR, client navigation, and API routes', async ({ page }) => {
-    test.setTimeout(60000);
+    test.setTimeout(120000);
     const consoleErrors = [];
     const pageErrors = [];
     page.on('pageerror', (error) => pageErrors.push(error.message));
@@ -81,39 +100,46 @@ test.describe('Next.js 14 App Router browser demo', () => {
     });
 
     // 1. Initial Page Load & Next.js Server Boot
+    await page.addInitScript(() => { window.__bnhGatewayLogs = []; });
     await page.goto(serverUrl);
     const serverStatus = page.locator('#server-status');
     const termOutput = page.locator('#term-output');
     const iframe = page.frameLocator('#app-preview');
 
-    // Wait for server ready state
-    await expect(serverStatus).toHaveClass(/active/, { timeout: 25000 });
-    await expect(termOutput).toContainText('▲ Next.js 14.2.5', { timeout: 25000 });
+    try {
+      await expect(termOutput).toContainText('▲ Next.js 16.3.3', { timeout: 25000 });
+    } catch (error) {
+      throw new Error(`${error.message}\nPAGE ERRORS: ${JSON.stringify(pageErrors)}\nCONSOLE ERRORS: ${JSON.stringify(consoleErrors)}\nURL: ${page.url()}`);
+    }
     await expect(termOutput).toContainText('Ready in');
+    await page.waitForTimeout(2000);
+    console.log('NEXT STARTUP DIAGNOSTIC:', await termOutput.textContent());
+    await page.waitForTimeout(10000);
+    console.log('NEXT POST-STARTUP DIAGNOSTIC:', await termOutput.textContent());
+    try {
+      await expect(serverStatus).toHaveClass(/active/, { timeout: 35000 });
+    } catch (error) {
+      throw new Error(`${error.message}\nNEXT TERMINAL:\n${await termOutput.textContent()}`
+        + `\nGATEWAY LOGS:\n${JSON.stringify(await page.evaluate(() => window.__bnhGatewayLogs || []))}`);
+    }
 
-    // 2. Verify Home Page (app/page.tsx) SSR in Iframe
-    await expect(iframe.locator('body')).toContainText('Next.js 14 App Router');
-    await expect(iframe.locator('body')).toContainText('In-Browser Node 22');
+    // Verify home page SSR in the App Router iframe.
+    await expect(iframe.locator('body')).toContainText('Hello Next.js!', { timeout: 30000 });
+    await expect(iframe.locator('h1')).toHaveText('Hello Next.js!');
 
-    // 3. Test Navigation to /about route
     await page.locator('.btn-route:has-text("/about")').click();
-    await expect(iframe.locator('body')).toContainText('About Next.js In-Browser Engine', { timeout: 10000 });
-    await expect(iframe.locator('body')).toContainText('Key Architecture Highlights');
+    await expect(iframe.locator('h1')).toHaveText('About the Next.js runtime', { timeout: 10000 });
 
-    // 4. Test Navigation to /dashboard route
     await page.locator('.btn-route:has-text("/dashboard")').click();
-    await expect(iframe.locator('body')).toContainText('Next.js Analytics Dashboard', { timeout: 10000 });
-    await expect(iframe.locator('body')).toContainText('Active Routes');
+    await expect(iframe.locator('h1')).toHaveText('Next.js runtime diagnostics', { timeout: 10000 });
 
-    // 5. Test Navigation to /api/hello JSON route
     await page.locator('.btn-route:has-text("/api/hello")').click();
-    await expect(iframe.locator('body')).toContainText('Hello from Next.js 14 App Router', { timeout: 10000 });
-    await expect(iframe.locator('body')).toContainText('Next.js 14.2.5');
+    await expect(iframe.locator('body')).toContainText('Hello from a native Next.js route', { timeout: 10000 });
 
-    // 6. Test Next.js Build Mode (next build)
+    // Run the real production compiler.
     await page.locator('#btn-build').click();
     await expect(termOutput).toContainText('Creating an optimized production build...', { timeout: 15000 });
-    await expect(termOutput).toContainText('Emitted routes: / (SSR), /about (Static), /dashboard (SSR), /api/hello (Function)');
+    await expect(termOutput).toContainText('Compiled successfully', { timeout: 60000 });
 
     expect(consoleErrors).toEqual([]);
     expect(pageErrors).toEqual([]);

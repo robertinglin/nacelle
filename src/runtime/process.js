@@ -163,6 +163,9 @@ function selectedProfile(value) {
 
 function processVersions(scope = globalThis, profile = selectedProfile()) {
   const versions = { ...profile.versions };
+  // This is the runtime identity Next.js checks to enter its supported
+  // WebContainer SWC-WASM fallback path.
+  versions.webcontainer = '1.0.0';
   const openssl = browserCryptoVersion(scope);
   if (openssl) versions.openssl = openssl;
   return versions;
@@ -223,6 +226,41 @@ export function installProcessContract(process, {
   process.execPath ||= '/browser/node';
   process.argv0 ||= 'node';
   process.versions = processVersions(scope, profile);
+  if (typeof process.hrtime !== 'function') {
+    const hrtime = (previous) => {
+      const now = Math.floor((scope.performance?.now?.() || 0) * 1e6);
+      const current = [Math.floor(now / 1e9), now % 1e9];
+      if (previous === undefined) return current;
+      if (!Array.isArray(previous) || previous.length < 2) {
+        throw new TypeError('process.hrtime() previous value must be a [seconds, nanoseconds] array');
+      }
+      let seconds = current[0] - Number(previous[0]);
+      let nanoseconds = current[1] - Number(previous[1]);
+      if (nanoseconds < 0) {
+        seconds -= 1;
+        nanoseconds += 1e9;
+      }
+      return [seconds, nanoseconds];
+    };
+    Object.defineProperty(hrtime, 'bigint', {
+      configurable: true,
+      value: () => {
+        if (typeof BigInt !== 'function') throw new Error('process.hrtime.bigint requires BigInt support');
+        return BigInt(Math.floor((scope.performance?.now?.() || 0) * 1e6));
+      },
+    });
+    process.hrtime = hrtime;
+  } else if (typeof process.hrtime.bigint !== 'function') {
+    try {
+      Object.defineProperty(process.hrtime, 'bigint', {
+        configurable: true,
+        value: () => {
+          if (typeof BigInt !== 'function') throw new Error('process.hrtime.bigint requires BigInt support');
+          return BigInt(Math.floor((scope.performance?.now?.() || 0) * 1e6));
+        },
+      });
+    } catch { /* preserve an immutable host implementation */ }
+  }
   if (browserCryptoVersion(scope)) process.versions.openssl ||= browserCryptoVersion(scope);
   process.umask ||= (mask) => {
     const previous = currentUmask;
@@ -542,7 +580,10 @@ function createIdentity(options, runId, childId) {
     env: stringEnvironment(options.env),
     cwd: String(options.cwd || '/node'),
     version: profile.runtimeVersion,
-    versions: { ...profile.versions },
+    // Child processes receive this identity verbatim. Keep the WebContainer
+    // marker on that boundary so libraries such as Next.js make the same
+    // WASM-first decision in forked workers as they do in the parent.
+    versions: { ...profile.versions, webcontainer: '1.0.0' },
     release: { ...profile.release },
     config: profile.config,
     features: profile.features,
@@ -619,6 +660,10 @@ export function createProcess({
     const nanos = Math.floor((now % 1000) * 1e6);
     return previous ? [seconds - previous[0], nanos - previous[1]] : [seconds, nanos];
   };
+  Object.defineProperty(process.hrtime, 'bigint', {
+    configurable: true,
+    value: () => BigInt(Math.floor(performance.now() * 1e6)),
+  });
   process.uptime = () => performance.now() / 1000;
   process.exit = (code = 0) => {
     if (exited) return;
@@ -775,6 +820,7 @@ export function createBrowserProcess(options = {}) {
     terminate() { return child.kill('SIGKILL'); },
     wait() { return completion; },
   };
+  if (typeof options.onNetwork === 'function') events.on('network', options.onNetwork);
 
   function moveTo(next) {
     const updated = transition(state, next);
@@ -828,6 +874,7 @@ export function createBrowserProcess(options = {}) {
     if (frame.type === 'child-disconnect') { emitDisconnect(); ipc?.close(); return; }
     if (frame.type === 'signal-result') return;
     if (frame.type === 'output') { outputWrite(frame.stream === 'stderr' ? child.stderr : child.stdout, frame.value); return; }
+    if (frame.type === 'network') { events.emit('network', frame.event); return; }
     if (frame.type === 'child-signal-request') { try { child.kill(frame.signal); } catch (error) { events.emit('error', error); } return; }
     if (frame.type === 'terminal') {
       if (frame.lastUserSequence && ipc?.lastReceivedSequence < frame.lastUserSequence) pendingTerminal = frame;
@@ -888,10 +935,12 @@ export function createBrowserProcess(options = {}) {
       controlPort: controlChannel.raw.port2,
       userPort: userChannel.raw.port2,
     };
+    if (options.networkPort) initialData.networkPort = options.networkPort;
     if (options.vfs !== undefined) initialData.vfs = prepareWorkerVfs(options.vfs, scope);
     const transferList = [
       controlChannel.raw.port2,
       userChannel.raw.port2,
+      ...(options.networkPort ? [options.networkPort] : []),
       ...(options.workerDataTransferList || []),
     ];
     worker.postMessage(initialData, transferList);

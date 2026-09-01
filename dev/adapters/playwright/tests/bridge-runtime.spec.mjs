@@ -219,4 +219,5 @@ test.describe('browser runtime bridge and core primitives', () => {
     expect(result.exit).toBe('resolved');
     expect(result.globalsRestored).toBe(true);
   });
+
 });

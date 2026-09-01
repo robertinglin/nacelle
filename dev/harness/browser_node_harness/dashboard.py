@@ -16,7 +16,7 @@ _PAGE = r"""<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Browser Node Harness</title>
+  <title>Nacelle Harness</title>
   <style>
     :root { color-scheme: dark; --bg:#0d1117; --panel:#161b22; --line:#30363d; --text:#e6edf3; --muted:#8b949e; --green:#3fb950; --red:#f85149; --yellow:#d29922; --blue:#58a6ff; }
     * { box-sizing:border-box; }
@@ -55,7 +55,7 @@ _PAGE = r"""<!doctype html>
 <body>
 <main>
   <header>
-    <div><h1>Browser Node Harness</h1><div id="run-line" class="run-line">Waiting for a run…</div></div>
+    <div><h1>Nacelle Harness</h1><div id="run-line" class="run-line">Waiting for a run…</div></div>
     <div id="updated">Connecting…</div>
   </header>
   <section id="cards" class="cards"></section>

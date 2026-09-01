@@ -46,9 +46,11 @@
       "entry": "zlib",
       "exports": [
         "deflateInit_",
+        "deflateInit2_",
         "deflate",
         "deflateEnd",
         "inflateInit_",
+        "inflateInit2_",
         "inflate",
         "inflateEnd",
         "crc32",

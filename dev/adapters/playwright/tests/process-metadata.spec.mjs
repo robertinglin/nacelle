@@ -24,6 +24,7 @@ test.describe('browser Node process metadata', () => {
 
         assert.ok(process.versions && typeof process.versions === 'object');
         assert.strictEqual(typeof process.versions.openssl, 'undefined');
+        assert.strictEqual(process.versions.webcontainer, '1.0.0');
 
         // These values identify the browser runtime and must not report a host Node executable.
         assert.strictEqual(process.execPath, '/browser/node');
@@ -31,6 +32,59 @@ test.describe('browser Node process metadata', () => {
         assert.strictEqual(process.ppid, 0);
       })();
     `);
+
+    await expectPass(expect, result);
+  });
+
+  test('keeps the owning process environment in CommonJS callbacks', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { fork } = require('node:child_process');
+      const child = fork('/node/process-env-cjs-child.js', [], {
+        env: { ...process.env, BNH_CHILD_ENV: 'child' },
+      });
+      child.once('error', (error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+      child.once('message', (message) => {
+        try {
+          assert.deepStrictEqual(message, {
+            before: 'child',
+            after: 'child',
+            pid: message.pid,
+          });
+        } catch (error) {
+          console.error(error.stack || error);
+          process.exitCode = 1;
+        }
+      });
+    `, {
+      files: {
+        '/node/process-env-cjs-child.js': `
+          const readLater = require('/node/process-env-cjs-route.js');
+          readLater().then((message) => {
+            process.send(message);
+            process.disconnect();
+          }, (error) => {
+            process.send({ error: String(error) });
+            process.disconnect();
+          });
+        `,
+        '/node/process-env-cjs-route.js': `
+          const before = process.env.BNH_CHILD_ENV;
+          module.exports = () => new Promise((resolve) => {
+            setTimeout(() => {
+              Promise.resolve().then(() => resolve({
+                before,
+                after: process.env.BNH_CHILD_ENV,
+                pid: process.pid,
+              }));
+            }, 0);
+          });
+        `,
+      },
+    });
 
     await expectPass(expect, result);
   });

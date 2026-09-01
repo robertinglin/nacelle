@@ -67,14 +67,35 @@ function loadWasmBytes(name) {
   return null;
 }
 
-const wasmInstances = {};
+const wasmInstances = Object.create(null);
+const wasmModules = Object.create(null);
+const wasmImports = {
+  env: { emscripten_notify_memory_growth() {} },
+  // Brotli is built with WASI even though it only needs proc_exit from that
+  // namespace. Keep this import available for every codec so the shared
+  // loader has the same contract for all bundled WASM artifacts.
+  wasi_snapshot_preview1: {
+    proc_exit() {},
+  },
+};
+
+function getWasmModule(name) {
+  if (Object.hasOwn(wasmModules, name)) return wasmModules[name];
+  const bytes = loadWasmBytes(name);
+  wasmModules[name] = bytes
+    ? new WebAssembly.Module(bytes)
+    : null;
+  return wasmModules[name];
+}
+
+function createWasmInstance(name) {
+  const module = getWasmModule(name);
+  return module ? new WebAssembly.Instance(module, wasmImports) : null;
+}
+
 function getWasmInstance(name) {
   if (!wasmInstances[name]) {
-    const bytes = loadWasmBytes(name);
-    if (!bytes) return null;
-    const env = new Proxy({}, { get: () => () => 0 });
-    const wasi = new Proxy({}, { get: () => () => 0 });
-    wasmInstances[name] = new WebAssembly.Instance(new WebAssembly.Module(bytes), { env, wasi_snapshot_preview1: wasi });
+    wasmInstances[name] = createWasmInstance(name);
   }
   return wasmInstances[name];
 }
@@ -312,6 +333,87 @@ function createWebTransform(scope, format, mode) {
   }
 }
 
+class NativeZlibCodec {
+  constructor(scope, format, mode, onOutput) {
+    this._scope = scope;
+    this._stream = createWebTransform(scope, format, mode);
+    if (!this._stream?.writable?.getWriter || !this._stream?.readable?.getReader) {
+      throw formatUnsupported(format, mode, new TypeError('compression stream lacks reader/writer access'));
+    }
+    this._writer = this._stream.writable.getWriter();
+    this._reader = this._stream.readable.getReader();
+    this._onOutput = onOutput;
+    this._closed = false;
+    this._firstOutputSent = false;
+    this._pendingOutput = [];
+    this._pendingOutputBytes = 0;
+    this._pumpPromise = this._pump();
+    this._pumpPromise.catch(() => {});
+  }
+
+  _emitOutput(value, force = false) {
+    if (value?.byteLength) {
+      if (!this._firstOutputSent) {
+        this._firstOutputSent = true;
+        this._onOutput(value);
+        return;
+      }
+      this._pendingOutput.push(value);
+      this._pendingOutputBytes += value.byteLength;
+    }
+    if (!force && this._pendingOutputBytes < 256 * 1024) return;
+    if (!this._pendingOutputBytes) return;
+    this._onOutput(concatenateBytes(this._pendingOutput));
+    this._pendingOutput.length = 0;
+    this._pendingOutputBytes = 0;
+  }
+
+  async _pump() {
+    let bytesSinceYield = 0;
+    try {
+      while (true) {
+        const { value, done } = await this._reader.read();
+        if (done) {
+          this._emitOutput(null, true);
+          return;
+        }
+        if (value?.byteLength) {
+          const output = toUint8Array(value);
+          this._emitOutput(output);
+          bytesSinceYield += output.byteLength;
+          if (bytesSinceYield >= 1024 * 1024) {
+            this._emitOutput(null, true);
+            bytesSinceYield = 0;
+            await new Promise((resolve) => (this._scope.setTimeout || setTimeout)(resolve, 0));
+          }
+        }
+      }
+    } finally {
+      this._reader.releaseLock?.();
+    }
+  }
+
+  write(value) {
+    if (this._closed) return Promise.reject(new Error('compression stream is closed'));
+    return this._writer.write(toUint8Array(value));
+  }
+
+  async finish() {
+    if (this._closed) return;
+    this._closed = true;
+    await this._writer.close();
+    await this._pumpPromise;
+  }
+
+  async abort(reason) {
+    if (this._closed) return;
+    this._closed = true;
+    try { await this._writer.abort(reason); } catch {}
+    try { await this._reader.cancel(reason); } catch {}
+    await this._pumpPromise.catch(() => {});
+  }
+}
+
 function zlibDataError(error) {
   const result = new Error('incorrect header check');
   result.code = 'Z_DATA_ERROR';
@@ -459,14 +561,231 @@ class ZlibHandle {
   close() { this._resource.emitDestroy(); }
 }
 
+const ZLIB_STREAM_SIZE = 56;
+const ZLIB_INPUT_CHUNK_SIZE = 64 * 1024;
+const ZLIB_OUTPUT_CHUNK_SIZE = 1024 * 1024;
+
+function zlibStreamWindowBits(format) {
+  if (format === 'gzip') return 31;
+  if (format === 'deflate-raw') return -15;
+  return 15;
+}
+
+function zlibWasmUnavailable(format, mode) {
+  const error = new Error(`zlib.wasm cannot stream ${format} ${mode}`);
+  error.code = 'ERR_ZLIB_WASM_UNAVAILABLE';
+  return error;
+}
+
+class WasmZlibCodec {
+  constructor(format, mode, options = {}) {
+    if (!['gzip', 'deflate', 'deflate-raw'].includes(format)) {
+      throw zlibWasmUnavailable(format, mode);
+    }
+    this._instance = createWasmInstance('zlib');
+    if (!this._instance) throw zlibWasmUnavailable(format, mode);
+    this._exports = this._instance.exports;
+    this._memory = this._exports.memory;
+    this._format = format;
+    this._mode = mode;
+    this._stream = this._exports.malloc(ZLIB_STREAM_SIZE);
+    this._input = this._exports.malloc(ZLIB_INPUT_CHUNK_SIZE);
+    this._output = this._exports.malloc(ZLIB_OUTPUT_CHUNK_SIZE);
+    this._version = this._exports.malloc(16);
+    this._initialized = false;
+    try {
+      new Uint8Array(this._memory.buffer, this._stream, ZLIB_STREAM_SIZE).fill(0);
+      new Uint8Array(this._memory.buffer).set(new TextEncoder().encode('1.3.1\0'), this._version);
+      const status = this._initialize(options);
+      if (status !== constants.Z_OK) {
+        const error = new Error(`zlib initialization failed with status ${status}`);
+        error.code = 'ERR_ZLIB_INITIALIZATION_FAILED';
+        throw error;
+      }
+      this._initialized = true;
+    } catch (error) {
+      this.close();
+      throw error;
+    }
+  }
+
+  _initialize(options) {
+    const windowBits = zlibStreamWindowBits(this._format);
+    const level = options.level ?? constants.Z_DEFAULT_COMPRESSION;
+    const strategy = options.strategy ?? constants.Z_DEFAULT_STRATEGY;
+    if (this._mode === 'compress') {
+      checkZlibParam(level, 'level', constants.Z_MIN_LEVEL, constants.Z_MAX_LEVEL);
+      checkZlibParam(strategy, 'strategy', constants.Z_DEFAULT_STRATEGY, constants.Z_FIXED);
+      if (typeof this._exports.deflateInit2_ === 'function') {
+        return this._exports.deflateInit2_(
+          this._stream,
+          level,
+          8,
+          windowBits,
+          options.memLevel ?? constants.Z_DEFAULT_MEMLEVEL,
+          strategy,
+          this._version,
+          ZLIB_STREAM_SIZE,
+        );
+      }
+      if (this._format === 'deflate' && typeof this._exports.deflateInit_ === 'function') {
+        return this._exports.deflateInit_(this._stream, level, this._version, ZLIB_STREAM_SIZE);
+      }
+    } else {
+      if (typeof this._exports.inflateInit2_ === 'function') {
+        return this._exports.inflateInit2_(this._stream, windowBits, this._version, ZLIB_STREAM_SIZE);
+      }
+      if (this._format === 'deflate' && typeof this._exports.inflateInit_ === 'function') {
+        return this._exports.inflateInit_(this._stream, this._version, ZLIB_STREAM_SIZE);
+      }
+    }
+    throw zlibWasmUnavailable(this._format, this._mode);
+  }
+
+  process(value, flush) {
+    const input = toUint8Array(value);
+    const output = [];
+    let offset = 0;
+    if (!input.byteLength) {
+      this._processInput(input, flush, output);
+      return output;
+    }
+    while (offset < input.byteLength) {
+      const end = Math.min(offset + ZLIB_INPUT_CHUNK_SIZE, input.byteLength);
+      const block = input.subarray(offset, end);
+      this._processInput(block, flush, output);
+      offset = end;
+    }
+    return output;
+  }
+
+  _processInput(input, flush, output) {
+    const transform = this._mode === 'compress'
+      ? this._exports.deflate
+      : this._exports.inflate;
+    const inputBytes = new Uint8Array(this._memory.buffer, this._input, input.byteLength);
+    inputBytes.set(input);
+    let offset = 0;
+    let status = constants.Z_OK;
+    let iterations = 0;
+    do {
+      iterations += 1;
+      if (iterations > 10000) {
+        const error = new Error('zlib.wasm made no bounded progress');
+        error.code = 'ERR_ZLIB_PROCESSING_FAILED';
+        throw error;
+      }
+      const view = new DataView(this._memory.buffer);
+      view.setUint32(this._stream, this._input + offset, true);
+      view.setUint32(this._stream + 4, input.byteLength - offset, true);
+      view.setUint32(this._stream + 12, this._output, true);
+      view.setUint32(this._stream + 16, ZLIB_OUTPUT_CHUNK_SIZE, true);
+      status = transform(this._stream, flush);
+      const remainingInput = view.getUint32(this._stream + 4, true);
+      const availableOutput = view.getUint32(this._stream + 16, true);
+      const consumed = input.byteLength - offset - remainingInput;
+      const produced = ZLIB_OUTPUT_CHUNK_SIZE - availableOutput;
+      if (consumed < 0 || consumed > input.byteLength - offset) {
+        throw new Error('zlib.wasm reported an invalid input count');
+      }
+      if (produced) {
+        output.push(new Uint8Array(this._memory.buffer, this._output, produced).slice());
+      }
+      offset += consumed;
+      if (status === constants.Z_STREAM_END) return;
+      if (status < 0 && status !== constants.Z_BUF_ERROR) {
+        const error = new Error(`zlib processing failed with status ${status}`);
+        error.code = this._mode === 'decompress' ? 'Z_DATA_ERROR' : 'ERR_ZLIB_PROCESSING_FAILED';
+        throw error;
+      }
+      const inputRemaining = input.byteLength - offset;
+      if (!inputRemaining && availableOutput > 0) return;
+      if (!consumed && !produced) {
+        if (flush === constants.Z_FINISH) {
+          const error = new Error('zlib.wasm made no progress while finishing');
+          error.code = this._mode === 'decompress' ? 'Z_DATA_ERROR' : 'ERR_ZLIB_PROCESSING_FAILED';
+          throw error;
+        }
+        return;
+      }
+    } while (offset < input.byteLength || flush === constants.Z_FINISH);
+  }
+
+  close() {
+    if (!this._instance) return;
+    try {
+      if (this._initialized) {
+        const close = this._mode === 'compress'
+          ? this._exports.deflateEnd
+          : this._exports.inflateEnd;
+        close?.(this._stream);
+      }
+    } finally {
+      this._initialized = false;
+      this._exports.free(this._stream);
+      this._exports.free(this._input);
+      this._exports.free(this._output);
+      this._exports.free(this._version);
+      this._instance = null;
+    }
+  }
+}
+
 class ZlibStream extends Transform {
-  constructor(format, mode, bufferClass, scope = globalThis) {
+  constructor(format, mode, bufferClass, scope = globalThis, options = {}) {
     const chunks = [];
     super({
       transform(chunk, _encoding, callback) {
-        chunks.push(chunk);
         this.bytesWritten += chunk.byteLength ?? chunk.length ?? 0;
-        callback();
+        const input = toUint8Array(chunk);
+        try {
+          if (!this._nativeCodec && !this._nativeCodecUnavailable
+            && (input.byteLength || typeof this._zlibFormat !== 'function')) {
+            const streamFormat = typeof this._zlibFormat === 'function'
+              ? this._zlibFormat([input])
+              : this._zlibFormat;
+            try {
+              this._nativeCodec = new NativeZlibCodec(
+                this._zlibScope,
+                streamFormat,
+                this._zlibMode,
+                (output) => this.push(this._zlibBufferClass ? new this._zlibBufferClass(output) : output),
+              );
+            } catch (error) {
+              if (error?.code !== 'ERR_UNSUPPORTED_WEB_CAPABILITY') throw error;
+              this._nativeCodecUnavailable = true;
+            }
+          }
+          if (this._nativeCodec) {
+            this._nativeCodec.write(input).then(
+              () => callback(),
+              (error) => callback(this._zlibMode === 'decompress' ? zlibDataError(error) : error),
+            );
+            return;
+          }
+          if (!this._zlibCodec && !this._zlibCodecUnavailable
+            && (input.byteLength || typeof this._zlibFormat !== 'function')) {
+            const streamFormat = typeof this._zlibFormat === 'function'
+              ? this._zlibFormat([input])
+              : this._zlibFormat;
+            try {
+              this._zlibCodec = new WasmZlibCodec(streamFormat, this._zlibMode, this._zlibOptions);
+            } catch (error) {
+              if (error?.code !== 'ERR_ZLIB_WASM_UNAVAILABLE') throw error;
+              this._zlibCodecUnavailable = true;
+            }
+          }
+          if (this._zlibCodec) {
+            for (const output of this._zlibCodec.process(input, constants.Z_NO_FLUSH)) {
+              this.push(this._zlibBufferClass ? new this._zlibBufferClass(output) : output);
+            }
+          } else {
+            chunks.push(chunk);
+          }
+          callback();
+        } catch (error) {
+          callback(error);
+        }
       },
     });
     this._zlibChunks = chunks;
@@ -474,26 +793,68 @@ class ZlibStream extends Transform {
     this._zlibMode = mode;
     this._zlibBufferClass = bufferClass;
     this._zlibScope = scope;
+    this._zlibOptions = options;
+    this._nativeCodec = null;
+    this._nativeCodecUnavailable = false;
+    this._zlibCodec = null;
+    this._zlibCodecUnavailable = false;
+    this._syncChunks = [];
     this._zlibMaxFlushFlag = format === 'zstd' ? 2 : 5;
     this.bytesWritten = 0;
     this._handle = new ZlibHandle();
   }
 
   _flush(callback) {
+    if (!this._nativeCodec && !this._nativeCodecUnavailable && typeof this._zlibFormat === 'string') {
+      try {
+        this._nativeCodec = new NativeZlibCodec(
+          this._zlibScope,
+          this._zlibFormat,
+          this._zlibMode,
+          (output) => this.push(this._zlibBufferClass ? new this._zlibBufferClass(output) : output),
+        );
+      } catch (error) {
+        if (error?.code !== 'ERR_UNSUPPORTED_WEB_CAPABILITY') {
+          callback(this._zlibMode === 'decompress' ? zlibDataError(error) : error);
+          return;
+        }
+        this._nativeCodecUnavailable = true;
+      }
+    }
+    if (this._nativeCodec) {
+      this._nativeCodec.finish().then(
+        () => {
+          this._nativeCodec = null;
+          callback();
+        },
+        (error) => callback(this._zlibMode === 'decompress' ? zlibDataError(error) : error),
+      );
+      return;
+    }
+    if (this._zlibCodec) {
+      try {
+        for (const output of this._zlibCodec.process(new Uint8Array(0), constants.Z_FINISH)) {
+          this.push(this._zlibBufferClass ? new this._zlibBufferClass(output) : output);
+        }
+        this._zlibCodec.close();
+        this._zlibCodec = null;
+        callback();
+      } catch (error) {
+        callback(this._zlibMode === 'decompress' ? zlibDataError(error) : error);
+      }
+      return;
+    }
     let transformed;
     try {
       const streamFormat = typeof this._zlibFormat === 'function'
         ? this._zlibFormat(this._zlibChunks)
         : this._zlibFormat;
-      const input = new this._zlibScope.Blob(this._zlibChunks).stream();
-      transformed = input.pipeThrough(
-        createWebTransform(this._zlibScope, streamFormat, this._zlibMode),
-      );
+      transformed = webTransform(this._zlibChunks, streamFormat, this._zlibMode, this._zlibScope);
     } catch (error) {
       callback(this._zlibMode === 'decompress' ? zlibDataError(error) : error);
       return;
     }
-    new this._zlibScope.Response(transformed).arrayBuffer().then(
+    Promise.resolve(transformed).then(
       (output) => {
         const BufferClass = this._zlibBufferClass;
         this.push(BufferClass ? new BufferClass(output) : new Uint8Array(output));
@@ -513,6 +874,12 @@ class ZlibStream extends Transform {
       throw error;
     }
     this._zlibChunks.length = 0;
+    this._nativeCodec?.abort();
+    this._nativeCodec = null;
+    this._nativeCodecUnavailable = false;
+    this._zlibCodec?.close();
+    this._zlibCodec = null;
+    this._zlibCodecUnavailable = false;
     this.bytesWritten = 0;
   }
 
@@ -560,6 +927,10 @@ class ZlibStream extends Transform {
   }
 
   _destroy(error, callback) {
+    this._nativeCodec?.abort(error).catch(() => {});
+    this._nativeCodec = null;
+    this._zlibCodec?.close();
+    this._zlibCodec = null;
     this._handle?.close();
     this._handle = null;
     callback(error);
@@ -580,7 +951,31 @@ class ZlibStream extends Transform {
       });
       return;
     }
-    syncUnavailable('zlib processing', '_processChunk');
+    const bytes = toUint8Array(chunk);
+    if (bytes.byteLength) this._syncChunks.push(bytes.slice());
+    if (_flushFlag !== constants.Z_FINISH) {
+      return this._zlibBufferClass?.alloc?.(0) || new Uint8Array(0);
+    }
+
+    const input = concatenateBytes(this._syncChunks);
+    const format = typeof this._zlibFormat === 'function'
+      ? this._zlibFormat([input])
+      : this._zlibFormat;
+    let output;
+    if (this._zlibMode === 'decompress') {
+      if (format === 'gzip') output = wasmGzipInflate(input);
+      else if (format === 'deflate') output = wasmZlibInflate(input);
+      else if (format === 'zstd') output = wasmZstdDecompress(input);
+      else throw new Error(`synchronous ${format} decompression is unavailable`);
+    } else if (format === 'deflate') {
+      output = wasmZlibDeflate(input);
+    } else if (format === 'zstd') {
+      output = wasmZstdCompress(input);
+    } else {
+      throw new Error(`synchronous ${format} compression is unavailable`);
+    }
+    this._syncChunks.length = 0;
+    return wrapBufferResult(output, this._zlibBufferClass);
   }
 }
 
@@ -629,23 +1024,23 @@ for (const name of ['reset', '_flush', 'flush', 'close', '_processChunk', '_dest
 }
 
 class Inflate extends ZlibStream {
-  constructor(_options, bufferClass, scope) { super('deflate', 'decompress', bufferClass, scope); }
+  constructor(options, bufferClass, scope) { super('deflate', 'decompress', bufferClass, scope, options); }
 }
 
 class InflateRaw extends ZlibStream {
-  constructor(_options, bufferClass, scope) { super('deflate-raw', 'decompress', bufferClass, scope); }
+  constructor(options, bufferClass, scope) { super('deflate-raw', 'decompress', bufferClass, scope, options); }
 }
 
 class Gunzip extends ZlibStream {
-  constructor(_options, bufferClass, scope) { super('gzip', 'decompress', bufferClass, scope); }
+  constructor(options, bufferClass, scope) { super('gzip', 'decompress', bufferClass, scope, options); }
 }
 
 class Unzip extends ZlibStream {
-  constructor(_options, bufferClass, scope) {
+  constructor(options, bufferClass, scope) {
     super((chunks) => {
       const first = chunks[0] || [];
       return first[0] === 0x1f && first[1] === 0x8b ? 'gzip' : 'deflate';
-    }, 'decompress', bufferClass, scope);
+    }, 'decompress', bufferClass, scope, options);
   }
 }
 
@@ -680,23 +1075,19 @@ class Gzip extends ZlibStream {
         throw error;
       }
     }
-    super('gzip', 'compress', bufferClass, scope);
+    super('gzip', 'compress', bufferClass, scope, options);
   }
 }
 
 class Deflate extends ZlibStream {
   constructor(options, bufferClass, scope) {
-    super('deflate', 'compress', bufferClass, scope);
-    this._level = options?.level ?? constants.Z_DEFAULT_COMPRESSION;
-    this._strategy = options?.strategy ?? constants.Z_DEFAULT_STRATEGY;
+    super('deflate', 'compress', bufferClass, scope, options);
   }
 }
 
 class DeflateRaw extends ZlibStream {
   constructor(options, bufferClass, scope) {
-    super('deflate-raw', 'compress', bufferClass, scope);
-    this._level = options?.level ?? constants.Z_DEFAULT_COMPRESSION;
-    this._strategy = options?.strategy ?? constants.Z_DEFAULT_STRATEGY;
+    super('deflate-raw', 'compress', bufferClass, scope, options);
   }
 }
 
@@ -761,6 +1152,54 @@ function toUint8Array(value) {
   if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
   return new Uint8Array(0);
+}
+
+function concatenateBytes(chunks) {
+  const total = chunks.reduce((size, chunk) => size + chunk.byteLength, 0);
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
+}
+
+async function webTransform(value, format, mode, scope) {
+  const input = new scope.Blob([value]).stream();
+  const transformed = input.pipeThrough(createWebTransform(scope, format, mode));
+  return new Uint8Array(await new scope.Response(transformed).arrayBuffer());
+}
+
+function gzipPayload(bytes) {
+  if (bytes.byteLength < 18 || bytes[0] !== 0x1f || bytes[1] !== 0x8b || bytes[2] !== 8) {
+    throw new Error('invalid gzip header');
+  }
+  const flags = bytes[3];
+  if (flags & 0xe0) throw new Error('unsupported gzip flags');
+  let offset = 10;
+  if (flags & 4) {
+    if (offset + 2 > bytes.byteLength - 8) throw new Error('invalid gzip extra field');
+    const extraLength = bytes[offset] | (bytes[offset + 1] << 8);
+    offset += 2 + extraLength;
+  }
+  for (const flag of [8, 16]) {
+    if (flags & flag) {
+      while (offset < bytes.byteLength - 8 && bytes[offset] !== 0) offset += 1;
+      offset += 1;
+    }
+  }
+  if (flags & 2) offset += 2;
+  if (offset > bytes.byteLength - 8) throw new Error('invalid gzip payload');
+  return bytes.subarray(offset, bytes.byteLength - 8);
+}
+
+function gzipUncompressedSize(bytes) {
+  const offset = bytes.byteLength - 4;
+  return (bytes[offset]
+    | (bytes[offset + 1] << 8)
+    | (bytes[offset + 2] << 16)
+    | (bytes[offset + 3] << 24)) >>> 0;
 }
 
 function wasmBrotliCompress(value, options = {}) {
@@ -875,63 +1314,77 @@ function wasmZstdDecompress(value, options = {}) {
   return result;
 }
 
-function wasmZlibDeflate(value, options = {}) {
-  const inst = getWasmInstance('zlib');
-  if (!inst) throw new Error('zlib.wasm artifact unavailable');
-  const exp = inst.exports;
-  const mem = exp.memory;
-  const inBytes = toUint8Array(value);
-
-  const inPtr = exp.malloc(inBytes.length);
-  new Uint8Array(mem.buffer).set(inBytes, inPtr);
-  const maxOut = inBytes.length * 2 + 1024;
-  const outPtr = exp.malloc(maxOut);
-  const strm = exp.malloc(64);
-  new Uint8Array(mem.buffer, strm, 64).fill(0);
-  const dv = new DataView(mem.buffer);
-  dv.setUint32(strm, inPtr, true);
-  dv.setUint32(strm + 4, inBytes.length, true);
-  dv.setUint32(strm + 12, outPtr, true);
-  dv.setUint32(strm + 16, maxOut, true);
-  const verPtr = exp.malloc(16);
-  new Uint8Array(mem.buffer).set(new TextEncoder().encode('1.3.1\0'), verPtr);
-  const level = options.level ?? 6;
-  exp.deflateInit_(strm, level, verPtr, 56);
-  exp.deflate(strm, 4);
-  const compLen = maxOut - dv.getUint32(strm + 16, true);
-  exp.deflateEnd(strm);
-  const out = new Uint8Array(mem.buffer).slice(outPtr, outPtr + compLen);
-  exp.free(inPtr); exp.free(outPtr); exp.free(strm); exp.free(verPtr);
-  return out;
+function wasmCodecTransform(value, format, mode, options = {}) {
+  const codec = new WasmZlibCodec(format, mode, options);
+  try {
+    const output = codec.process(value, constants.Z_NO_FLUSH);
+    output.push(...codec.process(new Uint8Array(0), constants.Z_FINISH));
+    return concatenateBytes(output);
+  } finally {
+    codec.close();
+  }
 }
 
-function wasmZlibInflate(value, options = {}) {
+function wasmZlibDeflate(value, options = {}, format = 'deflate') {
+  return wasmCodecTransform(value, format, 'compress', options);
+}
+
+function wasmZlibInflate(value, options = {}, format = 'deflate') {
+  return wasmCodecTransform(value, format, 'decompress', options);
+}
+
+function wasmGzipInflate(value, options = {}) {
+  const inputBytes = toUint8Array(value);
+  try {
+    return wasmZlibInflate(inputBytes, options, 'gzip');
+  } catch (error) {
+    if (error?.code !== 'ERR_ZLIB_WASM_UNAVAILABLE') throw error;
+  }
+  const rawDeflate = gzipPayload(inputBytes);
+  // The bundled zlib WASM exposes inflateInit_ (zlib-wrapped DEFLATE), not
+  // inflateInit2_ (gzip/raw modes). Preserve the gzip payload and add a
+  // temporary zlib envelope; inflate emits decoded bytes before checking the
+  // envelope checksum, so the gzip trailer remains authoritative here.
+  const wrapped = new Uint8Array(rawDeflate.byteLength + 6);
+  wrapped[0] = 0x78;
+  wrapped[1] = 0x9c;
+  wrapped.set(rawDeflate, 2);
+
+  const expectedSize = gzipUncompressedSize(inputBytes);
+  const maxOut = Math.max(
+    inputBytes.byteLength * 6,
+    Math.min(expectedSize || 0, 256 * 1024 * 1024),
+    4096,
+  );
   const inst = getWasmInstance('zlib');
-  if (!inst) throw new Error('zlib.wasm artifact unavailable');
+  if (!inst) throw zlibWasmUnavailable('gzip', 'decompress');
   const exp = inst.exports;
   const mem = exp.memory;
-  const inBytes = toUint8Array(value);
-
-  const inPtr = exp.malloc(inBytes.length);
-  new Uint8Array(mem.buffer).set(inBytes, inPtr);
-  const maxOut = Math.max(inBytes.length * 6, 4096);
+  const inPtr = exp.malloc(wrapped.length);
   const outPtr = exp.malloc(maxOut);
   const strm = exp.malloc(64);
-  new Uint8Array(mem.buffer, strm, 64).fill(0);
-  const dv = new DataView(mem.buffer);
-  dv.setUint32(strm, inPtr, true);
-  dv.setUint32(strm + 4, inBytes.length, true);
-  dv.setUint32(strm + 12, outPtr, true);
-  dv.setUint32(strm + 16, maxOut, true);
   const verPtr = exp.malloc(16);
-  new Uint8Array(mem.buffer).set(new TextEncoder().encode('1.3.1\0'), verPtr);
-  exp.inflateInit_(strm, verPtr, 56);
-  exp.inflate(strm, 4);
-  const decLen = maxOut - dv.getUint32(strm + 16, true);
-  exp.inflateEnd(strm);
-  const out = new Uint8Array(mem.buffer).slice(outPtr, outPtr + decLen);
-  exp.free(inPtr); exp.free(outPtr); exp.free(strm); exp.free(verPtr);
-  return out;
+  try {
+    new Uint8Array(mem.buffer).set(wrapped, inPtr);
+    new Uint8Array(mem.buffer, strm, 64).fill(0);
+    const dv = new DataView(mem.buffer);
+    dv.setUint32(strm, inPtr, true);
+    dv.setUint32(strm + 4, wrapped.length, true);
+    dv.setUint32(strm + 12, outPtr, true);
+    dv.setUint32(strm + 16, maxOut, true);
+    new Uint8Array(mem.buffer).set(new TextEncoder().encode('1.3.1\0'), verPtr);
+    exp.inflateInit_(strm, verPtr, 56);
+    exp.inflate(strm, 4);
+    const decodedLength = maxOut - dv.getUint32(strm + 16, true);
+    if (decodedLength === 0 && expectedSize !== 0) throw new Error('gzip decompression produced no output');
+    return new Uint8Array(mem.buffer).slice(outPtr, outPtr + decodedLength);
+  } finally {
+    exp.inflateEnd(strm);
+    exp.free(inPtr);
+    exp.free(outPtr);
+    exp.free(strm);
+    exp.free(verPtr);
+  }
 }
 
 function wrapBufferResult(uint8Arr, BufferClass) {
@@ -955,16 +1408,19 @@ function operation(value, format, mode, BufferClass, scope, optionsOrCallback, c
     if (streamFormat === 'zstd') {
       return mode === 'compress' ? wasmZstdCompress(value, options) : wasmZstdDecompress(value, options);
     }
-    try {
-      const input = new scope.Blob([value]).stream();
-      const transformed = input.pipeThrough(createWebTransform(scope, streamFormat, mode));
-      return new Uint8Array(await new scope.Response(transformed).arrayBuffer());
-    } catch (webErr) {
-      if (streamFormat === 'deflate' || streamFormat === 'deflate-raw' || streamFormat === 'gzip') {
-        return mode === 'compress' ? wasmZlibDeflate(value, options) : wasmZlibInflate(value, options);
+    if (streamFormat === 'gzip' || streamFormat === 'deflate' || streamFormat === 'deflate-raw') {
+      try {
+        return await webTransform(value, streamFormat, mode, scope);
+      } catch (nativeError) {
+        if (nativeError?.code !== 'ERR_UNSUPPORTED_WEB_CAPABILITY') throw nativeError;
+        return mode === 'compress'
+          ? wasmZlibDeflate(value, options, streamFormat)
+          : streamFormat === 'gzip'
+            ? wasmGzipInflate(value, options)
+            : wasmZlibInflate(value, options, streamFormat);
       }
-      throw webErr;
     }
+    return webTransform(value, streamFormat, mode, scope);
   };
 
   const result = execute();
@@ -1070,14 +1526,20 @@ export function createZlibShim(scope, BufferClass) {
     ZstdDecompress,
     createZstdCompress: createProperty(ZstdCompress, BufferClass, nativeScope),
     createZstdDecompress: createProperty(ZstdDecompress, BufferClass, nativeScope),
-    gzipSync: (value, options) => wrapBufferResult(wasmZlibDeflate(value, options), BufferClass),
-    gunzipSync: (value, options) => wrapBufferResult(wasmZlibInflate(value, options), BufferClass),
+    gzipSync: (value, options) => wrapBufferResult(wasmZlibDeflate(value, options, 'gzip'), BufferClass),
+    gunzipSync: (value, options) => wrapBufferResult(wasmGzipInflate(value, options), BufferClass),
     deflateSync: (value, options) => wrapBufferResult(wasmZlibDeflate(value, options), BufferClass),
-    deflateRawSync: (value, options) => wrapBufferResult(wasmZlibDeflate(value, options), BufferClass),
-    inflateRawSync: (value, options) => wrapBufferResult(wasmZlibInflate(value, options), BufferClass),
+    deflateRawSync: (value, options) => wrapBufferResult(wasmZlibDeflate(value, options, 'deflate-raw'), BufferClass),
+    inflateRawSync: (value, options) => wrapBufferResult(wasmZlibInflate(value, options, 'deflate-raw'), BufferClass),
     inflateSync: (value, options) => wrapBufferResult(wasmZlibInflate(value, options), BufferClass),
     unzip: (value, optionsOrCallback, callback) => operation(value, (input, targetScope) => unzipFormat(input, targetScope), 'decompress', BufferClass, scope, optionsOrCallback, callback),
-    unzipSync: (value, options) => wrapBufferResult(wasmZlibInflate(value, options), BufferClass),
+    unzipSync: (value, options) => {
+      const input = toUint8Array(value);
+      const output = input[0] === 0x1f && input[1] === 0x8b
+        ? wasmGzipInflate(input, options)
+        : wasmZlibInflate(input, options);
+      return wrapBufferResult(output, BufferClass);
+    },
     brotliCompressSync: (value, options) => wrapBufferResult(wasmBrotliCompress(value, options), BufferClass),
     brotliDecompressSync: (value, options) => wrapBufferResult(wasmBrotliDecompress(value, options), BufferClass),
     zstdCompress: (value, optionsOrCallback, callback) => operation(value, 'zstd', 'compress', BufferClass, nativeScope, optionsOrCallback, callback),

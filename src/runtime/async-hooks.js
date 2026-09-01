@@ -1,13 +1,17 @@
 let nextAsyncId = 2;
 let executionId = 1;
+let asyncContextGeneration = 0;
 const hooks = new Set();
 const resources = new Map();
 const contexts = new Map();
 const relatedAsyncIds = new Map();
 const promiseIds = new WeakMap();
 const promiseContexts = new WeakMap();
+const promiseAwaitContexts = new WeakMap();
+const promiseTargets = new WeakMap();
 const userContextMarker = Symbol('bnhUserContext');
 const errorAsyncIds = new WeakMap();
+const reportedRejections = new WeakSet();
 const rootResource = {};
 const asyncIdSymbol = Symbol('asyncId');
 const triggerAsyncIdSymbol = Symbol('triggerId');
@@ -135,12 +139,51 @@ export function setPromiseRejectionObserver(observer) {
 }
 
 export function isPromiseHandled(promise) {
-  return handledPromises.has(promise);
+  return handledPromises.has(promise) || handledPromises.has(promiseTarget(promise));
 }
 
 function observePromiseRejection(promise, reason) {
   if (handledPromises.has(promise)) return;
+  reportedRejections.add(promise);
+  const target = promiseTarget(promise);
+  if (target !== promise) reportedRejections.add(target);
   promiseRejectionObserver?.(promise, reason);
+}
+
+export function isPromiseRejectionReported(promise) {
+  return reportedRejections.has(promise) || reportedRejections.has(promiseTarget(promise));
+}
+
+export function runAsyncGenerator(generatorFunction, thisArg, args = []) {
+  return new Promise((resolve, reject) => {
+    let iterator;
+    try {
+      iterator = Reflect.apply(generatorFunction, thisArg, args);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    const advance = (method, value) => {
+      let result;
+      try {
+        result = Reflect.apply(iterator[method], iterator, [value]);
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      if (result.done) {
+        resolve(result.value);
+        return;
+      }
+      Promise.resolve(result.value).then(
+        (nextValue) => advance('next', nextValue),
+        (error) => advance('throw', error),
+      );
+    };
+
+    advance('next', undefined);
+  });
 }
 
 // Node gives queued destroy hooks a chance to run between long promise chains
@@ -199,9 +242,11 @@ function newAsyncId(type, triggerAsyncId, resource, weakResource = false, collec
     record.resource = resource;
   }
   resources.set(asyncId, record);
-  if (emitInitEvent) emit('init', asyncId, type, triggerAsyncId, resource);
   const inherited = contexts.get(triggerAsyncId);
-  if (inherited) contexts.set(asyncId, new Map(inherited));
+  if (inherited) {
+    contexts.set(asyncId, new Map(inherited));
+  }
+  if (emitInitEvent) emit('init', asyncId, type, triggerAsyncId, resource);
   return asyncId;
 }
 
@@ -215,10 +260,50 @@ function trackPromise(promise, triggerAsyncId = executionId) {
   if (knownAsyncId !== undefined) return knownAsyncId;
   const asyncId = newAsyncId('PROMISE', triggerAsyncId, promise, true);
   promiseIds.set(promise, asyncId);
-  const inheritedContext = contexts.get(triggerAsyncId);
-  if (inheritedContext) promiseContexts.set(promise, inheritedContext);
+  // Keep the promise's own snapshot instead of retaining the trigger resource's
+  // mutable map. A later enterWith/run must not rewrite this promise's context.
+  const promiseContext = contexts.get(asyncId);
+  if (promiseContext) promiseContexts.set(promise, promiseContext);
   emit('promiseResolve', asyncId);
   return asyncId;
+}
+
+function promiseTarget(promise) {
+  return promiseTargets.get(promise) || promise;
+}
+
+function observablePromise(promise) {
+  if (promiseTargets.has(promise)) return promise;
+  // A Proxy around a native Promise is still recognized as a branded Promise
+  // by V8, which lets `await` bypass the observable `.then` property. Proxy an
+  // ordinary promise-shaped object instead; it remains `instanceof Promise`
+  // through the shared prototype, but `await` must invoke its `then` method.
+  const target = Object.create(originalPromiseConstructor.prototype);
+  Object.defineProperty(target, 'constructor', {
+    configurable: true,
+    value: globalThis.Promise,
+  });
+  Object.defineProperty(target, Symbol.toStringTag, {
+    configurable: true,
+    value: 'Promise',
+  });
+  const observable = new Proxy(target, {
+    get(currentTarget, property, receiver) {
+      if (property === 'then') {
+        const context = contexts.get(executionId);
+        const pending = promiseAwaitContexts.get(observable) || [];
+        pending.push({
+          context: context ? new Map(context) : undefined,
+          generation: asyncContextGeneration,
+        });
+        promiseAwaitContexts.set(observable, pending);
+        promiseAwaitContexts.set(currentTarget, pending);
+      }
+      return Reflect.get(currentTarget, property, receiver);
+    },
+  });
+  promiseTargets.set(observable, promise);
+  return observable;
 }
 
 function withResourceProcess(asyncId, callback) {
@@ -296,11 +381,24 @@ export function collectAsyncResources() {
   }
 }
 
-function runInScope(asyncId, callback, thisArg, args, deferRestore = false, restoreAfterMicrotask = false) {
+function runInScope(asyncId, callback, thisArg, args, nativeContinuation = false) {
+  const generation = asyncContextGeneration;
   const previous = executionId;
   const previousUserCode = globalThis.__bnhUserCode;
   executionId = asyncId;
   globalThis.__bnhUserCode = true;
+  let nativeContinuationActive = true;
+  if (nativeContinuation && hostQueueMicrotask) {
+    // Awaiting a thenable creates the browser's hidden promise reaction after
+    // the resolver returns. Queue the context switch before invoking the
+    // resolver so unrelated reactions already in the queue run in their own
+    // context, then let the hidden await continuation run before restoring it.
+    hostQueueMicrotask(() => {
+      if (!nativeContinuationActive || generation !== asyncContextGeneration || !resources.has(asyncId)) return;
+      executionId = asyncId;
+      globalThis.__bnhUserCode = true;
+    });
+  }
   const record = resources.get(asyncId);
   const dispatchBefore = !record || record.initObserved || record.type === 'PROMISE';
   let dispatchAfter = dispatchBefore;
@@ -331,14 +429,21 @@ function runInScope(asyncId, callback, thisArg, args, deferRestore = false, rest
     }
     throw error;
   } finally {
-    if (restoreAfterMicrotask && hostQueueMicrotask) {
-      hostQueueMicrotask(() => {
-        if (executionId === asyncId) executionId = previous;
-      });
-    } else if (deferRestore && hostSetTimeout) {
-      hostSetTimeout(() => {
-        if (executionId === asyncId) executionId = previous;
-      }, 0);
+    if (nativeContinuation && hostQueueMicrotask) {
+      const restore = () => {
+        if (!nativeContinuationActive) return;
+        nativeContinuationActive = false;
+        if (generation !== asyncContextGeneration) return;
+        if (executionId === asyncId) {
+          executionId = previous;
+          if (previousUserCode === undefined) delete globalThis.__bnhUserCode;
+          else globalThis.__bnhUserCode = previousUserCode;
+        }
+      };
+      // The browser queues the await continuation while callback executes;
+      // this restoration therefore lands immediately after that continuation.
+      hostQueueMicrotask(restore);
+      executionId = previous;
     } else {
       executionId = previous;
     }
@@ -352,7 +457,7 @@ function runWithErrorScope(error, callback) {
     ? errorAsyncIds.get(error)
     : undefined;
   if (asyncId === undefined) return callback();
-  return runInScope(asyncId, callback, undefined, [], true);
+  return runInScope(asyncId, callback, undefined, []);
 }
 
 function runWithPromiseScope(promise, callback) {
@@ -363,37 +468,34 @@ function runWithPromiseScope(promise, callback) {
     const previousContext = contexts.get(asyncId);
     contexts.set(asyncId, promiseContext);
     try {
-      return runInScope(asyncId, callback, undefined, [], true);
+      return runInScope(asyncId, callback, undefined, []);
     } finally {
-      const restore = () => {
-        if (previousContext) contexts.set(asyncId, previousContext);
-        else contexts.delete(asyncId);
-      };
-      if (hostSetTimeout) hostSetTimeout(restore, 0);
-      else restore();
+      if (previousContext) contexts.set(asyncId, previousContext);
+      else contexts.delete(asyncId);
     }
   }
-  return runInScope(asyncId, callback, undefined, [], true);
+  return runInScope(asyncId, callback, undefined, []);
 }
 
-let taskHooksInstalled = false;
+const taskHookTargets = new WeakMap();
 
 function installTaskHooks(scope) {
-  if (taskHooksInstalled || !scope) return;
-  taskHooksInstalled = true;
+  if (!scope) return;
   // The runtime timer facade already creates one AsyncResource for each
   // timeout, interval, and immediate. Wrapping those functions here would
   // emit duplicate Timeout nodes and corrupt trigger-graph ordering.
 
   const originalQueueMicrotask = scope.queueMicrotask;
   if (typeof originalQueueMicrotask === 'function') {
+    if (taskHookTargets.get(scope) === originalQueueMicrotask) return;
+    taskHookTargets.set(scope, originalQueueMicrotask);
     scope.queueMicrotask = function patchedQueueMicrotask(callback) {
       if (typeof callback !== 'function' || !isUserCodeActive()) {
         return originalQueueMicrotask.call(this, callback);
       }
       const resource = {};
       const triggerAsyncId = executionId;
-      let asyncId;
+      const asyncId = newAsyncId('Microtask', triggerAsyncId, resource);
       originalQueueMicrotask.call(this, () => {
         try {
           return runInScope(asyncId, callback, this, []);
@@ -405,7 +507,6 @@ function installTaskHooks(scope) {
           }
         }
       });
-      asyncId = newAsyncId('Microtask', triggerAsyncId, resource);
     };
   }
 
@@ -423,33 +524,58 @@ function installPromiseHooks() {
   promisePatchInstalled = true;
   Promise.prototype.then = function patchedThen(onFulfilled, onRejected) {
     if (typeof onRejected === 'function') handledPromises.add(this);
-    const knownAsyncId = promiseIds.get(this);
-    if (knownAsyncId === undefined && !isUserCodeActive()) {
-      return originalThen.call(this, onFulfilled, onRejected);
+    const sourcePromise = promiseTarget(this);
+    const knownAsyncId = promiseIds.get(this) ?? promiseIds.get(sourcePromise);
+    const pendingAwaitContexts = promiseAwaitContexts.get(this)
+      || promiseAwaitContexts.get(sourcePromise);
+    const awaitContext = pendingAwaitContexts?.shift();
+    if (pendingAwaitContexts?.length === 0) {
+      promiseAwaitContexts.delete(this);
+      promiseAwaitContexts.delete(sourcePromise);
+    }
+    if (knownAsyncId === undefined && !isUserCodeActive() && !awaitContext) {
+      return originalThen.call(sourcePromise, onFulfilled, onRejected);
     }
     let triggerAsyncId = knownAsyncId || executionId;
     let asyncId;
+    const nativeResolver = typeof onFulfilled === 'function'
+      && String(onFulfilled).includes('[native code]');
     const fulfill = typeof onFulfilled === 'function'
-      ? (...args) => runInScope(asyncId, onFulfilled, this, args)
+      ? (...args) => {
+        return runInScope(asyncId, onFulfilled, this, args, nativeResolver || Boolean(awaitContext));
+      }
       : onFulfilled;
     const reject = typeof onRejected === 'function'
       ? (...args) => runInScope(asyncId, onRejected, this, args)
       : onRejected;
-    const result = originalThen.call(this, fulfill, reject);
+    const result = originalThen.call(sourcePromise, fulfill, reject);
     // The async resource belongs to the promise returned by then(), not the
     // source promise. A source promise may have multiple continuations.
     asyncId = newAsyncId('PROMISE', triggerAsyncId, result, true);
     promiseIds.set(result, asyncId);
-    const inheritedContext = promiseContexts.get(this) || contexts.get(triggerAsyncId);
-    if (inheritedContext) promiseContexts.set(result, inheritedContext);
+    // Promise continuations inherit the context in which `then()` is
+    // registered, even when the source promise was created in another scope.
+    // The async hook trigger remains the source promise, but the store belongs
+    // to the current execution context.
+    const currentContext = contexts.get(executionId);
+    const sourceContext = promiseContexts.get(this) || contexts.get(triggerAsyncId);
+    const inheritedContext = awaitContext?.generation === asyncContextGeneration
+      ? awaitContext.context || currentContext || sourceContext
+      : currentContext || sourceContext;
+    if (inheritedContext) {
+      const context = new Map(inheritedContext);
+      contexts.set(asyncId, context);
+      promiseContexts.set(result, context);
+    }
     emit('promiseResolve', asyncId);
-    return result;
+    return inheritedContext ? observablePromise(result) : result;
   };
   Promise.resolve = function patchedResolve(value) {
+    if (promiseTargets.has(value) && this === globalThis.Promise) return value;
     const result = Reflect.apply(originalResolve, this, [value]);
     const existingAsyncId = promiseIds.get(result);
     if (this === Promise && isUserCodeActive() && promiseContextSwitchPending
-        && hooks.size > 0 && existingAsyncId === undefined) {
+        && existingAsyncId === undefined) {
       // Native async functions hide their outer promise from the browser shim.
       // Recreate the two visible promise boundaries before native assimilation
       // supplies the continuation boundary through patchedThen.
@@ -460,7 +586,7 @@ function installPromiseHooks() {
       emit('promiseResolve', awaitedAsyncId);
       runInScope(promiseAsyncId, () => {}, undefined, []);
       promiseContextSwitchPending = false;
-    } else if (this === Promise && isUserCodeActive() && hooks.size > 0) {
+    } else if (this === Promise && isUserCodeActive()) {
       if (existingAsyncId === undefined) trackPromise(result);
       promiseContextSwitchPending = false;
     }
@@ -469,7 +595,7 @@ function installPromiseHooks() {
   Promise.reject = function patchedReject(reason) {
     const result = Reflect.apply(originalReject, this, [reason]);
     if (this === Promise) {
-      if (isUserCodeActive() && hooks.size > 0) {
+      if (isUserCodeActive()) {
         trackPromise(result);
       } else {
         promiseIds.set(result, executionId);
@@ -481,29 +607,25 @@ function installPromiseHooks() {
     return result;
   };
   if (isBrowserRealm && globalThis.Promise === originalPromiseConstructor) {
+    // Async functions use the browser's intrinsic Promise constructor. A
+    // wrapper that merely returns a native Promise is therefore invisible to
+    // `await`: the continuation runs through the intrinsic promise path and
+    // never reaches our patched `.then`. Promise subclasses are deliberately
+    // treated as thenables by that path, so the patched method can restore the
+    // resource that created the promise before invoking the continuation.
     function TrackedPromise(executor) {
       if (!new.target) throw new TypeError('Promises must be constructed via new');
       if (typeof executor !== 'function') throw new TypeError('Promise resolver is not a function');
       let resolvePromise;
-      let rejectNative;
-      let settled = false;
-      const result = new originalPromiseConstructor((resolve, reject) => {
-        resolvePromise = (value) => {
-          if (settled) return;
-          settled = true;
-          resolve(value);
-        };
-        rejectNative = reject;
+      let rejectPromise;
+      const target = new originalPromiseConstructor((resolve, reject) => {
+        resolvePromise = resolve;
+        rejectPromise = reject;
       });
-      if (isUserCodeActive() && hooks.size > 0
-          && (!promiseContextSwitchPending || hooks.size === 1)) {
+      const result = observablePromise(target);
+      if (isUserCodeActive()) {
         trackPromise(result);
       }
-      const rejectPromise = (reason) => {
-        if (settled) return;
-        settled = true;
-        rejectNative(reason);
-      };
       try {
         executor(resolvePromise, rejectPromise);
       } catch (error) {
@@ -513,6 +635,7 @@ function installPromiseHooks() {
     }
     TrackedPromise.prototype = originalPromiseConstructor.prototype;
     Object.setPrototypeOf(TrackedPromise, originalPromiseConstructor);
+    Object.defineProperty(TrackedPromise, 'name', { value: 'Promise' });
     globalThis.Promise = TrackedPromise;
   }
 }
@@ -578,6 +701,8 @@ function internalEmitInit(asyncId, type, triggerAsyncId, resource) {
   record.destroyed = false;
   record.destroyEmitted = false;
   resources.set(asyncId, record);
+  const inherited = contexts.get(record.triggerAsyncId);
+  if (inherited) contexts.set(asyncId, new Map(inherited));
   emit('init', asyncId, record.type, record.triggerAsyncId, resource);
 }
 
@@ -587,13 +712,16 @@ function internalEmitBefore(asyncId, triggerAsyncId) {
   const record = resources.get(asyncId);
   if (record?.destroyed) throw internalAsyncHookError();
   if (!record) {
+    const trigger = triggerAsyncId ?? executionId;
     resources.set(asyncId, {
       type: 'Unknown',
-      triggerAsyncId: triggerAsyncId ?? executionId,
+      triggerAsyncId: trigger,
       resource: {},
       process: globalThis.process,
       destroyed: false,
     });
+    const inherited = contexts.get(trigger);
+    if (inherited) contexts.set(asyncId, new Map(inherited));
   }
   const previous = executionId;
   executionId = asyncId;
@@ -695,12 +823,7 @@ export class AsyncResource {
 
   runInAsyncScope(callback, thisArg, ...args) {
     if (typeof callback !== 'function') throw new TypeError('callback must be a function');
-    const retainTaskResource = this._type === 'Timeout'
-      || this._type === 'Interval'
-      || this._type === 'Immediate'
-      || this._type === 'TickObject'
-      || this._type === 'Microtask';
-    return runInScope(this._asyncId, callback, thisArg, args, false, retainTaskResource);
+    return runInScope(this._asyncId, callback, thisArg, args);
   }
 
   emitDestroy() {
@@ -741,8 +864,9 @@ export class AsyncResource {
   }
 }
 
-export function createAsyncHooksModule() {
+export function createAsyncHooksModule(scope = globalThis) {
   installPromiseHooks();
+  installTaskHooks(scope);
   return {
     createHook: (callbacks) => new AsyncHook(callbacks),
     executionAsyncId: () => executionId,
@@ -752,10 +876,12 @@ export function createAsyncHooksModule() {
     asyncWrapProviders: ASYNC_WRAP_PROVIDERS,
     _bnhRunWithErrorScope: runWithErrorScope,
     _bnhRunWithPromiseScope: runWithPromiseScope,
-    AsyncLocalStorage: createAsyncLocalStorage(),
+    AsyncLocalStorage: createAsyncLocalStorage(scope),
+    _bnhInstallTaskHooks: () => installTaskHooks(scope),
     internal: createInternalAsyncHooks(),
     cleanup() {
       for (const hook of [...hooks]) hook.disable();
+      asyncContextGeneration += 1;
       destroyDrainGeneration += 1;
       destroyDrainScheduled = false;
       promiseContextSwitchPending = false;
@@ -780,12 +906,12 @@ export function createAsyncHooksModule() {
   };
 }
 
-function createAsyncLocalStorage() {
+function createAsyncLocalStorage(scope) {
   installPromiseHooks();
   return class AsyncLocalStorage {
     constructor() {
       this._enabled = false;
-      if (isBrowserRealm) installTaskHooks(globalThis);
+      if (isBrowserRealm) installTaskHooks(scope);
     }
 
     _enable() {
@@ -811,11 +937,18 @@ function createAsyncLocalStorage() {
 
     disable() {
       this._enabled = false;
-      for (const context of contexts.values()) context.delete(this);
+      for (const [asyncId, context] of contexts) {
+        const disabledContext = new Map(context);
+        disabledContext.delete(this);
+        contexts.set(asyncId, disabledContext);
+      }
     }
 
     getStore() {
-      return this._enabled ? contexts.get(executionId)?.get(this) : undefined;
+      if (!this._enabled) return undefined;
+      const context = contexts.get(executionId);
+      const value = context?.get(this);
+      return value;
     }
 
     static bind(callback) {
@@ -828,7 +961,7 @@ function createAsyncLocalStorage() {
 
     enterWith(value) {
       this._enabled = true;
-      const context = contexts.get(executionId) || new Map();
+      const context = new Map(contexts.get(executionId) || []);
       context.set(this, value);
       context.set(userContextMarker, true);
       contexts.set(executionId, context);
@@ -836,33 +969,21 @@ function createAsyncLocalStorage() {
     run(value, callback, ...args) {
       if (typeof callback !== 'function') throw new TypeError('callback must be a function');
       this._enabled = true;
-      const context = contexts.get(executionId) || new Map();
-      const previous = context.has(this) ? context.get(this) : undefined;
-      const hadPrevious = context.has(this);
+      const previousContext = contexts.get(executionId);
+      const context = new Map(previousContext || []);
       const runAsyncId = executionId;
       context.set(this, value);
       context.set(userContextMarker, true);
       contexts.set(executionId, context);
+      let restored = false;
       const restore = () => {
-        const currentContext = contexts.get(runAsyncId);
-        if (!currentContext) return;
-        if (hadPrevious) currentContext.set(this, previous);
-        else currentContext.delete(this);
+        if (restored) return;
+        restored = true;
+        if (previousContext) contexts.set(runAsyncId, previousContext);
+        else contexts.delete(runAsyncId);
       };
       try {
         const result = Reflect.apply(callback, undefined, args);
-        if (result !== null && (typeof result === 'object' || typeof result === 'function')
-          && typeof result.then === 'function') {
-          // Native async continuations do not invoke the patched Promise.then.
-          // Keep this scope live until the callback's promise settles so an
-          // await continuation can still read the store.
-          const settled = originalThen.call(result, restore);
-          promiseIds.set(result, runAsyncId);
-          promiseIds.set(settled, runAsyncId);
-          promiseContexts.set(result, context);
-          promiseContexts.set(settled, context);
-          return result;
-        }
         restore();
         return result;
       } catch (error) {
@@ -877,18 +998,12 @@ function createAsyncLocalStorage() {
 
       const previousContext = contexts.get(executionId) || new Map();
       const context = new Map(previousContext);
-      const previous = context.has(this) ? context.get(this) : undefined;
-      const hadPrevious = context.has(this);
-      this._enabled = false;
       context.delete(this);
       contexts.set(executionId, context);
       try {
         return Reflect.apply(callback, undefined, args);
       } finally {
-        this._enabled = true;
         contexts.set(executionId, previousContext);
-        if (hadPrevious) previousContext.set(this, previous);
-        else previousContext.delete(this);
       }
     }
   };

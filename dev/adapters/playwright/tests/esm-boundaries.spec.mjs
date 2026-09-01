@@ -88,3 +88,58 @@ test('reports the Node-like synchronous ERR_REQUIRE_ESM boundary', async ({ harn
   expect(child.stderr).toContain('Error [ERR_REQUIRE_ESM]: require() of ES Module /node/package-type-module/cjs.js from /node/cjs-esm.js not supported.');
   expect(child.stderr).toContain('Instead either rename cjs.js to end in .cjs, change the requiring code to use dynamic import() which is available in all CommonJS modules, or change "type": "module" to "type": "commonjs" in /node/package-type-module/package.json to treat all .js files as CommonJS (using .mjs for all ES modules instead).');
 });
+
+test('keeps the owning process environment in a same-realm native ESM graph', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const assert = require('node:assert/strict');
+    const { fork } = require('node:child_process');
+    const launch = (label, delay) => new Promise((resolve, reject) => {
+      const child = fork('/node/process-env-child.js', [label, String(delay)], {
+        env: { ...process.env, BNH_CHILD_ENV: label },
+      });
+      child.once('error', reject);
+      child.once('message', (message) => {
+        try {
+          assert.deepStrictEqual(message, {
+            label,
+            before: label,
+            after: label,
+            pid: message.pid,
+          });
+          resolve(message);
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    Promise.all([launch('first', 5), launch('second', 0)]).then(
+      () => {},
+      (error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      },
+    );
+  `, {
+    files: {
+      '/node/process-env-child.js': `
+        const label = process.argv[2];
+        const delay = Number(process.argv[3]);
+        setTimeout(() => {
+          import('/node/process-env-route.mjs').then((module) => {
+            process.send({ label, before: module.before, after: module.after, pid: module.pid });
+          }, (error) => {
+            process.send({ error: String(error) });
+          });
+        }, delay);
+      `,
+      '/node/process-env-route.mjs': `
+        export const pid = process.pid;
+        export const before = process.env.BNH_CHILD_ENV;
+        await Promise.resolve();
+        export const after = process.env.BNH_CHILD_ENV;
+      `,
+    },
+  });
+
+  await expectPass(expect, result);
+});

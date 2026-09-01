@@ -246,8 +246,16 @@ function createPath(platform) {
     },
     parse(value) {
       validateString(value, 'path');
-      const root = isAbsolute(value) ? separator : ''; const base = this.basename(value); const ext = this.extname(base);
-      return { root, dir: this.dirname(value), base, ext, name: ext ? base.slice(0, -ext.length) : base };
+      const normalized = normalizePath(value, platform);
+      const root = isAbsolute(value) ? separator : '';
+      const base = normalized.split(separator).at(-1) || '';
+      const extensionIndex = base.lastIndexOf('.');
+      const ext = extensionIndex <= 0 ? '' : base.slice(extensionIndex);
+      const lastSeparator = normalized.lastIndexOf(separator);
+      const dir = lastSeparator < 0
+        ? '.'
+        : lastSeparator === 0 ? separator : normalized.slice(0, lastSeparator);
+      return { root, dir, base, ext, name: ext ? base.slice(0, -ext.length) : base };
     },
     format(value) {
       validateObject(value, 'pathObject');

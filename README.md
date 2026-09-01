@@ -226,9 +226,9 @@ console.log(await proc.stdoutText());
 
 The TypeScript demo showcases three conversion pipelines from inline bash build scripts: Node.js 22 built-in `module.stripTypeScriptTypes()`, Vite's fast transform pipeline (`vite build`), and the official Microsoft TypeScript compiler (`tsc`), then executes the emitted JavaScript.
 
-### Next.js 14 App Router
+### Next.js 16 App Router
 
-Nacelle runs full Next.js App Router applications entirely in-browser without host subprocesses. The Next.js demo (`npm run examples:next`) demonstrates Server-Side Rendering (SSR), file-system routing (`app/page.tsx`, `app/about/page.tsx`, `app/dashboard/page.tsx`), Server Actions & API endpoints (`app/api/hello/route.ts`), and Next.js CLI orchestration (`next dev`, `next build`, `next start`).
+Nacelle runs full Next.js App Router applications entirely in-browser without host subprocesses. The Next.js demo (`npm run examples:next`) demonstrates Server-Side Rendering (SSR), file-system routing (`app/page.tsx`, `app/about/page.tsx`, `app/dashboard/page.tsx`), Server Actions & API endpoints (`app/api/hello/route.ts`), and Next.js CLI orchestration (`next dev`, `next build`, `next start`). Nacelle advertises the WebContainer runtime signal that makes stock Next.js select its own official SWC WebAssembly fallback (`@next/swc-wasm-nodejs`) instead of its platform `.node` package.
 
 ### Proxy configuration
 

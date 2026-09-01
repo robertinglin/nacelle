@@ -138,7 +138,7 @@ test.describe('Vite + React browser demo', () => {
     await expect(status).toHaveText(/Online — virtual Vite \+ React dev server/, { timeout: 30000 });
 
     const app = page.frameLocator('#app-preview');
-    await expect(app.locator('#app-title')).toHaveText('Vite + React in Browser Node');
+    await expect(app.locator('#app-title')).toHaveText('Vite + React in Nacelle');
     await expect(app.locator('#app-badge')).toContainText('Zustand');
     await expect(app.locator('#app-badge')).toContainText('React Router');
     await expect(app.locator('#app-status')).toContainText('virtual npm filesystem');
@@ -152,7 +152,7 @@ test.describe('Vite + React browser demo', () => {
     await app.locator('#router-about-link').click();
     await expect(app.locator('#app-title')).toHaveText('About the React app');
     await app.locator('#router-home-link').click();
-    await expect(app.locator('#app-title')).toHaveText('Vite + React in Browser Node');
+    await expect(app.locator('#app-title')).toHaveText('Vite + React in Nacelle');
 
     await expect(app.locator('#hash-router-path')).toHaveText('HashRouter path: /');
     await app.locator('#hash-router-about-link').click();
@@ -197,7 +197,7 @@ test.describe('Vite + React browser demo', () => {
     );
     await page.evaluate(() => document.getElementById('app-preview').contentDocument.getElementById('native-home-link').click());
     await homeResponse;
-    await expect(app.locator('#app-title')).toHaveText('Vite + React in Browser Node');
+    await expect(app.locator('#app-title')).toHaveText('Vite + React in Nacelle');
 
     const productionBundle = page.waitForResponse(
       (response) => response.url().endsWith('/assets/index.js'),
@@ -211,7 +211,7 @@ test.describe('Vite + React browser demo', () => {
       return { status: response.status, body: await response.json() };
     });
     expect(productionManifest).toEqual({ status: 200, body: { mode: 'production', entry: 'assets/index.js' } });
-    await expect(app.locator('#app-title')).toHaveText('Vite + React in Browser Node');
+    await expect(app.locator('#app-title')).toHaveText('Vite + React in Nacelle');
     await expect(app.locator('#increment')).toHaveText('Zustand count: 0');
     await app.locator('#increment').click();
     await expect(app.locator('#increment')).toHaveText('Zustand count: 1');
@@ -228,11 +228,11 @@ test.describe('Vite + React browser demo', () => {
     await expect(app.locator('#app-title')).toHaveText('About the React app');
 
     await page.evaluate(() => document.getElementById('app-preview').contentDocument.getElementById('native-home-link').click());
-    await expect(app.locator('#app-title')).toHaveText('Vite + React in Browser Node');
+    await expect(app.locator('#app-title')).toHaveText('Vite + React in Nacelle');
 
     await page.getByRole('button', { name: 'Restart Current Mode' }).click();
     await expect(status).toHaveText(/Online — Vite \+ React production build/, { timeout: 20000 });
-    await expect(app.locator('#app-title')).toHaveText('Vite + React in Browser Node', { timeout: 15000 });
+    await expect(app.locator('#app-title')).toHaveText('Vite + React in Nacelle', { timeout: 15000 });
 
     const restartedAbout = page.waitForResponse(
       (response) => response.url().endsWith('/__vhost__/5173/about')

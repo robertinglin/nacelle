@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Nacelle } from '../../../../src/index.js';
-import { runShellScript } from '../../../../src/runtime/shell.js';
+import { createShellProcess, runShellScript } from '../../../../src/runtime/shell.js';
 import { parseShellScript } from '../../../../src/runtime/shell-parser.js';
 
 function memoryShellFs(initial = {}) {
@@ -160,6 +160,30 @@ test('npm scripts run through the shell compatibility layer', async () => {
   assert.strictEqual(globalThis.AbortSignal?.any, hostAbortSignalAny);
 });
 
+test('shell process kill waits for the running command to finish', async () => {
+  const fs = memoryShellFs({ '/node/tool': '#!/usr/bin/env node\n' });
+  let commandStarted;
+  const commandStartedPromise = new Promise((resolve) => { commandStarted = resolve; });
+  let commandFinished = false;
+  const child = createShellProcess('tool', {
+    cwd: '/node',
+    env: { PATH: '/node' },
+    fs,
+    runCommand: ({ signal }) => new Promise((resolve) => {
+      commandStarted();
+      signal.addEventListener('abort', () => {
+        commandFinished = true;
+        resolve({ code: 130, stdout: '', stderr: '' });
+      }, { once: true });
+    }),
+  });
+
+  await commandStartedPromise;
+  await child.kill();
+  assert.equal(commandFinished, true);
+  assert.equal(await child.exit, 130);
+});
+
 test('inline bash can orchestrate a TypeScript strip-and-run build', async () => {
   const node = await Nacelle.create({
     gateway: false,
@@ -258,134 +282,102 @@ require('node:fs').writeFileSync('dist/result.txt', greeting);
   assert.equal(await node.fs.readFile('/node/dist/result.txt'), 'Hello Ada from Vite TypeScript');
 });
 
-test('inline bash can orchestrate TypeScript conversion through actual TypeScript compiler tsc', async () => {
-  const tsLib = `const ts = {
-  version: '5.5.4',
-  ModuleKind: { CommonJS: 1 },
-  ScriptTarget: { ES2022: 9 },
-  transpileModule(input) {
-    let code = String(input);
-    code = code.replace(/(?:export\\s+)?interface\\s+[A-Za-z_$][\\w$]*\\s*\\{[\\s\\S]*?\\}\\s*;?\\n?/g, '');
-    code = code.replace(/:\\s*[A-Za-z_$][\\w$]*(?:<[^>\\n]+>)?(?=\\s*[,)=;{])/g, '');
-    const header = '"use strict";\\n// Emitted by Microsoft TypeScript Compiler (tsc v5.5.4)\\nObject.defineProperty(exports, "__esModule", { value: true });\\n';
-    return { outputText: header + code.trim() + '\\n' };
-  }
-};
-module.exports = ts;
-`;
-
-  const tscBin = `#!/usr/bin/env node
-const fs = require('node:fs');
-const path = require('node:path');
-const ts = require('typescript');
-const args = process.argv.slice(2);
-let inputFile = 'src/main.ts';
-let outDir = 'dist';
-for (let i = 0; i < args.length; i++) {
-  if (args[i] === '--outDir' && args[i + 1]) outDir = args[++i];
-  else if (!args[i].startsWith('-')) inputFile = args[i];
-}
-const source = fs.readFileSync(inputFile, 'utf8');
-const result = ts.transpileModule(source);
-fs.mkdirSync(outDir, { recursive: true });
-const outFile = path.join(outDir, path.basename(inputFile, path.extname(inputFile)) + '.js');
-fs.writeFileSync(outFile, result.outputText);
-`;
-
+test('inline bash can orchestrate TypeScript conversion through actual TypeScript compiler from npm', async () => {
   const node = await Nacelle.create({
     gateway: false,
-    files: {
-      '/node/package.json': JSON.stringify({
-        name: 'tsc-typescript-fixture',
-        version: '1.0.0',
-        scripts: {
-          build: 'mkdir -p dist && tsc src/main.ts --outDir dist && node dist/main.js',
-        },
-      }),
-      '/node/node_modules/typescript/package.json': JSON.stringify({ name: 'typescript', version: '5.5.4', main: 'lib/typescript.js' }),
-      '/node/node_modules/typescript/lib/typescript.js': tsLib,
-      '/node/node_modules/typescript/bin/tsc': tscBin,
-      '/node/node_modules/.bin/tsc': '#!/usr/bin/env node\nrequire("../typescript/bin/tsc");\n',
-      '/node/src/main.ts': `interface User {
-  name: string;
-}
-const user: User = { name: 'Ada' };
-const greeting: string = 'Hello ' + user.name + ' from tsc Compiler';
-require('node:fs').writeFileSync('dist/result.txt', greeting);
-`,
-    },
+    cwd: '/node',
   });
+  await node.npm.install('typescript@5.5.4');
+
+  await node.fs.writeFile('/node/build.js', `
+    const fs = require('node:fs');
+    const ts = require('typescript');
+
+    const source = fs.readFileSync('src/main.ts', 'utf8');
+    const result = ts.transpileModule(source, {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022,
+      },
+    });
+
+    fs.mkdirSync('dist', { recursive: true });
+    fs.writeFileSync('dist/main.js', result.outputText);
+    require('./dist/main.js');
+  `);
+
+  await node.fs.writeFile('/node/package.json', JSON.stringify({
+    name: 'tsc-typescript-fixture',
+    version: '1.0.0',
+    scripts: {
+      build: 'node build.js',
+    },
+  }));
+
+  await node.fs.writeFile('/node/src/main.ts', `
+    interface User {
+      name: string;
+    }
+    const user: User = { name: 'Ada' };
+    const greeting: string = 'Hello ' + user.name + ' from TypeScript';
+    require('node:fs').writeFileSync('dist/result.txt', greeting);
+  `);
 
   const child = await node.bash('npm run build');
   assert.equal(await child.exit, 0);
-  assert.match(String(await node.fs.readFile('/node/dist/main.js')), /Emitted by Microsoft TypeScript Compiler \(tsc v5\.5\.4\)/);
-  assert.equal(await node.fs.readFile('/node/dist/result.txt'), 'Hello Ada from tsc Compiler');
+  assert.equal(await node.fs.readFile('/node/dist/result.txt'), 'Hello Ada from TypeScript');
 });
 
-test('inline bash can orchestrate Next.js App Router server and build commands', async () => {
-  const nextLib = `
-const http = require('node:http');
-function createNextServer() {
-  const server = http.createServer((req, res) => {
-    if (req.url === '/api/hello') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', framework: 'Next.js 14 App Router' }));
-      return;
-    }
-    res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end('<h1>▲ Next.js 14 App Router</h1>');
-  });
-  return {
-    listen(port, cb) { return server.listen(port, '127.0.0.1', cb); },
-    close() { return server.close(); },
-  };
-}
-module.exports = { createNextServer };
-`;
-
-  const nextBin = `#!/usr/bin/env node
-const fs = require('node:fs');
-const http = require('node:http');
-const { createNextServer } = require('next');
-const cmd = process.argv[2] || 'dev';
-if (cmd === 'build') {
-  fs.mkdirSync('.next', { recursive: true });
-  fs.writeFileSync('.next/BUILD_ID', 'build-14.2.5');
-  console.log('✓ Next.js build completed');
-  process.exit(0);
-}
-const app = createNextServer();
-app.listen(3000, () => console.log('✓ Next.js dev server ready'));
-`;
-
+test('inline bash can orchestrate full-stack React SSR server from npm', async () => {
   const node = await Nacelle.create({
     gateway: false,
-    files: {
-      '/node/package.json': JSON.stringify({
-        name: 'nextjs-fixture',
-        version: '14.2.5',
-        scripts: {
-          dev: 'next dev',
-          build: 'next build',
-        },
-      }),
-      '/node/node_modules/next/package.json': JSON.stringify({ name: 'next', version: '14.2.5', main: 'index.js' }),
-      '/node/node_modules/next/index.js': nextLib,
-      '/node/node_modules/next/bin/next': nextBin,
-      '/node/node_modules/.bin/next': '#!/usr/bin/env node\nrequire("../next/bin/next");\n',
-      '/node/app/page.tsx': 'export default function Page() { return <h1>▲ Next.js 14 App Router</h1>; }',
+    cwd: '/node',
+  });
+  await node.npm.install(['react@18.3.1', 'react-dom@18.3.1']);
+
+  await node.fs.writeFile('/node/server.js', `
+    const http = require('node:http');
+    const React = require('react');
+    const ReactDOMServer = require('react-dom/server');
+
+    function App({ message }) {
+      return React.createElement('h1', null, message);
+    }
+
+    const server = http.createServer((req, res) => {
+      if (req.url === '/api/hello') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', framework: 'React SSR' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end('<!DOCTYPE html><html><body>' + ReactDOMServer.renderToString(React.createElement(App, { message: 'React SSR' })) + '</body></html>');
+    });
+
+    server.listen(3000, '127.0.0.1', () => console.log('ready'));
+  `);
+
+  await node.fs.writeFile('/node/package.json', JSON.stringify({
+    name: 'react-ssr-fixture',
+    version: '1.0.0',
+    scripts: {
+      dev: 'node server.js',
+    },
+  }));
+
+  let readyResolve;
+  const readyPromise = new Promise((r) => { readyResolve = r; });
+
+  const devChild = await node.bash('npm run dev', {
+    onStdout: (chunk) => {
+      if (chunk.includes('ready')) readyResolve();
     },
   });
 
-  const buildChild = await node.bash('npm run build');
-  assert.equal(await buildChild.exit, 0);
-  assert.equal(await node.fs.readFile('/node/.next/BUILD_ID'), 'build-14.2.5');
-
-  const devChild = await node.bash('npm run dev');
-  await new Promise((r) => setTimeout(r, 100));
+  await readyPromise;
   const res = await node.fetch('http://localhost:3000/api/hello');
   const data = await res.json();
-  assert.equal(data.framework, 'Next.js 14 App Router');
+  assert.equal(data.framework, 'React SSR');
   assert.equal(data.status, 'ok');
   devChild.kill();
   await devChild.exit;
@@ -413,5 +405,3 @@ test('npm scripts stream stdout chunks in real time before command exit', async 
   await child.exit;
   assert.deepEqual(streamed, ['server listening on 3000\n']);
 });
-
-

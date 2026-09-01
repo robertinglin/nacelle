@@ -25,6 +25,13 @@ import {
   resolveNodeVersionRecord,
 } from './versions/index.js';
 
+const NPM_SCRIPT_ENV_KEYS = Object.freeze([
+  'npm_lifecycle_event',
+  'npm_lifecycle_script',
+  'npm_package_name',
+  'npm_package_version',
+]);
+
 export {
   createRuntime,
   defaultRuntime as runtime,
@@ -56,7 +63,7 @@ export {
 };
 
 /**
- * High-level In-Browser Node.js Execution Engine
+ * High-level In-Nacelle.js Execution Engine
  */
 export class Nacelle {
   static get supportedVersions() {
@@ -209,7 +216,7 @@ export class Nacelle {
       ipc: { enabled: true },
       signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
       output: { maxBytes: 10 * 1024 * 1024, stdoutBytes: 4 * 1024 * 1024, stderrBytes: 4 * 1024 * 1024 },
-      envVars: { allowed: Object.keys(env) },
+      envVars: { allowed: [...new Set([...Object.keys(env), ...NPM_SCRIPT_ENV_KEYS])] },
       proxy: { mode: proxy.mode || 'virtual', enabled: proxy.enabled === true },
     };
     const capabilities = createCapabilityManifest({ ...defaultCapabilities, ...(options.capabilities || {}) });
@@ -377,6 +384,12 @@ export class Nacelle {
       cache: this._npmCache,
       globalObject: this._globalObject,
       lifecycleScripts: this._capabilities?.npm?.lifecycleScripts === true,
+      // Keep npm's optional-dependency target separate from process.platform:
+      // Next.js sees the Linux-shaped Node contract it expects, while npm
+      // skips packages whose only implementation is a native .node addon.
+      platform: 'browser',
+      arch: 'browser',
+      libc: 'browser',
       limits: {
         maxEntries: this._capabilities?.budgets?.npmEntries,
         maxExpandedBytes: this._capabilities?.budgets?.npmBytes,
@@ -433,6 +446,7 @@ export class Nacelle {
        * @param {string} [options.cwd] Target directory
        * @param {Function} [options.onStdout]
        * @param {Function} [options.onStderr]
+       * @param {Function} [options.onNetwork] Callback for guest HTTP request events
        * @param {AbortSignal} [options.signal]
        */
       run: async (scriptName, options = {}) => {
@@ -672,6 +686,7 @@ export class Nacelle {
    * @param {number} [runOptions.timeout=30000] Timeout in milliseconds
    * @param {Function} [runOptions.onStdout] Callback for stdout chunks: (chunk: string) => void
    * @param {Function} [runOptions.onStderr] Callback for stderr chunks: (chunk: string) => void
+   * @param {Function} [runOptions.onNetwork] Callback for guest HTTP request events
    * @param {AbortSignal} [runOptions.signal]
    */
   async run({
@@ -681,7 +696,8 @@ export class Nacelle {
     cwd = this._cwd,
     timeout = 30000,
     onStdout,
-      onStderr,
+    onStderr,
+    onNetwork,
     stdin,
     signal,
     capture = true,
@@ -701,9 +717,13 @@ export class Nacelle {
       },
     });
     const controller = new AbortController();
-    const onAbort = () => controller.abort();
-    signal?.addEventListener?.('abort', onAbort, { once: true });
-    let killed = false;
+    let killed = Boolean(signal?.aborted);
+    const onAbort = () => {
+      killed = true;
+      controller.abort(signal?.reason);
+    };
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener?.('abort', onAbort, { once: true });
     let settled = false;
     const trace = createTraceRecorder();
     this._trace = trace;
@@ -723,6 +743,11 @@ export class Nacelle {
       this.emit('stderr', text);
     };
 
+    const handleNetwork = (event) => {
+      onNetwork?.(event);
+      this.emit('network', event);
+    };
+
     const runPromise = this._runtime.executeEntry(
       entry,
       {
@@ -733,6 +758,7 @@ export class Nacelle {
         stdin,
         signal: controller.signal,
         isolation: this._isolation,
+        onNetwork: handleNetwork,
       },
       handleStdout,
       handleStderr,
@@ -791,7 +817,7 @@ export class Nacelle {
       PATH: `${targetCwd}/node_modules/.bin:/node/node_modules/.bin:${this._env.PATH || ''}`,
       ...options.env,
     };
-    const runCommand = async ({ entry, argv, env, cwd, stdin, signal, timeout, onStdout, onStderr }) => {
+    const runCommand = async ({ entry, argv, env, cwd, stdin, signal, timeout, onNetwork, onStdout, onStderr }) => {
       const stdout = [];
       const stderr = [];
       const child = await this.run({
@@ -802,6 +828,7 @@ export class Nacelle {
         stdin,
         timeout,
         signal,
+        onNetwork,
         onStdout: (chunk) => {
           const text = String(chunk);
           stdout.push(text);
@@ -816,7 +843,7 @@ export class Nacelle {
       const code = await child.exit;
       return { code: code ?? 1, stdout: stdout.join(''), stderr: stderr.join(''), streamed: Boolean(onStdout || onStderr) };
     };
-    const runInline = async ({ source, argv, env, cwd, stdin, signal, timeout, onStdout, onStderr }) => {
+    const runInline = async ({ source, argv, env, cwd, stdin, signal, timeout, onNetwork, onStdout, onStderr }) => {
       const stdout = [];
       const stderr = [];
       const child = await this.execute(source, {
@@ -826,6 +853,7 @@ export class Nacelle {
         stdin,
         timeout,
         signal,
+        onNetwork,
         onStdout: (chunk) => {
           const text = String(chunk);
           stdout.push(text);
@@ -870,12 +898,14 @@ export class Nacelle {
         stdin: nodeOptions.input,
         signal: nodeOptions.signal,
         timeout: nodeOptions.timeout,
+        onNetwork: nodeOptions.onNetwork,
       }),
       nodeVersion: this._nodeProfile.runtimeVersion,
       signal: options.signal,
       timeout: options.timeout,
       onStdout: options.onStdout,
       onStderr: options.onStderr,
+      onNetwork: options.onNetwork,
     });
   }
 

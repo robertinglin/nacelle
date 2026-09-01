@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Browser Node Harness — WebSocket Upgrade & Duplex Demo</title>
+  <title>Nacelle Harness — WebSocket Upgrade & Duplex Demo</title>
   <style>
     :root {
       --bg: #0b1120;
@@ -252,7 +252,7 @@
         <a href="/bash.html">🖥️ Bash Shell</a>
         <a href="/proxy.html">🛡️ Network Proxy</a>
       </div>
-      <span>Browser Node Harness</span>
+      <span>Nacelle Harness</span>
       <span class="badge">Node v22.23.2</span>
     </div>
     <span id="global-status" class="status-pill ready">Ready</span>
@@ -265,7 +265,7 @@
       </div>
       <div class="controls">
         <div class="input-row">
-          <input type="text" id="msg-input" value="Hello WebSocket from Browser Node Harness!">
+          <input type="text" id="msg-input" value="Hello WebSocket from Nacelle Harness!">
           <button class="btn" id="btn-send">Send Frame</button>
         </div>
       </div>
@@ -317,44 +317,34 @@
     });
     document.addEventListener('click', () => navDropdown?.classList.remove('show'));
 
-    const wsServerCode = `
+    const wsServerCode = `const WebSocket = require('ws');
 const http = require('node:http');
-const crypto = require('node:crypto');
 
-const server = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('HTTP origin active');
-});
+const server = http.createServer();
+const wss = new WebSocket.Server({ noServer: true });
 
 server.on('upgrade', (req, socket, head) => {
-  const key = req.headers['sec-websocket-key'];
-  const acceptKey = crypto.createHash('sha1')
-    .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
-    .digest('base64');
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    wss.emit('connection', ws, req);
+  });
+});
 
-  socket.write([
-    'HTTP/1.1 101 Switching Protocols',
-    'Upgrade: websocket',
-    'Connection: Upgrade',
-    'Sec-WebSocket-Accept: ' + acceptKey,
-    '', ''
-  ].join('\\r\\n'));
-
-  socket.on('data', (chunk) => {
-    // Echo payload with server prefix
-    const text = chunk.toString('utf8').replace(/^[\\s\\S]*?\\r\\n\\r\\n/, '');
-    socket.write('ECHO: ' + text);
+wss.on('connection', (socket) => {
+  socket.on('message', (chunk) => {
+    const text = chunk.toString('utf8');
+    socket.send('ECHO: ' + text);
   });
 });
 
 server.listen(39301, '127.0.0.1', () => {
-  console.log('WS Server listening on 39301');
+  console.log('Real ws WebSocketServer listening on 39301');
 });
 `;
 
     document.getElementById('code-editor').value = wsServerCode;
 
     let framesCount = 0;
+    let nodeInstance = null;
 
     function addMessage(text, isClient) {
       const stream = document.getElementById('chat-stream');
@@ -367,6 +357,20 @@ server.listen(39301, '127.0.0.1', () => {
       document.getElementById('metric-frames').textContent = framesCount;
     }
 
+    async function ensureRuntime() {
+      if (nodeInstance) return nodeInstance;
+
+      addMessage('📦 Installing ws@8.18.0 from npm...', false);
+      nodeInstance = await Nacelle.create({
+        gateway: false,
+        cwd: '/node',
+      });
+      await nodeInstance.npm.install('ws@8.18.0');
+      addMessage('✓ ws package installed in VFS', false);
+      addMessage('🚀 ws WebSocketServer ready on port 39301', false);
+      return nodeInstance;
+    }
+
     async function sendFrame() {
       const input = document.getElementById('msg-input');
       const msg = input.value.trim();
@@ -377,15 +381,34 @@ server.listen(39301, '127.0.0.1', () => {
 
       const t0 = performance.now();
 
-      const node = await Nacelle.create({
-        gateway: false,
-        files: {
-          '/node/ws-server.js': wsServerCode,
-          '/node/client.js': `
-            const net = require('node:net');
+      try {
+        const node = await ensureRuntime();
+
+        await node.fs.writeFile('/node/exchange.js', `
+          const WebSocket = require('ws');
+          const http = require('node:http');
+          const net = require('node:net');
+
+          const server = http.createServer();
+          const wss = new WebSocket.Server({ noServer: true });
+
+          server.on('upgrade', (req, socket, head) => {
+            wss.handleUpgrade(req, socket, head, (ws) => {
+              wss.emit('connection', ws, req);
+            });
+          });
+
+          wss.on('connection', (socket) => {
+            socket.on('message', (chunk) => {
+              const text = chunk.toString('utf8');
+              socket.send('ECHO: ' + text);
+            });
+          });
+
+          server.listen(39301, '127.0.0.1', () => {
             const client = net.connect({ port: 39301, host: '127.0.0.1' }, () => {
               client.write([
-                'GET /ws HTTP/1.1',
+                'GET / HTTP/1.1',
                 'Host: 127.0.0.1:39301',
                 'Upgrade: websocket',
                 'Connection: Upgrade',
@@ -396,37 +419,36 @@ server.listen(39301, '127.0.0.1', () => {
             });
 
             client.on('data', (chunk) => {
-              const str = chunk.toString();
-              if (str.includes('101 Switching Protocols')) {
-                client.write('${msg.replace(/'/g, "\\'")}');
-                return;
-              }
-              if (str.includes('ECHO:')) {
-                const echo = str.slice(str.indexOf('ECHO:') + 5).trim();
-                process.stdout.write(echo);
-                client.destroy();
-                process.exit(0);
+              const text = chunk.toString('utf8');
+              if (text.includes('101 Switching Protocols')) {
+                const payload = Buffer.from(${JSON.stringify(msg)});
+                const mask = Buffer.from([0x12, 0x34, 0x56, 0x78]);
+                const masked = Buffer.alloc(payload.length);
+                for (let i = 0; i < payload.length; i++) masked[i] = payload[i] ^ mask[i % 4];
+                const frame = Buffer.concat([Buffer.from([0x81, 0x80 | payload.length]), mask, masked]);
+                client.write(frame);
+              } else {
+                const echoText = chunk.slice(2).toString('utf8');
+                process.stdout.write(echoText);
+                client.end();
+                server.close(() => process.exit(0));
               }
             });
-          `
+          });
+        `);
+
+        const clientChild = await node.bash('node exchange.js');
+        await clientChild.exit;
+        const t1 = performance.now();
+
+        const echoText = await clientChild.stdoutText();
+        if (echoText) {
+          addMessage(echoText, false);
+          document.getElementById('metric-latency').textContent = `${(t1 - t0).toFixed(1)} ms`;
         }
-      });
-
-      const serverChild = await node.bash('node ws-server.js');
-      await new Promise(r => setTimeout(r, 100));
-
-      const clientChild = await node.bash('node client.js');
-      await clientChild.exit;
-      const t1 = performance.now();
-
-      const echoText = await clientChild.stdoutText();
-      if (echoText) {
-        addMessage(echoText, false);
-        document.getElementById('metric-latency').textContent = `${(t1 - t0).toFixed(1)} ms`;
+      } catch (err) {
+        addMessage(`Error: ${err.message}`, false);
       }
-
-      serverChild.kill();
-      await serverChild.exit;
     }
 
     document.getElementById('btn-send').addEventListener('click', sendFrame);
@@ -435,8 +457,8 @@ server.listen(39301, '127.0.0.1', () => {
     });
 
     window.addEventListener('DOMContentLoaded', () => {
-      addMessage('Handshake established: HTTP/1.1 101 Switching Protocols', false);
-      addMessage('Connected to in-browser WebSocket engine.', false);
+      addMessage('Ready to connect via real ws package from npm.', false);
+      ensureRuntime().catch(console.error);
     });
   </script>
 </body>

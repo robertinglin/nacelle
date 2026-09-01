@@ -683,6 +683,7 @@ async function runNode(args, input, context, options) {
       return options.runNode({
         args: args.slice(index + 2), code, print: false, input, cwd: context.cwd, env: context.env,
         signal: context.signal, timeout: context.timeout,
+        onNetwork: context.onNetwork,
         onStdout: context.onStdout, onStderr: context.onStderr,
       });
     }
@@ -692,6 +693,7 @@ async function runNode(args, input, context, options) {
       return options.runNode({
         args: args.slice(index + 2), code, print: true, input, cwd: context.cwd, env: context.env,
         signal: context.signal, timeout: context.timeout,
+        onNetwork: context.onNetwork,
         onStdout: context.onStdout, onStderr: context.onStderr,
       });
     }
@@ -704,6 +706,7 @@ async function runNode(args, input, context, options) {
   return options.runCommand({
     entry: shellPath(script, context.cwd), argv: args.slice(index + 1), cwd: context.cwd,
     env: context.env, stdin: input, signal: context.signal, timeout: context.timeout,
+    onNetwork: context.onNetwork,
     onStdout: context.onStdout, onStderr: context.onStderr,
   });
 }
@@ -730,6 +733,7 @@ async function runShell(name, args, input, context, options) {
     cwd: context.cwd,
     env: context.env,
     stdin: input,
+    onNetwork: (event) => context.onNetwork?.(event),
     onStdout: (chunk) => stdout.push(String(chunk)),
     onStderr: (chunk) => stderr.push(String(chunk)),
   });
@@ -761,6 +765,7 @@ async function runNpm(name, args, input, context, options) {
       stdin: input,
       signal: context.signal,
       timeout: context.timeout,
+      onNetwork: (event) => context.onNetwork?.(event),
       onStdout: (chunk) => {
         const text = String(chunk);
         stdout.push(text);
@@ -794,6 +799,7 @@ async function runProgram(name, args, input, context, options) {
   return options.runCommand({
     entry: resolved.path, argv: args, cwd: context.cwd, env: context.env,
     stdin: input, signal: context.signal, timeout: context.timeout,
+    onNetwork: context.onNetwork,
     onStdout: context.onStdout, onStderr: context.onStderr,
   });
 }
@@ -846,6 +852,7 @@ async function executeSimple(command, context, options) {
     shellState: context.shellState || context,
     onStdout: shouldStreamStdout ? options.onStdout : undefined,
     onStderr: shouldStreamStderr ? options.onStderr : undefined,
+    onNetwork: options.onNetwork,
   };
 
   let commandResult = result(0);
@@ -906,6 +913,7 @@ export async function runShellScript(command, options) {
     previousCwd: null,
     lastStatus: 0,
     fs: options.fs,
+    onNetwork: options.onNetwork,
   };
   const finalPipeline = pipelines.at(-1);
   const extraArgs = Array.isArray(options.args) ? options.args : [];
@@ -948,6 +956,7 @@ export function createShellProcess(command, options) {
     signal,
     onStdout: (chunk) => { stdout.push(String(chunk)); options.onStdout?.(chunk); },
     onStderr: (chunk) => { stderr.push(String(chunk)); options.onStderr?.(chunk); },
+    onNetwork: (event) => options.onNetwork?.(event),
   })).catch((error) => {
     const message = `${error?.message || error}\n`;
     stderr.push(message);
@@ -958,7 +967,10 @@ export function createShellProcess(command, options) {
     exit,
     stdoutText: async () => { await exit; return stdout.join(''); },
     stderrText: async () => { await exit; return stderr.join(''); },
-    kill: async () => { controller?.abort(); },
+    kill: async () => {
+      controller?.abort();
+      await exit.catch(() => {});
+    },
     structuredResult: null,
   };
 }

@@ -107,6 +107,55 @@ test.describe('browser primitive output adapters', () => {
     expect(events).toEqual(['readable']);
   });
 
+  test('completes a read/readable consumer after the final buffered chunk', async () => {
+    let reads = 0;
+    const readable = new Readable({
+      highWaterMark: 1,
+      read() {
+        if (reads++ === 0) {
+          this.push('final chunk');
+          this.push(null);
+        }
+      },
+    });
+    const chunks = [];
+    const pull = (async () => {
+      while (true) {
+        const chunk = readable.read();
+        if (chunk !== null) {
+          chunks.push(new TextDecoder().decode(chunk));
+          continue;
+        }
+        if (readable.readableEnded) return;
+        await new Promise((resolve, reject) => {
+          const cleanup = () => {
+            readable.off('readable', onDone);
+            readable.off('end', onDone);
+            readable.off('error', onError);
+          };
+          const onDone = () => {
+            cleanup();
+            resolve();
+          };
+          const onError = (error) => {
+            cleanup();
+            reject(error);
+          };
+          readable.on('readable', onDone);
+          readable.on('end', onDone);
+          readable.on('error', onError);
+        });
+      }
+    })();
+
+    await Promise.race([
+      pull,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('readable pull timed out')), 1000)),
+    ]);
+    expect(chunks).toEqual(['final chunk']);
+    expect(readable.readableEnded).toBe(true);
+  });
+
   test('preserves object-mode values through Readable.from and Transform', async () => {
     const transformed = Readable.from([1, 2, 3]).pipe(new Transform({
       objectMode: true,

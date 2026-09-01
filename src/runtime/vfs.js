@@ -2113,20 +2113,46 @@ export function createVfs(options = {}) {
     validateWriteData(data);
     const record = descriptor(value);
     assertWritable(record);
-    if (!Number.isInteger(offset) || offset < 0) throw outOfRange('offset', offset);
-    if (length !== undefined && (!Number.isInteger(length) || length < 0)) throw outOfRange('length', length);
-    if (position !== null && position !== undefined && (!Number.isInteger(position) || position < 0)) {
-      throw outOfRange('position', position);
+    let valueBytes;
+    let byteOffset = 0;
+    let byteLength;
+    let bytePosition;
+
+    if (typeof data === 'string') {
+      let encoding = 'utf8';
+      if (typeof offset === 'string') {
+        encoding = offset;
+        bytePosition = null;
+      } else if (typeof length === 'string') {
+        bytePosition = offset;
+        encoding = length;
+      } else {
+        bytePosition = offset;
+        if (typeof position === 'string') encoding = position;
+        else bytePosition = offset ?? position;
+      }
+      valueBytes = decode(data, encoding);
+      byteLength = valueBytes.length;
+    } else {
+      if (!Number.isInteger(offset) || offset < 0) throw outOfRange('offset', offset);
+      if (length !== undefined && (!Number.isInteger(length) || length < 0)) throw outOfRange('length', length);
+      valueBytes = decode(data);
+      byteOffset = offset;
+      byteLength = length;
+      bytePosition = position;
     }
-    const valueBytes = decode(data);
-    const at = position === null || position === undefined ? record.position : position;
-    const count = Math.min(length ?? valueBytes.length, valueBytes.length - offset);
+
+    if (bytePosition !== null && bytePosition !== undefined && (!Number.isInteger(bytePosition) || bytePosition < 0)) {
+      throw outOfRange('position', bytePosition);
+    }
+    const at = bytePosition === null || bytePosition === undefined ? record.position : bytePosition;
+    const count = Math.min(byteLength ?? valueBytes.length, valueBytes.length - byteOffset);
     const target = readBytes(record.path, 'write');
     const result = new Uint8Array(Math.max(target.length, at + count));
     result.set(target);
-    result.set(valueBytes.subarray(offset, offset + count), at);
+    result.set(valueBytes.subarray(byteOffset, byteOffset + count), at);
     setFile(record.path, result, false, 'write');
-    if (position === null || position === undefined) record.position = at + count;
+    if (bytePosition === null || bytePosition === undefined) record.position = at + count;
     return { bytesWritten: count, buffer: data };
   }
 
@@ -2919,6 +2945,11 @@ export function createVfs(options = {}) {
         callback();
       }
       : null;
+    Object.defineProperty(stream, '__bnhVfsWriteStream', {
+      configurable: true,
+      enumerable: false,
+      value: true,
+    });
     stream._destroyHook = WriteStream.prototype._destroy;
     const destroy = stream.destroy.bind(stream);
     stream.destroy = (error, callback) => {
@@ -3375,7 +3406,8 @@ export function createVfs(options = {}) {
   function lstat(pathValue, optionsValue, callback) {
     const done = typeof optionsValue === 'function' ? optionsValue : callback;
     resolve(pathValue);
-    asyncFsOperation(done, () => lstatPath(resolve(pathValue)));
+    const resolvedPath = resolve(pathValue);
+    asyncFsOperation(done, () => lstatPath(resolvedPath));
   }
 
   function readdir(pathValue, optionsValue, callback) {
@@ -3750,7 +3782,10 @@ export function createVfs(options = {}) {
     async stat(...args) { await waitForMutations(); return fs.statSync(...args); },
     async statfs(...args) { await waitForMutations(); return fs.statfsSync(...args); },
     async lstat(...args) { await waitForMutations(); return fs.lstatSync(...args); },
-    async readdir(...args) { await waitForMutations(); return fs.readdirSync(...args); },
+    async readdir(...args) {
+      await waitForMutations();
+      return fs.readdirSync(...args);
+    },
     async opendir(pathValue, optionsValue = {}) {
       await waitForMutations();
       return createDirectoryHandle(pathValue, optionsValue);
@@ -3769,6 +3804,21 @@ export function createVfs(options = {}) {
     },
     watch: promiseWatch,
   };
+
+  const trackedPromises = Object.fromEntries(Object.entries(promises).map(([name, operation]) => {
+    if (typeof operation !== 'function') return [name, operation];
+    return [name, (...args) => {
+      const release = taskTracker?.();
+      let pending;
+      try {
+        pending = operation(...args);
+      } catch (error) {
+        release?.();
+        throw error;
+      }
+      return Promise.resolve(pending).finally(() => release?.());
+    }];
+  }));
 
   configureMounts(options.mounts);
   configureFixtures(options.fixtures);
@@ -3802,7 +3852,7 @@ export function createVfs(options = {}) {
       mountRecord.artifacts.add(path);
     },
     files: fileIndex,
-    fs: { ...fs, promises },
+    fs: { ...fs, promises: trackedPromises },
     path: resolve,
     read(pathValue) {
       const path = resolve(pathValue);

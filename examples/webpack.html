@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Browser Node Harness — Webpack 5 Bundler Demo</title>
+  <title>Nacelle Harness — Webpack 5 Bundler Demo</title>
   <style>
     :root {
       --bg: #0b1120;
@@ -223,7 +223,7 @@
         <a href="/bash.html">🖥️ Bash Shell</a>
         <a href="/proxy.html">🛡️ Network Proxy</a>
       </div>
-      <span>Browser Node Harness</span>
+      <span>Nacelle Harness</span>
       <span class="badge">Node v22.23.2</span>
     </div>
     <span id="global-status" class="status-pill ready">Ready</span>
@@ -232,14 +232,14 @@
   <main>
     <div class="panel">
       <div class="panel-header">
-        <span>📦 Webpack 5 Build Pipeline</span>
+        <span>📦 JavaScript Module Bundler (rollup on NPM)</span>
       </div>
       <div class="controls">
-        <button class="btn" id="btn-run">▶ Build & Hash Bundles (VFS Volume)</button>
+        <button class="btn" id="btn-run">▶ Run Rollup Module Bundler</button>
       </div>
       <div class="editor-container">
         <div class="panel-header" style="font-size: 0.75rem;">
-          <span>webpack.config.js & Multi-Chunk Sources</span>
+          <span>rollup.config.js & Multi-Module Sources</span>
         </div>
         <textarea class="code-view" id="code-editor" readonly></textarea>
       </div>
@@ -286,57 +286,47 @@
     document.addEventListener('click', () => navDropdown?.classList.remove('show'));
 
     const bundlerCode = `
+const { rollup } = require('rollup');
 const fs = require('node:fs');
-const path = require('node:path');
 const crypto = require('node:crypto');
 
-// 1. Multi-asset source modules
-const modules = {
-  './analytics.js': "module.exports = { track: (evt) => 'Event recorded: ' + evt };",
-  './math.js': "module.exports = { add: (a, b) => a + b, mul: (a, b) => a * b };",
-  './index.js': "const m = require('./math.js'); const a = require('./analytics.js'); console.log(a.track('Sum is ' + m.add(20, 22)));"
-};
+async function build() {
+  const bundle = await rollup({
+    input: '/node/src/index.js',
+  });
 
-// 2. Packaging bundle with module registry
-const bundleBody = \`
-(() => {
-  const registry = {
-    './analytics.js': (module, exports) => { \${modules['./analytics.js']} },
-    './math.js': (module, exports) => { \${modules['./math.js']} }
-  };
-  function requireModule(id) {
-    const mod = { exports: {} };
-    const resolvedId = registry[id] ? id : (registry[id + '.js'] ? id + '.js' : id);
-    if (registry[resolvedId]) {
-      registry[resolvedId](mod, mod.exports);
-    }
-    return mod.exports;
-  }
-  \${modules['./index.js'].replace(/require\\(/g, 'requireModule(')}
-})();
-\`;
+  const { output } = await bundle.generate({
+    format: 'cjs',
+    exports: 'auto',
+  });
 
-const hash = crypto.createHash('sha256').update(bundleBody).digest('hex').slice(0, 8);
-const bundleFilename = 'bundle.' + hash + '.js';
+  const code = output[0].code;
+  const hash = crypto.createHash('sha256').update(code).digest('hex').slice(0, 8);
+  const bundleFilename = 'bundle.' + hash + '.js';
 
-fs.mkdirSync('/node/dist', { recursive: true });
-fs.writeFileSync('/node/dist/' + bundleFilename, bundleBody);
-fs.writeFileSync('/node/dist/manifest.json', JSON.stringify({
-  'main.js': bundleFilename,
-  'modules': Object.keys(modules),
-  'hash': hash,
-  'size': Buffer.byteLength(bundleBody)
-}));
+  fs.mkdirSync('/node/dist', { recursive: true });
+  fs.writeFileSync('/node/dist/' + bundleFilename, code);
+  fs.writeFileSync('/node/dist/manifest.json', JSON.stringify({
+    'main.js': bundleFilename,
+    modules: output[0].modules ? Object.keys(output[0].modules) : ['/node/src/index.js', '/node/src/analytics.js', '/node/src/math.js'],
+    hash: hash,
+    size: Buffer.byteLength(code),
+  }, null, 2));
 
-console.log(JSON.stringify({
-  bundle: bundleFilename,
-  hash: hash,
-  size: Buffer.byteLength(bundleBody),
-  manifest: '/node/dist/manifest.json'
-}));
+  console.log(JSON.stringify({
+    bundle: bundleFilename,
+    hash: hash,
+    size: Buffer.byteLength(code),
+    manifest: '/node/dist/manifest.json'
+  }));
+}
+
+build().catch(console.error);
 `;
 
     document.getElementById('code-editor').value = bundlerCode;
+
+    let nodeInstance = null;
 
     async function build() {
       document.getElementById('global-status').textContent = 'Building...';
@@ -344,14 +334,21 @@ console.log(JSON.stringify({
 
       const t0 = performance.now();
       try {
-        const node = await Nacelle.create({
-          gateway: false,
-          files: {
-            '/node/webpack.js': bundlerCode
-          }
-        });
+        if (!nodeInstance) {
+          nodeInstance = await Nacelle.create({
+            gateway: false,
+            cwd: '/node',
+          });
+          await nodeInstance.npm.install('rollup@2.79.2');
+        }
 
-        const child = await node.bash('node webpack.js');
+        const node = nodeInstance;
+        await node.fs.writeFile('/node/src/analytics.js', "export const track = (evt) => 'Event recorded: ' + evt;");
+        await node.fs.writeFile('/node/src/math.js', "export const add = (a, b) => a + b; export const mul = (a, b) => a * b;");
+        await node.fs.writeFile('/node/src/index.js', "import { add } from './math.js'; import { track } from './analytics.js'; console.log(track('Sum is ' + add(20, 22)));");
+        await node.fs.writeFile('/node/rollup.js', bundlerCode);
+
+        const child = await node.bash('node rollup.js');
         const code = await child.exit;
         const stdout = await child.stdoutText();
         const t1 = performance.now();
@@ -371,7 +368,7 @@ console.log(JSON.stringify({
 
         const out = document.getElementById('output-pane');
         out.innerHTML = `
-          <div style="color: var(--success); font-weight: 700; margin-bottom: 8px;">✅ Webpack 5 Bundle Generated Successfully!</div>
+          <div style="color: var(--success); font-weight: 700; margin-bottom: 8px;">✅ Rollup Bundle Generated Successfully from NPM Package!</div>
           <div style="color: var(--text-muted); margin-bottom: 12px;">Asset Manifest (dist/manifest.json):</div>
           <pre style="background: #0f172a; padding: 10px; border-radius: 6px; border: 1px solid var(--border); color: #93c5fd;">${manifestRaw}</pre>
           <div style="color: var(--text-muted); margin-top: 12px; margin-bottom: 8px;">Executing Generated Bundle in Isolated Runtime:</div>

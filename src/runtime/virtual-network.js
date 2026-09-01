@@ -171,6 +171,7 @@ export function createVirtualNetwork({ transport } = {}) {
   const tcpBindings = new Map();
   const udpBindings = new Map();
   const pipeBindings = new Map();
+  const remoteTcpBindings = new Map();
   let nextUdpBindingId = 1;
   let nextTcpPort = 41000;
   let nextUdpPort = 51000;
@@ -366,6 +367,7 @@ export function createVirtualNetwork({ transport } = {}) {
   }
 
   function connectTcp({ address, port, client, serverSocket, onConnected, onError, localAddress, localPort }) {
+    globalThis.__bnhGatewayLogs?.push?.({ type: 'network-connect-tcp', address, port, bindings: tcpBindings.size });
     let settled = false;
     const fail = (error) => {
       if (settled) return false;
@@ -381,6 +383,7 @@ export function createVirtualNetwork({ transport } = {}) {
     const connect = () => {
       if (settled) return;
       const server = findBinding(tcpBindings, address, port);
+      globalThis.__bnhGatewayLogs?.push?.({ type: 'network-connect-lookup', address, port, found: Boolean(server) });
       if (!server) {
         // The unref compatibility test uses the public DNS endpoint only to
         // create a long-lived connection; keep that endpoint local and inert.
@@ -407,6 +410,7 @@ export function createVirtualNetwork({ transport } = {}) {
       };
       connection.serverSocket = serverSocket || server.owner._createAcceptedSocket?.(connection);
       if (!establish(connection)) return;
+      globalThis.__bnhGatewayLogs?.push?.({ type: 'network-connect-established', address, port });
       server.owner._acceptConnection(connection);
       client._runTcpResource?.(() => {});
     };
@@ -532,11 +536,45 @@ export function createVirtualNetwork({ transport } = {}) {
     });
   }
 
+  const bindTcp = (owner, address, port) => {
+    const result = bind(tcpBindings, owner, address, port, 'tcp');
+    const bindingKey = endpointKey(result.address, result.port);
+    if (typeof transport?.bindTcp === 'function') {
+      const ownerBindings = remoteTcpBindings.get(owner) || new Set();
+      ownerBindings.add(bindingKey);
+      remoteTcpBindings.set(owner, ownerBindings);
+      try {
+        transport.bindTcp({ bindingKey, address: result.address, port: result.port });
+      } catch (error) {
+        unbind(tcpBindings, owner);
+        remoteTcpBindings.delete(owner);
+        throw error;
+      }
+    }
+    return result;
+  };
+  const unbindTcp = (owner) => {
+    for (const bindingKey of remoteTcpBindings.get(owner) || []) {
+      transport?.unbindTcp?.({ bindingKey });
+    }
+    remoteTcpBindings.delete(owner);
+    unbind(tcpBindings, owner);
+  };
+  const acceptTcp = (bindingKey, connection) => {
+    const binding = tcpBindings.get(bindingKey);
+    if (!binding || typeof transport?.acceptTcp !== 'function') return false;
+    const accepted = transport.acceptTcp({ binding, connection });
+    if (!accepted) return false;
+    binding.owner._acceptConnection({ ...connection, ...accepted });
+    return true;
+  };
+
   return {
-    bindTcp: (owner, address, port) => bind(tcpBindings, owner, address, port, 'tcp'),
+    bindTcp,
     bindClusterTcp,
-    unbindTcp: (owner) => unbind(tcpBindings, owner),
+    unbindTcp,
     connectTcp,
+    acceptTcp,
     bindPipe,
     bindClusterPipe,
     unbindPipe,
@@ -563,6 +601,260 @@ export function createVirtualNetwork({ transport } = {}) {
     _tcpBindings: tcpBindings,
     _udpBindings: udpBindings,
     _pipeBindings: pipeBindings,
+  };
+}
+
+function addMessagePortListener(port, listener) {
+  if (typeof port?.addEventListener === 'function') {
+    const handler = (event) => listener(event.data);
+    port.addEventListener('message', handler);
+    port.start?.();
+    return () => port.removeEventListener?.('message', handler);
+  }
+  if (typeof port?.on === 'function') {
+    const handler = (event) => listener(event?.data === undefined ? event : event.data);
+    port.on('message', handler);
+    return () => port.off?.('message', handler);
+  }
+  throw new TypeError('network bridge requires a MessagePort');
+}
+
+function postMessagePort(port, message) {
+  port.postMessage(message);
+}
+
+/** Connect a worker-owned virtual network to its parent's network registry. */
+export function createRemoteVirtualNetwork({ port } = {}) {
+  if (!port?.postMessage) throw new TypeError('network bridge requires a MessagePort');
+  let nextConnectionId = 1;
+  let closed = false;
+  const connections = new Map();
+  const send = (message) => {
+    if (closed) return;
+    try { postMessagePort(port, message); } catch { /* the parent may already be terminal */ }
+  };
+  const transport = {
+    bindTcp({ bindingKey, address, port: boundPort }) {
+      send({ type: 'bind', bindingKey, address, port: boundPort });
+    },
+    unbindTcp({ bindingKey }) {
+      send({ type: 'unbind', bindingKey });
+    },
+    acceptTcp({ binding, connection }) {
+      const connectionId = connection.connectionId || `${binding.key}:${nextConnectionId++}`;
+      const peer = {
+        destroyed: false,
+        _runTcpResource(callback) { return callback(); },
+        _peerClosed() {
+          if (this.destroyed) return;
+          this.destroyed = true;
+          send({ type: 'close', connectionId });
+        },
+        push(bytes) {
+          if (this.destroyed) return false;
+          if (bytes === null) send({ type: 'end', connectionId });
+          else {
+            const value = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+            send({ type: 'write', connectionId, bytes: value });
+          }
+          return true;
+        },
+        destroy() {
+          this._peerClosed();
+        },
+      };
+      const serverSocket = binding.owner._createAcceptedSocket({ ...connection, client: peer });
+      connections.set(connectionId, { socket: serverSocket, peer });
+      return { client: peer, serverSocket };
+    },
+  };
+  const network = createVirtualNetwork({ transport });
+  const receive = (message) => {
+    if (closed || !message) return;
+    send({ type: 'debug', operation: message.type, connectionId: message.connectionId, bindingKey: message.bindingKey });
+    if (message.type === 'connect') {
+      try {
+        const accepted = network.acceptTcp(message.bindingKey, {
+          connectionId: message.connectionId,
+          localAddress: message.localAddress,
+          localPort: message.localPort,
+          remoteAddress: message.remoteAddress,
+          remotePort: message.remotePort,
+        });
+        send({ type: 'debug', operation: 'accepted', connectionId: message.connectionId, accepted });
+      } catch (error) {
+        send({ type: 'debug', operation: 'accept-error', connectionId: message.connectionId, error: error?.message });
+      }
+      return;
+    }
+    const connection = connections.get(message.connectionId);
+    if (!connection) return;
+    if (message.type === 'data') {
+      const bytes = message.bytes instanceof Uint8Array ? message.bytes : new Uint8Array(message.bytes || []);
+      connection.socket.push(bytes);
+      send({
+        type: 'debug',
+        operation: 'data-pushed',
+        connectionId: message.connectionId,
+        listeners: connection.socket.listenerCount?.('data'),
+        listenerNames: connection.socket.listeners?.('data')?.map?.((listener) => listener.name),
+        flowing: connection.socket.readableFlowing,
+        destroyed: connection.socket.destroyed,
+        length: bytes.byteLength,
+        server: Boolean(connection.socket._server),
+        flowDrainScheduled: connection.socket._flowDrainScheduled,
+      });
+      globalThis.queueMicrotask?.(() => send({
+        type: 'debug',
+        operation: 'data-turn',
+        connectionId: message.connectionId,
+        listeners: connection.socket.listenerCount?.('data'),
+        listenerNames: connection.socket.listeners?.('data')?.map?.((listener) => listener.name),
+        flowing: connection.socket.readableFlowing,
+        destroyed: connection.socket.destroyed,
+        length: connection.socket.readableLength,
+        flowDrainScheduled: connection.socket._flowDrainScheduled,
+        server: Boolean(connection.socket._server),
+      }));
+    } else if (message.type === 'end') {
+      connection.socket.push(null);
+    } else if (message.type === 'close') {
+      connections.delete(message.connectionId);
+      connection.socket.destroy();
+    }
+  };
+  const removeListener = addMessagePortListener(port, receive);
+  return {
+    network,
+    close() {
+      if (closed) return;
+      closed = true;
+      removeListener();
+      for (const connection of connections.values()) connection.socket.destroy();
+      connections.clear();
+      port.close?.();
+    },
+  };
+}
+
+/** Expose a parent virtual network to one worker through a private MessagePort. */
+export function createWorkerNetworkBridge({ network, port } = {}) {
+  if (!network?.bindTcp || !network?.unbindTcp) throw new TypeError('parent virtual network is required');
+  if (!port?.postMessage) throw new TypeError('network bridge requires a MessagePort');
+  const bindings = new Map();
+  const connections = new Map();
+  let nextConnectionId = 1;
+  const send = (message) => {
+    try { postMessagePort(port, message); } catch { /* the worker may already be terminal */ }
+  };
+  const destroyConnection = (connectionId, error) => {
+    const connection = connections.get(connectionId);
+    if (!connection) return;
+    connections.delete(connectionId);
+    connection.client.destroy?.(error);
+  };
+  const handle = (message) => {
+    const operation = message?.type;
+    globalThis.__bnhGatewayLogs?.push?.({
+      type: 'network-bridge-message',
+      operation,
+      debugOperation: message?.operation,
+      debugListeners: message?.listeners,
+      debugFlowing: message?.flowing,
+      debugDestroyed: message?.destroyed,
+      debugLength: message?.length,
+      bindingKey: message?.bindingKey,
+      connectionId: message?.connectionId,
+      port: message?.port,
+    });
+    if (operation === 'bind') {
+      const owner = {
+        _createAcceptedSocket(connection) {
+          const connectionId = `${message.bindingKey}:${nextConnectionId++}`;
+          const record = { connectionId, client: connection.client, peer: null };
+          const peer = {
+            destroyed: false,
+            _runTcpResource(callback) { return callback(); },
+            _peerClosed() {
+              if (this.destroyed) return;
+              this.destroyed = true;
+              send({ type: 'close', connectionId });
+            },
+            push(bytes) {
+              if (this.destroyed) return false;
+              if (bytes === null) send({ type: 'end', connectionId });
+              else {
+                const value = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+                send({ type: 'data', connectionId, bytes: value });
+              }
+              return true;
+            },
+            destroy() {
+              this._peerClosed();
+            },
+          };
+          record.peer = peer;
+          connections.set(connectionId, record);
+          return peer;
+        },
+        _acceptConnection(connection) {
+          const record = [...connections.values()].find((candidate) => candidate.peer === connection.serverSocket);
+          globalThis.__bnhGatewayLogs?.push?.({
+            type: 'network-bridge-accept',
+            found: Boolean(record),
+            connectionId: record?.connectionId,
+          });
+          if (!record) return;
+          record.client = connection.client;
+          send({
+            type: 'connect',
+            bindingKey: message.bindingKey,
+            connectionId: record.connectionId,
+            localAddress: connection.localAddress,
+            localPort: connection.localPort,
+            remoteAddress: connection.remoteAddress,
+            remotePort: connection.remotePort,
+          });
+        },
+      };
+      try {
+        const bound = network.bindTcp(owner, message.address, message.port);
+        bindings.set(message.bindingKey, { owner });
+        send({ type: 'bind-ack', bindingKey: message.bindingKey, address: bound.address, port: bound.port });
+      } catch (error) {
+        send({ type: 'bind-error', bindingKey: message.bindingKey, error: { message: error.message, code: error.code } });
+      }
+      return;
+    }
+    if (operation === 'unbind') {
+      const binding = bindings.get(message.bindingKey);
+      if (binding) {
+        network.unbindTcp(binding.owner);
+        bindings.delete(message.bindingKey);
+      }
+      return;
+    }
+    if (operation === 'debug') return;
+    const connection = connections.get(message.connectionId);
+    if (!connection) return;
+    if (operation === 'write') {
+      const bytes = message.bytes instanceof Uint8Array ? message.bytes : new Uint8Array(message.bytes || []);
+      connection.client.push(bytes);
+    } else if (operation === 'end') {
+      connection.client.push(null);
+    } else if (operation === 'close') {
+      destroyConnection(message.connectionId);
+    }
+  };
+  const removeListener = addMessagePortListener(port, handle);
+  return {
+    close() {
+      removeListener();
+      for (const binding of bindings.values()) network.unbindTcp(binding.owner);
+      for (const connectionId of [...connections.keys()]) destroyConnection(connectionId);
+      bindings.clear();
+      port.close?.();
+    },
   };
 }
 

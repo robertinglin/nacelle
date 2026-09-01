@@ -246,7 +246,7 @@ class DashboardTests(unittest.TestCase):
             self.assertIs(server, server_factory.return_value)
             server_factory.assert_called_once()
             self.assertEqual(server_factory.call_args.args[0], ("127.0.0.1", 8787))
-            self.assertIn("Browser Node Harness", dashboard._PAGE)
+            self.assertIn("Nacelle Harness", dashboard._PAGE)
             self.assertIn("data-autoscroll", dashboard._PAGE)
             self.assertIn("clear-attempts", dashboard._PAGE)
             self.assertIn("Proof scope", dashboard._PAGE)

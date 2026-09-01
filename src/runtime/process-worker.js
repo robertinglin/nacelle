@@ -220,7 +220,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     process.argv0 ||= 'node';
     process.version ||= 'v22.23.2';
     process.release ||= { name: 'node', lts: 'Jod' };
-    process.versions ||= { node: '22.23.2', modules: '127', napi: '10', v8: '12.4.254.21-node.56' };
+    process.versions ||= { node: '22.23.2', modules: '127', napi: '10', v8: '12.4.254.21-node.56', webcontainer: '1.0.0' };
     process.umask ||= (value) => {
       const previous = mask;
       if (value === undefined) return previous;
@@ -339,6 +339,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       connected: true,
       exitCode: 0,
       __bnhProxyRequest: requestProxy,
+      __bnhNetworkEvent(event) { sendControl('network', { event }); },
       cwd: () => identity.cwd,
       chdir: (value) => {
         const source = String(value);
@@ -387,8 +388,19 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         return true;
       },
       kill: (signal = 'SIGTERM') => { sendControl('child-signal-request', { signal }); return true; },
-      exit(code = 0) { exitCode = Number(code) || 0; process.exitCode = exitCode; process.emit('exit', exitCode); finish('exit', exitCode); throw processExitSignal; },
+      exit(code = 0) {
+        exitCode = Number(code) || 0;
+        process.exitCode = exitCode;
+        if (exitCode === 1) process.stderr?.write?.('[bnh-worker-exit-debug] stack=' + new Error().stack + '\\n');
+        process.emit('exit', exitCode);
+        finish('exit', exitCode);
+        throw processExitSignal;
+      },
     });
+    // A child identity is structured-cloned into this worker. Preserve the
+    // runtime marker even when a caller supplied an older identity object.
+    process.versions ||= {};
+    process.versions.webcontainer = '1.0.0';
     process.stdout = {
       isTTY: false,
       _host: null,
@@ -435,7 +447,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
             } else {
               pending.resolve(result);
             }
-          }
+            }
         } else if (frame.payload?.__bnhWorkerStdin) {
           process.stdin.push(frame.payload.value);
         } else if (frame.payload?.__bnhWorkerStdinEnd) {
@@ -466,11 +478,13 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       stdout: (value) => process.stdout.write(value),
       stderr: (value) => process.stderr.write(value),
     };
-    const context = { process, ipc: process, stdout: output.stdout, stderr: output.stderr, vfs, signal: process };
+    const context = { process, ipc: process, stdout: output.stdout, stderr: output.stderr, vfs, signal: process, networkPort: message.networkPort };
     Promise.resolve().then(() => run(context)).then(() => {
+      process.stderr.write('[bnh-worker-natural-debug] code=' + String(process.exitCode || 0) + '\\n');
       if (!terminalSent) finish('natural', process.exitCode || 0, null);
     }, (error) => {
       error.code ||= 'ERR_WORKER_EXCEPTION';
+      process.stderr.write('[bnh-worker-rejection-debug] ' + (error.stack || error) + '\\n');
       finish('rejection', 1, null, error);
     });
   }

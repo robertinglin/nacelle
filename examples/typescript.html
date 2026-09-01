@@ -478,11 +478,13 @@ const payload = {
 require('node:fs').writeFileSync('dist/result.txt', JSON.stringify(payload, null, 2));
 console.log('[Result] ' + greeting);
 `,
-      enums: `enum TaskStatus {
-  Pending = 0,
-  Active = 1,
-  Completed = 2,
-}
+      enums: `const TaskStatus = {
+  Pending: 0,
+  Active: 1,
+  Completed: 2,
+} as const;
+
+type TaskStatus = typeof TaskStatus[keyof typeof TaskStatus];
 
 interface Task {
   id: string;
@@ -549,7 +551,7 @@ console.log('[FS] ' + message);
         badge: 'tsc v5.5.4',
         tag: 'Official tsc',
         scriptName: 'build:tsc',
-        command: "mkdir -p dist && tsc src/main.ts --outDir dist && node dist/main.js && cat dist/result.txt",
+        command: "mkdir -p dist && tsc src/main.ts src/global.d.ts --outDir dist && node dist/main.js && cat dist/result.txt",
         note: "Official Microsoft TypeScript compiler transpiles full AST with standard CommonJS/ES2022 output per tsconfig.",
       },
       all: {
@@ -557,7 +559,7 @@ console.log('[FS] ' + message);
         badge: 'All Compilers',
         tag: 'Comparison Mode',
         scriptName: 'build:all',
-        command: "mkdir -p dist && node build-node.js && vite build --entry src/main.ts --out dist/vite.js && tsc src/main.ts --outDir dist && node dist/main.js && cat dist/result.txt",
+        command: "mkdir -p dist && node build-node.js && vite build --entry src/main.ts --out dist/vite.js && tsc src/main.ts src/global.d.ts --outDir dist && node dist/main.js && cat dist/result.txt",
         note: "Executes all three compiler engines sequentially to produce a side-by-side comparison matrix.",
       },
     };
@@ -649,103 +651,22 @@ console.log('✓ transformed ' + entry + ' (esbuild transform)');
 console.log('✓ ' + out + ' (' + transformed.length + ' bytes) built in ' + duration + 'ms');
 `;
 
-    const tscLibCode = `const ts = {
-  version: '5.5.4',
-  ModuleKind: { None: 0, CommonJS: 1, AMD: 2, UMD: 3, System: 4, ES2015: 5, ES2020: 6, ESNext: 99 },
-  ScriptTarget: { ES3: 0, ES5: 1, ES2015: 2, ES2020: 7, ES2022: 9, ESNext: 99 },
-  
-  transpileModule(input, transpileOptions = {}) {
-    const options = transpileOptions.compilerOptions || {};
-    let code = String(input);
-    code = code.replace(/(?:export\\s+|import\\s+)type\\s+[^;\\n]+;?\\n?/g, '');
-    code = code.replace(/(?:export\\s+)?interface\\s+[A-Za-z_$][\\w$]*(?:\\s+extends[^{]+)?\\s*\\{[\\s\\S]*?\\}\\s*;?\\n?/g, '');
-    code = code.replace(/(?:export\\s+)?type\\s+[A-Za-z_$][\\w$]*(?:<[^>]+>)?\\s*=\\s*[^;\\n]+;\\n?/g, '');
-    code = code.replace(/(?:export\\s+)?enum\\s+([A-Za-z_$][\\w$]*)\\s*\\{([^}]+)\\}/g, (_, enumName, body) => {
-      const items = body.split(',').map(m => m.trim()).filter(Boolean);
-      let idx = 0;
-      const assignments = items.map(m => {
-        const parts = m.split('=').map(p => p.trim());
-        const key = parts[0];
-        const val = parts.length > 1 ? parts[1] : idx++;
-        return \`    \${enumName}[\${enumName}[\${JSON.stringify(key)}] = \${val}] = \${JSON.stringify(key)};\`;
-      }).join('\\n');
-      return \`var \${enumName};\\n(function (\${enumName}) {\\n\${assignments}\\n})(\${enumName} || (\${enumName} = {}));\`;
-    });
-    code = code.replace(/<[A-Za-z_$][\\w$,\\s]*>(?=\\s*[\\(=])/g, '');
-    code = code.replace(/:\\s*[A-Za-z_$][\\w$]*(?:<[^>\\n]+>)?(?:\\[\\])?(?=\\s*[,)=;{])/g, '');
-    code = code.replace(/([A-Za-z_$][\\w$]*)!\\s*(?=[,.;)=])/g, '$1');
-    code = code.replace(/\\s+as\\s+(?:const|[A-Za-z_$][\\w$]*(?:<[^>\\n]+>)?(?:\\[\\])?)/g, '');
-    
-    const header = '"use strict";\\n// Emitted by Microsoft TypeScript Compiler (tsc v5.5.4)\\nObject.defineProperty(exports, "__esModule", { value: true });\\n';
-    return {
-      outputText: header + code.trim() + '\\n',
-      diagnostics: [],
-    };
-  },
-  
-  transpile(source, compilerOptions) {
-    return this.transpileModule(source, { compilerOptions }).outputText;
-  },
-};
-
-module.exports = ts;
-`;
-
-    const tscBinCode = `#!/usr/bin/env node
-const fs = require('node:fs');
+    const tscScriptCode = `const fs = require('node:fs');
 const path = require('node:path');
 const ts = require('typescript');
 
-const args = process.argv.slice(2);
-let inputFile = 'src/main.ts';
-let outDir = 'dist';
-let target = ts.ScriptTarget.ES2022;
-let moduleKind = ts.ModuleKind.CommonJS;
-
-for (let i = 0; i < args.length; i++) {
-  const arg = args[i];
-  if ((arg === '--outDir' || arg === '-d') && args[i + 1]) {
-    outDir = args[++i];
-  } else if ((arg === '--target' || arg === '-t') && args[i + 1]) {
-    const t = args[++i].toUpperCase();
-    if (t.includes('2022') || t.includes('NEXT')) target = ts.ScriptTarget.ES2022;
-    else if (t.includes('2020')) target = ts.ScriptTarget.ES2020;
-    else if (t.includes('2015') || t.includes('ES6')) target = ts.ScriptTarget.ES2015;
-    else if (t.includes('ES5')) target = ts.ScriptTarget.ES5;
-  } else if ((arg === '--module' || arg === '-m') && args[i + 1]) {
-    const m = args[++i].toLowerCase();
-    if (m.includes('commonjs') || m.includes('cjs')) moduleKind = ts.ModuleKind.CommonJS;
-    else if (m.includes('es')) moduleKind = ts.ModuleKind.ESNext;
-  } else if ((arg === '--project' || arg === '-p') && args[i + 1]) {
-    i++;
-  } else if (arg.startsWith('--') && args[i + 1] && !args[i + 1].startsWith('-')) {
-    i++;
-  } else if (!arg.startsWith('-')) {
-    inputFile = arg;
-  }
-}
-
-if (!fs.existsSync(inputFile)) {
-  if (fs.existsSync('src/main.ts')) inputFile = 'src/main.ts';
-  else if (fs.existsSync('main.ts')) inputFile = 'main.ts';
-  else {
-    console.error(\`tsc: error TS5058: The specified path does not exist: '\${inputFile}'.\`);
-    process.exit(1);
-  }
-}
-
+const inputFile = '/node/src/main.ts';
 const source = fs.readFileSync(inputFile, 'utf8');
 const result = ts.transpileModule(source, {
   compilerOptions: {
-    module: moduleKind,
-    target: target,
+    module: ts.ModuleKind.CommonJS,
+    target: ts.ScriptTarget.ES2022,
   },
 });
 
-fs.mkdirSync(outDir, { recursive: true });
-const outFile = path.join(outDir, path.basename(inputFile, path.extname(inputFile)) + '.js');
-fs.writeFileSync(outFile, result.outputText);
-console.log(\`[tsc] Successfully compiled '\${inputFile}' -> '\${outFile}' (target: ES2022, module: CommonJS)\`);
+fs.mkdirSync('/node/dist', { recursive: true });
+fs.writeFileSync('/node/dist/main.js', result.outputText);
+console.log('[tsc] Successfully compiled via TypeScript v' + ts.version);
 `;
 
     const sourceInput = document.getElementById('source');
@@ -801,6 +722,8 @@ console.log(\`[tsc] Successfully compiled '\${inputFile}' -> '\${outFile}' (targ
       element.className = `status ${kind}`;
     }
 
+    let nodeInstance = null;
+
     async function runDemo(engineOverride = null) {
       const activeEng = engineOverride || currentEngine;
       setStatus(statusSpan, 'compiling', 'running');
@@ -813,39 +736,60 @@ console.log(\`[tsc] Successfully compiled '\${inputFile}' -> '\${outFile}' (targ
 
       try {
         const t0 = performance.now();
-        const node = await Nacelle.create({
-          gateway: false,
-          globalObject: window,
-          files: {
-            '/node/package.json': JSON.stringify({
-              name: 'typescript-multi-compiler-demo',
-              version: '1.0.0',
-              scripts: {
-                'build:node': engineConfigs.node.command,
-                'build:vite': engineConfigs.vite.command,
-                'build:tsc': engineConfigs.tsc.command,
-              },
-            }, null, 2),
-            '/node/tsconfig.json': JSON.stringify({
-              compilerOptions: {
-                target: 'ES2022',
-                module: 'commonjs',
-                strict: true,
-                outDir: './dist',
-              },
-            }, null, 2),
-            '/node/src/main.ts': sourceCode,
-            '/node/build-node.js': nodeScriptCode,
-            '/node/node_modules/vite/package.json': JSON.stringify({ name: 'vite', version: '5.4.2', main: 'index.js' }),
-            '/node/node_modules/vite/index.js': viteModuleCode,
-            '/node/node_modules/vite/bin/vite.js': viteBinCode,
-            '/node/node_modules/.bin/vite': `#!/usr/bin/env node\nrequire('../vite/bin/vite.js');\n`,
-            '/node/node_modules/typescript/package.json': JSON.stringify({ name: 'typescript', version: '5.5.4', main: 'lib/typescript.js' }),
-            '/node/node_modules/typescript/lib/typescript.js': tscLibCode,
-            '/node/node_modules/typescript/bin/tsc': tscBinCode,
-            '/node/node_modules/.bin/tsc': `#!/usr/bin/env node\nrequire('../typescript/bin/tsc');\n`,
+        if (!nodeInstance) {
+          termLogs.textContent += '📦 Initializing runtime and installing typescript@5.5.4 from npm...\n';
+          nodeInstance = await Nacelle.create({
+            gateway: false,
+            cwd: '/node',
+            globalObject: window,
+          });
+          await nodeInstance.npm.install('typescript@5.5.4', {
+            onProgress: (p) => {
+              if (p.phase === 'unpacking') termLogs.textContent += `📂 Unpacking ${p.name}@${p.version}...\n`;
+            }
+          });
+          termLogs.textContent += '✓ Real TypeScript compiler package ready in VFS\n';
+        }
+
+        const node = nodeInstance;
+        await node.fs.writeFile('/node/package.json', JSON.stringify({
+          name: 'typescript-multi-compiler-demo',
+          version: '1.0.0',
+          scripts: {
+            'build:node': 'node build-node.js',
+            'build:tsc': 'node build-tsc.js',
           },
-        });
+        }, null, 2));
+
+        await node.fs.writeFile('/node/tsconfig.json', JSON.stringify({
+          compilerOptions: {
+            target: 'ES2022',
+            module: 'commonjs',
+            outDir: './dist',
+            skipLibCheck: true,
+            noImplicitAny: false,
+          },
+        }, null, 2));
+
+        await node.fs.writeFile('/node/src/global.d.ts', `
+declare function require(name: string): any;
+declare var process: any;
+declare var Buffer: any;
+`);
+
+        await node.fs.writeFile('/node/node_modules/vite/package.json', JSON.stringify({
+          name: 'vite',
+          version: '5.4.2',
+          main: 'index.js',
+          bin: { vite: 'bin/vite.js' },
+        }));
+        await node.fs.writeFile('/node/node_modules/vite/index.js', viteModuleCode);
+        await node.fs.writeFile('/node/node_modules/vite/bin/vite.js', viteBinCode);
+        await node.fs.writeFile('/node/node_modules/.bin/vite', '#!/usr/bin/env node\nrequire("../vite/bin/vite.js");\n');
+
+        await node.fs.writeFile('/node/src/main.ts', sourceCode);
+        await node.fs.writeFile('/node/build-node.js', nodeScriptCode);
+        await node.fs.writeFile('/node/build-tsc.js', tscScriptCode);
 
         if (activeEng === 'all') {
           const nodeChild = await node.bash(engineConfigs.node.command);

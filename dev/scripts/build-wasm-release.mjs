@@ -180,14 +180,14 @@ if (fs.existsSync(zlibDir)) {
     `-I${zlibDir}`,
     "-O2",
     "-sALLOW_MEMORY_GROWTH=1",
-    "-sEXPORTED_FUNCTIONS=_deflateInit_,_deflate,_deflateEnd,_inflateInit_,_inflate,_inflateEnd,_crc32,_adler32,_malloc,_free",
+    "-sEXPORTED_FUNCTIONS=_deflateInit_,_deflateInit2_,_deflate,_deflateEnd,_inflateInit_,_inflateInit2_,_inflate,_inflateEnd,_crc32,_adler32,_malloc,_free",
     "-sERROR_ON_UNDEFINED_SYMBOLS=0",
     "-Wl,--export-table",
     "--no-entry",
     "-o", path.join(outDir, "zlib.wasm"),
-  ], path.join(outDir, "zlib.wasm"), ['deflateInit_', 'deflate', 'deflateEnd', 'inflateInit_', 'inflate', 'inflateEnd', 'crc32', 'adler32', 'malloc', 'free'], 10);
+  ], path.join(outDir, "zlib.wasm"), ['deflateInit_', 'deflateInit2_', 'deflate', 'deflateEnd', 'inflateInit_', 'inflateInit2_', 'inflate', 'inflateEnd', 'crc32', 'adler32', 'malloc', 'free'], 10);
 
-  artifacts.push({ node: "internal/deps/zlib.node", wasm: "./zlib.wasm", entry: "zlib", exports: ['deflateInit_', 'deflate', 'deflateEnd', 'inflateInit_', 'inflate', 'inflateEnd', 'crc32', 'adler32', 'malloc', 'free'] });
+  artifacts.push({ node: "internal/deps/zlib.node", wasm: "./zlib.wasm", entry: "zlib", exports: ['deflateInit_', 'deflateInit2_', 'deflate', 'deflateEnd', 'inflateInit_', 'inflateInit2_', 'inflate', 'inflateEnd', 'crc32', 'adler32', 'malloc', 'free'] });
 }
 
 // 4. Brotli (node:zlib brotli)
@@ -260,4 +260,3 @@ const manifest = {
 
 fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
 console.log(`\n=== Release WASM Build Completed: ${artifacts.length} artifacts built into ${outDir} ===`);
-

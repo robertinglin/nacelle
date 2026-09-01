@@ -391,7 +391,6 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       exit(code = 0) {
         exitCode = Number(code) || 0;
         process.exitCode = exitCode;
-        if (exitCode === 1) process.stderr?.write?.('[bnh-worker-exit-debug] stack=' + new Error().stack + '\\n');
         process.emit('exit', exitCode);
         finish('exit', exitCode);
         throw processExitSignal;
@@ -480,11 +479,9 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     };
     const context = { process, ipc: process, stdout: output.stdout, stderr: output.stderr, vfs, signal: process, networkPort: message.networkPort };
     Promise.resolve().then(() => run(context)).then(() => {
-      process.stderr.write('[bnh-worker-natural-debug] code=' + String(process.exitCode || 0) + '\\n');
       if (!terminalSent) finish('natural', process.exitCode || 0, null);
     }, (error) => {
       error.code ||= 'ERR_WORKER_EXCEPTION';
-      process.stderr.write('[bnh-worker-rejection-debug] ' + (error.stack || error) + '\\n');
       finish('rejection', 1, null, error);
     });
   }

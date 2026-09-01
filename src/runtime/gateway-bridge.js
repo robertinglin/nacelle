@@ -13,7 +13,6 @@ export function installGatewayBridge({ net, globalObject = globalThis } = {}) {
 
   const onMessage = async (event) => {
     const data = event.data;
-    console.log('[GATEWAY BRIDGE onMessage received]', data);
     if (!data || data.type !== 'bnh-vnet-request') return;
 
     const currentNet = globalObject.__bnhActiveGatewayNet || net;

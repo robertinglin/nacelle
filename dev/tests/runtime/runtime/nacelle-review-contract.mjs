@@ -84,6 +84,13 @@ test('tar extraction rejects traversal, absolute paths, symlinks, and resource e
     unpackTarGz(compressed, { maxCompressionRatio: 2 }),
     { code: 'ERR_ARCHIVE_LIMIT' },
   );
+
+  const npmDirectoryHeader = packTar([
+    { path: 'package', type: 'directory' },
+    { path: 'package/package.json', data: new TextEncoder().encode('{"name":"fixture"}') },
+  ]);
+  const extracted = unpackTar(npmDirectoryHeader, { stripPrefix: 'package/', targetDir: '/app' });
+  assert.deepEqual(extracted.map(({ path }) => path), ['/app/package.json']);
 });
 
 test('output capture is bounded and reports dropped bytes without retaining the full stream', async () => {

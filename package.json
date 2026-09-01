@@ -1,6 +1,6 @@
 {
   "name": "nacelle",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Self-contained Node.js execution engine and virtual runtime in the browser via WebAssembly, Web Workers, and Virtual Filesystem",
   "keywords": [
     "nacelle",

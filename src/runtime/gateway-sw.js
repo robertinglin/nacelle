@@ -169,8 +169,8 @@ async function handleVirtualRequest(request, { port, routeId = null, version = G
     let settled = false;
 
     const cleanup = () => {
-      clearTimeout(timeout);
       channel.port1.removeEventListener?.('message', onResponseMessage);
+      channel.port1.onmessage = null;
       channel.port1.close();
     };
 
@@ -180,13 +180,6 @@ async function handleVirtualRequest(request, { port, routeId = null, version = G
       cleanup();
       resolve(response);
     };
-
-    const timeout = setTimeout(() => {
-      finishResponse(new Response('Gateway Timeout: In-browser Node server did not respond in time', {
-        status: 504,
-        headers: gatewayResponseHeaders({ 'content-type': 'text/plain; charset=utf-8' }),
-      }));
-    }, 15000);
 
     const onResponseMessage = (msgEvent) => {
       const message = msgEvent.data;
@@ -260,7 +253,7 @@ async function handleVirtualRequest(request, { port, routeId = null, version = G
       });
     }
 
-    channel.port1.addEventListener('message', onResponseMessage);
+    channel.port1.onmessage = onResponseMessage;
     channel.port1.start?.();
 
     targetClient.postMessage({

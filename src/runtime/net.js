@@ -14,13 +14,6 @@ const socketHandle = Symbol('socketHandle');
 const SymbolAsyncDispose = Symbol.for('nodejs.asyncDispose');
 const NativeSymbolAsyncDispose = Symbol.asyncDispose;
 const inspectCustomSymbol = Symbol.for('nodejs.util.inspect.custom');
-let networkDebugCount = 0;
-
-function networkDebug(message) {
-  if (networkDebugCount >= 24) return;
-  networkDebugCount += 1;
-  globalThis.process?.stderr?.write?.(`[bnh-network-debug] ${message}\n`);
-}
 
 function exposeNativeAsyncDispose(ctor) {
   if (!NativeSymbolAsyncDispose || NativeSymbolAsyncDispose === SymbolAsyncDispose) return;
@@ -677,7 +670,6 @@ export class Socket extends Duplex {
   _send(bytes, callback) {
     const peer = this._peer;
     const transport = this._transportPeer;
-    networkDebug(`send bytes=${bytes.byteLength} peer=${Boolean(peer)} transport=${Boolean(transport)}`);
     this._writeDispatched = false;
     schedule(() => {
       if (peer) {
@@ -1394,8 +1386,6 @@ export class Server extends EventEmitter {
   }
 
   _acceptConnection(connection) {
-    networkDebug(`accept port=${this._boundPort} connections=${this._connections + 1}`);
-    networkDebug(`accept-listeners connection=${this.listenerCount('connection')} hasSocket=${Boolean(connection.serverSocket)}`);
     globalThis.__bnhGatewayLogs?.push?.({
       type: 'net-accept-server',
       port: this._boundPort,

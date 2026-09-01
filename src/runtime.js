@@ -3566,7 +3566,6 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       exitCode = Number(code) || 0;
       exitRequested = true;
       exiting = true;
-      if (exitCode === 1) stderr?.(`[bnh-exit-debug] pid=${processObject.pid} stack=${new Error().stack}\n`);
       if (!exitEventEmitted) {
         exitEventEmitted = true;
         processObject.emit('exit', exitCode);
@@ -3707,12 +3706,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     configurable: true,
     enumerable: true,
     get: () => exitCode,
-    set: (value) => {
-      exitCode = Number(value) || 0;
-      if (exitCode === 1 && (processObject._bnhVirtualChild || processObject.env?.npm_lifecycle_script?.includes('next'))) {
-        stderr?.(`[bnh-exit-code-debug] pid=${processObject.pid} virtual=${Boolean(processObject._bnhVirtualChild)} env=${JSON.stringify(processObject.env)} stack=${new Error().stack}\n`);
-      }
-    },
+    set: (value) => { exitCode = Number(value) || 0; },
   });
   installProcessFinalization(processObject);
   return { processObject, setTimer, clearTimer };
@@ -5012,9 +5006,6 @@ export function createRuntime({
       Module.prototype._compile = function compile(content, filename, format) {
         const source = typeof content === 'string' ? content : String(content);
         const resolved = String(filename || this.filename || sourcePath);
-        if (resolved.includes('/next/dist/') && (resolved.includes('app-page') || resolved.includes('route-module'))) {
-          processObj.stderr?.write?.(`[bnh-compile-debug] ${resolved} env=${processObj.env?.__NEXT_DEV_SERVER || ''} scope=${scope.process?.env?.__NEXT_DEV_SERVER || ''}\n`);
-        }
         const compileSource = format === 'module' || moduleHasStaticEsmSyntax(source)
           ? moduleSynchronousEsmSource(source, resolved)
           : source;
@@ -8126,8 +8117,6 @@ export function createRuntime({
             childProc.processObject._bnhHasPendingTasks = () => childTaskReleases.size > 0;
             childProc.processObject._bnhTryExit = () => childProc.processObject.exit?.(0);
             childProc.processObject._bnhRunInContext = (callback) => {
-              const debugMicrotask = callback?.__bnhDebugMicrotask === true;
-              if (debugMicrotask) options.onStderr?.('[bnh-microtask-debug] context-enter\n');
               const previousProcess = scope.process;
               const previousConsole = scope.console;
               const previousTimers = {
@@ -8260,11 +8249,8 @@ export function createRuntime({
               scope.clearImmediate = childProc.clearTimer;
               if (!options.ipc) {
                 scope.queueMicrotask = (callback) => {
-                  const debugMicrotask = callback?.__bnhDebugMicrotask === true;
-                  if (debugMicrotask) stderr?.(`[bnh-microtask-debug] queued\n`);
                   const release = childTrackTask();
                   nativeQueueMicrotask(() => {
-                    if (debugMicrotask) stderr?.(`[bnh-microtask-debug] running\n`);
                     try {
                       const runInContext = childProc.processObject._bnhRunInContext;
                       if (typeof runInContext === 'function') runInContext.call(childProc.processObject, callback);
@@ -8545,9 +8531,6 @@ export function createRuntime({
             const encoding = options?.encoding;
             const stdoutValue = encoding && encoding !== 'buffer' ? stdoutArr.join('') : Buffer.from(stdoutArr.join(''));
             const stderrValue = encoding && encoding !== 'buffer' ? stderrArr.join('') : Buffer.from(stderrArr.join(''));
-          if (childProc.processObject.getCode?.() !== 0) {
-            stderrArr.push(`[bnh-sync-child-debug] entry=${entryPath} status=${childProc.processObject.getCode?.()} exitRequested=${childProc.processObject._exitRequested?.()} pendingTimers=${Boolean(hasPendingTimers)} pendingTasks=${Boolean(hasPendingTasks)} stderrBytes=${stderrArr.length}\n`);
-          }
           return {
               pid: childProc.processObject.pid,
               stdout: stdoutValue,
@@ -8950,7 +8933,6 @@ export function createRuntime({
       pending += 1;
       return () => {
         pending = Math.max(0, pending - 1);
-        if (pending === 0) stderr?.(`[bnh-lifecycle-debug] pending=0 servers=${processObject?._bnhHttpServers?.size || 0}\n`);
       };
     };
     const injectedProcess = options.processObject;
@@ -9055,7 +9037,6 @@ export function createRuntime({
           installProcessStdinSurface(processObject.stdin);
           processObject.exit = (code) => {
             processObject.exitCode = Number(code) || 0;
-            if (processObject.exitCode === 1) processObject.stderr?.write?.(`[bnh-injected-exit-debug] pid=${processObject.pid} stack=${new Error().stack}\n`);
             processObject.emit('exit', processObject.exitCode);
             if (typeof injectedProcess.exit === 'function') return injectedProcess.exit(code);
           };
@@ -9138,7 +9119,6 @@ export function createRuntime({
         })()
       : fullProcessData;
     const processObject = processData.processObject;
-    processObject.on?.('exit', (code) => stderr?.(`[bnh-runtime-exit-debug] code=${code} stack=${new Error().stack}\n`));
     if (typeof injectedProcess?.__bnhNetworkEvent === 'function') {
       processObject.__bnhNetworkEvent = injectedProcess.__bnhNetworkEvent;
     }
@@ -10260,9 +10240,6 @@ export function createRuntime({
         scope.__bnhActiveProcess = processObj;
         try { return callback(); }
         finally {
-          if (injectedProcess && (previousProcess === injectedProcess || scope.process === injectedProcess)) {
-            stderr?.(`[bnh-process-context-debug] importer=${String(importer)} ownerPid=${processObj?.pid} previousPid=${previousProcess?.pid} restoredPid=${scope.process?.pid}\n`);
-          }
           scope.__bnhActiveProcess = previousActiveProcess;
           scope.process = previousProcess;
         }
@@ -10449,25 +10426,7 @@ export function createRuntime({
           }
       const source = loaded?.source ?? vfs.read(resolved);
       const text = typeof source === 'string' ? source : new TextDecoder().decode(source);
-      let compileText = text;
-      if (resolved.includes('setup-dev-bundler')) {
-        processObj.stderr?.write?.(`[bnh-next-route-debug] loader path=${resolved} source=${text.includes('const knownFiles = wp.getTimeInfoEntries();')}\\n`);
-      }
-      if (resolved.includes('/next/dist/server/lib/router-utils/setup-dev-bundler.js')) {
-        compileText = compileText
-          .replace(
-            'async function propagateServerField(opts, field, args) {',
-            "async function propagateServerField(opts, field, args) { process.stderr.write('[bnh-next-route-debug] propagate ' + field + '\\n');",
-          )
-          .replace(
-            'const knownFiles = wp.getTimeInfoEntries();',
-            "const knownFiles = wp.getTimeInfoEntries(); process.stderr.write('[bnh-next-route-debug] known-app=' + JSON.stringify([...knownFiles.keys()].filter((file) => file.includes('/app/'))) + '\\n');",
-          )
-          .replace(
-            'serverFields.appPathRoutes = Object.fromEntries(Object.entries(appPaths).map(([k, v])=>[',
-            "process.stderr.write('[bnh-next-route-debug] app-paths=' + JSON.stringify(appPaths) + '\\n'); serverFields.appPathRoutes = Object.fromEntries(Object.entries(appPaths).map(([k, v])=>[",
-          );
-      }
+      const compileText = text;
           if (resolved.endsWith('.mjs')
             && (esmSourceHasTopLevelAwait(text) || esmGraphRequiresAsync(resolved))) {
             throw requireAsyncEsmError(resolved, importer);
@@ -10500,10 +10459,6 @@ export function createRuntime({
             loaded?.format === 'module' || moduleHasStaticEsmSyntax(compileText) ? 'module' : loaded?.format,
           ));
         } catch (error) {
-          if (processObj?.env?.npm_lifecycle_event === 'build'
-            && resolved.includes('/node_modules/next/')) {
-            processObj.stderr?.write?.(`[bnh-next-load-error-debug] ${resolved} ${String(error?.stack || error)}\n`);
-          }
           throw error;
         }
       }
@@ -10861,7 +10816,6 @@ export function createRuntime({
           // Four turns cover those deliveries while keeping short-lived runs
           // from paying the browser's minimum timer delay repeatedly.
           if (idleRounds >= 4) {
-            stderr?.(`[bnh-lifecycle-debug] idle pending=${pending} servers=${processObject?._bnhHttpServers?.size || 0} timers=${activeTimers?.size || 0}\n`);
             if (processObject._emitBeforeExit?.()) {
               idleRounds = 0;
               continue;
@@ -11013,7 +10967,6 @@ export function createRuntime({
         });
         const terminal = await child._worker?.wait?.();
         const code = terminal ? terminal.code : await child.exit;
-        stderr?.(`[bnh-entry-terminal-debug] kind=${terminal?.kind || 'unknown'} status=${terminal?.status || 'unknown'} code=${terminal?.code ?? code} signal=${terminal?.signal || ''} error=${terminal?.error?.stack || terminal?.error?.message || ''}\n`);
         if (activeChild === child) activeChild = null;
         return code;
       }

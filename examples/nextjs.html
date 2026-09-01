@@ -662,7 +662,6 @@ export default nextConfig;
           const response = await node.fetch(`http://localhost:${port}/`, { cache: 'no-store' });
           if (response.ok) return;
           const body = await response.text();
-          logTerminal(`[bnh-next-probe-debug] status=${response.status} body-tail=${body.slice(-1800)}`, 'stderr');
           throw new Error(`Next.js returned HTTP ${response.status}: ${body.slice(0, 400)}`);
         } catch (error) {
           lastError = error;
@@ -719,8 +718,6 @@ export default nextConfig;
             // Next 16 prints its startup banner before the App Router finishes
             // creating request handlers. Probe the real virtual port so the
             // iframe sees the same server a native browser would reach.
-            const nextServerFiles = await node.fs.readdir('/node/.next/dev/server').catch(() => []);
-            logTerminal(`[bnh-next-files-debug] /node/.next/dev/server ${JSON.stringify(nextServerFiles)}`, 'stderr');
             await waitForNextServer();
             booted = true;
             serverStatus.className = 'status-dot active';
@@ -739,11 +736,6 @@ export default nextConfig;
           onStderr: (chunk) => logTerminal(chunk, 'stderr'),
         });
         activeProcess = processHandle;
-        processHandle.exit.then(
-          (code) => logTerminal(`[lifecycle-debug] Next process exited code=${code} terminal=${JSON.stringify(processHandle.terminalRecord || processHandle.terminal || null)}`, 'stderr'),
-          (error) => logTerminal(`[lifecycle-debug] Next process failed ${error?.stack || error}`, 'stderr'),
-        );
-        processHandle.on?.('terminal', (record) => logTerminal(`[lifecycle-debug] terminal ${JSON.stringify(record)}`, 'stderr'));
       } catch (err) {
         serverStatus.className = 'status-dot error';
           logTerminal(`Error: name=${err.name || typeof err} message=${err.message || ''} code=${err.code || ''} stack=${err.stack || String(err)}`, 'stderr');

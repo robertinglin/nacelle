@@ -33,6 +33,7 @@ function setIsolationHeaders(response) {
 
 test.describe('Next.js 16 App Router browser demo', () => {
   test.beforeAll(async () => {
+    await fs.promises.mkdir(npmCacheDir, { recursive: true });
     localServer = http.createServer(async (request, response) => {
       setIsolationHeaders(response);
       const pathname = new URL(request.url, 'http://127.0.0.1').pathname;
@@ -113,9 +114,7 @@ test.describe('Next.js 16 App Router browser demo', () => {
     }
     await expect(termOutput).toContainText('Ready in');
     await page.waitForTimeout(2000);
-    console.log('NEXT STARTUP DIAGNOSTIC:', await termOutput.textContent());
     await page.waitForTimeout(10000);
-    console.log('NEXT POST-STARTUP DIAGNOSTIC:', await termOutput.textContent());
     try {
       await expect(serverStatus).toHaveClass(/active/, { timeout: 35000 });
     } catch (error) {

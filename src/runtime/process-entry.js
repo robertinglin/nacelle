@@ -43,7 +43,6 @@ export async function runProcessEntry(context) {
   }
   const { profile, runtime } = runtimeFor(descriptor.nodeVersion);
   installProcessContract(context.process, { nodeProfile: profile });
-  context.process.on?.('exit', (code) => context.stderr(`[bnh-entry-exit-debug] code=${code} stack=${new Error().stack}\n`));
   const remoteVirtualNetwork = context.networkPort
     ? createRemoteVirtualNetwork({ port: context.networkPort })
     : null;

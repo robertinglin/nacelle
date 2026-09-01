@@ -164,9 +164,25 @@ async function handleVirtualRequest(request, { port, routeId = null, version = G
     let statusCode = 200;
     let statusText = 'OK';
     const bodyChunks = [];
+    let receivedBytes = 0;
+    let contentLength = null;
+    let settled = false;
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      channel.port1.removeEventListener?.('message', onResponseMessage);
+      channel.port1.close();
+    };
+
+    const finishResponse = (response) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(response);
+    };
 
     const timeout = setTimeout(() => {
-      resolve(new Response('Gateway Timeout: In-browser Node server did not respond in time', {
+      finishResponse(new Response('Gateway Timeout: In-browser Node server did not respond in time', {
         status: 504,
         headers: gatewayResponseHeaders({ 'content-type': 'text/plain; charset=utf-8' }),
       }));
@@ -180,6 +196,9 @@ async function handleVirtualRequest(request, { port, routeId = null, version = G
         statusCode = message.statusCode || 200;
         statusText = message.statusText || 'OK';
         headers = gatewayResponseHeaders(message.headers || {});
+        const declaredLength = headers.get('content-length');
+        contentLength = declaredLength === null ? null : Number.parseInt(declaredLength, 10);
+        if (!Number.isFinite(contentLength) || contentLength < 0) contentLength = null;
         if (!headers.has('access-control-allow-origin')) headers.set('access-control-allow-origin', '*');
         if (!headers.has('access-control-expose-headers')) headers.set('access-control-expose-headers', '*');
       } else if (message.type === 'bnh-vnet-response-chunk') {
@@ -200,44 +219,47 @@ async function handleVirtualRequest(request, { port, routeId = null, version = G
           }
           if (chunkBytes.byteLength > 0) {
             bodyChunks.push(chunkBytes);
+            receivedBytes += chunkBytes.byteLength;
+            if (contentLength !== null && receivedBytes >= contentLength) {
+              finishResponse(createGatewayResponse());
+            }
           }
         }
       } else if (message.type === 'bnh-vnet-response-end') {
-        clearTimeout(timeout);
-        channel.port1.removeEventListener?.('message', onResponseMessage);
-        channel.port1.close();
-        let totalLen = 0;
-        for (const c of bodyChunks) totalLen += c.byteLength;
-        const fullBody = new Uint8Array(totalLen);
-        let offset = 0;
-        for (const c of bodyChunks) {
-          fullBody.set(c, offset);
-          offset += c.byteLength;
-        }
-        if (!headers) {
-          headers = gatewayResponseHeaders({
-            'content-type': 'text/html; charset=utf-8',
-            'access-control-allow-origin': '*',
-          });
-        }
-        if (headers.has('content-length')) {
-          headers.delete('content-length');
-        }
-        resolve(new Response(fullBody, {
-          status: statusCode,
-          statusText,
-          headers,
-        }));
+        finishResponse(createGatewayResponse());
       } else if (message.type === 'bnh-vnet-response-error') {
-        clearTimeout(timeout);
-        channel.port1.removeEventListener?.('message', onResponseMessage);
-        channel.port1.close();
-        resolve(new Response(`Virtual Network Error: ${message.error || 'Connection refused'}`, {
+        finishResponse(new Response(`Virtual Network Error: ${message.error || 'Connection refused'}`, {
           status: 502,
           headers: gatewayResponseHeaders({ 'content-type': 'text/plain; charset=utf-8' }),
         }));
       }
     };
+
+    function createGatewayResponse() {
+      let totalLen = 0;
+      for (const c of bodyChunks) totalLen += c.byteLength;
+      const fullBody = new Uint8Array(totalLen);
+      let offset = 0;
+      for (const c of bodyChunks) {
+        fullBody.set(c, offset);
+        offset += c.byteLength;
+      }
+      if (!headers) {
+        headers = gatewayResponseHeaders({
+          'content-type': 'text/html; charset=utf-8',
+          'access-control-allow-origin': '*',
+        });
+      }
+      if (headers.has('content-length')) {
+        headers.delete('content-length');
+      }
+      return new Response(fullBody, {
+        status: statusCode,
+        statusText,
+        headers,
+      });
+    }
+
     channel.port1.addEventListener('message', onResponseMessage);
     channel.port1.start?.();
 

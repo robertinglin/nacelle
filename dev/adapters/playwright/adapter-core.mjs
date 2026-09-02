@@ -8,6 +8,7 @@ import { chromium, firefox, webkit } from 'playwright';
 const browserTypes = { chromium, firefox, webkit };
 const dependencyPattern = /(?:require\s*\(\s*|from\s+|import\s*\(\s*|new\s+Worker\s*\(\s*|fork\s*\(\s*)['"](\.\.?\/[^'"]+)['"]/g;
 const BROWSER_LAUNCH_RETRY_DELAY_MS = 100;
+const CHROMIUM_RUNTIME_ARGS = ['--js-flags=--max-old-space-size=8192'];
 
 function browserLaunchErrorText(error) {
   const message = error?.stack || error?.message || String(error);
@@ -23,13 +24,17 @@ export function isTransientBrowserLaunchFailure(error, browserName) {
 }
 
 export async function launchBrowser(browserType, browserName, { retryDelayMs = BROWSER_LAUNCH_RETRY_DELAY_MS } = {}) {
+  const launchOptions = {
+    headless: true,
+    ...(browserName === 'chromium' ? { args: CHROMIUM_RUNTIME_ARGS } : {}),
+  };
   try {
-    return await browserType.launch({ headless: true });
+    return await browserType.launch(launchOptions);
   } catch (initialError) {
     if (!isTransientBrowserLaunchFailure(initialError, browserName)) throw initialError;
     await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
     try {
-      return await browserType.launch({ headless: true });
+      return await browserType.launch(launchOptions);
     } catch (retryError) {
       const combined = new Error(
         `${browserName} launch failed after one transient-startup retry\n` +

@@ -208,6 +208,33 @@ process.stdout.write('commonjs resolver contracts completed');`,
   assert.equal(await child.stdoutText(), 'commonjs resolver contracts completed');
 });
 
+test('CommonJS cache hits return before running the load hook again', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/app/main.cjs': `const assert = require('node:assert/strict');
+const moduleApi = require('node:module');
+let loads = 0;
+const registration = moduleApi.registerHooks({
+  load(url, context, nextLoad) {
+    loads += 1;
+    return nextLoad(url, context);
+  },
+});
+const first = require('./cached.cjs');
+const second = require('./cached.cjs');
+registration.deregister();
+assert.equal(first, second);
+assert.equal(loads, 1);
+process.stdout.write('commonjs cache contract completed');`,
+      '/node/app/cached.cjs': "module.exports = { cached: true };",
+    },
+  });
+  const child = await node.run({ entry: '/node/app/main.cjs', cwd: '/node/app' });
+  assert.equal(await child.exit, 0, `${await child.stdoutText()}${await child.stderrText()}`);
+  assert.equal(await child.stdoutText(), 'commonjs cache contract completed');
+});
+
 test('output capture is bounded and reports dropped bytes without retaining the full stream', async () => {
   const output = createOutputCollector({ limits: { total: 4, stdout: 4, stderr: 4 }, tailBytes: 2 });
   output.stdout.write(new TextEncoder().encode('abcd'));

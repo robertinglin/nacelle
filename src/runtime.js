@@ -11085,6 +11085,9 @@ export function createRuntime({
       if (isNativeAddonBuildPath(resolved) || (resolved.endsWith('.node') && addonsDisabled(processObj))) {
         rejectNativeAddon(nativeAddonPath(resolved), processObj);
       }
+      if (Object.hasOwn(moduleCache, resolved)) {
+        return moduleCache[resolved].exports;
+      }
       let loaded;
       try {
         loaded = runModuleHook('load', resolvedURL, context, (url) => {

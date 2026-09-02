@@ -1957,8 +1957,23 @@ export function createVfs(options = {}) {
     notify(destination, 'rename');
   }
 
+  function normalizeOpenFlags(value) {
+    if (typeof value !== 'number') return String(value);
+    if (!Number.isInteger(value) || value < 0) return String(value);
+    const accessMode = value & 3;
+    const readWrite = accessMode === FS_CONSTANTS.O_RDWR;
+    const append = Boolean(value & FS_CONSTANTS.O_APPEND);
+    const create = Boolean(value & FS_CONSTANTS.O_CREAT);
+    const truncate = Boolean(value & FS_CONSTANTS.O_TRUNC);
+    const exclusive = Boolean(value & FS_CONSTANTS.O_EXCL);
+    if (append) return `${readWrite ? 'a+' : 'a'}${exclusive ? 'x' : ''}`;
+    if (create || truncate) return `${readWrite ? 'w+' : 'w'}${exclusive ? 'x' : ''}`;
+    if (readWrite || accessMode === FS_CONSTANTS.O_WRONLY) return 'r+';
+    return 'r';
+  }
+
   function openDescriptor(pathValue, flags = 'r') {
-    flags = String(flags);
+    flags = normalizeOpenFlags(flags);
     const path = resolvePath(resolve(pathValue));
     const writable = flags.includes('w') || flags.includes('a') || flags.includes('+');
     access(path, 'open', writable);
@@ -3181,6 +3196,7 @@ export function createVfs(options = {}) {
     }
     if (files.has(path) && directories.has(path)) throw invalidPath();
     files.set(path, decode(entryValue.data ?? entryValue.bytes ?? entryValue.content ?? entryValue));
+    if (entryValue.mode !== undefined) metadataFor(path).mode = modeValue(entryValue.mode);
   }
 
   function seedTree(root, tree) {
@@ -3752,6 +3768,17 @@ export function createVfs(options = {}) {
     },
     watch,
   };
+
+  // fs.exists uses a legacy callback shape with no error argument. Node's
+  // custom promisifier preserves that shape for callers such as CITGM.
+  Object.defineProperty(fs.exists, Symbol.for('nodejs.util.promisify.custom'), {
+    configurable: true,
+    enumerable: false,
+    value: async function promisifiedExists(pathValue) {
+      return fs.existsSync(pathValue);
+    },
+    writable: false,
+  });
 
   const promises = {
     constants: FS_CONSTANTS,

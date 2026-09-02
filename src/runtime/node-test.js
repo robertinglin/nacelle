@@ -693,6 +693,9 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
   };
   return new Proxy(test, {
     apply(_target, thisArg, args) { return Reflect.apply(activeInstance(), thisArg, args); },
-    get(_target, property, receiver) { return Reflect.get(activeInstance(), property, receiver); },
+    get(_target, property, receiver) {
+      if (property === '__bnhSetActiveProcess') return Reflect.get(_target, property, receiver);
+      return Reflect.get(activeInstance(), property, receiver);
+    },
   });
 }

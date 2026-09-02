@@ -769,6 +769,8 @@ export function createBrowserProcess(options = {}) {
   let spawned = false;
   let startupTimer;
   let pendingTerminal;
+  const proxyTransports = new Map();
+  let nextProxyTransportId = 1;
   let abortListener;
   let completionResolve;
   let completionReject;
@@ -896,11 +898,65 @@ export function createBrowserProcess(options = {}) {
       scope,
       onMessage: (value) => {
         if (value?.__bnhProxyRequest?.requestId && options.proxyAdapter) {
-          const { requestId, request } = value.__bnhProxyRequest;
+          const {
+            requestId,
+            operation = 'request',
+            request = {},
+          } = value.__bnhProxyRequest;
+          const dispatchTransport = async () => {
+            if (operation === 'send' && request.transportId) {
+              const transport = proxyTransports.get(request.transportId);
+              if (!transport) throw Object.assign(new Error('proxy transport is closed'), { code: 'ERR_PROXY_CONNECTION_FAILED' });
+              if (request.action === 'write') {
+                await new Promise((resolve, reject) => {
+                  let settled = false;
+                  const complete = (error) => {
+                    if (settled) return;
+                    settled = true;
+                    if (error) reject(error);
+                    else resolve();
+                  };
+                  try {
+                    const result = transport.write(request.bytes, complete);
+                    if (result && typeof result.then === 'function') result.then(() => complete(), complete);
+                  } catch (error) {
+                    complete(error);
+                  }
+                });
+              } else if (request.action === 'end') {
+                const result = transport.end();
+                if (result && typeof result.then === 'function') await result;
+              } else if (request.action === 'destroy') {
+                transport.destroy(request.error && Object.assign(new Error(request.error.message), request.error));
+                proxyTransports.delete(request.transportId);
+              }
+              return { ok: true };
+            }
+            const method = typeof options.proxyAdapter === 'function'
+              ? options.proxyAdapter
+              : options.proxyAdapter[operation] || options.proxyAdapter.request;
+            if (typeof method !== 'function') throw new Error(`proxy adapter does not implement ${operation}()`);
+            const result = await method.call(options.proxyAdapter, request);
+            if (operation !== 'connect' || !result?.transport) return result;
+            const transportId = `${childId}-transport-${nextProxyTransportId++}`;
+            proxyTransports.set(transportId, result.transport);
+            return {
+              ...result,
+              transport: undefined,
+              __bnhTransport: { id: transportId, virtualTls: Boolean(result.transport.virtualTls) },
+            };
+          };
           Promise.resolve()
-            .then(() => options.proxyAdapter.request(request))
+            .then(dispatchTransport)
             .then(serializeProxyResponse)
-            .then((result) => child.send({ __bnhProxyResponse: true, requestId, result }))
+            .then((result) => {
+              const transport = result?.__bnhTransport?.id
+                ? proxyTransports.get(result.__bnhTransport.id)
+                : undefined;
+              const message = { __bnhProxyResponse: true, requestId, result };
+              if (transport) return child.send(message, transport);
+              return child.send(message);
+            })
             .catch((error) => child.send({
               __bnhProxyResponse: true,
               requestId,

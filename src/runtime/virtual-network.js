@@ -366,7 +366,7 @@ export function createVirtualNetwork({ transport } = {}) {
     }
   }
 
-  function connectTcp({ address, port, client, serverSocket, onConnected, onError, localAddress, localPort }) {
+  function connectTcp({ address, port, hostname, client, serverSocket, onConnected, onError, localAddress, localPort }) {
     globalThis.__bnhGatewayLogs?.push?.({ type: 'network-connect-tcp', address, port, bindings: tcpBindings.size });
     let settled = false;
     const fail = (error) => {
@@ -435,6 +435,7 @@ export function createVirtualNetwork({ transport } = {}) {
         result = hook.call(transport, {
           address,
           port,
+          hostname: hostname || address,
           target: virtualAddressFamily(address) === 6 ? `[${address}]:${port}` : `${address}:${port}`,
           client,
           localAddress,

@@ -24,7 +24,7 @@ function isValidExportName(value) {
 }
 
 function hasEsmSyntax(source) {
-  return /(?:^|[;\n])\s*export\s+(?:default\b|(?:const|let|var|function|class)\b|[*{])/.test(source);
+  return /(?:^|[;\n])\s*(?:export\s+(?:default\b|(?:const|let|var|function|class)\b|[*{])|import\s*(?:(?:[^'";]*?from\s*)?['"]))/m.test(source);
 }
 
 function decodeStaticString(value) {
@@ -242,6 +242,8 @@ export function createModuleLoader({
   const moduleURLs = new Map();
   const importCache = new Map();
   const nativeSpecifierHints = new Map();
+  const cycleModuleURLs = new Map();
+  const cycleRegistrations = new Map();
   const builtinEsmSyncers = new Set();
   const syncBuiltinESMExports = () => {
     for (const sync of builtinEsmSyncers) sync();
@@ -662,7 +664,9 @@ export function createModuleLoader({
         const request = subpath ? `./${subpath}` : '.';
         const exportsMap = typeof config.exports === 'string' || Array.isArray(config.exports)
           ? { '.': config.exports }
-          : config.exports;
+          : Object.keys(config.exports).some((key) => key === '.' || key.startsWith('./'))
+            ? config.exports
+            : { '.': config.exports };
         const entry = matchingPackageEntry(exportsMap, request);
         if (!entry) throw packageError('ERR_PACKAGE_PATH_NOT_EXPORTED', `Package subpath '${request}' is not defined`);
         const exported = resolvePackageTarget(entry.target, packageRoot, entry.match, conditions, 'exports');
@@ -788,6 +792,36 @@ export function createModuleLoader({
     return { names, esmSyntax: metadata.esmSyntax };
   };
 
+  const esmExportNames = (source) => {
+    const value = String(source);
+    const names = new Set();
+    const bindings = new Map();
+    for (const match of value.matchAll(/\bexport\s+(?:async\s+)?(?:const|let|var|function|class)\s+([$A-Z_a-z][$\w]*)/g)) {
+      if (isValidExportName(match[1])) {
+        names.add(match[1]);
+        bindings.set(match[1], match[1]);
+      }
+    }
+    for (const match of value.matchAll(/\bexport\s*\{([^}]+)\}/g)) {
+      for (const part of match[1].split(',')) {
+        const pieces = part.trim().split(/\s+as\s+/);
+        const local = pieces[0].trim().replace(/^(['"])(.*?)\1$/, '$2');
+        const name = (pieces[1] || pieces[0]).trim().replace(/^(['"])(.*?)\1$/, '$2');
+        if (isValidExportName(name)) {
+          names.add(name);
+          if (!match[0].includes(' from ')) bindings.set(name, local);
+        }
+      }
+    }
+    const defaultDeclaration = value.match(/\bexport\s+default\s+(?:async\s+)?(?:function|class)\s+([$A-Z_a-z][$\w]*)/);
+    return {
+      defaultExport: /\bexport\s+default\b/.test(value),
+      names,
+      bindings,
+      defaultBinding: defaultDeclaration?.[1],
+    };
+  };
+
   const builtinModuleSource = (resolved, value) => {
     const names = Object.keys(value && (typeof value === 'object' || typeof value === 'function') ? value : {})
       .filter(isValidExportName)
@@ -848,6 +882,54 @@ export function createModuleLoader({
     ].join('\n');
   };
 
+  const cycleModuleSource = (resolved, importer, processOverride) => {
+    const source = sourceText(read(resolved, importer).value);
+    const analysis = esmExportNames(source);
+    const state = {
+      values: Object.create(null),
+      listeners: [],
+      publish(values) {
+        this.values = values || Object.create(null);
+        for (const listener of this.listeners) listener(this.values);
+      },
+    };
+    const token = register(() => state);
+    const key = cacheKey(resolved, processOverride);
+    cycleRegistrations.set(key, { names: analysis.names, bindings: analysis.bindings, defaultBinding: analysis.defaultBinding, token });
+    const access = `globalThis[${quote(registryName)}][${quote(token)}]()`;
+    const namedExports = [...analysis.names].map((name) => {
+      const local = `__bnhCycleExport_${name.replace(/[^$\w]/g, '_')}`;
+      return `let ${local} = ${access}.values[${quote(name)}];\nexport { ${local} as ${quote(name)} };`;
+    });
+    const defaultExport = analysis.defaultExport
+      ? `let __bnhCycleDefault = ${access}.values.default;\nexport { __bnhCycleDefault as default };`
+      : '';
+    const updates = [
+      ...analysis.names,
+      ...(analysis.defaultExport ? ['default'] : []),
+    ].map((name) => {
+      const local = name === 'default'
+        ? '__bnhCycleDefault'
+        : `__bnhCycleExport_${name.replace(/[^$\w]/g, '_')}`;
+      return `${local} = values?.[${quote(name)}];`;
+    }).join(' ');
+    return [
+      `const cycleState = ${access};`,
+      ...namedExports,
+      defaultExport,
+      `cycleState.listeners.push((values) => { ${updates} });`,
+    ].join('\n');
+  };
+
+  const cycleModuleURL = (resolved, importer, processOverride) => {
+    const key = cacheKey(resolved, processOverride);
+    if (cycleModuleURLs.has(key)) return cycleModuleURLs.get(key);
+    const source = cycleModuleSource(resolved, importer, processOverride);
+    const url = `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}_cycle_${moduleSequence++}${processKey(processOverride)}`;
+    cycleModuleURLs.set(key, url);
+    return url;
+  };
+
   const invalidCjsModuleURL = (specifier, exportName) => {
     const message = `The requested module '${specifier}' does not provide an export named '${exportName}'`;
     const source = `export default undefined;\nthrow new SyntaxError(${quote(message)});`;
@@ -896,6 +978,17 @@ export function createModuleLoader({
     const masked = value.split('');
     let state = 'code';
     let quoteChar = '';
+    let regexCharClass = false;
+    const canStartRegex = (index) => {
+      let cursor = index - 1;
+      while (cursor >= 0 && /\s/.test(value[cursor])) cursor -= 1;
+      if (cursor < 0) return true;
+      if ('([{,:;=!&|?+-*%^~<>'.includes(value[cursor])) return true;
+      const end = cursor + 1;
+      while (cursor >= 0 && /[$\w]/.test(value[cursor])) cursor -= 1;
+      const previousWord = value.slice(cursor + 1, end);
+      return ['case', 'delete', 'do', 'else', 'in', 'instanceof', 'of', 'return', 'throw', 'typeof', 'void', 'yield', 'await'].includes(previousWord);
+    };
     for (let index = 0; index < value.length; index += 1) {
       const char = value[index];
       const next = value[index + 1];
@@ -910,6 +1003,10 @@ export function createModuleLoader({
           masked[index + 1] = ' ';
           state = 'block-comment';
           index += 1;
+        } else if (char === '/' && canStartRegex(index)) {
+          masked[index] = ' ';
+          regexCharClass = false;
+          state = 'regex';
         } else if (char === '\'' || char === '"' || char === '`') {
           quoteChar = char;
           state = 'string';
@@ -927,6 +1024,25 @@ export function createModuleLoader({
           masked[index + 1] = ' ';
           state = 'code';
           index += 1;
+        } else if (char !== '\n' && char !== '\r') masked[index] = ' ';
+        continue;
+      }
+      if (state === 'regex') {
+        if (char === '\\') {
+          masked[index] = ' ';
+          if (index + 1 < value.length && value[index + 1] !== '\n' && value[index + 1] !== '\r') {
+            masked[index + 1] = ' ';
+            index += 1;
+          }
+        } else if (char === '[') {
+          masked[index] = ' ';
+          regexCharClass = true;
+        } else if (char === ']' && regexCharClass) {
+          masked[index] = ' ';
+          regexCharClass = false;
+        } else if (char === '/' && !regexCharClass) {
+          masked[index] = ' ';
+          state = 'code';
         } else if (char !== '\n' && char !== '\r') masked[index] = ' ';
         continue;
       }
@@ -1100,7 +1216,9 @@ export function createModuleLoader({
       if (isWasmBytes(loaded.source)) return wasmModuleSource(loaded.source, loadedResolved, processOverride);
       const loadedText = sourceText(loaded.source);
       if (loaded.format === 'json') return `export default ${JSON.stringify(JSON.parse(loadedText))};`;
-      if (loaded.format === 'module') return `${bindProcess(rewriteImports(loadedText, loadedResolved, processOverride), processOverride)}\n//# sourceURL=${loadedResolved}`;
+      if (loaded.format === 'module' || hasEsmSyntax(loadedText)) {
+        return `${bindProcess(rewriteImports(loadedText, loadedResolved, processOverride), processOverride)}\n//# sourceURL=${loadedResolved}`;
+      }
       return cjsModuleSource(loadedResolved, loadedText, processOverride);
     }
     if (isBuiltinSpecifier(resolved)) return builtinModuleSource(resolved, builtinValue);
@@ -1136,7 +1254,7 @@ export function createModuleLoader({
       return `export default ${JSON.stringify(JSON.parse(sourceText(value)))};`;
     }
     const loadedText = sourceText(value);
-    if (moduleFormat(resolved) !== 'module') return cjsModuleSource(resolved, loadedText, processOverride);
+    if (moduleFormat(resolved) !== 'module' && !hasEsmSyntax(loadedText)) return cjsModuleSource(resolved, loadedText, processOverride);
     return `${bindProcess(rewriteImports(loadedText, resolved, processOverride), processOverride)}\n//# sourceURL=${resolved}`;
   }
 
@@ -1315,7 +1433,7 @@ export function createModuleLoader({
     return { ...result, url: result.url || url };
   };
 
-  const rewriteImportsAsync = async (source, importer, processOverride) => {
+  const rewriteImportsAsync = async (source, importer, processOverride, ancestors) => {
     let rewritten = String(source);
     const patterns = [
       {
@@ -1331,39 +1449,34 @@ export function createModuleLoader({
       const masked = maskJavaScriptLiterals(rewritten);
       const matches = [...masked.matchAll(pattern)];
       const originalPattern = new RegExp(pattern.source, pattern.flags.replace('g', ''));
-      const replacements = await Promise.all(matches.map(async (match) => {
+      const replacements = [];
+      for (const match of matches) {
         const original = rewritten.slice(match.index, match.index + match[0].length).match(originalPattern);
-        if (!original) return null;
+        if (!original) continue;
         const specifier = original[4];
         const prefix = original[2];
         const quoteOffset = original[0].indexOf(original[3], original[1].length + prefix.length);
         const resolved = hookURLToSpecifier((await runResolveHooksAsync(specifier, importer)).url);
-        const url = await moduleURLAsync(resolved, processOverride);
+        const url = await moduleURLAsync(resolved, processOverride, importer, ancestors);
         nativeSpecifierHints.set(url, specifier);
-        // Keep the native namespace alongside the generated module URL. A
-        // later dynamic import can then reuse the already-instantiated module
-        // even when its virtual backing file has been removed meanwhile.
-        const resolvedKey = cacheKey(resolved, processOverride);
-        if (moduleFormat(resolved) === 'module' && !importCache.has(resolvedKey)) {
-          importCache.set(resolvedKey, import(url));
-        }
         if (exportAware && requestedExportName(prefix) && resolved.endsWith('.json')) {
-          return {
+          replacements.push({
             start: match.index + quoteOffset,
             end: match.index + quoteOffset + specifier.length + 2,
             replacement: quote(invalidCjsModuleURL(specifier, requestedExportName(prefix))),
             exportAware,
             prefix,
-          };
+          });
+          continue;
         }
-        return {
+        replacements.push({
           start: match.index + quoteOffset,
           end: match.index + quoteOffset + specifier.length + 2,
           replacement: quote(url),
           exportAware,
           prefix,
-        };
-      }));
+        });
+      }
       for (const replacement of replacements.filter(Boolean).reverse()) {
         rewritten = `${rewritten.slice(0, replacement.start)}${replacement.replacement}${rewritten.slice(replacement.end)}`;
       }
@@ -1395,7 +1508,7 @@ export function createModuleLoader({
     return rewritten;
   };
 
-  const moduleSourceAsync = async (resolved, processOverride) => {
+  const moduleSourceAsync = async (resolved, processOverride, ancestors) => {
     const builtinValue = builtin(resolved, processOverride);
     const format = isBuiltinSpecifier(resolved) ? 'builtin'
       : /^[A-Za-z][A-Za-z\d+.-]*:/.test(resolved) ? 'module'
@@ -1409,9 +1522,10 @@ export function createModuleLoader({
       if (isWasmBytes(loaded.source)) return wasmModuleSource(loaded.source, loadedResolved, processOverride);
       const loadedText = sourceText(loaded.source);
       if (loaded.format === 'json') return `export default ${JSON.stringify(JSON.parse(loadedText))};`;
-      if (loaded.format === 'module') {
+      const loadedFormat = hasEsmSyntax(loadedText) ? 'module' : loaded.format;
+      if (loadedFormat === 'module') {
         const moduleText = stripHashbang(loadedText);
-        return `${bindProcess(await rewriteImportsAsync(moduleText, loadedResolved, processOverride), processOverride)}\n//# sourceURL=${loadedResolved}`;
+        return `${bindProcess(await rewriteImportsAsync(moduleText, loadedResolved, processOverride, ancestors), processOverride)}\n//# sourceURL=${loadedResolved}`;
       }
       return cjsModuleSource(loadedResolved, loadedText, processOverride);
     }
@@ -1422,25 +1536,40 @@ export function createModuleLoader({
       throw error;
     }
     if (resolved.startsWith('data:')) {
-      return `${bindProcess(await rewriteImportsAsync(decodeDataBody(resolved), resolved, processOverride), processOverride)}\n//# sourceURL=${resolved}`;
+      return `${bindProcess(await rewriteImportsAsync(decodeDataBody(resolved), resolved, processOverride, ancestors), processOverride)}\n//# sourceURL=${resolved}`;
     }
     const value = read(resolved, resolved).value;
     if (isWasmBytes(value)) return wasmModuleSource(value, resolved, processOverride);
     if (resolved.endsWith('.json')) return `export default ${JSON.stringify(JSON.parse(sourceText(value)))};`;
     const loadedText = sourceText(value);
-    if (moduleFormat(resolved) !== 'module') return cjsModuleSource(resolved, loadedText, processOverride);
+    if (moduleFormat(resolved) !== 'module' && !hasEsmSyntax(loadedText)) return cjsModuleSource(resolved, loadedText, processOverride);
     const moduleText = stripHashbang(loadedText);
-    return `${bindProcess(await rewriteImportsAsync(moduleText, resolved, processOverride), processOverride)}\n//# sourceURL=${resolved}`;
+    return `${bindProcess(await rewriteImportsAsync(moduleText, resolved, processOverride, ancestors), processOverride)}\n//# sourceURL=${resolved}`;
   };
 
-  const moduleURLAsync = async (resolved, processOverride) => {
+  const moduleURLAsync = async (resolved, processOverride, importer = resolved, ancestors = new Set()) => {
     const key = cacheKey(resolved, processOverride);
     if (moduleURLs.has(key)) return moduleURLs.get(key);
+    if (isBuiltinSpecifier(resolved)) return moduleURL(resolved, processOverride);
+    if (ancestors.has(key)) {
+      return cycleModuleURL(resolved, importer, processOverride);
+    }
+    if (cycleModuleURLs.has(key)) return cycleModuleURLs.get(key);
     if (asyncModuleURLs.has(key)) return asyncModuleURLs.get(key);
     const promise = (async () => {
-      const source = await moduleSourceAsync(resolved, processOverride);
-      asyncModuleSources.set(key, source);
-      const url = `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}_${moduleSequence++}${processKey(processOverride)}`;
+      const nextAncestors = new Set(ancestors);
+      nextAncestors.add(key);
+      const source = await moduleSourceAsync(resolved, processOverride, nextAncestors);
+      const registration = cycleRegistrations.get(key);
+      const publishedSource = registration
+        ? `${source}\n${registration.names.size || registration.defaultBinding ? `globalThis[${quote(registryName)}][${quote(registration.token)}]().publish({${[...registration.names].map((name) => {
+          const binding = registration.bindings.get(name);
+          return binding ? `${quote(name)}: ${binding}` : '';
+        }).filter(Boolean).concat(registration.defaultBinding ? [`default: ${registration.defaultBinding}`] : []).join(',')}});` : ''}`
+        : source;
+      const finalSource = publishedSource;
+      asyncModuleSources.set(key, finalSource);
+      const url = `data:text/javascript;charset=utf-8,${encodeModuleSource(finalSource)}#${registryName}_${moduleSequence++}${processKey(processOverride)}`;
       moduleURLs.set(key, url);
       return url;
     })();

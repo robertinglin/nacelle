@@ -36,6 +36,7 @@ import { transformAsyncSource } from './runtime/async-transform.js';
 import { EventEmitter, addAbortListener, getEventListeners, getMaxListeners, once } from './runtime/events.js';
 import { createVfs, fileURLToPath, pathToFileURL } from './runtime/vfs.js';
 import { path } from './runtime/path.js';
+import { runShellScript } from './runtime/shell.js';
 import {
   Readable, Writable, Duplex, Transform, PassThrough, Stream, duplexPair, pipeline, destroy,
   compose, isDestroyed, isDisturbed, isErrored, isReadable, isWritable, promises as streamPromises,
@@ -172,7 +173,7 @@ const BUILTIN_NAMES = Object.freeze([
   'internal/event_target', 'internal/async_context_frame', 'internal/async_hooks', 'internal/test/binding', 'internal/test/transfer',
   'internal/bootstrap/realm', 'internal/modules/cjs/loader', 'internal/modules/esm/utils', 'internal/vm/module',
   'internal/webstreams/adapters',
-  'internal/util', 'internal/util/debuglog', 'internal/util/types', 'internal/options', 'internal/dgram', 'internal/crypto/x509',
+  'internal/util', 'internal/util/debuglog', 'internal/util/types', 'internal/options', 'internal/dgram', 'internal/crypto/x509', 'internal/crypto/keys',
 ]);
 
 function builtinName(name) {
@@ -2735,7 +2736,7 @@ function moduleHasStaticEsmSyntax(source) {
   const stripped = String(source)
     .replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '')
     .replace(/'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`/g, '""');
-  return /(?:^|[;\n])\s*export\s+(?:default\b|(?:const|let|var|function|class)\b|[*{])/.test(stripped);
+  return /(?:^|[;\n])\s*(?:export\s+(?:default\b|(?:const|let|var|function|class)\b|[*{])|import\s*(?:(?:[^'";]*?from\s*)?['"]))/m.test(stripped);
 }
 
 function cjsStaticExportNames(source) {
@@ -2767,6 +2768,9 @@ function moduleSynchronousEsmSource(source, filename = '/node/index.mjs') {
   const prelude = "Object.defineProperty(module.exports, Symbol.toStringTag, { value: 'Module' });\n";
   let reexportIndex = 0;
   let namespaceIndex = 0;
+  const defaultDeclarations = [...String(source).matchAll(
+    /(^|[;\n])\s*export\s+default\s+(?:async\s+)?(?:function|class)\s+([$_A-Za-z][$_\w]*)/gm,
+  )].map(([, , name]) => name);
   const importBindings = (clause, request, namespace = false) => {
     const trimmed = clause.trim();
     if (trimmed.startsWith('{')) {
@@ -2785,12 +2789,13 @@ function moduleSynchronousEsmSource(source, filename = '/node/index.mjs') {
     }
     const comma = trimmed.indexOf(',');
     const defaultName = comma < 0 ? trimmed : trimmed.slice(0, comma).trim();
-    let result = `const ${defaultName} = ${request};`;
+    const binding = `__bnhDefaultImport${namespaceIndex++}`;
+    let result = `const ${binding} = ${request}; const ${defaultName} = ${binding} && Object.prototype.hasOwnProperty.call(${binding}, 'default') ? ${binding}.default : ${binding};`;
     if (comma >= 0) result += `\n${importBindings(trimmed.slice(comma + 1), request)}`;
     return result;
   };
   transformed = transformed.replace(
-    /(^|[;\n])\s*import\s+([\s\S]*?)\s+from\s+(['\"])([^'\"]+)\3\s*;?/g,
+    /(^|[;\n])\s*import\s*([\s\S]*?)\s*from\s*(['\"])([^'\"]+)\3\s*;?/g,
     (_, prefix, clause, quote, specifier) => `${prefix}${importBindings(clause, `require(${JSON.stringify(specifier)})`, clause.trim().startsWith('*'))}`,
   );
   transformed = transformed.replace(
@@ -2799,7 +2804,14 @@ function moduleSynchronousEsmSource(source, filename = '/node/index.mjs') {
   );
   transformed = transformed.replace(/\bconst\s+(require|exports|module)\s*=/g, 'var $1 =');
   transformed = transformed.replace(
-    /(^|[;\n])\s*export\s+default\s+([^;]+);?/g,
+    /(^|[;\n])\s*export\s+default\s+((?:async\s+)?(?:function|class)\s+[$_A-Za-z][$_\w]*)/g,
+    (_, prefix, declaration) => `${prefix}${declaration}`,
+  );
+  if (defaultDeclarations.length) {
+    transformed += `\n${defaultDeclarations.map((name) => `module.exports.default = ${name};`).join('\n')}`;
+  }
+  transformed = transformed.replace(
+    /(^|[;\n])\s*export\s+default\s+(?!async\s+function\b|function\b|class\b)([^;]+);?/g,
     (_, prefix, expression) => `${prefix}Object.defineProperty(module.exports, '__esModule', { value: true, enumerable: true }); module.exports.default = (${expression});`,
   );
   transformed = transformed.replace(
@@ -3047,10 +3059,14 @@ const DEFAULT_RUNTIME_CAPABILITIES = Object.freeze({
 });
 
 function browserProcessVersions(scope, profile) {
-  void scope;
   // Next.js uses this WebContainer marker to select its own official SWC
   // WebAssembly fallback before attempting the platform-specific .node file.
-  return Object.freeze({ ...profile.versions, webcontainer: '1.0.0' });
+  const openssl = browserCryptoVersion(scope);
+  return Object.freeze({
+    ...profile.versions,
+    ...(openssl ? { openssl } : {}),
+    webcontainer: '1.0.0',
+  });
 }
 
 function createProcess(scope, options, stdout, stderr, trackTask) {
@@ -3494,8 +3510,17 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     openStdin: () => processObject.stdin,
     stdout: {
       isTTY: false,
-      write: (value) => { if (typeof stdout === 'function') stdout(normalizeOutputChunk(value)); return true; },
-      end: () => {},
+      write: (value, encoding, callback) => {
+        if (typeof encoding === 'function') callback = encoding;
+        if (typeof stdout === 'function') stdout(normalizeOutputChunk(value));
+        callback?.();
+        return true;
+      },
+      end: (value, encoding, callback) => {
+        if (typeof encoding === 'function') callback = encoding;
+        if (value !== undefined && value !== null) processObject.stdout.write(value, encoding);
+        callback?.();
+      },
       ref() { return this; },
       unref() { return this; },
       on(...args) { processObject.on(...args); return this; },
@@ -3505,8 +3530,17 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     },
     stderr: {
       isTTY: false,
-      write: (value) => { if (typeof stderr === 'function') stderr(normalizeOutputChunk(value)); return true; },
-      end: () => {},
+      write: (value, encoding, callback) => {
+        if (typeof encoding === 'function') callback = encoding;
+        if (typeof stderr === 'function') stderr(normalizeOutputChunk(value));
+        callback?.();
+        return true;
+      },
+      end: (value, encoding, callback) => {
+        if (typeof encoding === 'function') callback = encoding;
+        if (value !== undefined && value !== null) processObject.stderr.write(value, encoding);
+        callback?.();
+      },
       ref() { return this; },
       unref() { return this; },
       on(...args) { processObject.on(...args); return this; },
@@ -4403,6 +4437,9 @@ export function createRuntime({
   wasmBaseUrl,
 } = {}) {
   const scope = globalObject;
+  const runtimeQueueMicrotask = typeof scope.queueMicrotask === 'function'
+    ? scope.queueMicrotask.bind(scope)
+    : (callback) => scope.setTimeout(callback, 0);
   installErrorStackCompatibility(scope);
   const legacyVersion = /^(?:node@?|n|v)?\d+(?:\..*)?$/.test(String(version || '')) ? version : null;
   const resolvedProfile = resolveNodeVersionProfile(nodeProfile?.id || nodeVersion || legacyVersion || 'lts');
@@ -4938,7 +4975,17 @@ export function createRuntime({
         processObject.env[key] = value;
       }
     };
-    const nodePath = { ...path };
+    const currentPathProcess = () => scope.__bnhActiveProcess || scope.process || processObject;
+    const nodePath = {
+      ...path,
+      resolve(...parts) {
+        return path.resolve(currentPathProcess().cwd?.() || '/node', ...parts);
+      },
+      relative(from, to) {
+        const cwd = currentPathProcess().cwd?.() || '/node';
+        return path.relative(path.resolve(cwd, from), path.resolve(cwd, to));
+      },
+    };
     const nodeUrl = createUrlModule(scope, { pathToFileURL, fileURLToPath });
     processObject.report = createProcessReport({
       processObject,
@@ -6804,6 +6851,7 @@ export function createRuntime({
           const stderrStream = outputStream();
           const child = new BrowserChildProcess();
           const ownerProcess = scope.process || processObject;
+          const executableName = String(file).split('/').pop();
           const emitChildMessage = (value, handle) => {
             const event = value && typeof value === 'object'
               && typeof value.cmd === 'string'
@@ -6812,7 +6860,23 @@ export function createRuntime({
               : 'message';
             child.emit(event, value, handle);
           };
-          const prepared = prepareChild(file, args, options, ownerProcess);
+          const commandPath = normalizePath(file, ownerProcess.cwd?.() || '/node');
+          let directScript = false;
+          if (executableName !== 'node' && executableName !== 'nodejs') {
+            try {
+              const commandSource = readSource(commandPath);
+              const commandText = typeof commandSource === 'string'
+                ? commandSource
+                : new TextDecoder().decode(commandSource);
+              directScript = commandText.startsWith('#!');
+            } catch {
+              // Commands that are not VFS scripts continue through the normal
+              // unsupported-command and native-worker paths below.
+            }
+          }
+          const prepared = directScript
+            ? prepareChild(ownerProcess.execPath, [commandPath, ...(Array.isArray(args) ? args : [])], options, ownerProcess)
+            : prepareChild(file, args, options, ownerProcess);
           const processResource = new AsyncResource('PROCESSWRAP');
           const pipeResources = [
             new AsyncResource('PIPEWRAP'),
@@ -6855,7 +6919,10 @@ export function createRuntime({
             },
           } : null;
           let closed = false;
-          let releaseChildTask = trackTask?.() || null;
+          const trackOwnedTask = typeof ownerProcess?._bnhTaskTracker === 'function'
+            ? ownerProcess._bnhTaskTracker
+            : trackTask;
+          let releaseChildTask = trackOwnedTask?.() || null;
           let abortListener = null;
           let childProcess = null;
           let timeoutHandle = null;
@@ -7301,7 +7368,44 @@ export function createRuntime({
               if (commandName === 'npm') {
                 child.spawn({ file, args });
                 scope.queueMicrotask(() => child.emit('spawn'));
-                runNpmChild(prepared, ownerProcess).then((result) => {
+                runNpmChild(prepared, ownerProcess, options).then((result) => {
+                  if (result.stdout) {
+                    stdout += result.stdout;
+                    writeStdout(result.stdout);
+                  }
+                  if (result.stderr) {
+                    stderr += result.stderr;
+                    writeStderr(result.stderr);
+                  }
+                  finish(result.code, null);
+                }, (error) => {
+                  const message = `${error?.stack || error?.message || error}\n`;
+                  stderr += message;
+                  writeStderr(message);
+                  finish(1, null, error);
+                });
+                return;
+              }
+              const launchesNpmEntrypoint = commandName === 'node'
+                && prepared.entryPath.endsWith('/node_modules/.bin/npm')
+                && prepared.scriptPath === prepared.entryPath
+                && prepared.commandArgs[0] === prepared.entryPath;
+              if (launchesNpmEntrypoint) {
+                // npm invokes its own executable through Node when a package
+                // manager test is spawned. Route that standard entrypoint to
+                // the same virtual npm implementation used by direct npm
+                // children instead of treating the shebang-only launcher as
+                // an empty JavaScript file.
+                child.spawn({ file, args });
+                scope.queueMicrotask(() => child.emit('spawn'));
+                const npmPrepared = {
+                  ...prepared,
+                  command: prepared.entryPath,
+                  commandArgs: prepared.commandArgs.slice(1),
+                  argv: [prepared.entryPath, ...prepared.commandArgs.slice(1)],
+                  executionArgv: [prepared.entryPath, ...prepared.commandArgs.slice(1)],
+                };
+                runNpmChild(npmPrepared, ownerProcess, options).then((result) => {
                   if (result.stdout) {
                     stdout += result.stdout;
                     writeStdout(result.stdout);
@@ -7390,28 +7494,25 @@ export function createRuntime({
                   finish(terminalCode, terminalSignal);
                 }
               } else if (!result.pending) {
-                const scheduleFinish = scope.__BNH_NATIVE_TIMERS__?.setTimeout || scope.setTimeout;
-                scheduleFinish(() => {
-                  if (result.stdoutChunks?.length) {
-                    const complete = result.stdoutChunks.join('');
-                    const missing = stdoutEmitted && complete.endsWith(stdout)
-                      ? complete.slice(0, complete.length - stdout.length)
-                      : complete;
-                    stdout = complete;
-                    if (missing) writeStdout(missing);
-                  }
-                  if (result.stderrChunks?.length) {
-                    const complete = result.stderrChunks.join('');
-                    const missing = stderrEmitted && complete.endsWith(stderr)
-                      ? complete.slice(0, complete.length - stderr.length)
-                      : complete;
-                    stderr = complete;
-                    if (missing) writeStderr(missing);
-                  }
-                  if (stdout && !stdoutEmitted) writeStdout(stdout);
-                  if (stderr && !stderrEmitted) writeStderr(stderr);
-                  scope.queueMicrotask(() => finish(terminalCode, terminalSignal));
-                });
+                if (result.stdoutChunks?.length) {
+                  const complete = result.stdoutChunks.join('');
+                  const missing = stdoutEmitted && complete.endsWith(stdout)
+                    ? complete.slice(0, complete.length - stdout.length)
+                    : complete;
+                  stdout = complete;
+                  if (missing) writeStdout(missing);
+                }
+                if (result.stderrChunks?.length) {
+                  const complete = result.stderrChunks.join('');
+                  const missing = stderrEmitted && complete.endsWith(stderr)
+                    ? complete.slice(0, complete.length - stderr.length)
+                    : complete;
+                  stderr = complete;
+                  if (missing) writeStderr(missing);
+                }
+                if (stdout && !stdoutEmitted) writeStdout(stdout);
+                if (stderr && !stderrEmitted) writeStderr(stderr);
+                finish(terminalCode, terminalSignal);
               } else if (result.process) {
                 result.process.once?.('exit', (code, signal) => {
                   if (result.stdoutChunks?.length) {
@@ -7432,7 +7533,13 @@ export function createRuntime({
                   }
                   if (stdout && !stdoutEmitted) writeStdout(stdout);
                   if (stderr && !stderrEmitted) writeStderr(stderr);
-                  scope.queueMicrotask(() => finish(signal ? null : code, signal || null));
+                  scope.queueMicrotask(() => {
+                    const finalSignal = result.process?.getSignal?.() || signal || null;
+                    const finalCode = finalSignal
+                      ? null
+                      : (result.process?.getCode?.() ?? code);
+                    finish(finalCode, finalSignal);
+                  });
                 });
               }
             } catch (error) {
@@ -7587,7 +7694,7 @@ export function createRuntime({
         }
 
         function hasStaticEsmSyntax(source) {
-          return /(?:^|[;\n])\s*export\s+(?:default\b|(?:const|let|var|function|class)\b|[*{])/.test(source);
+          return /(?:^|[;\n])\s*(?:export\s+(?:default\b|(?:const|let|var|function|class)\b|[*{])|import\s*(?:(?:[^'";]*?from\s*)?['"]))/m.test(source);
         }
 
         function synchronousEsmSource(source, filename) {
@@ -8046,7 +8153,7 @@ export function createRuntime({
             if (prepared.reportOnSignal) childProc.processObject.report.reportOnSignal = true;
             if (prepared.reportOnUncaughtException) childProc.processObject.report.reportOnUncaughtException = true;
             const childTaskReleases = new Set();
-            const nativeQueueMicrotask = scope.queueMicrotask.bind(scope);
+            const nativeQueueMicrotask = runtimeQueueMicrotask;
             let childExitCheckQueued = false;
             const tryExitChild = () => {
               if (childExitCheckQueued) return;
@@ -8255,15 +8362,10 @@ export function createRuntime({
               scope.clearImmediate = childProc.clearTimer;
               if (!options.ipc) {
                 scope.queueMicrotask = (callback) => {
-                  const release = childTrackTask();
                   nativeQueueMicrotask(() => {
-                    try {
-                      const runInContext = childProc.processObject._bnhRunInContext;
-                      if (typeof runInContext === 'function') runInContext.call(childProc.processObject, callback);
-                      else callback();
-                    } finally {
-                      release();
-                    }
+                    const runInContext = childProc.processObject._bnhRunInContext;
+                    if (typeof runInContext === 'function') runInContext.call(childProc.processObject, callback);
+                    else callback();
                   });
                 };
               }
@@ -8670,7 +8772,7 @@ export function createRuntime({
           return execFileSync(parsed.file, parsed.args, { ...options, stdinPath: parsed.stdinPath });
         }
 
-        const runNpmChild = async (prepared, ownerProcess) => {
+        const runNpmChild = async (prepared, ownerProcess, childOptions = {}) => {
           const args = prepared.commandArgs.map(String);
           const optionsWithValues = new Set([
             '--cache', '--prefix', '--registry', '--userconfig', '--loglevel', '--workspace', '-w',
@@ -8691,6 +8793,335 @@ export function createRuntime({
             if (key === 'registry') return { code: 0, stdout: `${registry.replace(/\/+$/, '')}\n`, stderr: '' };
             if (key === 'https-proxy') return { code: 0, stdout: `${env.npm_config_https_proxy || 'null'}\n`, stderr: '' };
           }
+
+          const createNpm = (clientRegistry = registry) => new BrowserNpm({
+            vfs,
+            registry: clientRegistry,
+            cache: scope.__BNH_NPM_CACHE__,
+            globalObject: scope,
+            fetchFn: (url, init) => runtimeFetchRef.current(url, init),
+            proxyUrl: null,
+            lifecycleScripts: false,
+            platform: 'browser',
+            arch: 'browser',
+            libc: 'browser',
+          });
+
+          const commandArguments = args.slice(command.index + 1);
+          const positionalArguments = () => {
+            const values = [];
+            let stopOptions = false;
+            for (let index = 0; index < commandArguments.length; index += 1) {
+              const argument = String(commandArguments[index]);
+              if (!stopOptions && argument === '--') {
+                stopOptions = true;
+                continue;
+              }
+              if (!stopOptions && argument.startsWith('-')) {
+                if (!argument.includes('=') && optionsWithValues.has(argument)) index += 1;
+                continue;
+              }
+              values.push(argument);
+            }
+            return values;
+          };
+
+          const resolvePackage = async (spec, clientRegistry = registry) => {
+            const parsed = parsePackageSpec(spec);
+            if (!parsed.name || /^https?:\/\//i.test(parsed.name)) {
+              throw new Error(`npm ${command.name} only supports registry package specs in the browser runtime`);
+            }
+            const npm = createNpm(clientRegistry);
+            const metadata = await npm.fetchPackageMetadata(parsed.name);
+            const resolved = npm.resolveVersion(metadata, parsed.range);
+            return { npm, metadata, parsed, ...resolved };
+          };
+
+          const runVirtualCommand = ({ entry, argv, cwd, commandEnv, stdin, signal, timeout, onStdout, onStderr }) => {
+            let shebangScript = false;
+            try {
+              const source = readSource(normalizePath(entry, cwd || ownerProcess.cwd?.() || '/node'));
+              const text = typeof source === 'string' ? source : new TextDecoder().decode(source);
+              shebangScript = text.startsWith('#!');
+            } catch {
+              // The virtual child path below handles commands that are not
+              // executable files mounted in the VFS.
+            }
+            if (shebangScript && entry !== processObject.execPath) {
+              const prepared = prepareChild(processObject.execPath, [entry, ...(argv || [])], {
+                cwd,
+                env: commandEnv,
+                input: stdin,
+                signal,
+                timeout,
+              }, ownerProcess);
+              const stdout = [];
+              const stderr = [];
+              const result = runPreparedSync(prepared, {
+                asyncLifecycle: true,
+                encoding: 'utf8',
+                onStdout: (value) => {
+                  const chunk = normalizeOutputChunk(value);
+                  stdout.push(chunk);
+                  onStdout?.(chunk);
+                },
+                onStderr: (value) => {
+                  const chunk = normalizeOutputChunk(value);
+                  stderr.push(chunk);
+                  onStderr?.(chunk);
+                },
+              });
+              const complete = (code, signalValue) => ({
+                code: signalValue ? null : code ?? result.status ?? 1,
+                stdout: stdout.join(''),
+                stderr: stderr.join(''),
+                streamed: Boolean(stdout.length || stderr.length),
+              });
+              if (!result.pending || !result.process) {
+                return Promise.resolve(complete(result.status, result.signal));
+              }
+              return new Promise((resolve) => {
+                result.process.once('exit', (code, signalValue) => {
+                  scope.queueMicrotask(() => {
+                    const finalSignal = result.process.getSignal?.() || signalValue || null;
+                    const finalCode = finalSignal
+                      ? null
+                      : (result.process.getCode?.() ?? code);
+                    resolve(complete(finalCode, finalSignal));
+                  });
+                });
+              });
+            }
+            if (entry === processObject.execPath && Array.isArray(argv) && argv[0] === '-e') {
+              const prepared = prepareChild(entry, argv, {
+                cwd,
+                env: commandEnv,
+                input: stdin,
+                signal,
+                timeout,
+              }, ownerProcess);
+              const result = runPreparedSync(prepared, {
+                encoding: 'utf8',
+                onStdout,
+                onStderr,
+              });
+              const stdout = String(result.stdout || '');
+              const stderr = String(result.stderr || '');
+              if (!result.stdoutChunks?.length && stdout) onStdout?.(stdout);
+              if (!result.stderrChunks?.length && stderr) onStderr?.(stderr);
+              return Promise.resolve({
+                code: result.status ?? 1,
+                stdout,
+                stderr,
+                streamed: Boolean(stdout || stderr),
+              });
+            }
+            return new Promise((resolve) => {
+              const output = [];
+              const errors = [];
+              let callbackOutput = '';
+              let callbackError = '';
+              let settled = false;
+              const text = (value) => normalizeOutputChunk(value);
+              const finish = (code) => {
+                if (settled) return;
+                settled = true;
+                const stdout = output.length ? output.join('') : callbackOutput;
+                const stderr = errors.length ? errors.join('') : callbackError;
+                resolve({
+                  code: code ?? 1,
+                  stdout,
+                  stderr,
+                  streamed: output.length > 0 || errors.length > 0,
+                });
+              };
+              const child = virtualAsync(entry, argv, {
+                cwd,
+                env: commandEnv,
+                input: stdin,
+                signal,
+                timeout,
+              }, (_error, stdout, stderr) => {
+                callbackOutput = String(stdout || '');
+                callbackError = String(stderr || '');
+              });
+              child.stdout?.on('data', (value) => {
+                const chunk = text(value);
+                output.push(chunk);
+                onStdout?.(chunk);
+              });
+              child.stderr?.on('data', (value) => {
+                const chunk = text(value);
+                errors.push(chunk);
+                onStderr?.(chunk);
+              });
+              child.once('close', (code) => {
+                finish(code);
+              });
+              child.stdin?.end(stdin === undefined ? undefined : stdin);
+            });
+          };
+
+          const shellFs = {
+            exists: async (pathname) => vfs.fs.existsSync(pathname),
+            stat: (...fsArgs) => vfs.fs.promises.stat(...fsArgs),
+            readFile: async (pathname, ...fsArgs) => {
+              const bytes = await vfs.fs.promises.readFile(pathname, ...fsArgs);
+              return typeof bytes === 'string' ? bytes : new TextDecoder().decode(bytes);
+            },
+            writeFile: (...fsArgs) => vfs.fs.promises.writeFile(...fsArgs),
+            mkdir: (...fsArgs) => vfs.fs.promises.mkdir(...fsArgs),
+            readdir: (...fsArgs) => vfs.fs.promises.readdir(...fsArgs),
+            remove: (pathname, removeOptions) => vfs.fs.rmSync(pathname, removeOptions),
+            copy: (source, destination, copyOptions) => vfs.fs.cpSync(source, destination, copyOptions),
+            rename: (source, destination) => vfs.fs.renameSync(source, destination),
+            glob: async (pattern, cwd) => vfs.fs.globSync(pattern, { cwd }),
+          };
+
+          const runScriptBody = async (scriptName, packageJson, scriptOptions = {}) => {
+            const script = packageJson?.scripts?.[scriptName];
+            if (typeof script !== 'string' || !script) {
+              return { code: 0, stdout: '', stderr: '', streamed: false };
+            }
+            const scriptCwd = scriptOptions.cwd || prepared.cwd;
+            const baseEnv = scriptOptions.env || env;
+            const scriptEnv = {
+              ...baseEnv,
+              npm_lifecycle_event: scriptName,
+              npm_lifecycle_script: script,
+              npm_package_name: packageJson.name || '',
+              npm_package_version: packageJson.version || '',
+              npm_execpath: '/node/node_modules/.bin/npm',
+              npm_node_execpath: '/node/node_modules/.bin/node',
+              PATH: `${scriptCwd}/node_modules/.bin:/node/node_modules/.bin:${baseEnv.PATH || ''}`,
+            };
+            const stdout = [];
+            const stderr = [];
+            const result = await runShellScript(script, {
+              args: scriptOptions.args,
+              cwd: scriptCwd,
+              env: scriptEnv,
+              stdin: scriptOptions.stdin,
+              fs: shellFs,
+              signal: scriptOptions.signal,
+              timeout: scriptOptions.timeout,
+              onNetwork: scriptOptions.onNetwork,
+              onStdout: (chunk) => {
+                const textChunk = String(chunk);
+                stdout.push(textChunk);
+                scriptOptions.onStdout?.(textChunk);
+              },
+              onStderr: (chunk) => {
+                const textChunk = String(chunk);
+                stderr.push(textChunk);
+                scriptOptions.onStderr?.(textChunk);
+              },
+              npmRun: (nestedName, nestedOptions) => runPackageScript(nestedName, {
+                ...nestedOptions,
+                cwd: nestedOptions?.cwd || scriptCwd,
+                env: nestedOptions?.env || scriptEnv,
+              }),
+              runCommand: (commandOptions) => runVirtualCommand({
+                entry: commandOptions.entry,
+                argv: commandOptions.argv,
+                cwd: commandOptions.cwd,
+                commandEnv: commandOptions.env,
+                stdin: commandOptions.stdin,
+                signal: commandOptions.signal,
+                timeout: commandOptions.timeout,
+                onStdout: commandOptions.onStdout,
+                onStderr: commandOptions.onStderr,
+              }),
+              runNode: (nodeOptions) => runVirtualCommand({
+                entry: processObject.execPath,
+                argv: [nodeOptions.print ? '-p' : '-e', nodeOptions.code, ...(nodeOptions.args || [])],
+                cwd: nodeOptions.cwd,
+                commandEnv: nodeOptions.env,
+                stdin: nodeOptions.input,
+                signal: nodeOptions.signal,
+                timeout: nodeOptions.timeout,
+                onStdout: nodeOptions.onStdout,
+                onStderr: nodeOptions.onStderr,
+              }),
+              nodeVersion: resolvedProfile.runtimeVersion,
+            });
+            return { code: result.code, stdout: stdout.join(''), stderr: stderr.join(''), streamed: Boolean(stdout.length || stderr.length) };
+          };
+
+          const runPackageScript = async (scriptName, scriptOptions = {}) => {
+            const npm = createNpm();
+            const packageJson = await npm.readPackageJson(scriptOptions.cwd || prepared.cwd);
+            if (!packageJson?.scripts?.[scriptName]) {
+              return {
+                code: 1,
+                stdout: '',
+                stderr: `npm error Missing script: "${scriptName}"\n`,
+                streamed: false,
+              };
+            }
+            const lifecycle = [`pre${scriptName}`, scriptName, `post${scriptName}`];
+            const stdout = [];
+            const stderr = [];
+            for (const name of lifecycle) {
+              const result = await runScriptBody(name, packageJson, {
+                ...scriptOptions,
+                args: name === scriptName ? scriptOptions.args : [],
+              });
+              stdout.push(result.stdout);
+              stderr.push(result.stderr);
+              if (result.code !== 0) return { code: result.code, stdout: stdout.join(''), stderr: stderr.join(''), streamed: true };
+            }
+            return { code: 0, stdout: stdout.join(''), stderr: stderr.join(''), streamed: true };
+          };
+
+          if (command.name === '--version' || command.name === '-v'
+            || commandArguments.includes('--version') || commandArguments.includes('-v')) {
+            return { code: 0, stdout: '10.0.0-browser\n', stderr: '' };
+          }
+
+          if (command.name === 'view' || command.name === 'info') {
+            const spec = positionalArguments()[0];
+            if (!spec) return { code: 1, stdout: '', stderr: 'npm error package name is required\n' };
+            const resolved = await resolvePackage(spec);
+            const document = {
+              ...(resolved.doc || {}),
+              name: resolved.doc?.name || resolved.parsed.name,
+              version: resolved.version,
+              ...(resolved.metadata['dist-tags'] ? { 'dist-tags': resolved.metadata['dist-tags'] } : {}),
+            };
+            return { code: 0, stdout: `${JSON.stringify(document)}\n`, stderr: '' };
+          }
+
+          if (command.name === 'pack') {
+            const spec = positionalArguments()[0];
+            if (!spec) return { code: 1, stdout: '', stderr: 'npm error package name is required\n' };
+            const resolved = await resolvePackage(spec);
+            const tarballUrl = resolved.doc?.dist?.tarball;
+            if (!tarballUrl) throw new Error(`Missing tarball URL for ${resolved.parsed.name}@${resolved.version}`);
+            const bytes = await resolved.npm.fetchTarball(tarballUrl, {
+              name: resolved.parsed.name,
+              version: resolved.version,
+              integrity: resolved.doc?.dist?.integrity,
+            });
+            const filename = `${resolved.parsed.name.replace(/^@/, '').replaceAll('/', '-')}-${resolved.version}.tgz`;
+            await vfs.fs.promises.writeFile(path.join(prepared.cwd, filename), bytes);
+            return { code: 0, stdout: `${filename}\n`, stderr: '' };
+          }
+
+          if (command.name === 'run' || command.name === 'run-script' || command.name === 'test') {
+            const scriptName = command.name === 'test' ? 'test' : commandArguments[0];
+            const separator = commandArguments.indexOf('--');
+            const scriptArgs = separator >= 0 ? commandArguments.slice(separator + 1) : command.name === 'test' ? [] : commandArguments.slice(1);
+            return runPackageScript(scriptName, {
+              cwd: prepared.cwd,
+              env,
+              args: scriptArgs,
+              stdin: prepared.stdin,
+              signal: childOptions.signal,
+              timeout: childOptions.timeout,
+            });
+          }
+
           if (!['install', 'i', 'add'].includes(command.name)) {
             return {
               code: 1,
@@ -8738,17 +9169,7 @@ export function createRuntime({
             specs.push(argument);
           }
 
-          const npm = new BrowserNpm({
-            vfs,
-            registry: requestedRegistry || registry,
-            globalObject: scope,
-            fetchFn: (url, init) => runtimeFetchRef.current(url, init),
-            proxyUrl: null,
-            lifecycleScripts: false,
-            platform: 'browser',
-            arch: 'browser',
-            libc: 'browser',
-          });
+          const npm = createNpm(requestedRegistry || registry);
           const packageJson = await npm.readPackageJson(prepared.cwd);
           const resolvedSpecs = specs.map((spec) => {
             const parsed = parsePackageSpec(spec);
@@ -8757,7 +9178,14 @@ export function createRuntime({
               || packageJson?.dependencies?.[parsed.name];
             return declaredRange ? `${parsed.name}@${declaredRange}` : spec;
           });
-          const result = await npm.install(resolvedSpecs, { cwd: prepared.cwd });
+          const installSpecs = resolvedSpecs.length
+            ? resolvedSpecs
+            : Object.entries({
+              ...packageJson?.dependencies,
+              ...packageJson?.devDependencies,
+              ...packageJson?.optionalDependencies,
+            }).map(([name, range]) => `${name}@${range}`);
+          const result = await npm.install(installSpecs, { cwd: prepared.cwd });
           if (!noSave && specs.length > 0) {
             if (packageJson) {
               const section = saveDev ? 'devDependencies' : 'dependencies';
@@ -9777,6 +10205,7 @@ export function createRuntime({
       isX509Certificate: (value) => value instanceof builtins.crypto.X509Certificate,
     });
     builtins['internal/crypto/x509'] = x509Module;
+    builtins['internal/crypto/keys'] = Object.freeze({});
     processObject.getBuiltinModule = function getBuiltinModule(id) {
       if (typeof id !== 'string') throw moduleArgumentTypeError('id', 'of type string', id);
       const name = builtinName(id);
@@ -11005,7 +11434,10 @@ export function createRuntime({
       const stderr = capabilities.output.stderr;
       const workerSource = new URL('./runtime/process-entry.js', import.meta.url).href;
       const files = Object.fromEntries(
-        vfs.snapshot({ copy: false }).artifacts.map(({ path, bytes }) => [path, bytes]),
+        vfs.snapshot({ copy: false }).artifacts.map(({ path, bytes }) => [path, {
+          data: bytes,
+          mode: vfs.stat(path).mode & 0o777,
+        }]),
       );
       const workerIsolation = executionIsolation === 'worker';
       const spawnProxy = workerIsolation && proxyCapability.adapter
@@ -11044,6 +11476,7 @@ export function createRuntime({
           capabilities: capabilities.manifest,
           nodeVersion: resolvedProfile.id,
           files,
+          npmCache: options.npmCache,
           entry,
           execArgv: childExecArgv,
           proxy: spawnProxy,

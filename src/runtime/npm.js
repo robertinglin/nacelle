@@ -426,6 +426,7 @@ export class BrowserNpm {
     const rawFetch = fetchFn || (typeof this.globalObject.fetch === 'function' ? this.globalObject.fetch : (typeof fetch === 'function' ? fetch : null));
     this.fetchFn = rawFetch ? (url, init) => rawFetch.call(this.globalObject, url, init) : null;
     this.installed = new Map(); // name -> version
+    this.installedLocations = new Map(); // node_modules path -> version
     this.limits = {
       maxEntries: limits.maxEntries ?? 10_000,
       maxExpandedBytes: limits.maxExpandedBytes ?? 256 * 1024 * 1024,
@@ -583,6 +584,7 @@ export class BrowserNpm {
     concurrency = 8,
     lifecycleScripts = this.lifecycleScripts,
     limits = this.limits,
+    includeDevDependencies = false,
   } = {}) {
     let rawSpecs = packageSpecs;
     if (!rawSpecs || (Array.isArray(rawSpecs) && rawSpecs.length === 0)) {
@@ -593,14 +595,50 @@ export class BrowserNpm {
     }
     const specs = Array.isArray(rawSpecs) ? rawSpecs : [rawSpecs];
     const targetNodeModules = nodeModulesDir || (cwd.endsWith('/') ? `${cwd}node_modules` : `${cwd}/node_modules`);
-    const queue = specs.map((spec) => ({ ...parsePackageSpec(spec), optional: false }));
+    const queue = specs.map((spec) => ({ ...parsePackageSpec(spec), optional: false, nodeModulesDir: targetNodeModules }));
     const results = [];
     const visited = new Set();
     const filesToMount = {};
 
-    const processItem = async ({ name, range, optional = false }) => {
-      const visitKey = `${name}@${range}`;
-      if (visited.has(visitKey) || this.installed.has(name)) return;
+    const parentNodeModulesDir = (directory) => {
+      const packageRoot = directory.endsWith('/node_modules')
+        ? directory.slice(0, -'/node_modules'.length)
+        : directory;
+      const marker = packageRoot.lastIndexOf('/node_modules/');
+      return marker < 0 ? null : `${packageRoot.slice(0, marker)}/node_modules`;
+    };
+
+    const dependencyLocation = (name, range, currentNodeModulesDir, currentPackageDir) => {
+      let directory = currentNodeModulesDir;
+      let conflict = false;
+      while (directory) {
+        const installedVersion = this.installedLocations.get(`${directory}/${name}`);
+        if (installedVersion) {
+          if (satisfiesSemver(installedVersion, range)) return null;
+          conflict = true;
+        }
+        directory = parentNodeModulesDir(directory);
+      }
+      return conflict ? `${currentPackageDir}/node_modules` : currentNodeModulesDir;
+    };
+
+    const processItem = async ({
+      name,
+      range,
+      optional = false,
+      nodeModulesDir: requestedNodeModulesDir = targetNodeModules,
+      parentPackageDir = null,
+    }) => {
+      let itemNodeModulesDir = requestedNodeModulesDir;
+      let locationKey = `${itemNodeModulesDir}/${name}`;
+      let installedVersion = this.installedLocations.get(locationKey);
+      if (installedVersion && !satisfiesSemver(installedVersion, range) && parentPackageDir) {
+        itemNodeModulesDir = `${parentPackageDir}/node_modules`;
+        locationKey = `${itemNodeModulesDir}/${name}`;
+        installedVersion = this.installedLocations.get(locationKey);
+      }
+      const visitKey = `${itemNodeModulesDir}:${name}@${range}`;
+      if (visited.has(visitKey) || (installedVersion && satisfiesSemver(installedVersion, range))) return;
       visited.add(visitKey);
       // Platform-specific optional packages are native delivery variants in
       // the npm graph. Skip them before metadata/tarball work; Next.js will
@@ -636,7 +674,7 @@ export class BrowserNpm {
       }
 
       onProgress?.({ phase: 'unpacking', name, version });
-      const pkgDir = `${targetNodeModules}/${name}`;
+      const pkgDir = `${itemNodeModulesDir}/${name}`;
       const entries = await unpackTarGz(tarballBytes, {
         stripPrefix: 'package/',
         targetDir: pkgDir,
@@ -650,13 +688,14 @@ export class BrowserNpm {
 
       for (const entry of entries) {
         if (entry.type === 'file' && entry.data) {
-          packageFiles[entry.path] = entry.data;
+          const fileData = entry.data;
+          packageFiles[entry.path] = { data: fileData, mode: entry.mode };
           pkgFilesCount += 1;
-          pkgTotalBytes += entry.data.byteLength;
+          pkgTotalBytes += fileData.byteLength;
 
           if (entry.path === `${pkgDir}/package.json` || entry.path.endsWith('/package.json')) {
             try {
-              const raw = typeof entry.data === 'string' ? entry.data : new TextDecoder().decode(entry.data);
+              const raw = typeof fileData === 'string' ? fileData : new TextDecoder().decode(fileData);
               parsedPkgJson = JSON.parse(raw);
             } catch { /* ignore */ }
           }
@@ -676,18 +715,20 @@ export class BrowserNpm {
           : Object.entries(parsedPkgJson.bin);
 
         for (const [binName, binRel] of binEntries) {
-          const binPath = `${targetNodeModules}/.bin/${binName}`;
+          const binPath = `${itemNodeModulesDir}/.bin/${binName}`;
           const cleanRel = String(binRel).replace(/^\.\//, '');
           if (!cleanRel || cleanRel.startsWith('/') || cleanRel.split('/').includes('..')) {
             throw npmSecurityError('ERR_NPM_PACKAGE_PATH', `package bin escapes its package directory: ${binRel}`);
           }
           const targetFile = `${pkgDir}/${cleanRel}`;
-          filesToMount[binPath] = new TextEncoder().encode(
-            `#!/usr/bin/env node\nrequire('${targetFile}');\n`
-          );
+          filesToMount[binPath] = {
+            data: new TextEncoder().encode(`#!/usr/bin/env node\nrequire('${targetFile}');\n`),
+            mode: 0o755,
+          };
         }
       }
 
+      this.installedLocations.set(locationKey, version);
       this.installed.set(name, version);
       results.push({ name, version, filesCount: pkgFilesCount, bytes: pkgTotalBytes });
       onProgress?.({ phase: 'installed', name, version });
@@ -704,27 +745,59 @@ export class BrowserNpm {
         ...(parsedPkgJson?.dependencies || {}),
       };
       for (const [depName, depRange] of Object.entries(deps)) {
-        if (!this.installed.has(depName)) {
-          queue.push({ name: depName, range: depRange, optional: false });
-        }
+        const dependencyDir = dependencyLocation(depName, depRange, itemNodeModulesDir, pkgDir);
+        if (dependencyDir) queue.push({
+          name: depName,
+          range: depRange,
+          optional: false,
+          nodeModulesDir: dependencyDir,
+          parentPackageDir: pkgDir,
+        });
       }
       const optionalDeps = {
         ...(versionDoc?.optionalDependencies || {}),
         ...(parsedPkgJson?.optionalDependencies || {}),
       };
       for (const [depName, depRange] of Object.entries(optionalDeps)) {
-        if (!this.installed.has(depName)) {
-          queue.push({ name: depName, range: depRange, optional: true });
+        const dependencyDir = dependencyLocation(depName, depRange, itemNodeModulesDir, pkgDir);
+        if (dependencyDir) queue.push({
+          name: depName,
+          range: depRange,
+          optional: true,
+          nodeModulesDir: dependencyDir,
+          parentPackageDir: pkgDir,
+        });
+      }
+      if (includeDevDependencies && !parentPackageDir) {
+        for (const [depName, depRange] of Object.entries(parsedPkgJson?.devDependencies || {})) {
+          const dependencyDir = dependencyLocation(depName, depRange, itemNodeModulesDir, pkgDir);
+          if (dependencyDir) queue.push({
+            name: depName,
+            range: depRange,
+            optional: false,
+            nodeModulesDir: dependencyDir,
+            parentPackageDir: pkgDir,
+          });
         }
       }
     };
 
+    const installLocks = new Map();
     const processQueueItem = async (item) => {
+      const lockKey = `${item.nodeModulesDir || targetNodeModules}/${item.name}`;
+      const previous = installLocks.get(lockKey) || Promise.resolve();
+      let release;
+      const current = new Promise((resolve) => { release = resolve; });
+      installLocks.set(lockKey, current);
       try {
+        await previous;
         await processItem(item);
       } catch (error) {
         if (!item.optional) throw error;
         onProgress?.({ phase: 'optional-failed', name: item.name, range: item.range, error });
+      } finally {
+        release();
+        if (installLocks.get(lockKey) === current) installLocks.delete(lockKey);
       }
     };
 

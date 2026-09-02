@@ -38,6 +38,22 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('reports browser output as non-TTY while preserving tty window APIs', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (() => {
+        const assert = require('node:assert');
+        const tty = require('node:tty');
+        assert.strictEqual(tty.isatty(1), false);
+        assert.strictEqual(tty.isatty(process.stdout), false);
+        assert.strictEqual(typeof tty.getWindowSize, 'function');
+        assert.deepStrictEqual(tty.getWindowSize(), [80, 24]);
+        assert.deepStrictEqual(new tty.WriteStream(1).getWindowSize(), [80, 24]);
+      })();
+    `);
+
+    await expectPass(expect, result);
+  });
+
   test('loads test-assert.js-style CommonJS modules that declare process locally', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       (() => {
@@ -70,6 +86,152 @@ test.describe('browser runtime bridge and core primitives', () => {
 
     expect(result.timedOut).toBe(false);
     expect(result.exitCode).toBe(17);
+  });
+
+  test('runs npm scripts when Node launches the npm entrypoint', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/node', [
+          '/node/node_modules/.bin/npm', 'test',
+        ], { cwd: '/node' });
+        let output = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', (value) => {
+            resolve(value);
+          });
+        });
+        assert.strictEqual(code, 0);
+        assert.strictEqual(output, 'npm entrypoint ran\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/package.json': JSON.stringify({
+          name: 'npm-entrypoint-fixture',
+          version: '1.0.0',
+          scripts: { test: "node -e \"process.stdout.write('npm entrypoint ran\\\\n')\"" },
+        }),
+        '/node/node_modules/.bin/node': '#!/usr/bin/env node\\n',
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\\n',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('executes shebang scripts from the virtual filesystem', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/tool', ['argument'], { cwd: '/node' });
+        let output = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0);
+        assert.strictEqual(output, 'tool ran argument\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/node_modules/.bin/tool': "#!/usr/bin/env node\nprocess.stdout.write('tool ran ' + process.argv[2] + '\\n');\n",
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('waits for shebang child processes and propagates their output and status', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/tool', [], { cwd: '/node' });
+        let output = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 7);
+        assert.strictEqual(output, 'tool start\\nnested tool ran\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/node_modules/.bin/tool': [
+          '#!/usr/bin/env node',
+          "process.stdout.write('tool start\\n');",
+          "const { spawn } = require('node:child_process');",
+          "const child = spawn(process.execPath, ['/node/tool-child.js'], { stdio: 'inherit' });",
+          "child.once('error', (error) => { process.stderr.write('tool error ' + error.message + '\\n'); process.exit(2); });",
+          "child.once('exit', (code, signal) => { process.on('exit', () => { if (signal) process.kill(process.pid, signal); else process.exit(code); }); });",
+        ].join('\n'),
+        '/node/tool-child.js': "process.stdout.write('nested tool ran\\n'); process.exitCode = 7;",
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('forwards output and status through npm scripts that launch shebang children', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/node', [
+          '/node/node_modules/.bin/npm', 'test',
+        ], { cwd: '/node' });
+        let output = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 7);
+        assert.strictEqual(output, 'npm tool start\\nnpm nested tool ran\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/package.json': JSON.stringify({
+          name: 'npm-shebang-fixture',
+          version: '1.0.0',
+          scripts: { test: 'tool' },
+        }),
+        '/node/node_modules/.bin/node': '#!/usr/bin/env node\\n',
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\\n',
+        '/node/node_modules/.bin/tool': [
+          '#!/usr/bin/env node',
+          "process.stdout.write('npm tool start\\n');",
+          "const { spawn } = require('node:child_process');",
+          "const child = spawn(process.execPath, ['/node/npm-tool-child.js'], { stdio: 'inherit' });",
+          "child.once('exit', (code, signal) => { process.on('exit', () => { if (signal) process.kill(process.pid, signal); else process.exit(code); }); });",
+        ].join('\n'),
+        '/node/npm-tool-child.js': "process.stdout.write('npm nested tool ran\\n'); process.exitCode = 7;",
+      },
+    });
+
+    await expectPass(expect, result);
   });
 
   test('runs the upstream worker abort-on-uncaught-exception case', async ({ harnessPage }) => {
@@ -130,6 +292,41 @@ test.describe('browser runtime bridge and core primitives', () => {
         process.exitCode = 1;
       });
     `);
+
+    await expectPass(expect, result);
+  });
+
+  test('resolves relative paths from each virtual process cwd', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn(process.execPath, ['/node/path-cwd-child.js'], {
+          cwd: '/node/workspace',
+        });
+        let output = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0);
+        assert.strictEqual(output, '/node/workspace/test.js\\n/node\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/workspace/.keep': '',
+        '/node/path-cwd-child.js': [
+          "const path = require('node:path');",
+          "process.stdout.write(path.resolve('test.js') + '\\n');",
+          "process.stdout.write(path.dirname(path.resolve('.')) + '\\n');",
+        ].join('\n'),
+      },
+    });
 
     await expectPass(expect, result);
   });

@@ -97,11 +97,13 @@ export async function runProcessEntry(context) {
     runId: context.process.runId,
     capabilities: descriptor.capabilities,
     proxy: descriptor.proxy,
+    vfsBackend: descriptor.vfsBackend,
     virtualNetwork: remoteVirtualNetwork
       ? { shared: true, network: remoteVirtualNetwork.network }
       : descriptor.virtualNetwork,
   });
-  await runtime.mount(descriptor.files, { symlinks: descriptor.symlinks });
+  if (descriptor.vfsBackend) await runtime.mount({});
+  else await runtime.mount(descriptor.files, { symlinks: descriptor.symlinks });
   let code;
   try {
     code = await runtime.executeEntry(

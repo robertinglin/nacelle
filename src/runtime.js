@@ -8686,10 +8686,10 @@ export function createRuntime({
           // Child descriptors are created in this same browser realm. VFS
           // file buffers are replaced, never mutated in place, so sharing
           // them avoids copying the complete mounted tree for every child.
-          const snapshot = vfs.snapshot({ copy: false });
-          const files = Object.fromEntries(
-            snapshot.artifacts.map(({ path, bytes }) => [path, bytes]),
-          );
+          const snapshot = vfs.snapshot({ copy: false, includeBackend: true });
+          const files = snapshot.backend
+            ? {}
+            : Object.fromEntries(snapshot.artifacts.map(({ path, bytes }) => [path, bytes]));
           if (prepared.source !== null) {
             files[prepared.entryPath] = new TextEncoder().encode(prepared.source);
           }
@@ -8728,6 +8728,7 @@ export function createRuntime({
             capabilities: capabilities.manifest,
             nodeVersion: resolvedProfile.id,
             files,
+            vfsBackend: snapshot.backend,
             symlinks: snapshot.symlinks,
             entry: prepared.entryPath,
             execArgv: childExecArgv,
@@ -11387,7 +11388,10 @@ export function createRuntime({
         capabilities: validateCapabilityManifest(context.capabilities),
         fixtures: context.fixtures,
       };
-      capabilities = assembleBrowserCapabilities(runSpec, { globalObject: scope });
+      capabilities = assembleBrowserCapabilities(runSpec, {
+        globalObject: scope,
+        vfsBackend: context.vfsBackend,
+      });
       const manifestProxy = capabilities.manifest.proxy || { mode: 'virtual', enabled: false, capabilityKey: 'proxy', capabilityGranted: false };
       const requestedProxy = context.proxy && typeof context.proxy === 'object' ? context.proxy : {};
       const configuredAdapter = requestedProxy.adapter

@@ -736,7 +736,6 @@ export class BrowserNpm {
         entries = entries.map((entry) => ({
           ...entry,
           path: `${pkgDir}/${entry.name}`,
-          data: entry.data?.slice?.() || entry.data,
         }));
         onProgress?.({ phase: 'cache-hit-unpacked', name, version });
       } else {
@@ -749,7 +748,6 @@ export class BrowserNpm {
         if (cacheUnpacked) {
           this.cache.setUnpackedPackage(packageName, version, entries.map((entry) => ({
             ...entry,
-            data: entry.data?.slice?.() || entry.data,
           })));
         }
       }

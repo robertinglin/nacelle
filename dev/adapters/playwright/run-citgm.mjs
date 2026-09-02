@@ -4,6 +4,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { spawn } from 'node:child_process';
 import { firefox, chromium } from 'playwright';
+import { launchBrowser } from './adapter-core.mjs';
 import { formatProgressLine } from './progress-protocol.mjs';
 
 const adapterRoot = path.dirname(new URL(import.meta.url).pathname);
@@ -96,7 +97,7 @@ async function main() {
   try {
     const url = `http://127.0.0.1:${port}/citgm.html`;
     await waitForServer(url, server);
-    const browser = await browserTypes[options.browserName].launch({ headless: true });
+    const browser = await launchBrowser(browserTypes[options.browserName], options.browserName);
     try {
       const page = await browser.newPage();
       page.setDefaultTimeout(0);

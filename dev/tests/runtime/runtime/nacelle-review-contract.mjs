@@ -214,8 +214,13 @@ test('CommonJS cache hits return before running the load hook again', async () =
     files: {
       '/node/app/main.cjs': `const assert = require('node:assert/strict');
 const moduleApi = require('node:module');
+let resolves = 0;
 let loads = 0;
 const registration = moduleApi.registerHooks({
+  resolve(specifier, context, nextResolve) {
+    resolves += 1;
+    return nextResolve(specifier, context);
+  },
   load(url, context, nextLoad) {
     loads += 1;
     return nextLoad(url, context);
@@ -225,6 +230,7 @@ const first = require('./cached.cjs');
 const second = require('./cached.cjs');
 registration.deregister();
 assert.equal(first, second);
+assert.equal(resolves, 1);
 assert.equal(loads, 1);
 process.stdout.write('commonjs cache contract completed');`,
       '/node/app/cached.cjs': "module.exports = { cached: true };",
@@ -233,6 +239,75 @@ process.stdout.write('commonjs cache contract completed');`,
   const child = await node.run({ entry: '/node/app/main.cjs', cwd: '/node/app' });
   assert.equal(await child.exit, 0, `${await child.stdoutText()}${await child.stderrText()}`);
   assert.equal(await child.stdoutText(), 'commonjs cache contract completed');
+});
+
+test('deleting require.cache invalidates the CommonJS request cache', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/app/main.cjs': `const assert = require('node:assert/strict');
+const moduleApi = require('node:module');
+let resolves = 0;
+let loads = 0;
+const registration = moduleApi.registerHooks({
+  resolve(specifier, context, nextResolve) {
+    resolves += 1;
+    return nextResolve(specifier, context);
+  },
+  load(url, context, nextLoad) {
+    loads += 1;
+    return nextLoad(url, context);
+  },
+});
+const filename = require.resolve('./cached.cjs');
+const first = require('./cached.cjs');
+delete require.cache[filename];
+const second = require('./cached.cjs');
+registration.deregister();
+assert.equal(first, 1);
+assert.equal(second, 2);
+assert.equal(resolves, 2);
+assert.equal(loads, 2);
+process.stdout.write('commonjs cache invalidation contract completed');`,
+      '/node/app/cached.cjs': "globalThis.__bnhCacheLoads = (globalThis.__bnhCacheLoads || 0) + 1; module.exports = globalThis.__bnhCacheLoads;",
+    },
+  });
+  const child = await node.run({ entry: '/node/app/main.cjs', cwd: '/node/app' });
+  assert.equal(await child.exit, 0, `${await child.stdoutText()}${await child.stderrText()}`);
+  assert.equal(await child.stdoutText(), 'commonjs cache invalidation contract completed');
+});
+
+test('CommonJS package imports use the normal resolve and cache path', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/package.json': JSON.stringify({ imports: { '#answer': './answer.cjs' } }),
+      '/node/main.cjs': `const assert = require('node:assert/strict');
+const moduleApi = require('node:module');
+let resolves = 0;
+let loads = 0;
+const registration = moduleApi.registerHooks({
+  resolve(specifier, context, nextResolve) {
+    resolves += 1;
+    return nextResolve(specifier, context);
+  },
+  load(url, context, nextLoad) {
+    loads += 1;
+    return nextLoad(url, context);
+  },
+});
+assert.equal(require('#answer'), 42);
+assert.equal(require('#answer'), 42);
+registration.deregister();
+assert.equal(resolves, 1);
+assert.equal(loads, 1);
+process.stdout.write('commonjs package-import contract completed');`,
+      '/node/answer.cjs': 'module.exports = 42;',
+    },
+  });
+  const child = await node.run({ entry: '/node/main.cjs', cwd: '/node' });
+  assert.equal(await child.exit, 0, `${await child.stdoutText()}${await child.stderrText()}`);
+  assert.equal(await child.stdoutText(), 'commonjs package-import contract completed');
 });
 
 test('output capture is bounded and reports dropped bytes without retaining the full stream', async () => {

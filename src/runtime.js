@@ -10850,6 +10850,7 @@ export function createRuntime({
 
     builtins.worker_threads = workerThreads;
     const cache = Object.create(null);
+    const cjsResolutionCache = new Map();
     const executionGlobal = createExecutionGlobal(scope);
     const moduleHookContext = (importer) => ({
       conditions: ['node', 'require'],
@@ -10989,10 +10990,6 @@ export function createRuntime({
         });
       }
       if (name === 'repl') return ensureReplDispose(loadModule('/node/lib/repl.js', importer, false, processObj));
-      if (name.startsWith('#')) {
-        const resolved = esmLoader.resolve(name, importer, ['node', 'require']);
-        return loadModule(resolved, importer, true, processObj);
-      }
       if (BUILTIN_NAMES.includes(name)) {
         if (name === 'internal/test/binding') emitInternalTestBindingWarning(processObj);
         if (name === 'dns') scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ = Math.max(1, Number(scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ || 0));
@@ -11043,6 +11040,16 @@ export function createRuntime({
           ?? (name === 'process' ? processObj : builtins[name] ?? {});
       }
       const context = moduleHookContext(importer);
+      const resolutionCache = processObj === processObject
+        ? cjsResolutionCache
+        : (processObj.__bnhCjsResolutionCache ||= new Map());
+      const requestCacheKey = skipResolve
+        ? null
+        : `${typeof importer === 'string' ? importer : importer?.filename || entry}\x00${String(specifier)}`;
+      const requestCachedPath = requestCacheKey ? resolutionCache.get(requestCacheKey) : null;
+      if (requestCachedPath && Object.hasOwn(moduleCache, requestCachedPath)) {
+        return moduleCache[requestCachedPath].exports;
+      }
       const resolvedResult = skipResolve
         ? {
             url: specifier.startsWith('file:') ? specifier : pathToFileURL(specifier).href,
@@ -11070,6 +11077,7 @@ export function createRuntime({
       }
       const resolvedURL = resolvedResult?.url || pathToFileURL(resolveFile(specifier, importer, processObj)).href;
       let resolved = resolvedURL.startsWith('file:') ? fileURLToPath(resolvedURL) : resolvedURL;
+      if (requestCacheKey && resolved.startsWith('/')) resolutionCache.set(requestCacheKey, resolved);
       if (isRuntimeEsmModule(resolved, processObj.execArgv) && isRequireEsmEnabled(processObj)) {
         const cachedNamespace = getEsmNamespace(resolved, processObj);
         if (cachedNamespace) {

@@ -5584,7 +5584,7 @@ export function createRuntime({
             }
             return BUILTIN_NAMES.includes(builtinName(name))
               ? moduleApi._load(name, importer)
-              : loadModule(esmLoader.resolveRequire(name, importer), importer, true, processObj);
+              : runtimeRequire(name, importer, processObj);
           };
           req.resolve = (name) => moduleApi._resolve ? moduleApi._resolve(name, importer) : esmLoader.resolveRequire(name, importer);
           req.main = moduleApi._main || null;
@@ -10495,7 +10495,7 @@ export function createRuntime({
         throw traceEventsUnavailableError();
       }
       if (BUILTIN_NAMES.includes(builtin)) return builtins[builtin] ?? {};
-      return loadModule(esmLoader.resolveRequire(name, importer), importer, true, processObject);
+      return loadModule(name, importer);
     };
     const streamWebApi = builtins['stream/web'];
     installBlobStreamClass(() => streamWebApi.ReadableStream);
@@ -11049,7 +11049,9 @@ export function createRuntime({
             format: specifier.endsWith('.json') ? 'json' : isRuntimeEsmModule(specifier, processObj.execArgv) ? 'module' : 'commonjs',
           }
         : runModuleHook('resolve', specifier, context, (currentSpecifier) => {
-            const candidate = esmLoader.resolve(currentSpecifier, importer, ['node', 'require']);
+            const candidate = context.conditions?.includes('require') && !context.conditions.includes('import')
+              ? esmLoader.resolveRequire(currentSpecifier, importer)
+              : esmLoader.resolve(currentSpecifier, importer, context.conditions);
             if (candidate.startsWith('http:') || candidate.startsWith('https:')) {
               return { url: candidate, format: 'module' };
             }
@@ -11149,7 +11151,7 @@ export function createRuntime({
       activeModuleApi._cache = moduleCache;
       if (resolved.endsWith('.json')) module.exports = JSON.parse(text);
       else {
-        const require = (name) => loadModule(esmLoader.resolveRequire(name, resolved), resolved, true, processObj);
+        const require = (name) => loadModule(name, resolved, false, processObj);
         require.resolve = (name) => BUILTIN_NAMES.includes(builtinName(name))
           ? name
           : esmLoader.resolveRequire(name, resolved);

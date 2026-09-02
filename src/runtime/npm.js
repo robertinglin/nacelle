@@ -620,6 +620,38 @@ export class BrowserNpm {
     return Object.entries(deps).map(([name, range]) => `${name}@${range}`);
   }
 
+  async seedInstalledLocations() {
+    const packageJsonSuffix = '/package.json';
+    const visit = async (directory) => {
+      for (const entry of this.vfs?.entries?.(directory) || []) {
+        const pathname = `${directory.replace(/\/+$/, '')}/${entry.name}`;
+        if (entry.isDirectory?.()) {
+          await visit(pathname);
+          continue;
+        }
+        if (entry.name !== 'package.json' || !pathname.endsWith(packageJsonSuffix)) continue;
+        const packageDir = pathname.slice(0, -packageJsonSuffix.length);
+        const marker = packageDir.lastIndexOf('/node_modules/');
+        if (marker < 0) continue;
+        const relative = packageDir.slice(marker + '/node_modules/'.length);
+        const segments = relative.split('/');
+        if (segments.length !== 1 && !(segments.length === 2 && segments[0].startsWith('@'))) continue;
+        try {
+          const bytes = await this.vfs.fs.promises.readFile(pathname);
+          const text = typeof bytes === 'string' ? bytes : new TextDecoder().decode(bytes);
+          const manifest = JSON.parse(text);
+          if (typeof manifest.name === 'string' && typeof manifest.version === 'string') {
+            this.installedLocations.set(packageDir, manifest.version);
+            this.installed.set(manifest.name, manifest.version);
+          }
+        } catch {
+          // A malformed or inaccessible manifest is handled by normal loading.
+        }
+      }
+    };
+    await visit('/node');
+  }
+
   async install(packageSpecs, {
     cwd = '/node',
     nodeModulesDir = null,
@@ -640,6 +672,7 @@ export class BrowserNpm {
     }
     const specs = Array.isArray(rawSpecs) ? rawSpecs : [rawSpecs];
     const targetNodeModules = nodeModulesDir || (cwd.endsWith('/') ? `${cwd}node_modules` : `${cwd}/node_modules`);
+    await this.seedInstalledLocations();
     const queue = specs.map((spec) => ({ ...parsePackageSpec(spec), optional: false, nodeModulesDir: targetNodeModules }));
     const results = [];
     const visited = new Set();
@@ -862,7 +895,16 @@ export class BrowserNpm {
       installLocks.set(lockKey, current);
       try {
         await previous;
-        await processItem(item);
+        // Another dependency may have occupied the requested location while
+        // this item waited for the lock. Recompute its npm placement against
+        // the now-current tree before unpacking, otherwise a later branch
+        // can overwrite an incompatible version at the same location.
+        const dependencyDir = item.parentPackageDir
+          ? dependencyLocation(item.name, item.range, item.nodeModulesDir, item.parentPackageDir)
+          : null;
+        await processItem(dependencyDir
+          ? { ...item, nodeModulesDir: dependencyDir }
+          : item);
       } catch (error) {
         if (!item.optional) throw error;
         onProgress?.({ phase: 'optional-failed', name: item.name, range: item.range, error });

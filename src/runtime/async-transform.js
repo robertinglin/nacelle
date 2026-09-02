@@ -151,6 +151,82 @@ function matchingToken(tokens, index, opening, closing) {
   return -1;
 }
 
+function rewriteForAwaitLoops(source) {
+  const tokens = tokenize(source);
+  const names = new Set(tokens.filter((token) => token.value !== '<literal>').map((token) => token.value));
+  const replacements = [];
+  let sequence = 0;
+  for (let index = 0; index < tokens.length - 2; index += 1) {
+    if (tokens[index].value !== 'for' || tokens[index + 1].value !== 'await') continue;
+    const openIndex = index + 2;
+    if (tokens[openIndex]?.value !== '(') continue;
+    const closeIndex = matchingToken(tokens, openIndex, '(', ')');
+    if (closeIndex < 0) continue;
+    const bodyOpenIndex = closeIndex + 1;
+    if (tokens[bodyOpenIndex]?.value !== '{') continue;
+    const bodyCloseIndex = matchingToken(tokens, bodyOpenIndex, '{', '}');
+    if (bodyCloseIndex < 0) continue;
+
+    let roundDepth = 0;
+    let squareDepth = 0;
+    let curlyDepth = 0;
+    let ofIndex = -1;
+    for (let cursor = openIndex + 1; cursor < closeIndex; cursor += 1) {
+      const value = tokens[cursor].value;
+      if (value === '(') roundDepth += 1;
+      else if (value === ')') roundDepth -= 1;
+      else if (value === '[') squareDepth += 1;
+      else if (value === ']') squareDepth -= 1;
+      else if (value === '{') curlyDepth += 1;
+      else if (value === '}') curlyDepth -= 1;
+      else if (value === 'of' && roundDepth === 0 && squareDepth === 0 && curlyDepth === 0) {
+        ofIndex = cursor;
+        break;
+      }
+    }
+    if (ofIndex < 0) continue;
+    const declaration = source.slice(tokens[openIndex + 1].start, tokens[ofIndex].start).trim();
+    const declarationMatch = /^(const|let|var)\s+([\s\S]+)$/.exec(declaration);
+    if (!declarationMatch) continue;
+    const iterable = source.slice(tokens[ofIndex].end, tokens[closeIndex].start).trim();
+    if (!iterable) continue;
+
+    const uniqueName = (base) => {
+      let name = `${base}${sequence}`;
+      while (names.has(name)) name = `${base}${++sequence}`;
+      names.add(name);
+      return name;
+    };
+    const valueName = uniqueName('__bnhForAwaitValue');
+    const iteratorName = uniqueName('__bnhForAwaitIterator');
+    const stepName = uniqueName('__bnhForAwaitStep');
+    const body = source.slice(tokens[bodyOpenIndex].end, tokens[bodyCloseIndex].start);
+    replacements.push({
+      start: tokens[index].start,
+      end: tokens[bodyCloseIndex].end,
+      value: `{
+  const ${valueName} = (${iterable});
+  const ${iteratorName} = ${valueName}[Symbol.asyncIterator]
+    ? ${valueName}[Symbol.asyncIterator]()
+    : ${valueName}[Symbol.iterator]();
+  let ${stepName};
+  try {
+    while (!(${stepName} = (yield Promise.resolve(${iteratorName}.next()).then((result) => (
+      Promise.resolve(result.value).then((value) => ({ ...result, value }))
+    )))).done) {
+      ${declarationMatch[1]} ${declarationMatch[2]} = ${stepName}.value;${body}
+    }
+  } finally {
+    if (${stepName} && !${stepName}.done && typeof ${iteratorName}.return === 'function') {
+      yield Promise.resolve(${iteratorName}.return());
+    }
+  }
+}`,
+    });
+  }
+  return applyReplacements(source, replacements);
+}
+
 function findArrowBodyEnd(tokens, arrowIndex, sourceLength) {
   let round = 0;
   let square = 0;
@@ -477,7 +553,7 @@ function transformCandidates(source, candidates, bindingName) {
 }
 
 export function transformAsyncSource(source, preferredBinding = '__bnhAsync') {
-  const text = String(source);
+  const text = rewriteForAwaitLoops(String(source));
   const names = new Set(text.match(/\b[$A-Z_a-z][$\w]*\b/gu) || []);
   let bindingName = preferredBinding;
   while (names.has(bindingName)) bindingName = `${preferredBinding}$`;

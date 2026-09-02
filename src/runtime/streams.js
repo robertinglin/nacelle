@@ -730,7 +730,10 @@ export class Readable extends EventEmitter {
         || this._bufferedBytes < this.readableHighWaterMark)) this._readOnce();
       this._scheduleReadable();
     }
-    if (name === 'end') this._maybeEmitEnd();
+    // Node does not emit an already-ready end event re-entrantly from
+    // EventEmitter#on. Defer the check so multi-listener helpers such as
+    // ee-first can finish installing their cancellation handles first.
+    if (name === 'end') queueMicrotask(() => this._maybeEmitEnd());
     return this;
   }
 

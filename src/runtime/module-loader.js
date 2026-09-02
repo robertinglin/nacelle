@@ -785,6 +785,14 @@ export function createModuleLoader({
       if (libraryFile) return libraryFile;
       throw packageError('ERR_UNKNOWN_BUILTIN_MODULE', `No such built-in module: ${name}`);
     }
+    if (value.startsWith('#')) {
+      const imported = resolvePackageImports(value, importer, ['node', 'require']);
+      if (imported.startsWith('node:') || imported.startsWith('data:')
+        || imported.startsWith('http:') || imported.startsWith('https:')) return imported;
+      const candidate = resolveFileOrDirectory(imported, false, commonJsFileCandidates, commonJsDirectoryCandidates);
+      if (candidate) return candidate;
+      throw packageError('MODULE_NOT_FOUND', `Cannot find module '${value}'`);
+    }
     if (value.startsWith('data:') || /^[A-Za-z][A-Za-z\d+.-]*:/.test(value)) return resolve(value, importer, ['node', 'require']);
     if (!isPathSpecifier(value)) {
       const resolved = resolvePackage(value, importer, ['node', 'require']);

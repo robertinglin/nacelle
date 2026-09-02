@@ -119,6 +119,61 @@ test('tar extraction rejects traversal, absolute paths, symlinks, and resource e
   assert.deepEqual(extracted.map(({ path }) => path), ['/app/package.json']);
 });
 
+test('VFS existence checks preserve symlink resolution while fast-pathing ordinary files', () => {
+  const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write' }] });
+  vfs.writeFile('/node/target.js', 'module.exports = true;');
+  vfs.fs.symlinkSync('/node/target.js', '/node/link.js');
+  vfs.fs.symlinkSync('/node', '/node/alias');
+
+  assert.equal(vfs.files.has('/node/target.js'), true);
+  assert.equal(vfs.files.has('/node/missing.js'), false);
+  assert.equal(vfs.files.has('/node/link.js'), true);
+  assert.equal(vfs.files.has('/node/alias/target.js'), true);
+});
+
+test('VFS resolves parent paths from a non-root process cwd', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/package.json': 'parent-package',
+      '/node/project/read.js': "process.stdout.write(require('node:fs').readFileSync('../package.json', 'utf8'));",
+    },
+  });
+  const child = await node.run({ entry: '/node/project/read.js', cwd: '/node/project' });
+  assert.equal(await child.exit, 0);
+  assert.equal(await child.stdoutText(), 'parent-package');
+});
+
+test('CommonJS resolution uses main and stops package type lookup at node_modules', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/package.json': JSON.stringify({ type: 'module' }),
+      '/node/app.cjs': "const main = require('main-only'); const implicit = require('implicit-commonjs'); process.stdout.write(main + ':' + implicit);",
+      '/node/node_modules/main-only/package.json': JSON.stringify({ main: 'main.cjs', module: 'module.cjs' }),
+      '/node/node_modules/main-only/main.cjs': "module.exports = 'main';",
+      '/node/node_modules/main-only/module.cjs': "module.exports = 'module';",
+      '/node/node_modules/implicit-commonjs/index.js': "module.exports = 'commonjs';",
+    },
+  });
+  const child = await node.run({ entry: '/node/app.cjs', cwd: '/node' });
+  assert.equal(await child.exit, 0);
+  assert.equal(await child.stdoutText(), 'main:commonjs');
+});
+
+test('node -e resolves packages relative to its child cwd', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/app/runner.js': "const { spawnSync } = require('node:child_process'); const result = spawnSync('node', ['-e', 'process.stdout.write(require(\"pkg\"))'], { cwd: '/node/app', encoding: 'utf8' }); if (result.status !== 0) { process.stderr.write(result.stderr); process.exitCode = 1; } else process.stdout.write(result.stdout);",
+      '/node/app/node_modules/pkg/index.js': "module.exports = 'child-cwd';",
+    },
+  });
+  const child = await node.run({ entry: '/node/app/runner.js', cwd: '/node/app' });
+  assert.equal(await child.exit, 0);
+  assert.equal(await child.stdoutText(), 'child-cwd');
+});
+
 test('output capture is bounded and reports dropped bytes without retaining the full stream', async () => {
   const output = createOutputCollector({ limits: { total: 4, stdout: 4, stderr: 4 }, tailBytes: 2 });
   output.stdout.write(new TextEncoder().encode('abcd'));

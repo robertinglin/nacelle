@@ -4631,13 +4631,16 @@ export function createRuntime({
     let directory = path.dirname(entryPath);
     for (;;) {
       if (directory.endsWith('/node_modules')) return 'commonjs';
-      try {
-        const source = vfs.read(path.join(directory, 'package.json'));
-        const text = typeof source === 'string' ? source : new TextDecoder().decode(source);
-        const config = JSON.parse(text);
-        return config.type === 'module' ? 'module' : 'commonjs';
-      } catch (error) {
-        if (error?.code !== 'ENOENT') return 'commonjs';
+      const packagePath = path.join(directory, 'package.json');
+      if (vfs.files.has(packagePath)) {
+        try {
+          const source = vfs.read(packagePath);
+          const text = typeof source === 'string' ? source : new TextDecoder().decode(source);
+          const config = JSON.parse(text);
+          return config.type === 'module' ? 'module' : 'commonjs';
+        } catch (error) {
+          if (error?.code !== 'ENOENT') return 'commonjs';
+        }
       }
       // Unresolved specifiers reach here as relative paths; dirname('.') is
       // '.', so without this guard the climb never ends and the page hangs.
@@ -6745,17 +6748,20 @@ export function createRuntime({
           }
           const executionArgv = [executable, ...rawArgs];
           const id = ++childSequence;
+          const commonJsEvalPath = normalizePath(`.bnh-child-${id}.cjs`, cwd);
           const mainPath = script
             ? normalizePath(script, cwd)
             : interactive
               ? normalizePath(`.bnh-child-${id}.js`, cwd)
-              : `/node/.bnh-child-${id}.js`;
+              : evalCode !== null
+                ? commonJsEvalPath
+                : `/node/.bnh-child-${id}.js`;
           const moduleEvalPath = normalizePath(`.bnh-child-${id}.mjs`, cwd);
           const moduleEntry = moduleInput || importPreloads.length > 0;
           if (importPreloads.length > 0 && evalCode !== null) moduleInput = true;
           const entryPath = moduleEntry && evalCode !== null
             ? moduleEvalPath
-            : evalCode !== null || preloads.length ? `/node/.bnh-child-${id}.js` : mainPath;
+            : mainPath;
           const commandName = executable.split('/').pop();
           const versionOnly = (commandName === 'node' || commandName === 'nodejs' || executable === processObject.execPath)
             && script === null && evalCode === null
@@ -7590,21 +7596,18 @@ export function createRuntime({
           const internalName = source.startsWith('node:') ? source.slice(5) : source;
           if (internalName.startsWith('internal/')) {
             const internalBase = `/node/lib/${internalName}`;
-            for (const candidate of moduleCandidates(internalBase)) {
-              try { readSource(candidate); return candidate; } catch { /* ignore */ }
-            }
+            const internalCandidate = moduleCandidates(internalBase).find((candidate) => vfs.files.has(candidate));
+            if (internalCandidate) return internalCandidate;
           }
           if (!source.startsWith('.') && !source.startsWith('/')) {
             const coreName = source.startsWith('node:') ? source.slice(5) : source;
-            for (const candidate of moduleCandidates(`/node/lib/${coreName}`)) {
-              try { readSource(candidate); return candidate; } catch { /* ignore */ }
-            }
+            const coreCandidate = moduleCandidates(`/node/lib/${coreName}`).find((candidate) => vfs.files.has(candidate));
+            if (coreCandidate) return coreCandidate;
             let directory = path.dirname(importer || '/node/index.js');
             while (true) {
               const packageBase = path.join(directory, 'node_modules', source);
-              for (const candidate of moduleCandidates(packageBase)) {
-                try { readSource(candidate); return candidate; } catch { /* ignore */ }
-              }
+              const directCandidate = moduleCandidates(packageBase).find((candidate) => vfs.files.has(candidate));
+              if (directCandidate) return directCandidate;
               if (!cjsPackageEntryCache.has(packageBase)) {
                 let packageEntry = null;
                 const packageManifest = `${packageBase}/package.json`;
@@ -7615,41 +7618,42 @@ export function createRuntime({
                     : new TextDecoder().decode(packageSource));
                   const main = typeof packageConfig.main === 'string'
                     ? packageConfig.main
-                    : typeof packageConfig.module === 'string' ? packageConfig.module : null;
+                    : null;
                   if (main && !main.startsWith('/')) packageEntry = path.join(packageBase, main);
                 } catch { /* package directory has no readable manifest */ }
                 cjsPackageEntryCache.set(packageBase, packageEntry);
               }
               const packageEntry = cjsPackageEntryCache.get(packageBase);
               if (packageEntry) {
-                for (const candidate of moduleCandidates(packageEntry)) {
-                  try { readSource(candidate); return candidate; } catch { /* ignore */ }
-                }
+                const packageCandidate = moduleCandidates(packageEntry).find((candidate) => vfs.files.has(candidate));
+                if (packageCandidate) return packageCandidate;
               }
               if (directory === '/' || directory === '.' || directory === '') break;
               directory = path.dirname(directory);
             }
           }
           const base = specifier.startsWith('/') ? specifier : normalizePath(specifier, importer ? path.dirname(importer) : '/node');
-          for (const candidate of moduleCandidates(base)) {
-            try { readSource(candidate); return candidate; } catch { /* ignore */ }
-          }
+          const candidate = moduleCandidates(base).find((pathname) => vfs.files.has(pathname));
+          if (candidate) return candidate;
           if (addonsDisabled(processObj) || isNativeAddonBuildPath(base)) return nativeAddonPath(base);
           return base;
         }
         function packageType(entryPath) {
           let directory = path.dirname(entryPath);
           for (;;) {
+            if (directory.endsWith('/node_modules')) return 'commonjs';
             const packagePath = path.join(directory, 'package.json');
-            try {
-              const packageSource = readSource(packagePath);
-              const packageText = typeof packageSource === 'string'
-                ? packageSource
-                : new TextDecoder().decode(packageSource);
-              const packageConfig = JSON.parse(packageText);
-              return packageConfig.type === 'module' ? 'module' : 'commonjs';
-            } catch (error) {
-              if (error?.code !== 'ENOENT') return 'commonjs';
+            if (vfs.files.has(packagePath)) {
+              try {
+                const packageSource = readSource(packagePath);
+                const packageText = typeof packageSource === 'string'
+                  ? packageSource
+                  : new TextDecoder().decode(packageSource);
+                const packageConfig = JSON.parse(packageText);
+                return packageConfig.type === 'module' ? 'module' : 'commonjs';
+              } catch (error) {
+                if (error?.code !== 'ENOENT') return 'commonjs';
+              }
             }
             // Unresolved specifiers ('node:nope') reach here as relative paths;
             // dirname('.') is '.', so without this guard the climb never ends.

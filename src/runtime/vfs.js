@@ -401,8 +401,10 @@ function normalizePath(value, cwd = '/node') {
   for (const part of parts) {
     if (!part || part === '.') continue;
     if (part === '..') {
-      if (result.length <= base.length) throw invalidPath('path escapes its logical mount');
-      result.pop();
+      // Lexical path normalization may reach the logical root. The mount
+      // boundary is enforced by access() after normalization, just as it is
+      // for absolute paths, rather than by rejecting a valid parent step.
+      if (result.length) result.pop();
       continue;
     }
     result.push(part);
@@ -882,6 +884,16 @@ export function createVfs(options = {}) {
 
   function nodeExists(path) {
     return files.has(path) || directories.has(path) || symlinks.has(path) || virtualSocketExists(path);
+  }
+
+  function traversesSymlink(path) {
+    if (!symlinks.size) return false;
+    let prefix = '';
+    for (const part of path.split('/').filter(Boolean)) {
+      prefix += `/${part}`;
+      if (symlinks.has(prefix)) return true;
+    }
+    return false;
   }
 
   function metadataFor(path) {
@@ -3935,7 +3947,11 @@ export function createVfs(options = {}) {
 
   const fileIndex = Object.freeze({
     has(pathValue) {
-      try { return files.has(resolvePath(resolve(pathValue))); } catch { return false; }
+      try {
+        const path = resolve(pathValue);
+        if (!traversesSymlink(path)) return files.has(path);
+        return files.has(resolvePath(path));
+      } catch { return false; }
     },
   });
 

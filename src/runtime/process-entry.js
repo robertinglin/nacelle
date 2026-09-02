@@ -17,6 +17,24 @@ function runtimeFor(nodeVersion) {
   return { profile, runtime };
 }
 
+function createRemoteNpmCache(context) {
+  const cache = new BrowserNpmCache({ globalObject: globalThis });
+  const request = (resource) => context.process.__bnhProxyRequest('request', {
+    __bnhNpmCache: true,
+    ...resource,
+  });
+  cache.getMetadata = async (name) => {
+    const result = await request({ type: 'metadata', name });
+    return result?.metadata || null;
+  };
+  cache.getTarball = async (key) => {
+    const result = await request({ type: 'tarball', key });
+    if (!result?.bytes) return null;
+    return result.bytes instanceof Uint8Array ? result.bytes : new Uint8Array(result.bytes);
+  };
+  return cache;
+}
+
 export async function runProcessEntry(context) {
   const sourceDescriptor = context.vfs;
   const descriptor = sourceDescriptor?.proxy?.rpc
@@ -48,7 +66,9 @@ export async function runProcessEntry(context) {
   }
   const { profile, runtime } = runtimeFor(descriptor.nodeVersion);
   installProcessContract(context.process, { nodeProfile: profile });
-  if (descriptor.npmCache) {
+  if (descriptor.npmCache?.rpc) {
+    globalThis.__BNH_NPM_CACHE__ = createRemoteNpmCache(context);
+  } else if (descriptor.npmCache) {
     const cache = new BrowserNpmCache({ globalObject: globalThis });
     cache.memoryMeta = new Map(Object.entries(descriptor.npmCache.metadata || {}));
     cache.memoryTarballs = new Map(Object.entries(descriptor.npmCache.tarballs || {}).map(([key, bytes]) => [

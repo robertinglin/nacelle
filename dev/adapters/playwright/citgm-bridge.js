@@ -170,6 +170,18 @@ function createFetchTransport(host, port, loadCachedResource) {
 
 function createBrowserProxyAdapter(loadCachedResource) {
   return {
+    async request(request = {}) {
+      if (request.__bnhNpmCache !== true) return null;
+      if (request.type === 'metadata' && request.name) {
+        const metadata = await npmCache.getMetadata(String(request.name));
+        return metadata ? { metadata } : null;
+      }
+      if (request.type === 'tarball' && request.key) {
+        const bytes = await npmCache.getTarball(String(request.key));
+        return bytes ? { bytes } : null;
+      }
+      return null;
+    },
     resolve() {
       // The transport uses the original hostname from client._connectOptions;
       // this address only gives the virtual socket a routable placeholder.
@@ -515,6 +527,7 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
         env: runEnv,
         signal: controller.signal,
         timeout,
+        npmCache: { rpc: true },
         processArgv,
         onNetwork: (event) => {
           networkEvents.push(event);

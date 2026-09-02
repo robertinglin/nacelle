@@ -800,6 +800,19 @@ export function createVfs(options = {}) {
     }
   }
 
+  function indexDirectPath(path, kind) {
+    if (!directoryIndex || path === '/') return;
+    const parent = parentOf(path);
+    const name = path.slice(parent === '/' ? 1 : parent.length + 1);
+    if (!name || name.includes('/')) return;
+    let entries = directoryIndex.get(parent);
+    if (!entries) {
+      entries = new Map();
+      directoryIndex.set(parent, entries);
+    }
+    if (!entries.has(name) || kind === 'directory') entries.set(name, kind);
+  }
+
   function rebuildDirectoryIndex() {
     const index = new Map();
     directoryIndex = index;
@@ -879,13 +892,13 @@ export function createVfs(options = {}) {
     const group = hardLinks.get(path);
     if (!group) {
       files.set(path, bytes);
-      indexPath(path, 'file');
+      indexDirectPath(path, 'file');
       return;
     }
     group.bytes = bytes;
     for (const linkPath of group.paths) {
       files.set(linkPath, bytes);
-      indexPath(linkPath, 'file');
+      indexDirectPath(linkPath, 'file');
     }
   }
 
@@ -911,7 +924,7 @@ export function createVfs(options = {}) {
     hardLinks.set(source, group);
     hardLinks.set(destination, group);
     files.set(destination, group.bytes);
-    indexPath(destination, 'file');
+    indexDirectPath(destination, 'file');
   }
 
   function moveFileNode(source, destination) {
@@ -955,7 +968,7 @@ export function createVfs(options = {}) {
     if (directories.has(path)) return false;
     ensureParent(path, operation);
     directories.add(path);
-    indexPath(path, 'directory');
+    indexDirectPath(path, 'directory');
     metadataFor(path);
     notify(path, 'rename');
     return true;
@@ -976,13 +989,13 @@ export function createVfs(options = {}) {
       if (!recursive) throw missing(parent, operation);
       const createdParent = makeDirectory(parent, true, operation);
       directories.add(path);
-      indexPath(path, 'directory');
+      indexDirectPath(path, 'directory');
       metadataFor(path);
       notify(path, 'rename');
       return createdParent || path;
     }
     directories.add(path);
-    indexPath(path, 'directory');
+    indexDirectPath(path, 'directory');
     metadataFor(path);
     notify(path, 'rename');
     return recursive ? path : undefined;
@@ -1389,7 +1402,7 @@ export function createVfs(options = {}) {
     ensureParent(path, 'symlink');
     if (nodeExists(path)) throw existsError(path, 'symlink');
     symlinks.set(path, target);
-    indexPath(path, 'symlink');
+    indexDirectPath(path, 'symlink');
     metadataFor(path);
     notify(path, 'rename');
   }
@@ -1417,7 +1430,7 @@ export function createVfs(options = {}) {
       addHardLink(source, destination);
     } else {
       symlinks.set(destination, symlinks.get(source));
-      indexPath(destination, 'symlink');
+      indexDirectPath(destination, 'symlink');
     }
     const attributes = metadataFor(source);
     attributes.nlink += 1;
@@ -3204,7 +3217,7 @@ export function createVfs(options = {}) {
       ensureParent(path, 'mount');
       if (nodeExists(path)) throw existsError(path, 'mount');
       symlinks.set(path, target);
-      indexPath(path, 'symlink');
+      indexDirectPath(path, 'symlink');
       return;
     }
     if (type === 'directory') {
@@ -3213,7 +3226,7 @@ export function createVfs(options = {}) {
         current = `${current}/${part}`;
         if (files.has(current)) throw notDirectory(current, 'mount');
         directories.add(current);
-        indexPath(current, 'directory');
+        indexDirectPath(current, 'directory');
       }
       return;
     }
@@ -3226,12 +3239,12 @@ export function createVfs(options = {}) {
         parent = `${parent}/${part}`;
         if (files.has(parent)) throw notDirectory(parent, 'mount');
         directories.add(parent);
-        indexPath(parent, 'directory');
+        indexDirectPath(parent, 'directory');
       }
     }
     if (files.has(path) && directories.has(path)) throw invalidPath();
     files.set(path, decode(entryValue.data ?? entryValue.bytes ?? entryValue.content ?? entryValue));
-    indexPath(path, 'file');
+    indexDirectPath(path, 'file');
     if (entryValue.mode !== undefined) metadataFor(path).mode = modeValue(entryValue.mode);
   }
 
@@ -3264,11 +3277,11 @@ export function createVfs(options = {}) {
         parent = `${parent}/${part}`;
         if (files.has(parent)) throw notDirectory(parent, 'mount');
         directories.add(parent);
-        indexPath(parent, 'directory');
+        indexDirectPath(parent, 'directory');
       }
       if (nodeExists(linkPath)) throw existsError(linkPath, 'mount');
       symlinks.set(linkPath, sourcePath(target));
-      indexPath(linkPath, 'symlink');
+      indexDirectPath(linkPath, 'symlink');
     }
     return { path: mountRecord.path, mode: mountRecord.mode };
   }

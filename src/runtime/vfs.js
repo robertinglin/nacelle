@@ -433,11 +433,13 @@ function createMemoryBackend() {
     files,
     directories,
     symlinks,
+    directoryIndex: null,
     reset() {
       files.clear();
       directories.clear();
       symlinks.clear();
       directories.add('/');
+      this.directoryIndex = null;
     },
   };
 }
@@ -724,7 +726,10 @@ export function createVfs(options = {}) {
   const directories = backend.directories instanceof Set ? backend.directories : new Set(['/']);
   const symlinks = backend.symlinks instanceof Map ? backend.symlinks : new Map();
   const metadata = new Map();
-  let directoryIndex = null;
+  const sharedDirectoryIndex = Object.prototype.hasOwnProperty.call(backend, 'directoryIndex');
+  let directoryIndex = sharedDirectoryIndex && backend.directoryIndex instanceof Map
+    ? backend.directoryIndex
+    : null;
   let taskTracker = typeof options.trackTask === 'function' ? options.trackTask : null;
   let activeRequestTracker = null;
   if (!directories.has('/')) directories.add('/');
@@ -781,7 +786,15 @@ export function createVfs(options = {}) {
     return path.slice(0, path.lastIndexOf('/')) || '/';
   }
 
+  function syncDirectoryIndex() {
+    if (sharedDirectoryIndex && directoryIndex !== backend.directoryIndex) {
+      directoryIndex = backend.directoryIndex instanceof Map ? backend.directoryIndex : null;
+    }
+    return directoryIndex;
+  }
+
   function indexPath(path, kind) {
+    syncDirectoryIndex();
     if (!directoryIndex || path === '/') return;
     let parent = parentOf(path);
     while (true) {
@@ -801,6 +814,7 @@ export function createVfs(options = {}) {
   }
 
   function indexDirectPath(path, kind) {
+    syncDirectoryIndex();
     if (!directoryIndex || path === '/') return;
     const parent = parentOf(path);
     const name = path.slice(parent === '/' ? 1 : parent.length + 1);
@@ -814,8 +828,11 @@ export function createVfs(options = {}) {
   }
 
   function rebuildDirectoryIndex() {
+    syncDirectoryIndex();
+    if (directoryIndex) return directoryIndex;
     const index = new Map();
     directoryIndex = index;
+    if (sharedDirectoryIndex) backend.directoryIndex = index;
     for (const directory of directories) indexPath(directory, 'directory');
     for (const file of files.keys()) indexPath(file, 'file');
     for (const link of symlinks.keys()) indexPath(link, 'symlink');
@@ -824,6 +841,7 @@ export function createVfs(options = {}) {
 
   function invalidateDirectoryIndex() {
     directoryIndex = null;
+    if (sharedDirectoryIndex) backend.directoryIndex = null;
   }
 
   function symlinkTarget(linkPath, targetValue) {
@@ -1125,7 +1143,7 @@ export function createVfs(options = {}) {
     access(path, 'scandir');
     if (files.has(path) || symlinks.has(path)) throw notDirectory(path, 'scandir');
     if (!directories.has(path)) throw missing(path, 'scandir');
-    const names = (directoryIndex || rebuildDirectoryIndex()).get(path) || new Map();
+    const names = (syncDirectoryIndex() || rebuildDirectoryIndex()).get(path) || new Map();
     return [...names].sort((left, right) => lexicalCompare(left[0], right[0]))
       .map(([name, kind]) => new Dirent(name, kind, path));
   }
@@ -3351,10 +3369,14 @@ export function createVfs(options = {}) {
       files: Object.fromEntries(artifactList.map(({ path, bytes }) => [path, bytes])),
     };
     if (includeBackend) {
+      const backendDirectoryIndex = syncDirectoryIndex();
       result.backend = {
         files: new Map(files),
         directories: new Set(directories),
         symlinks: new Map(symlinks),
+        directoryIndex: backendDirectoryIndex
+          ? new Map([...backendDirectoryIndex].map(([path, entries]) => [path, new Map(entries)]))
+          : null,
       };
     }
     return result;

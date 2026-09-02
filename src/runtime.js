@@ -10568,7 +10568,12 @@ export function createRuntime({
         && /^https?:$/i.test(scope.location.protocol || '')
         ? scope.location.origin
         : null;
+      const explicitProxy = proxyCapability?.mode === 'proxy'
+        && proxyCapability.enabled
+        && proxyCapability.capabilityGranted
+        && proxyCapability.adapter;
       const npmProxyUrl = npmProxyOrigin && isNpmRegistryRequest
+        && !explicitProxy
         ? `${npmProxyOrigin}/__npm_proxy__/${encodeURIComponent(target)}`
         : null;
       const canCacheNpmRequest = method === 'GET' && npmRegistryOrigins.has(targetOrigin)
@@ -10608,7 +10613,9 @@ export function createRuntime({
         });
       };
       const fetchNetwork = () => {
-        if (httpClientFetch) return fetchWithTelemetry('browser-native', () => nativeFetch(input, init));
+        if (httpClientFetch && !explicitProxy) {
+          return fetchWithTelemetry('browser-native', () => nativeFetch(input, init));
+        }
         if (npmProxyUrl) {
           // npm registry responses are cross-origin and many registry routes do
           // not opt into CORS. Use the same-origin download proxy when the

@@ -30,7 +30,7 @@ function headerEnd(bytes) {
   return -1;
 }
 
-function createFetchTransport(host, port, loadCachedProject) {
+function createFetchTransport(host, port, loadCachedResource) {
   const listeners = new Map();
   const requestChunks = [];
   const controller = new AbortController();
@@ -132,7 +132,7 @@ function createFetchTransport(host, port, loadCachedProject) {
       const body = contentLength > 0 ? requestBytes.slice(end, end + contentLength) : undefined;
       const protocol = Number(port) === 443 ? 'https:' : 'http:';
       const url = new URL(requestTarget, `${protocol}//${host}`).href;
-      const cachedBody = method === 'GET' ? await loadCachedProject?.(url) : null;
+      const cachedBody = method === 'GET' ? await loadCachedResource?.(url) : null;
       const response = cachedBody
         ? {
             status: 200,
@@ -168,7 +168,7 @@ function createFetchTransport(host, port, loadCachedProject) {
   return transport;
 }
 
-function createBrowserProxyAdapter(loadCachedProject) {
+function createBrowserProxyAdapter(loadCachedResource) {
   return {
     resolve() {
       // The transport uses the original hostname from client._connectOptions;
@@ -180,7 +180,7 @@ function createBrowserProxyAdapter(loadCachedProject) {
         || request.host
         || request.address;
       return {
-        transport: createFetchTransport(String(clientHost), Number(request.port), loadCachedProject),
+        transport: createFetchTransport(String(clientHost), Number(request.port), loadCachedResource),
         localAddress: '127.0.0.1',
         localPort: 0,
         remoteAddress: String(clientHost),
@@ -225,6 +225,7 @@ class ArtifactNpmCache extends BrowserNpmCache {
   }
 
   async getMetadata(packageName) {
+    if (this.memoryMeta.has(packageName)) return this.memoryMeta.get(packageName);
     const relative = this.artifactManifest?.metadata?.[packageName];
     if (relative && this.artifactBaseUrl) {
       const response = await fetch(new URL(relative, this.artifactBaseUrl));
@@ -240,6 +241,9 @@ class ArtifactNpmCache extends BrowserNpmCache {
   async getTarball(key) {
     const rawKey = key.replace(/^(?:pkg-tarball:|tarball:|pkg:)/, '');
     const candidateKeys = [key, rawKey, `tarball:${rawKey}`, `pkg-tarball:${rawKey}`, `pkg:${rawKey}`];
+    for (const candidate of candidateKeys) {
+      if (this.memoryTarballs.has(candidate)) return this.memoryTarballs.get(candidate);
+    }
     const relative = candidateKeys.map((candidate) => this.artifactManifest?.tarballs?.[candidate]).find(Boolean);
     if (relative && this.artifactBaseUrl) {
       const response = await fetch(new URL(relative, this.artifactBaseUrl));
@@ -262,7 +266,23 @@ class ArtifactNpmCache extends BrowserNpmCache {
 
 const runtime = createRuntime({ globalObject: globalThis, nodeVersion: 'v22' });
 const npmCache = new ArtifactNpmCache({ globalObject: globalThis });
-const browserProxyAdapter = createBrowserProxyAdapter((url) => npmCache.getProject(url));
+const browserProxyAdapter = createBrowserProxyAdapter(async (url) => {
+  const project = await npmCache.getProject(url);
+  if (project) return project;
+  let parsed;
+  try { parsed = new URL(url); } catch { return null; }
+  const registryOrigin = npmCache.artifactManifest?.registry
+    ? String(npmCache.artifactManifest.registry).replace(/\/+$/, '')
+    : DEFAULT_REGISTRY;
+  if (parsed.origin !== registryOrigin) return null;
+  if (/\/[^/]+\/[-][^/]+\.tgz$/.test(parsed.pathname)) {
+    return npmCache.getTarball(`tarball:${url}`);
+  }
+  const packageName = decodeURIComponent(parsed.pathname.replace(/^\/+|\/+$/g, ''));
+  if (!packageName || packageName.includes('/-/')) return null;
+  const metadata = await npmCache.getMetadata(packageName);
+  return metadata ? new TextEncoder().encode(JSON.stringify(metadata)) : null;
+});
 globalThis.__BNH_NPM_CACHE__ = npmCache;
 let running = false;
 
@@ -312,16 +332,6 @@ function structuredCitgmStage(value) {
     }
   }
   return null;
-}
-
-function npmCacheSnapshot(cache) {
-  return {
-    metadata: Object.fromEntries(cache.memoryMeta),
-    tarballs: Object.fromEntries([...cache.memoryTarballs.entries()].map(([key, bytes]) => [
-      key,
-      bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes),
-    ])),
-  };
 }
 
 async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 1000, citgmVersion = DEFAULT_CITGM_VERSION, browser = 'unknown', progress: progressConfig = null }) {
@@ -505,7 +515,6 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
         env: runEnv,
         signal: controller.signal,
         timeout,
-        npmCache: npmCacheSnapshot(npmCache),
         processArgv,
         onNetwork: (event) => {
           networkEvents.push(event);

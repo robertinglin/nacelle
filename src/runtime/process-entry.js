@@ -1,6 +1,7 @@
 import { createRuntime } from '../runtime.js';
 import { PROCESS_WORKER_SOURCE } from './process-worker.js';
 import { installProcessContract } from './process.js';
+import { BrowserNpmCache } from './npm.js';
 import { resolveNodeVersionProfile } from '../versions/index.js';
 import { createRemoteVirtualNetwork } from './virtual-network.js';
 
@@ -30,8 +31,12 @@ export async function runProcessEntry(context) {
                 error.code = 'ERR_NACELLE_PROXY_RPC_UNAVAILABLE';
                 throw error;
               }
-              return context.process.__bnhProxyRequest(request);
+              return context.process.__bnhProxyRequest('request', request);
             },
+            connect: (request) => context.process.__bnhProxyRequest('connect', { ...request, client: undefined }),
+            send: (request) => context.process.__bnhProxyRequest('send', request),
+            resolve: (request) => context.process.__bnhProxyRequest('resolve', request),
+            tls: (request) => context.process.__bnhProxyRequest('tls', request),
           },
         },
       }
@@ -43,6 +48,17 @@ export async function runProcessEntry(context) {
   }
   const { profile, runtime } = runtimeFor(descriptor.nodeVersion);
   installProcessContract(context.process, { nodeProfile: profile });
+  if (descriptor.npmCache) {
+    const cache = new BrowserNpmCache({ globalObject: globalThis });
+    cache.memoryMeta = new Map(Object.entries(descriptor.npmCache.metadata || {}));
+    cache.memoryTarballs = new Map(Object.entries(descriptor.npmCache.tarballs || {}).map(([key, bytes]) => [
+      key,
+      bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes),
+    ]));
+    globalThis.__BNH_NPM_CACHE__ = cache;
+  } else {
+    delete globalThis.__BNH_NPM_CACHE__;
+  }
   const remoteVirtualNetwork = context.networkPort
     ? createRemoteVirtualNetwork({ port: context.networkPort })
     : null;

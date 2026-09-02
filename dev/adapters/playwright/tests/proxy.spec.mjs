@@ -10,6 +10,7 @@ import {
   normalizeProxyRequest,
   normalizeProxySelection,
 } from '../runtime/proxy-contract.js';
+import { validateCapabilityManifest } from '../runtime/index.js';
 
 test.describe('optional proxy capability', () => {
   test('defaults each run to virtual mode without an adapter', () => {
@@ -22,6 +23,22 @@ test.describe('optional proxy capability', () => {
       adapter: null,
       capabilityGranted: false,
     });
+  });
+
+  test('preserves a granted proxy when the capability manifest is canonicalized twice', () => {
+    const manifest = {
+      vfs: { mounts: [{ path: '/node', mode: 'read-write' }] },
+      workers: { entryModules: ['*'], maxChildren: 1 },
+      ipc: { enabled: true },
+      signals: { allowed: ['SIGTERM'] },
+      output: {},
+      envVars: { allowed: [] },
+      proxy: { mode: 'proxy', enabled: true, capability: true },
+    };
+    const first = validateCapabilityManifest(manifest);
+    const second = validateCapabilityManifest(first);
+    expect(first.proxy.capabilityGranted).toBe(true);
+    expect(second.proxy.capabilityGranted).toBe(true);
   });
 
   test('accepts an adapter or callback without requiring one in virtual mode', () => {

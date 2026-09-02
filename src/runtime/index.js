@@ -124,7 +124,10 @@ function normalizeProxyCapability(value) {
   if (typeof capabilityKey !== 'string' || !capabilityKey) {
     throw capabilityError('ERR_INVALID_CAPABILITY', 'proxy.capabilityKey must be a non-empty string', { key: 'proxy' });
   }
-  const grant = source.capability ?? source.grant ?? source.granted;
+  // Canonical manifests expose capabilityGranted instead of retaining the
+  // original grant object. Preserve that boolean when a manifest is validated
+  // again at a runtime boundary.
+  const grant = source.capability ?? source.grant ?? source.granted ?? source.capabilityGranted;
   const capabilityGranted = proxyGrantIsEnabled(grant, capabilityKey);
   const enabled = source.enabled ?? source.optIn ?? mode === 'proxy';
   if (typeof enabled !== 'boolean') {

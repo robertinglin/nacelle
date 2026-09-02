@@ -1,8 +1,23 @@
 export function createTtyModule(processObject, { stream = null, net = null } = {}) {
+  const streamForFd = (fd) => {
+    if (fd === 0) return processObject?.stdin;
+    if (fd === 1) return processObject?.stdout;
+    if (fd === 2) return processObject?.stderr;
+    return null;
+  };
+
   function isatty(fd) {
-    if (typeof fd === 'number' && (fd === 0 || fd === 1 || fd === 2)) return true;
+    if (typeof fd === 'number' && (fd === 0 || fd === 1 || fd === 2)) {
+      return Boolean(streamForFd(fd)?.isTTY);
+    }
     if (fd && typeof fd === 'object' && fd.isTTY) return true;
     return false;
+  }
+
+  function getWindowSize(fd = 1) {
+    const target = typeof fd === 'object' ? fd : streamForFd(fd);
+    if (typeof target?.getWindowSize === 'function') return target.getWindowSize();
+    return [80, 24];
   }
 
   class ReadStream {
@@ -53,6 +68,7 @@ export function createTtyModule(processObject, { stream = null, net = null } = {
 
   return {
     isatty,
+    getWindowSize,
     ReadStream,
     WriteStream,
   };

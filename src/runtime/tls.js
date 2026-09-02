@@ -263,6 +263,7 @@ function normalizeAuthority(options = {}) {
 }
 
 function isVirtualInternetBackingSocket(socket) {
+  if (socket?._bnhProxyTransport || socket?._bnhVirtualTransport) return false;
   const options = socket?._connectOptions;
   const host = String(options?.host || options?.hostname || '').toLowerCase();
   return Boolean(options && Number(options.port) === 443
@@ -350,6 +351,13 @@ function normalizeProxy(proxy, capability) {
     capability: capability ?? proxy.capability,
     capabilities: capability ?? proxy.capabilities,
   });
+}
+
+function proxySupports(proxy, operation) {
+  const adapter = proxy?.adapter;
+  return typeof adapter === 'function'
+    || typeof adapter?.[operation] === 'function'
+    || typeof adapter?.handle === 'function';
 }
 
 function bytesFor(value, scope) {
@@ -1083,6 +1091,7 @@ export class TLSSocket extends Duplex {
       // that route the first transport chunk into a separate TLS pair.
       const needsRawSocketProbe = !this._socket?._tlsServerOptions;
       if (!this._options._isServer && needsRawSocketProbe
+        && !this._socket?._bnhVirtualTransport
         && this._socket?.write && !this._handshakeMarkerSent) {
         this._handshakeMarkerSent = true;
         try { this._socket.write(TLS_HANDSHAKE_MARKER, () => {}); } catch { /* transport may be closing */ }
@@ -1779,6 +1788,19 @@ export function createTlsModule(scope = globalThis, options = {}) {
           ca: connectOptions.ca,
         };
       socket._tlsClientOptions = connectOptions;
+      tlsResource = new AsyncResource('TLSWRAP');
+    }
+    if (!socket && targetProxy && proxySupports(targetProxy, 'connect')) {
+      socket = new net.Socket();
+      socket._bnhProxyTransport = true;
+      socket._tlsClientOptions = connectOptions;
+      pendingSocketOptions = {
+        host: connectOptions.host || connectOptions.hostname || 'localhost',
+        port: connectOptions.port,
+        localAddress: connectOptions.localAddress,
+        localPort: connectOptions.localPort,
+        lookup: connectOptions.lookup,
+      };
       tlsResource = new AsyncResource('TLSWRAP');
     }
     if (!socket && connectOptions.port !== undefined && connectOptions.virtualTransport !== false && !targetProxy) {

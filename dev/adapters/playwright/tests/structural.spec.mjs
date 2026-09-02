@@ -46,9 +46,9 @@ test.describe('browser runtime test contracts', () => {
   });
 
   test('covers every shared primitive family in the source contracts', async () => {
-    const runtime = await source('src/browser_node_harness/primitive_suites/runtime.py');
-    const io = await source('src/browser_node_harness/primitive_suites/io_network.py');
-    const platform = await source('src/browser_node_harness/primitive_suites/system_platform.py');
+    const runtime = await source('harness/browser_node_harness/primitive_suites/runtime.py');
+    const io = await source('harness/browser_node_harness/primitive_suites/io_network.py');
+    const platform = await source('harness/browser_node_harness/primitive_suites/system_platform.py');
     for (const marker of [
       'globals', 'buffer-encoding', 'promise-microtasks', 'event-emitter',
       'uncaught-exception', 'unhandled-rejection',

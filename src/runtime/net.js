@@ -267,6 +267,9 @@ export class Socket extends Duplex {
     if (this._handle && typeof this._handle === 'object') this._handle[ownerSymbol] = this;
     this._transport = internal.transport;
     this._performance = internal.performance;
+    this._taskTracker = internal.getTaskTracker?.() || internal.trackTask || null;
+    this._taskRelease = null;
+    this._unrefed = false;
     this.allowHalfOpen = options.allowHalfOpen ?? true;
     this.connecting = false;
     this._pending = true;
@@ -292,6 +295,15 @@ export class Socket extends Duplex {
     this._closing = false;
     this._writable._write = (bytes, encoding, callback) => this._write(bytes, encoding, callback);
     this._writable._final = (callback) => this._final(callback);
+  }
+
+  _activateTask() {
+    if (!this._unrefed && !this._taskRelease) this._taskRelease = this._taskTracker?.() || null;
+  }
+
+  _releaseTask() {
+    this._taskRelease?.();
+    this._taskRelease = null;
   }
 
   on(name, listener) {
@@ -326,6 +338,7 @@ export class Socket extends Duplex {
     this.connecting = true;
     this._pending = true;
     this._readyState = 'opening';
+    this._activateTask();
     this._connectOptions = { ...options, port, host, family };
     this._performanceStart = this._performance ? (this._network.performance?.now?.() || globalThis.performance?.now?.() || 0) : 0;
     if (this._handle?.connect) {
@@ -438,6 +451,7 @@ export class Socket extends Duplex {
       this._network.connectTcp({
         address,
         port,
+        hostname: this._connectOptions?.host || this._connectOptions?.hostname || address,
         client: this,
         localAddress,
         localPort,
@@ -478,6 +492,7 @@ export class Socket extends Duplex {
     this.connecting = true;
     this._pending = true;
     this._readyState = 'opening';
+    this._activateTask();
     const resolvedPath = resolvePipePath(path, this._ownerProcess);
     this.path = resolvedPath;
     this._connectOptions = { ...options, path: resolvedPath };
@@ -554,6 +569,7 @@ export class Socket extends Duplex {
     }
     this._pipeResource = connection.pipeResource;
     this._pipeConnectResource = connection.pipeConnectResource;
+    this._bnhVirtualTransport = Boolean(connection.transport?.virtualTls);
     if (connection.transport) this._attachTransport(connection.transport);
     else this._peer = connection.serverSocket;
     const handle = this._handle || this._transportPeer;
@@ -892,8 +908,18 @@ export class Socket extends Duplex {
     return this;
   }
 
-  ref() { this._unrefed = false; this._handle?.ref?.(); return this; }
-  unref() { this._unrefed = true; this._handle?.unref?.(); return this; }
+  ref() {
+    this._unrefed = false;
+    if (!this.destroyed && (this.connecting || !this.pending)) this._activateTask();
+    this._handle?.ref?.();
+    return this;
+  }
+  unref() {
+    this._unrefed = true;
+    this._releaseTask();
+    this._handle?.unref?.();
+    return this;
+  }
   destroySoon() {
     if (this.writable) this.end();
     if (this.writableFinished) this.destroy();
@@ -967,6 +993,7 @@ export class Socket extends Duplex {
     this._timeout = null;
     if (this._connectAttempt) this._connectAttempt.settled = true;
     for (const resource of [...this._tcpConnectResources]) this._releaseConnectResource(resource);
+    this._releaseTask();
     for (const destination of this._pipes.keys()) destination.destroy?.(error);
     this.unpipe();
     const peer = this._peer;
@@ -1412,6 +1439,7 @@ export class Server extends EventEmitter {
     accepted.connecting = false;
     accepted._pending = false;
     accepted._readyState = 'open';
+    accepted._activateTask?.();
     accepted._sockname = {
       address: connection.remoteAddress,
       family: connection.remoteAddress

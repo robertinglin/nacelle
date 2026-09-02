@@ -158,7 +158,7 @@ globalThis.__BROWSER_NODE_HARNESS__ = {
           stderr: partial.stderr,
           timedOut: true,
           runResult: failureResult(runId, 'shutdown', Object.assign(new Error('browser run timed out'), { code: 'ERR_RUN_TIMEOUT' }), 'timed_out'),
-          details: { runtimeVersion: runtime?.version || null, variant, metadata, tty_supported: false },
+              details: { runtimeVersion: runtime ? runtime.version : null, variant, metadata, tty_supported: false },
         };
       }
       const runResult = result.structuredResult || failureResult(runId, 'running', new Error('browser runtime returned no structured result'));
@@ -168,14 +168,14 @@ globalThis.__BROWSER_NODE_HARNESS__ = {
         stderr: result.stderr,
         timedOut: false,
         runResult,
-        details: { runtimeVersion: runtime?.version || null, variant, metadata, tty_supported: false },
+            details: { runtimeVersion: runtime ? runtime.version : null, variant, metadata, tty_supported: false },
       };
     } catch (error) {
       const phase = error?.code === 'ERR_CAPABILITY_DENIED' || error?.code === 'ERR_INVALID_CAPABILITY'
         ? 'setup'
         : 'launch';
       const runResult = failureResult(runId, phase, error, error?.code === 'ERR_NOT_SUPPORTED' ? 'unsupported' : 'failed');
-      return { exitCode: null, stdout: '', stderr: String(error?.stack || error), timedOut: false, runResult, details: { runtimeVersion: runtime?.version || null, variant, metadata, tty_supported: false } };
+      return { exitCode: null, stdout: '', stderr: String(error?.stack || error), timedOut: false, runResult, details: { runtimeVersion: runtime ? runtime.version : null, variant, metadata, tty_supported: false } };
     } finally {
       clearTimeout(timeoutTimer);
     }

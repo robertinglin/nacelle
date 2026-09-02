@@ -12,4 +12,5 @@ node/
 target/
 node_modules/
 .npm_cache/
+dev/adapters/playwright/.cache/
 test-results/

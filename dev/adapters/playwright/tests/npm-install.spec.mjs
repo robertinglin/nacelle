@@ -3,6 +3,8 @@ import { packTar, unpackTar, packTarGz, unpackTarGz } from '../runtime/tar.js';
 import { BrowserNpm, satisfiesSemver, parsePackageSpec } from '../runtime/npm.js';
 import { createVfs } from '../runtime/vfs.js';
 import { createModuleLoader } from '../runtime/module-loader.js';
+import { EventEmitter } from '../runtime/events.js';
+import { Readable, promises as streamPromises } from '../runtime/streams.js';
 
 test.describe('In-Browser TAR & NPM Package Management', () => {
   test('packTar and unpackTar handles files, directories and path prefixes', () => {
@@ -44,6 +46,29 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     expect(new TextDecoder().decode(unpacked[0].data)).toBe('Hello Browser TarGz!');
   });
 
+  test('pipeline accepts writable streams without Node stream state', async () => {
+    const output = new EventEmitter();
+    const chunks = [];
+    output.write = (chunk) => {
+      chunks.push(new Uint8Array(chunk));
+      return true;
+    };
+    output.end = () => queueMicrotask(() => output.emit('finish'));
+    output.destroy = () => {};
+
+    await streamPromises.pipeline(Readable.from([new Uint8Array([1, 2]), new Uint8Array([3])]), output);
+    expect(chunks).toHaveLength(2);
+    expect([...chunks.flatMap((chunk) => [...chunk])]).toEqual([1, 2, 3]);
+  });
+
+  test('VFS accepts numeric open flags used by fs-minipass and tar', async () => {
+    const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
+    const fd = vfs.fs.openSync('/node/numeric.txt', vfs.fs.constants.O_WRONLY | vfs.fs.constants.O_CREAT | vfs.fs.constants.O_TRUNC);
+    vfs.fs.writeSync(fd, new Uint8Array([7, 8, 9]));
+    vfs.fs.closeSync(fd);
+    expect([...vfs.fs.readFileSync('/node/numeric.txt')]).toEqual([7, 8, 9]);
+  });
+
   test('semver utilities parse and match version specs', () => {
     expect(parsePackageSpec('express@4.19.2')).toEqual({ name: 'express', range: '4.19.2' });
     expect(parsePackageSpec('@types/node@^20.0.0')).toEqual({ name: '@types/node', range: '^20.0.0' });
@@ -78,6 +103,7 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
           name: 'mini-express',
           version: '1.0.0',
           main: 'lib/index.js',
+          bin: 'lib/cli.js',
         })),
       },
       {
@@ -93,6 +119,11 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
           module.exports = createApplication;
         `),
       },
+      {
+        path: 'package/lib/cli.js',
+        mode: 0o755,
+        data: encoder.encode('#!/usr/bin/env node\n'),
+      },
     ]);
 
     const cache = new Map();
@@ -105,6 +136,8 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     expect(result.packages[0].name).toBe('mini-express');
     expect(vfs.files.has('/node/node_modules/mini-express/package.json')).toBe(true);
     expect(vfs.files.has('/node/node_modules/mini-express/lib/index.js')).toBe(true);
+    expect(vfs.fs.statSync('/node/node_modules/mini-express/lib/cli.js').mode & 0o777).toBe(0o755);
+    expect(vfs.fs.statSync('/node/node_modules/.bin/mini-express').mode & 0o777).toBe(0o755);
 
     // Now test module loading via createModuleLoader
     const loader = createModuleLoader({
@@ -121,6 +154,101 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     const app = miniExpress();
     app.get('/hello', () => 'Hello from mini-express!');
     expect(app.handle('/hello')).toBe('Hello from mini-express!');
+  });
+
+  test('module-loader preserves named exports from an installed ESM package', async () => {
+    const encoder = new TextEncoder();
+    const vfs = createVfs({
+      mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }],
+    });
+    const esmPackage = await packTarGz([
+      {
+        path: 'package/package.json',
+        data: encoder.encode(JSON.stringify({
+          name: 'esm-package',
+          version: '1.0.0',
+          type: 'module',
+          main: 'index.js',
+        })),
+      },
+      {
+        path: 'package/index.js',
+        data: encoder.encode("import'./side-effect.js';\nexport function answer() { return globalThis.__BNH_ESM_SIDE_EFFECT__ ? 42 : 0; }\n"),
+      },
+      {
+        path: 'package/side-effect.js',
+        data: encoder.encode("import fs from'fs';\nglobalThis.__BNH_ESM_SIDE_EFFECT__ = typeof fs.readFileSync === 'function';\n"),
+      },
+    ]);
+    const npm = new BrowserNpm({ vfs, cache: new Map([['pkg-tarball:esm-package@1.0.0', esmPackage]]) });
+    await npm.install('esm-package@1.0.0', { cwd: '/node' });
+
+    const loader = createModuleLoader({
+      files: {
+        has: (pathname) => vfs.files.has(pathname),
+        get: (pathname) => vfs.read(pathname),
+      },
+      globalObject: globalThis,
+      builtins: { fs: { readFileSync() {} } },
+    });
+    const imported = await loader.import('esm-package', '/node/entry.mjs');
+    expect(imported.answer()).toBe(42);
+  });
+
+  test('BrowserNpm nests incompatible concurrent dependency versions', async () => {
+    const encoder = new TextEncoder();
+    const vfs = createVfs({
+      mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }],
+    });
+    const packages = new Map();
+    const archives = new Map();
+    const addPackage = async (name, version, dependencies = {}) => {
+      const metadata = packages.get(name) || { name, 'dist-tags': {}, versions: {} };
+      metadata['dist-tags'].latest = version;
+      metadata.versions[version] = {
+        name,
+        version,
+        dependencies,
+        dist: { tarball: `https://registry.test/${name}/-/${name}-${version}.tgz` },
+      };
+      packages.set(name, metadata);
+      archives.set(`${name}@${version}`, await packTarGz([{
+        path: 'package/package.json',
+        data: encoder.encode(JSON.stringify({ name, version, dependencies })),
+      }]));
+    };
+    await addPackage('first', '1.0.0', { shared: '^1.0.0' });
+    await addPackage('second', '1.0.0', { shared: '^2.0.0' });
+    await addPackage('shared', '1.0.0');
+    await addPackage('shared', '2.0.0');
+
+    const npm = new BrowserNpm({
+      vfs,
+      registry: 'https://registry.test',
+      proxyUrl: null,
+      fetchFn: async (url) => {
+        const path = new URL(url).pathname;
+        if (path.endsWith('/shared')) {
+          return { ok: true, status: 200, json: async () => ({
+            name: 'shared',
+            'dist-tags': { latest: '2.0.0' },
+            versions: {
+              '1.0.0': packages.get('shared').versions['1.0.0'],
+              '2.0.0': packages.get('shared').versions['2.0.0'],
+            },
+          }) };
+        }
+        const name = path.slice(1);
+        if (packages.has(name)) return { ok: true, status: 200, json: async () => packages.get(name) };
+        const match = path.match(/\/([^/]+)-([0-9.]+)\.tgz$/);
+        if (match) return { ok: true, status: 200, arrayBuffer: async () => archives.get(`${match[1]}@${match[2]}`).buffer };
+        return { ok: false, status: 404 };
+      },
+    });
+    await npm.install(['first@1.0.0', 'second@1.0.0'], { cwd: '/node', concurrency: 8 });
+
+    expect(vfs.files.has('/node/node_modules/shared/package.json')).toBe(true);
+    expect(vfs.files.has('/node/node_modules/second/node_modules/shared/package.json')).toBe(true);
   });
 
   test('BrowserNpmCache saves, retrieves, and clears metadata and tarballs', async () => {

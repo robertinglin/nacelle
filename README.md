@@ -226,6 +226,47 @@ console.log(await proc.stdoutText());
 
 The TypeScript demo showcases three conversion pipelines from inline bash build scripts: Node.js 22 built-in `module.stripTypeScriptTypes()`, Vite's fast transform pipeline (`vite build`), and the official Microsoft TypeScript compiler (`tsc`), then executes the emitted JavaScript.
 
+### Run CITGM in Chromium or Firefox
+
+The Playwright adapter preloads the pinned CITGM CLI and the candidate package's
+registry metadata, tarballs, and dependency graph into Nacelle's browser-side
+npm cache, then executes CITGM itself as a Nacelle child process. Preloading
+does not run candidate tests. Playwright only hosts the browser page and selects
+the browser engine; CITGM, the candidate package, npm commands, and package
+tests stay inside the browser runtime.
+
+Install the adapter dependencies and browser binaries once:
+
+```bash
+npm --prefix dev/adapters/playwright install
+npx --prefix dev/adapters/playwright playwright install chromium firefox
+```
+
+Generate the host-side artifact once per CITGM version, candidate package, and
+registry. This uses host npm only to fetch package data with lifecycle scripts
+disabled; it does not run the candidate. The generated cache is ignored by git
+and is consumed as local assets by the browser page:
+
+```bash
+npm run citgm:precache -- express
+```
+
+Run one registry package through either engine:
+
+```bash
+npm run citgm:browser:chromium -- express
+npm run citgm:browser:firefox -- express
+```
+
+If no matching artifact exists, the runner falls back to direct browser registry
+fetches. Arguments after the module are forwarded to CITGM. The runner currently
+targets registry packages; local-directory and native-addon cases need an
+explicit browser-safe fixture or capability before they can be meaningful.
+Use `NACELLE_CITGM_VERSION` to select a different CITGM release and
+`NACELLE_CITGM_TIMEOUT_MS` to change the outer browser-run timeout.
+Set `NACELLE_NPM_REGISTRY` when generating and consuming an
+alternate registry artifact.
+
 ### Next.js 16 App Router
 
 Nacelle runs full Next.js App Router applications entirely in-browser without host subprocesses. The Next.js demo (`npm run examples:next`) demonstrates Server-Side Rendering (SSR), file-system routing (`app/page.tsx`, `app/about/page.tsx`, `app/dashboard/page.tsx`), Server Actions & API endpoints (`app/api/hello/route.ts`), and Next.js CLI orchestration (`next dev`, `next build`, `next start`). Nacelle advertises the WebContainer runtime signal that makes stock Next.js select its own official SWC WebAssembly fallback (`@next/swc-wasm-nodejs`) instead of its platform `.node` package.

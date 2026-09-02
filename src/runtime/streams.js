@@ -750,7 +750,14 @@ export class Readable extends EventEmitter {
   }
 
   off(name, listener) {
-    return this.removeListener(name, listener);
+    const result = super.removeListener(name, listener);
+    if (name === 'readable') {
+      this._readableState.readableListening = this.listenerCount('readable') > 0;
+    }
+    if (name === 'data' && this.listenerCount('data') === 0) {
+      this._readableState.dataListening = false;
+    }
+    return result;
   }
 
   removeAllListeners(name = undefined) {
@@ -3439,7 +3446,7 @@ export const promises = {
 export function pipeline(...streams) {
   const callback = typeof streams.at(-1) === 'function' ? streams.pop() : () => {};
   streams = streams.map((stream) => {
-    if (isNodeStream(stream) || typeof stream?.pipe === 'function') return stream;
+    if (isNodeStream(stream) || typeof stream?.pipe === 'function' || typeof stream?.write === 'function') return stream;
     if (typeof stream === 'function') return Duplex.from(stream);
     return Readable.from(stream);
   });

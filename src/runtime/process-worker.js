@@ -58,11 +58,11 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     user.postMessage({ channel: USER, runId: identity.runId, childId: identity.childId, direction: 'child-to-parent', sequence: ++userSequence, type, payload });
   }
 
-  function requestProxy(request) {
+  function requestProxy(operation, request) {
     const requestId = String(identity.childId) + '-proxy-' + (++proxySequence);
     return new Promise((resolve, reject) => {
       proxyRequests.set(requestId, { resolve, reject });
-      sendUserFrame('message', { __bnhProxyRequest: { requestId, request } });
+      sendUserFrame('message', { __bnhProxyRequest: { requestId, operation, request } });
     });
   }
 
@@ -114,6 +114,37 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     Object.defineProperty(proxy, '__bnhHandleId', { value: descriptor.id });
     remoteHandles.set(descriptor.id, proxy);
     return proxy;
+  }
+
+  function createRemoteTransport(descriptor, handle) {
+    const request = (action, fields = {}) => requestProxy('send', {
+      transportId: descriptor.id,
+      action,
+      ...fields,
+    });
+    const transport = {
+      virtualTls: Boolean(descriptor.virtualTls),
+      on(name, listener) { handle.on(name, listener); return transport; },
+      once(name, listener) { handle.once(name, listener); return transport; },
+      off(name, listener) { handle.off(name, listener); return transport; },
+      removeListener(name, listener) { handle.removeListener(name, listener); return transport; },
+      write(bytes, callback) {
+        const operation = request('write', { bytes });
+        operation.then(() => callback?.(), (error) => callback?.(error));
+        return true;
+      },
+      end(callback) {
+        const operation = request('end');
+        operation.then(() => callback?.(), (error) => callback?.(error));
+        return transport;
+      },
+      destroy(error) {
+        void request('destroy', { error: error ? { name: error.name, message: error.message, code: error.code } : undefined });
+        handle.close?.();
+        return transport;
+      },
+    };
+    return transport;
   }
 
   function makeEmitter() {
@@ -407,9 +438,22 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       _parent: null,
       _pendingData: null,
       _pendingEncoding: '',
-      write(value) { sendControl('output', { stream: 'stdout', value: outputText(value) }); return true; },
+      write(value, encoding, callback) {
+        if (typeof encoding === 'function') callback = encoding;
+        sendControl('output', { stream: 'stdout', value: outputText(value) });
+        callback?.();
+        return true;
+      },
     };
-    process.stderr = { isTTY: false, write(value) { sendControl('output', { stream: 'stderr', value: outputText(value) }); return true; } };
+    process.stderr = {
+      isTTY: false,
+      write(value, encoding, callback) {
+        if (typeof encoding === 'function') callback = encoding;
+        sendControl('output', { stream: 'stderr', value: outputText(value) });
+        callback?.();
+        return true;
+      },
+    };
 
     control.onmessage = (event) => {
       const frame = event.data;
@@ -433,7 +477,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         if (target) target.emit(frame.payload.event, ...(frame.payload.args || []).map((value) => value?.id ? createRemoteHandle(value) : value));
       } else if (frame.type === 'message') {
         if (frame.payload?.__bnhProxyResponse) {
-          const response = frame.payload.__bnhProxyResponse;
+          const response = frame.payload;
           const pending = proxyRequests.get(response.requestId);
           if (!pending) return;
           proxyRequests.delete(response.requestId);
@@ -441,12 +485,16 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
             pending.reject(Object.assign(new Error(response.error.message || 'proxy request failed'), response.error));
           } else {
             const result = response.result;
+            if (result?.__bnhTransport && frame.handle) {
+              result.transport = createRemoteTransport(result.__bnhTransport, createRemoteHandle(frame.handle));
+              delete result.__bnhTransport;
+            }
             if (result?.__bnhResponse && typeof Response === 'function') {
               pending.resolve(new Response(result.body || null, { status: result.status, statusText: result.statusText, headers: result.headers }));
             } else {
               pending.resolve(result);
             }
-            }
+          }
         } else if (frame.payload?.__bnhWorkerStdin) {
           process.stdin.push(frame.payload.value);
         } else if (frame.payload?.__bnhWorkerStdinEnd) {

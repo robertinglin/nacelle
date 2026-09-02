@@ -748,13 +748,15 @@ async function runNpm(name, args, input, context, options) {
   }
   const meaningfulArgs = args.filter((arg) => !['--silent', '--loglevel=silent'].includes(arg));
   if (meaningfulArgs[0] === '--version' || meaningfulArgs[0] === '-v') return result(0, '10.0.0-browser\n');
-  if (!['run', 'run-script'].includes(meaningfulArgs[0]) || !meaningfulArgs[1]) {
+  const isTest = meaningfulArgs[0] === 'test';
+  if ((!['run', 'run-script'].includes(meaningfulArgs[0]) && !isTest)
+    || (!isTest && !meaningfulArgs[1])) {
     return commandError('npm', 'only npm run is supported by the browser shell');
   }
   if (typeof options.npmRun !== 'function') return commandError('npm', 'npm execution is unavailable');
-  const scriptName = meaningfulArgs[1];
+  const scriptName = isTest ? 'test' : meaningfulArgs[1];
   const separator = meaningfulArgs.indexOf('--');
-  const scriptArgs = separator >= 0 ? meaningfulArgs.slice(separator + 1) : meaningfulArgs.slice(2);
+  const scriptArgs = separator >= 0 ? meaningfulArgs.slice(separator + 1) : isTest ? [] : meaningfulArgs.slice(2);
   const stdout = [];
   const stderr = [];
   try {

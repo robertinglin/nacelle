@@ -23,7 +23,7 @@ test.describe('browser Node process metadata', () => {
         assert.strictEqual(process.features.debug, false);
 
         assert.ok(process.versions && typeof process.versions === 'object');
-        assert.strictEqual(typeof process.versions.openssl, 'undefined');
+        assert.strictEqual(process.versions.openssl, '3.0.0');
         assert.strictEqual(process.versions.webcontainer, '1.0.0');
 
         // These values identify the browser runtime and must not report a host Node executable.

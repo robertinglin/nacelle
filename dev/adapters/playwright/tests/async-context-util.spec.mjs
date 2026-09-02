@@ -9,10 +9,13 @@ test.describe('browser-native async context and util primitives', () => {
       (async () => {
         const assert = require('node:assert');
         const util = require('node:util');
+        const fs = require('node:fs');
         const { promisify } = util;
         assert.strictEqual(Object.hasOwn(util, 'promisify'), true);
         assert.strictEqual(typeof promisify, 'function');
         assert.strictEqual(promisify.custom, Symbol.for('nodejs.util.promisify.custom'));
+        assert.strictEqual(await promisify(fs.exists)('/node'), true);
+        assert.strictEqual(await promisify(fs.exists)('/does-not-exist'), false);
 
         const receiver = { value: 7, read(callback) { callback(null, this.value); } };
         receiver.readAsync = promisify(receiver.read);

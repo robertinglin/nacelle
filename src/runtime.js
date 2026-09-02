@@ -7368,12 +7368,26 @@ export function createRuntime({
               if (commandName === 'npm' || commandName === 'yarn' || commandName === 'yarnpkg') {
                 child.spawn({ file, args });
                 scope.queueMicrotask(() => child.emit('spawn'));
-                runNpmChild(prepared, ownerProcess, options).then((result) => {
-                  if (result.stdout) {
+                let streamedOutput = false;
+                const npmChildOptions = {
+                  ...options,
+                  onStdout: (value) => {
+                    streamedOutput = true;
+                    stdout += normalizeOutputChunk(value);
+                    writeStdout(value);
+                  },
+                  onStderr: (value) => {
+                    streamedOutput = true;
+                    stderr += normalizeOutputChunk(value);
+                    writeStderr(value);
+                  },
+                };
+                runNpmChild(prepared, ownerProcess, npmChildOptions).then((result) => {
+                  if (!streamedOutput && result.stdout) {
                     stdout += result.stdout;
                     writeStdout(result.stdout);
                   }
-                  if (result.stderr) {
+                  if (!streamedOutput && result.stderr) {
                     stderr += result.stderr;
                     writeStderr(result.stderr);
                   }
@@ -7405,12 +7419,26 @@ export function createRuntime({
                   argv: [prepared.entryPath, ...prepared.commandArgs.slice(1)],
                   executionArgv: [prepared.entryPath, ...prepared.commandArgs.slice(1)],
                 };
-                runNpmChild(npmPrepared, ownerProcess, options).then((result) => {
-                  if (result.stdout) {
+                let streamedOutput = false;
+                const npmChildOptions = {
+                  ...options,
+                  onStdout: (value) => {
+                    streamedOutput = true;
+                    stdout += normalizeOutputChunk(value);
+                    writeStdout(value);
+                  },
+                  onStderr: (value) => {
+                    streamedOutput = true;
+                    stderr += normalizeOutputChunk(value);
+                    writeStderr(value);
+                  },
+                };
+                runNpmChild(npmPrepared, ownerProcess, npmChildOptions).then((result) => {
+                  if (!streamedOutput && result.stdout) {
                     stdout += result.stdout;
                     writeStdout(result.stdout);
                   }
-                  if (result.stderr) {
+                  if (!streamedOutput && result.stderr) {
                     stderr += result.stderr;
                     writeStderr(result.stderr);
                   }
@@ -9150,6 +9178,8 @@ export function createRuntime({
               stdin: prepared.stdin,
               signal: childOptions.signal,
               timeout: childOptions.timeout,
+              onStdout: childOptions.onStdout,
+              onStderr: childOptions.onStderr,
             });
           }
 

@@ -813,9 +813,9 @@ async function runNpm(name, args, input, context, options) {
         context.onStderr?.(text);
       },
     });
-    const code = child && Object.prototype.hasOwnProperty.call(child, 'code')
-      ? child.code
-      : await child?.exit;
+    const code = child && typeof child === 'object' && 'exit' in child
+      ? await child.exit
+      : Object.prototype.hasOwnProperty.call(child || {}, 'code') ? child.code : 1;
     const res = result(code ?? 1, stdout.join(''), stderr.join(''));
     if (context.onStdout || context.onStderr) res.streamed = true;
     return res;

@@ -1174,7 +1174,7 @@ export function createVfs(options = {}) {
   }
 
   function directoryEntryName(rootValue, entry) {
-    const root = resolvePath(rootValue);
+    const root = resolvePath(resolve(rootValue));
     if (entry.path === root) return entry.name;
     return `${entry.path.slice(root.length + 1)}/${entry.name}`;
   }

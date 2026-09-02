@@ -329,7 +329,6 @@ function text(value) {
 function progressIdentity(value, limit = 128) {
   return text(value).replace(/[^a-zA-Z0-9@._/:=-]/g, '_').slice(0, limit);
 }
-
 function byteLength(value) {
   if (value instanceof Uint8Array) return value.byteLength;
   if (ArrayBuffer.isView(value)) return value.byteLength;
@@ -561,6 +560,7 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     report('execution', 'child-started', {
       ...childIdentity,
       testStage: 'citgm-runner',
+      script: 'citgm',
       argumentCount: Math.max(0, processArgv.length - 2),
       childActive: childActive(),
     });
@@ -568,6 +568,7 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     report('execution', 'upstream-test-started', {
       ...childIdentity,
       testStage: 'package-manager-test',
+      script: 'citgm',
     });
     livenessTimer = setInterval(() => {
       if (!controller.signal.aborted && childActive()) report('execution', 'child-running');

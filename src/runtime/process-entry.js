@@ -45,24 +45,35 @@ function createRemoteNpmCache(context) {
 
 export async function runProcessEntry(context) {
   const sourceDescriptor = context.vfs;
+  const proxyOperations = new Set(sourceDescriptor?.proxy?.operations || []);
   const descriptor = sourceDescriptor?.proxy?.rpc
     ? {
         ...sourceDescriptor,
         proxy: {
           ...sourceDescriptor.proxy,
           adapter: {
-            request: async (request) => {
-              if (typeof context.process?.__bnhProxyRequest !== 'function') {
-                const error = new Error('proxy RPC is unavailable in this worker');
-                error.code = 'ERR_NACELLE_PROXY_RPC_UNAVAILABLE';
-                throw error;
-              }
-              return context.process.__bnhProxyRequest('request', request);
-            },
-            connect: (request) => context.process.__bnhProxyRequest('connect', { ...request, client: undefined }),
-            send: (request) => context.process.__bnhProxyRequest('send', request),
-            resolve: (request) => context.process.__bnhProxyRequest('resolve', request),
-            tls: (request) => context.process.__bnhProxyRequest('tls', request),
+            ...(proxyOperations.has('request') ? {
+              request: async (request) => {
+                if (typeof context.process?.__bnhProxyRequest !== 'function') {
+                  const error = new Error('proxy RPC is unavailable in this worker');
+                  error.code = 'ERR_NACELLE_PROXY_RPC_UNAVAILABLE';
+                  throw error;
+                }
+                return context.process.__bnhProxyRequest('request', request);
+              },
+            } : {}),
+            ...(proxyOperations.has('connect') ? {
+              connect: (request) => context.process.__bnhProxyRequest('connect', { ...request, client: undefined }),
+            } : {}),
+            ...(proxyOperations.has('send') ? {
+              send: (request) => context.process.__bnhProxyRequest('send', request),
+            } : {}),
+            ...(proxyOperations.has('resolve') ? {
+              resolve: (request) => context.process.__bnhProxyRequest('resolve', request),
+            } : {}),
+            ...(proxyOperations.has('tls') ? {
+              tls: (request) => context.process.__bnhProxyRequest('tls', request),
+            } : {}),
           },
         },
       }

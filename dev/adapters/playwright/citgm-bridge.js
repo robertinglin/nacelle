@@ -371,25 +371,30 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       onProgress: (event) => recordProgress(progress.bootstrap, event),
     });
 
-    const preloadVfs = createVfs({
-      mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }],
-    });
-    const preloadNpm = new BrowserNpm({
-      vfs: preloadVfs,
-      registry,
-      cache: npmCache,
-      globalObject: globalThis,
-      proxyUrl: null,
-      platform: 'browser',
-      arch: 'browser',
-      libc: 'browser',
-    });
-    const preload = await preloadNpm.install(module, {
-      cwd: '/node',
-      nodeModulesDir: '/node/node_modules',
-      includeDevDependencies: true,
-      onProgress: (event) => recordProgress(progress.preload, event),
-    });
+    let preloadSummary;
+    {
+      const preloadVfs = createVfs({
+        mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }],
+      });
+      const preloadNpm = new BrowserNpm({
+        vfs: preloadVfs,
+        registry,
+        cache: npmCache,
+        globalObject: globalThis,
+        proxyUrl: null,
+        platform: 'browser',
+        arch: 'browser',
+        libc: 'browser',
+      });
+      const preload = await preloadNpm.install(module, {
+        cwd: '/node',
+        nodeModulesDir: '/node/node_modules',
+        includeDevDependencies: true,
+        materialize: false,
+        onProgress: (event) => recordProgress(progress.preload, event),
+      });
+      preloadSummary = { packages: preload.packages.length, files: preload.totalFiles };
+    }
     await runtime.mount({});
 
     const processArgv = ['node', CITGM_ENTRY, ...args, module];
@@ -418,7 +423,7 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       runResult: child.structuredResult,
       precache: { used: precacheUsed, packages: npmCache.artifactManifest?.packageCount || 0 },
       install: { packages: install.packages.length, files: install.totalFiles },
-      preload: { packages: preload.packages.length, files: preload.totalFiles },
+      preload: preloadSummary,
       progress,
       networkEvents,
     };

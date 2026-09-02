@@ -6,7 +6,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { compareSemver, parseSemver, satisfiesSemver } from '../../../src/runtime/npm.js';
+import { compareSemver, parseNpmAlias, parseSemver, satisfiesSemver } from '../../../src/runtime/npm.js';
 
 const adapterRoot = path.dirname(fileURLToPath(import.meta.url));
 const defaultRegistry = 'https://registry.npmjs.org';
@@ -179,14 +179,17 @@ async function resolvePackageGraph(initialPackages, metadata, registry, includeD
   const processed = new Set();
   const addRequest = (name, range) => {
     if (typeof name !== 'string' || typeof range !== 'string') return;
-    if (/^(?:file:|git:|github:|https?:\/\/)/i.test(range)) {
-      throw new Error(`CITGM precache does not support non-registry dependency ${name}@${range}`);
+    const alias = parseNpmAlias(range);
+    const requestName = alias?.name || name;
+    const requestRange = alias?.range || range;
+    if (/^(?:file:|git:|github:|https?:\/\/)/i.test(requestRange)) {
+      throw new Error(`CITGM precache does not support non-registry dependency ${requestName}@${requestRange}`);
     }
-    requestedNames.add(name);
-    const key = `${name}@${range}`;
+    requestedNames.add(requestName);
+    const key = `${requestName}@${requestRange}`;
     if (pendingKeys.has(key)) return;
     pendingKeys.add(key);
-    pending.push({ name, range });
+    pending.push({ name: requestName, range: requestRange });
   };
 
   for (const item of initialPackages) {

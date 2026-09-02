@@ -19,6 +19,19 @@ _DAEMON = textwrap.dedent(
     for line in sys.stdin:
         request = json.loads(line)
         mode = request.get("mode", "pass")
+        if mode == "progress":
+            print("BNH_PROGRESS " + json.dumps({
+                "schemaVersion": 1,
+                "type": "progress",
+                "runId": "external-run",
+                "sequence": 1,
+                "phase": "execution",
+                "event": "output-activity",
+                "stream": "stdout",
+                "bytes": 12,
+                "chunks": 1,
+            }), file=sys.stderr, flush=True)
+            time.sleep(0.05)
         if mode == "hang":
             time.sleep(60)
             continue
@@ -39,6 +52,28 @@ _DAEMON = textwrap.dedent(
 
 
 class JsonlWorkerTests(unittest.TestCase):
+    def test_worker_delivers_external_progress_before_final_response(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            worker = JsonlWorker(
+                [sys.executable, "-u", "-c", _DAEMON],
+                Path(raw),
+                os.environ,
+                index=2,
+            )
+            progress: list[dict[str, object]] = []
+            try:
+                payload, error, _, timed_out = worker.call(
+                    {"mode": "progress"},
+                    2,
+                    on_progress=progress.append,
+                )
+                self.assertFalse(timed_out, error)
+                self.assertEqual(payload and payload["status"], "pass")
+                self.assertEqual(progress[0]["event"], "output-activity")
+                self.assertNotIn("BNH_PROGRESS", error)
+            finally:
+                worker.close()
+
     def test_worker_recovers_after_timeout_without_stale_stdout(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             worker = JsonlWorker(

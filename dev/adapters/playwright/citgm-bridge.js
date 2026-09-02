@@ -1,6 +1,7 @@
 import { BrowserNpm, BrowserNpmCache } from './runtime/npm.js';
 import { createRuntime } from './runtime.js';
 import { createVfs } from './runtime/vfs.js';
+import { createProgressReporter } from './progress-protocol.mjs';
 
 const DEFAULT_CITGM_VERSION = '10.0.2';
 const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
@@ -299,7 +300,7 @@ function npmCacheSnapshot(cache) {
   };
 }
 
-async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 1000, citgmVersion = DEFAULT_CITGM_VERSION }) {
+async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 1000, citgmVersion = DEFAULT_CITGM_VERSION, progress: progressConfig = null }) {
   if (running) throw new Error('a CITGM run is already active in this browser page');
   if (!module || typeof module !== 'string') throw new TypeError('module is required');
   running = true;
@@ -319,6 +320,10 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
   const controller = new AbortController();
   const timeout = Number(timeoutMs) > 0 ? Number(timeoutMs) : 15 * 60 * 1000;
   const runId = `citgm-${Date.now()}`;
+  const progressReporter = createProgressReporter({
+    binding: progressConfig?.binding,
+    runId,
+  });
   const progress = {
     bootstrap: { events: 0, phases: {}, last: null },
     preload: { events: 0, phases: {}, last: null },
@@ -326,14 +331,20 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
   const networkEvents = [];
   let child = null;
   let timer = null;
+  let livenessTimer = null;
 
   const recordProgress = (target, event) => {
     target.events += 1;
     target.phases[event.phase] = (target.phases[event.phase] || 0) + 1;
-    target.last = { phase: event.phase, name: event.name || null };
+    target.last = { phase: event.phase };
+    progressReporter.emit(target === progress.bootstrap ? 'bootstrap' : 'preload', `npm-${event.phase}`, {
+      events: target.events,
+    });
   };
 
   try {
+    progressReporter.emit('lifecycle', 'started');
+    progressReporter.emit('setup', 'runtime-reset-started');
     await runtime.reset({
       runId,
       variant: 'v22',
@@ -343,6 +354,7 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       isolation: 'worker',
       proxy: { mode: 'proxy', enabled: true, capability: true, adapter: browserProxyAdapter },
     });
+    progressReporter.emit('setup', 'runtime-reset-complete');
     await runtime.mount({
       '/node/node_modules/.bin/node': NODE_BIN,
       '/node/node_modules/.bin/npm': NPM_BIN,
@@ -362,6 +374,7 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     });
     const precacheUsed = await npmCache.loadArtifact(citgmVersion, module, registry);
     timer = setTimeout(() => {
+      progressReporter.emit('lifecycle', 'timeout', { timedOut: true });
       controller.abort();
       void child?.kill();
     }, timeout);
@@ -370,6 +383,8 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       cwd: '/node',
       onProgress: (event) => recordProgress(progress.bootstrap, event),
     });
+    await progressReporter.flush();
+    progressReporter.emit('setup', 'citgm-install-complete', { events: progress.bootstrap.events });
 
     let preloadSummary;
     {
@@ -395,6 +410,8 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       });
       preloadSummary = { packages: preload.packages.length, files: preload.totalFiles };
     }
+    await progressReporter.flush();
+    progressReporter.emit('setup', 'dependency-preload-complete', { events: progress.preload.events });
     await runtime.mount({});
 
     const processArgv = ['node', CITGM_ENTRY, ...args, module];
@@ -407,10 +424,22 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
         timeout,
         npmCache: npmCacheSnapshot(npmCache),
         processArgv,
-        onNetwork: (event) => networkEvents.push(event),
+        onNetwork: (event) => {
+          networkEvents.push(event);
+          progressReporter.emit('execution', 'network-activity', { events: networkEvents.length });
+        },
+        onStdout: (value) => progressReporter.output('stdout', value),
+        onStderr: (value) => progressReporter.output('stderr', value),
       },
     );
+    progressReporter.emit('execution', 'child-started');
+    livenessTimer = setInterval(() => {
+      const state = child?.state || child?._worker?.state;
+      if (state === 'running') progressReporter.emit('execution', 'child-running');
+    }, 5000);
     const exitCode = await child.exit;
+    await progressReporter.flush();
+    progressReporter.emit('lifecycle', 'completed', { code: exitCode ?? null });
     await Promise.resolve();
     const [stdout, stderr] = await Promise.all([child.stdoutText(), child.stderrText()]);
     return {
@@ -428,6 +457,7 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       networkEvents,
     };
   } catch (error) {
+    progressReporter.emit('lifecycle', 'failed', { code: error?.code || 'ERR_CITGM_RUN' });
     return {
       module,
       citgmVersion,
@@ -442,6 +472,8 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     };
   } finally {
     clearTimeout(timer);
+    clearInterval(livenessTimer);
+    await progressReporter.flush();
     running = false;
   }
 }

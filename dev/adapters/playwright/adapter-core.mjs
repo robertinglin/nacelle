@@ -323,7 +323,7 @@ export async function collectBundle(request) {
   };
 }
 
-export async function createAdapter() {
+export async function createAdapter({ onProgress = null } = {}) {
   const browserName = process.env.BNH_BROWSER || 'chromium';
   if (!browserTypes[browserName]) {
     throw new Error(`unsupported BNH_BROWSER=${browserName}; expected chromium, firefox, or webkit`);
@@ -334,6 +334,7 @@ export async function createAdapter() {
   let reusablePage = null;
   let reusablePageReady = false;
   let reusableBindingInstalled = false;
+  let reusableProgressBindingInstalled = false;
   let activeBundle = null;
   let server = null;
   let serverURL = null;
@@ -431,6 +432,7 @@ export async function createAdapter() {
         reusablePage = null;
         reusablePageReady = false;
         reusableBindingInstalled = false;
+        reusableProgressBindingInstalled = false;
       }
       context = await browser.newContext();
       page = await context.newPage();
@@ -439,6 +441,7 @@ export async function createAdapter() {
         reusablePage = page;
         reusablePageReady = false;
         reusableBindingInstalled = false;
+        reusableProgressBindingInstalled = false;
       }
     }
     const consoleLines = [];
@@ -456,6 +459,12 @@ export async function createAdapter() {
       if (reusePage) reusableBindingInstalled = true;
     } else {
       activeBundle = bundle;
+    }
+    if (onProgress && (!reusePage || !reusableProgressBindingInstalled)) {
+      await page.exposeBinding('__bnhReportProgress', async (_source, event) => {
+        try { onProgress(event); } catch { /* progress cannot affect test execution */ }
+      });
+      if (reusePage) reusableProgressBindingInstalled = true;
     }
     let discardPage = false;
     try {
@@ -507,6 +516,7 @@ export async function createAdapter() {
           bundleBytes: bundle.totalBytes,
           omittedFiles: bundle.omitted,
         },
+        progress: onProgress ? { binding: '__bnhReportProgress' } : null,
       };
       const bridgeResult = await page.evaluate(async (input) => {
         const bridge = globalThis.__BROWSER_NODE_HARNESS__;
@@ -571,6 +581,7 @@ export async function createAdapter() {
           reusablePage = null;
           reusablePageReady = false;
           reusableBindingInstalled = false;
+          reusableProgressBindingInstalled = false;
         }
       }
     }
@@ -605,6 +616,7 @@ export async function createAdapter() {
       reusablePage = null;
       reusablePageReady = false;
       reusableBindingInstalled = false;
+      reusableProgressBindingInstalled = false;
     }
     await browser.close();
   }

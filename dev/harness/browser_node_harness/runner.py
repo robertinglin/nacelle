@@ -8,7 +8,7 @@ import secrets
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Callable, Sequence
 
 from .config import CommandConfig, HarnessConfig
 from .fingerprint import failure_fingerprint
@@ -290,6 +290,7 @@ class TestRunner:
         iteration: int = 0,
         attempt_id: str = "",
         pool_size: int = 1,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> TestResult:
         nonce = secrets.token_hex(6)
         request_path = self.requests_dir / f"{run_id}-{nonce}.request.json"
@@ -346,7 +347,7 @@ class TestRunner:
         if spec.protocol == "jsonl":
             pool, argv, cwd = self._ensure_jsonl_pool(spec, worktree, mapping, pool_size)
             raw_payload, adapter_noise, process_duration_ms, process_timed_out = pool.call(
-                request, spec.timeout_seconds + 5
+                request, spec.timeout_seconds + 5, on_progress=on_progress
             )
             if raw_payload is not None:
                 payload = raw_payload
@@ -362,6 +363,7 @@ class TestRunner:
                 env=env,
                 timeout_seconds=spec.timeout_seconds + 5,
                 max_output_chars=spec.max_output_chars,
+                on_progress=on_progress,
             )
             process_stdout = process.stdout
             process_stderr = process.stderr
@@ -526,6 +528,7 @@ class TestRunner:
         iteration: int,
         attempt_id: str = "",
         concurrency: int = 1,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[TestResult]:
         if not tests:
             return []
@@ -555,6 +558,7 @@ class TestRunner:
                         iteration=iteration,
                         attempt_id=attempt_id,
                         pool_size=max(1, concurrency),
+                        on_progress=on_progress,
                     ): test.path
                     for test in batch
                 }

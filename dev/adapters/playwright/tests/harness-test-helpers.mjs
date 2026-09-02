@@ -18,6 +18,7 @@ export const test = base.extend({
   harnessPage: async ({ page }, use, testInfo) => {
     const entry = `/node/.bnh-playwright-tests/${testInfo.testId}.js`;
     let files = new Map();
+    const progressEvents = [];
     await page.exposeBinding('__bnhReadFile', async (_source, requestedPath) => {
       const value = files.get(requestedPath);
       if (value === undefined) throw new Error(`unexpected manifest path: ${requestedPath}`);
@@ -26,6 +27,9 @@ export const test = base.extend({
         encoding: 'base64',
         data: bytes.toString('base64'),
       };
+    });
+    await page.exposeBinding('__bnhReportProgress', async (_source, event) => {
+      progressEvents.push(event);
     });
     await page.goto(browserRuntimeURL, { waitUntil: 'domcontentloaded' });
     await page.evaluate(() => {
@@ -68,6 +72,7 @@ export const test = base.extend({
               bundleBytes: new TextEncoder().encode(sourceText).byteLength,
               omittedFiles: [],
             },
+            progress: { binding: '__bnhReportProgress' },
           });
         }, {
           entryPath,
@@ -81,6 +86,7 @@ export const test = base.extend({
           variant,
         });
       },
+      progressEvents,
     });
   },
 });

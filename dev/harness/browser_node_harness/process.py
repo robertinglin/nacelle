@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -40,6 +41,7 @@ _BASE_ENV_KEYS = {
     "LC_ALL",
     "TERM",
 }
+_PROGRESS_PREFIX = "BNH_PROGRESS "
 
 
 class MissingPlaceholder(KeyError):
@@ -90,6 +92,7 @@ def run_process(
     stdin_text: str | None = None,
     max_output_chars: int = 80_000,
     on_output: Callable[[str, str], None] | None = None,
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
     stop_requested: Callable[[], str | None] | None = None,
     on_started: Callable[[int], None] | None = None,
 ) -> ProcessResult:
@@ -116,6 +119,18 @@ def run_process(
 
     def read_output(pipe: Any, stream: str, chunks: list[str]) -> None:
         for line in iter(pipe.readline, ""):
+            if stream == "stderr" and line.startswith(_PROGRESS_PREFIX):
+                try:
+                    progress = json.loads(line[len(_PROGRESS_PREFIX) :].rstrip("\r\n"))
+                except json.JSONDecodeError:
+                    progress = None
+                if isinstance(progress, dict) and progress.get("type") == "progress":
+                    if on_progress is not None:
+                        try:
+                            on_progress(progress)
+                        except Exception:
+                            pass
+                    continue
             chunks.append(line)
             if on_output is not None:
                 try:

@@ -10,6 +10,28 @@ from browser_node_harness.process import run_process
 
 
 class ProcessTests(unittest.TestCase):
+    def test_filters_and_delivers_progress_without_changing_process_output(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            progress: list[dict[str, object]] = []
+            result = run_process(
+                [
+                    sys.executable,
+                    "-c",
+                    "import json, sys, time; "
+                    "print('BNH_PROGRESS ' + json.dumps({'type': 'progress', 'phase': 'execution', 'event': 'child-started'}), file=sys.stderr, flush=True); "
+                    "print('BNH_PROGRESS candidate output', flush=True); "
+                    "time.sleep(.05); print('real output', flush=True)",
+                ],
+                cwd=Path(raw),
+                env=os.environ,
+                timeout_seconds=2,
+                on_progress=progress.append,
+            )
+
+            self.assertEqual(result.stdout, "BNH_PROGRESS candidate output\nreal output\n")
+            self.assertEqual(result.stderr, "")
+            self.assertEqual(progress[0]["event"], "child-started")
+
     def test_streams_output_and_honors_stop_request(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             output: list[tuple[str, str]] = []

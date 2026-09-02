@@ -2,8 +2,13 @@
 import readline from 'node:readline';
 import process from 'node:process';
 import { createAdapter, executeSafely } from './adapter-core.mjs';
+import { formatProgressLine } from './progress-protocol.mjs';
 
-const adapter = await createAdapter();
+const adapter = await createAdapter({
+  onProgress(event) {
+    try { process.stderr.write(formatProgressLine(event)); } catch { /* diagnostics cannot affect the request */ }
+  },
+});
 const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 
 async function shutdown() {

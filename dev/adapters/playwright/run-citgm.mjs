@@ -4,6 +4,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { spawn } from 'node:child_process';
 import { firefox, chromium } from 'playwright';
+import { formatProgressLine } from './progress-protocol.mjs';
 
 const adapterRoot = path.dirname(new URL(import.meta.url).pathname);
 const browserTypes = { chromium, firefox };
@@ -101,12 +102,16 @@ async function main() {
       page.setDefaultTimeout(0);
       await page.goto(url, { waitUntil: 'domcontentloaded' });
       await page.waitForFunction(() => typeof globalThis.__NACELLE_CITGM__?.run === 'function');
-      process.stdout.write(`Preloading CITGM ${options.citgmVersion} and ${options.module} package data in ${options.browserName}...\n`);
+      await page.exposeBinding('__bnhReportProgress', async (_source, event) => {
+        try { process.stderr.write(formatProgressLine(event)); } catch { /* diagnostics cannot affect the run */ }
+      });
+      process.stdout.write('Starting browser-side CITGM execution...\n');
       const result = await page.evaluate((request) => globalThis.__NACELLE_CITGM__.run(request), {
         module: options.module,
         args: options.citgmArgs,
         timeoutMs: options.timeoutMs,
         citgmVersion: options.citgmVersion,
+        progress: { binding: '__bnhReportProgress' },
       });
       if (result.stdout) process.stdout.write(result.stdout);
       if (result.stderr) process.stderr.write(result.stderr);

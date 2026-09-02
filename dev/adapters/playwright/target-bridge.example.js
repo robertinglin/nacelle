@@ -2,6 +2,7 @@
 // Keep this page-side layer thin; target projects extend the runtime library.
 import { createRuntime } from './runtime.js';
 import { resolveNodeVersionProfile } from './versions/index.js';
+import { createProgressReporter } from './progress-protocol.mjs';
 
 function decodeBase64(data) {
   const binary = atob(data);
@@ -106,9 +107,14 @@ globalThis.__BROWSER_NODE_HARNESS__ = {
     let runtime = null;
     let timedOut = false;
     let timeoutTimer;
+    let livenessTimer;
 
     const runtimeContext = { env, variant, metadata, signal: controller.signal };
     const runId = String(request.context?.run_id || request.metadata?.runId || `browser-${Date.now()}`);
+    const progress = createProgressReporter({
+      binding: request.progress?.binding,
+      runId,
+    });
     runtimeContext.runId = runId;
     runtimeContext.capabilities = request.capabilities;
     runtimeContext.proxy = request.proxy;
@@ -120,29 +126,64 @@ globalThis.__BROWSER_NODE_HARNESS__ = {
     const deadline = new Promise((resolve) => {
       timeoutTimer = setTimeout(async () => {
         timedOut = true;
+        progress.emit('lifecycle', 'timeout', { timedOut: true });
         controller.abort();
         void stopChild();
         resolve({ timedOut: true });
       }, timeoutMs);
     });
     const execute = (async () => {
+      progress.emit('lifecycle', 'started');
       runtime = runtimeFor(variant);
-      if (controller.signal.aborted) return { exitCode: null, cancelled: true };
+      if (controller.signal.aborted) {
+        progress.emit('lifecycle', 'cancelled');
+        return { exitCode: null, cancelled: true };
+      }
+      progress.emit('setup', 'reset-started');
       await runtime.reset(runtimeContext);
-      if (controller.signal.aborted) return { exitCode: null, cancelled: true };
+      progress.emit('setup', 'reset-complete');
+      if (controller.signal.aborted) {
+        progress.emit('lifecycle', 'cancelled');
+        return { exitCode: null, cancelled: true };
+      }
+      progress.emit('setup', 'materialize-started', { files: request.files?.manifest?.length || 0 });
       const files = await materialize(request.files, request.metadata?.sourceSha256 || '');
-      if (controller.signal.aborted) return { exitCode: null, cancelled: true };
+      progress.emit('setup', 'materialize-complete', { files: Object.keys(files).length });
+      if (controller.signal.aborted) {
+        progress.emit('lifecycle', 'cancelled');
+        return { exitCode: null, cancelled: true };
+      }
+      progress.emit('setup', 'mount-started');
       await runtime.mount(files, runtimeContext);
-      if (controller.signal.aborted) return { exitCode: null, cancelled: true };
+      progress.emit('setup', 'mount-complete');
+      if (controller.signal.aborted) {
+        progress.emit('lifecycle', 'cancelled');
+        return { exitCode: null, cancelled: true };
+      }
       child = await runtime.spawn(
         ['node', ...(request.flags || []), request.entry],
-        { cwd: '/node', env, variant, metadata, signal: controller.signal },
+        {
+          cwd: '/node',
+          env,
+          variant,
+          metadata,
+          signal: controller.signal,
+          onStdout: (value) => progress.output('stdout', value),
+          onStderr: (value) => progress.output('stderr', value),
+        },
       );
+      progress.emit('execution', 'child-started');
+      livenessTimer = setInterval(() => {
+        const state = child?.state || child?._worker?.state;
+        if (state === 'running') progress.emit('execution', 'child-running');
+      }, 5000);
       if (timedOut) {
         await stopChild();
         return { exitCode: null, stdout: '', stderr: '' };
       }
       const result = await readChild(child);
+      await progress.flush();
+      progress.emit('lifecycle', 'completed', { code: result.exitCode ?? null });
       return { ...result, structuredResult: child.structuredResult };
     })();
 
@@ -158,7 +199,7 @@ globalThis.__BROWSER_NODE_HARNESS__ = {
           stderr: partial.stderr,
           timedOut: true,
           runResult: failureResult(runId, 'shutdown', Object.assign(new Error('browser run timed out'), { code: 'ERR_RUN_TIMEOUT' }), 'timed_out'),
-              details: { runtimeVersion: runtime ? runtime.version : null, variant, metadata, tty_supported: false },
+          details: { runtimeVersion: runtime ? runtime.version : null, variant, metadata, tty_supported: false },
         };
       }
       const runResult = result.structuredResult || failureResult(runId, 'running', new Error('browser runtime returned no structured result'));
@@ -171,6 +212,7 @@ globalThis.__BROWSER_NODE_HARNESS__ = {
             details: { runtimeVersion: runtime ? runtime.version : null, variant, metadata, tty_supported: false },
       };
     } catch (error) {
+      progress.emit('lifecycle', 'failed', { code: error?.code || 'ERR_BROWSER_RUNTIME' });
       const phase = error?.code === 'ERR_CAPABILITY_DENIED' || error?.code === 'ERR_INVALID_CAPABILITY'
         ? 'setup'
         : 'launch';
@@ -178,6 +220,8 @@ globalThis.__BROWSER_NODE_HARNESS__ = {
       return { exitCode: null, stdout: '', stderr: String(error?.stack || error), timedOut: false, runResult, details: { runtimeVersion: runtime ? runtime.version : null, variant, metadata, tty_supported: false } };
     } finally {
       clearTimeout(timeoutTimer);
+      clearInterval(livenessTimer);
+      await progress.flush();
     }
   },
 };

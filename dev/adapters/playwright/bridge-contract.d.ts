@@ -52,6 +52,25 @@ export interface NacelleHarnessRequest {
     variant?: string;
     [key: string]: unknown;
   };
+  progress?: {
+    binding: '__bnhReportProgress';
+  } | null;
+}
+
+export interface NacelleHarnessProgressEvent {
+  schemaVersion: 1;
+  type: 'progress';
+  runId: string;
+  sequence: number;
+  phase: string;
+  event: string;
+  stream?: 'stdout' | 'stderr';
+  bytes?: number;
+  chunks?: number;
+  events?: number;
+  files?: number;
+  code?: number | null | string;
+  timedOut?: boolean;
 }
 
 export interface NacelleHarnessRuntimeContext {

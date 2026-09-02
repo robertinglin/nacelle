@@ -3,12 +3,17 @@ import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { createAdapter, executeSafely } from './adapter-core.mjs';
+import { formatProgressLine } from './progress-protocol.mjs';
 
 const raw = process.argv[2] || process.env.BNH_REQUEST_FILE;
 if (!raw) throw new Error('request JSON path is required');
 const requestPath = path.resolve(raw);
 const request = JSON.parse(await readFile(requestPath, 'utf8'));
-const adapter = await createAdapter();
+const adapter = await createAdapter({
+  onProgress(event) {
+    try { process.stderr.write(formatProgressLine(event)); } catch { /* diagnostics cannot affect the request */ }
+  },
+});
 try {
   const output = await executeSafely(adapter, request);
   await writeFile(request.paths.result, JSON.stringify(output), 'utf8');

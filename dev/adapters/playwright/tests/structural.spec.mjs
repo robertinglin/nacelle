@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { expect, test } from 'playwright/test';
+import { createProgressReporter } from '../progress-protocol.mjs';
 
 const root = resolve(import.meta.dirname, '..', '..', '..');
 const adapterRoot = resolve(root, 'adapters/playwright');
@@ -19,6 +20,8 @@ test.describe('browser runtime test contracts', () => {
     expect(contract).toContain('exitCode: number | null');
     expect(contract).toContain('timedOut?: boolean');
     expect(contract).toContain('expected?:');
+    expect(contract).toContain("binding: '__bnhReportProgress'");
+    expect(contract).toContain("type: 'progress'");
   });
 
   test('requires reset, mount, spawn, stream capture, timeout kill, and runtime version details', async () => {
@@ -42,7 +45,38 @@ test.describe('browser runtime test contracts', () => {
     expect(adapter).toContain('return await bridge.run(input)');
     expect(adapter).toContain('page.exposeBinding(\'__bnhReadFile\'');
     expect(adapter).toContain('expected: request.expected || null');
+    expect(adapter).toContain("page.exposeBinding('__bnhReportProgress'");
+    expect(adapter).toContain("progress: onProgress ? { binding: '__bnhReportProgress' }");
     expect(adapter).not.toContain('spawn(process.execPath');
+  });
+
+  test('uses a bounded, candidate-output-free progress protocol', async () => {
+    const progress = await source('adapters/playwright/progress-protocol.mjs');
+    expect(progress).toContain("export const PROGRESS_PREFIX = 'BNH_PROGRESS '");
+    expect(progress).toContain('const DEFAULT_MAX_PENDING = 64');
+    expect(progress).toContain("event === 'output-activity'");
+    expect(progress).not.toContain('testPath');
+    expect(progress).not.toContain('packageName');
+  });
+
+  test('coalesces burst activity and delivers progress in report order', async () => {
+    const received = [];
+    globalThis.__testProgressBinding = async (event) => {
+      received.push(event);
+    };
+    try {
+      const reporter = createProgressReporter({ binding: '__testProgressBinding', runId: 'run-1' });
+      reporter.emit('lifecycle', 'started');
+      for (let count = 1; count <= 100; count += 1) {
+        reporter.emit('bootstrap', 'npm-installed', { events: count });
+      }
+      await reporter.flush();
+      expect(received).toHaveLength(2);
+      expect(received[1]).toMatchObject({ phase: 'bootstrap', event: 'npm-installed', events: 100 });
+      expect(received.map((event) => event.sequence)).toEqual([1, 2]);
+    } finally {
+      delete globalThis.__testProgressBinding;
+    }
   });
 
   test('covers every shared primitive family in the source contracts', async () => {

@@ -23,6 +23,26 @@ test.describe('browser runtime bridge and core primitives', () => {
     expect(result.stderr).toContain('browser stderr');
   });
 
+  test('reports live generic lifecycle and output activity without candidate text', async ({ harnessPage }) => {
+    const start = harnessPage.progressEvents.length;
+    const candidateText = 'candidate-output-must-stay-out-of-progress';
+    const result = await harnessPage.run(`
+      process.stdout.write(${JSON.stringify(candidateText)});
+    `);
+
+    await expectPass(expect, result);
+    const progress = harnessPage.progressEvents.slice(start);
+    expect(progress.some((event) => event.phase === 'setup' && event.event === 'mount-complete')).toBe(true);
+    expect(progress.some((event) => (
+      event.phase === 'execution'
+      && event.event === 'output-activity'
+      && event.stream === 'stdout'
+      && event.bytes >= candidateText.length
+    ))).toBe(true);
+    expect(progress.at(-1)).toMatchObject({ phase: 'lifecycle', event: 'completed', code: 0 });
+    expect(JSON.stringify(progress)).not.toContain(candidateText);
+  });
+
   test('keeps Buffer arrays and assert predicates Node-compatible', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       (() => {

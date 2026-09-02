@@ -497,6 +497,7 @@ export async function createAdapter({ onProgress = null } = {}) {
       const bridgeRequest = {
         schemaVersion: 1,
         entry: bundle.entry,
+        browser: browserName,
         capabilities: request.capabilities,
         proxy: request.proxy,
         fixtures: request.fixtures,

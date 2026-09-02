@@ -26,6 +26,24 @@ export function createProgressReporter({ binding, runId, maxPending = DEFAULT_MA
   const activityTimers = new Set();
   let sequence = 0;
   let draining = null;
+  let lastCounters = null;
+
+  function monotonicCounters(candidate) {
+    if (!candidate || typeof candidate !== 'object') return candidate;
+    const merge = (left, right) => {
+      if (!left || typeof left !== 'object') return right;
+      if (!right || typeof right !== 'object') return left;
+      const result = { ...left };
+      for (const [key, value] of Object.entries(right)) {
+        if (Number.isFinite(value) && Number.isFinite(result[key])) result[key] = Math.max(result[key], value);
+        else if (value && typeof value === 'object') result[key] = merge(result[key], value);
+        else if (value !== undefined) result[key] = value;
+      }
+      return result;
+    };
+    lastCounters = merge(lastCounters, candidate);
+    return lastCounters;
+  }
 
   function reportable() {
     return Boolean(bindingName && typeof globalThis[bindingName] === 'function');
@@ -33,6 +51,7 @@ export function createProgressReporter({ binding, runId, maxPending = DEFAULT_MA
 
   function push(payload) {
     const previous = queue.at(-1);
+    if (payload.counters) payload.counters = monotonicCounters(payload.counters);
     payload.sequence = ++sequence;
     if (payload.event === 'output-activity'
       && previous?.event === payload.event
@@ -59,6 +78,9 @@ export function createProgressReporter({ binding, runId, maxPending = DEFAULT_MA
     }
     for (const key of ['events', 'files']) {
       if (Number.isFinite(payload[key])) previous[key] = Math.max(previous[key] || 0, payload[key]);
+    }
+    for (const key of ['stage', 'childActive', 'counters']) {
+      if (payload[key] !== undefined) previous[key] = payload[key];
     }
     return previous;
   }
@@ -110,11 +132,12 @@ export function createProgressReporter({ binding, runId, maxPending = DEFAULT_MA
     emit(phase, event, fields = {}) {
       enqueue(phase, event, fields);
     },
-    output(stream, value) {
+    output(stream, value, fields = {}) {
       enqueue('execution', 'output-activity', {
         stream: String(stream),
         bytes: byteLength(value),
         chunks: 1,
+        ...fields,
       });
     },
     async flush() {

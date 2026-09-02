@@ -59,6 +59,17 @@ test.describe('browser runtime test contracts', () => {
     expect(progress).not.toContain('packageName');
   });
 
+  test('CITGM progress carries request metadata, stage, child identity, and counters', async () => {
+    const citgm = await source('adapters/playwright/citgm-bridge.js');
+    expect(citgm).toContain("stage: 'runtime-reset'");
+    expect(citgm).toContain('citgmVersion');
+    expect(citgm).toContain('childActive');
+    expect(citgm).toContain("'upstream-test-started'");
+    expect(citgm).toContain('processArgv');
+    expect(citgm).toContain('networkEvents');
+    expect(citgm).toContain('outputCounters');
+  });
+
   test('coalesces burst activity and delivers progress in report order', async () => {
     const received = [];
     globalThis.__testProgressBinding = async (event) => {

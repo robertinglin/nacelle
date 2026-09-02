@@ -196,6 +196,36 @@ the run is active. Events have this shape:
   sequence: number;
   phase: string;
   event: string;
+  stage?: string;
+  module?: string;
+  spec?: string;
+  citgmVersion?: string;
+  browser?: string;
+  timeoutMs?: number;
+  entry?: string;
+  command?: string;
+  argumentCount?: number;
+  label?: 'upstream-test-execution' | 'upstream-test-completion';
+  childActive?: boolean;
+  counters?: {
+    npm?: {
+      citgmInstallEvents: number;
+      candidatePreloadEvents: number;
+      citgmInstallPackages: number;
+      citgmInstallFiles: number;
+      candidatePreloadPackages: number;
+      candidatePreloadFiles: number;
+    };
+    networkEvents: number;
+    output: {
+      stdoutBytes: number;
+      stdoutChunks: number;
+      stderrBytes: number;
+      stderrChunks: number;
+      totalBytes: number;
+      totalChunks: number;
+    };
+  };
   stream?: 'stdout' | 'stderr';
   bytes?: number;
   chunks?: number;
@@ -206,9 +236,21 @@ the run is active. Events have this shape:
 }
 ```
 
-The event names and counters describe work that actually occurred (for example,
-runtime setup, child start, output activity, or completion). They are not a progress
-percentage and must not carry package names, test names, or candidate output.
+The event names and counters describe work that actually occurred. For CITGM, the
+initial `lifecycle/started` event includes the requested module/spec, CITGM version,
+browser, and timeout. `child-started` includes the fixed command identity, entry path,
+and argument count; it deliberately does not copy the argument values. `stage` is a
+bounded high-level operation such as `runtime-reset`, `citgm-install`,
+`candidate-dependency-preload`, `child-launch`, `upstream-test-execution`,
+`completion`, or `timeout`. `childActive` reflects the browser runtime's observed
+nonterminal child state, not elapsed time.
+
+The CITGM bridge also recognizes only structured `info:`/`notice:`/`citgm:` lines
+whose wording matches an allowlisted start/run/test or completion form and forwards
+only the fixed labels `upstream-test-execution` or `upstream-test-completion`. It
+never forwards arbitrary stdout/stderr text. Counters are bounded numeric telemetry;
+they are not a progress percentage and must not be used to alter the requested
+module, test path, or execution behavior.
 
 The bridge must run the test body in the browser-native runtime. Do not proxy execution to host Node, a remote machine, or a server-side container if browser-native compatibility is the target being measured.
 

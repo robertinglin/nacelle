@@ -215,6 +215,12 @@ export function parsePackageSpec(spec) {
   return { name, range: range || 'latest' };
 }
 
+export function parseNpmAlias(range) {
+  const trimmed = String(range || '').trim();
+  if (!trimmed.startsWith('npm:')) return null;
+  return parsePackageSpec(trimmed.slice(4));
+}
+
 /**
  * Persistent IndexedDB and in-memory cache for NPM package metadata and tarball archives.
  */
@@ -585,6 +591,7 @@ export class BrowserNpm {
     lifecycleScripts = this.lifecycleScripts,
     limits = this.limits,
     includeDevDependencies = false,
+    materialize = true,
   } = {}) {
     let rawSpecs = packageSpecs;
     if (!rawSpecs || (Array.isArray(rawSpecs) && rawSpecs.length === 0)) {
@@ -609,12 +616,13 @@ export class BrowserNpm {
     };
 
     const dependencyLocation = (name, range, currentNodeModulesDir, currentPackageDir) => {
+      const effectiveRange = parseNpmAlias(range)?.range || range;
       let directory = currentNodeModulesDir;
       let conflict = false;
       while (directory) {
         const installedVersion = this.installedLocations.get(`${directory}/${name}`);
         if (installedVersion) {
-          if (satisfiesSemver(installedVersion, range)) return null;
+          if (satisfiesSemver(installedVersion, effectiveRange)) return null;
           conflict = true;
         }
         directory = parentNodeModulesDir(directory);
@@ -629,22 +637,33 @@ export class BrowserNpm {
       nodeModulesDir: requestedNodeModulesDir = targetNodeModules,
       parentPackageDir = null,
     }) => {
+      const alias = parseNpmAlias(range);
+      const packageName = alias?.name || name;
+      const packageRange = alias?.range || range;
       let itemNodeModulesDir = requestedNodeModulesDir;
       let locationKey = `${itemNodeModulesDir}/${name}`;
       let installedVersion = this.installedLocations.get(locationKey);
-      if (installedVersion && !satisfiesSemver(installedVersion, range) && parentPackageDir) {
+      if (installedVersion && !satisfiesSemver(installedVersion, packageRange) && parentPackageDir) {
         itemNodeModulesDir = `${parentPackageDir}/node_modules`;
         locationKey = `${itemNodeModulesDir}/${name}`;
         installedVersion = this.installedLocations.get(locationKey);
       }
-      const visitKey = `${itemNodeModulesDir}:${name}@${range}`;
-      if (visited.has(visitKey) || (installedVersion && satisfiesSemver(installedVersion, range))) return;
+      if (!installedVersion) {
+        const installedPackage = await this.readPackageJson(locationKey);
+        if (installedPackage?.version && satisfiesSemver(installedPackage.version, packageRange)) {
+          installedVersion = installedPackage.version;
+          this.installedLocations.set(locationKey, installedVersion);
+          this.installed.set(name, installedVersion);
+        }
+      }
+      const visitKey = `${itemNodeModulesDir}:${name}@${packageName}@${packageRange}`;
+      if (visited.has(visitKey) || (installedVersion && satisfiesSemver(installedVersion, packageRange))) return;
       visited.add(visitKey);
       // Platform-specific optional packages are native delivery variants in
       // the npm graph. Skip them before metadata/tarball work; Next.js will
       // select and, when needed, download its own WASM package at runtime.
-      if (isBrowserNativePackage(name, this.platform)) {
-        onProgress?.({ phase: 'optional-skipped', name, range, reason: 'browser-native-addon' });
+      if (isBrowserNativePackage(packageName, this.platform)) {
+        onProgress?.({ phase: 'optional-skipped', name, range: packageRange, reason: 'browser-native-addon' });
         return;
       }
 
@@ -653,24 +672,24 @@ export class BrowserNpm {
       let tarballBytes = null;
 
       // Check direct tarball cache by spec
-      const directTarballKey = `pkg-tarball:${name}@${range}`;
+      const directTarballKey = `pkg-tarball:${packageName}@${packageRange}`;
       const cachedDirect = await this.cache.getTarball(directTarballKey);
       if (cachedDirect) {
         tarballBytes = cachedDirect;
-        version = range === 'latest' ? '1.0.0' : range;
+        version = packageRange === 'latest' ? '1.0.0' : packageRange;
         onProgress?.({ phase: 'cache-hit-tarball', name, version, bytes: tarballBytes.byteLength });
       } else {
-        const metadata = await this.fetchPackageMetadata(name, { onProgress });
-        const resolved = this.resolveVersion(metadata, range);
+        const metadata = await this.fetchPackageMetadata(packageName, { onProgress });
+        const resolved = this.resolveVersion(metadata, packageRange);
         version = resolved.version;
         versionDoc = resolved.doc;
         if (optional && !packageSupportsPlatform(versionDoc, this.platform, this.arch, this.libc)) {
-          onProgress?.({ phase: 'optional-skipped', name, range, reason: 'platform-mismatch' });
+          onProgress?.({ phase: 'optional-skipped', name, range: packageRange, reason: 'platform-mismatch' });
           return;
         }
         const tarballUrl = versionDoc?.dist?.tarball;
-        if (!tarballUrl) throw new Error(`Missing tarball URL for ${name}@${version}`);
-        tarballBytes = await this.fetchTarball(tarballUrl, { name, version, integrity: versionDoc?.dist?.integrity, onProgress });
+        if (!tarballUrl) throw new Error(`Missing tarball URL for ${packageName}@${version}`);
+        tarballBytes = await this.fetchTarball(tarballUrl, { name: packageName, version, integrity: versionDoc?.dist?.integrity, onProgress });
       }
 
       onProgress?.({ phase: 'unpacking', name, version });
@@ -684,12 +703,12 @@ export class BrowserNpm {
       let pkgFilesCount = 0;
       let pkgTotalBytes = 0;
       let parsedPkgJson = null;
-      const packageFiles = {};
+      const packageFiles = materialize ? {} : null;
 
       for (const entry of entries) {
         if (entry.type === 'file' && entry.data) {
           const fileData = entry.data;
-          packageFiles[entry.path] = { data: fileData, mode: entry.mode };
+          if (packageFiles) packageFiles[entry.path] = { data: fileData, mode: entry.mode };
           pkgFilesCount += 1;
           pkgTotalBytes += fileData.byteLength;
 
@@ -706,10 +725,10 @@ export class BrowserNpm {
         onProgress?.({ phase: 'optional-skipped', name, range, reason: 'platform-mismatch' });
         return;
       }
-      Object.assign(filesToMount, packageFiles);
+      if (packageFiles) Object.assign(filesToMount, packageFiles);
 
       // Link package "bin" scripts into node_modules/.bin/
-      if (parsedPkgJson && parsedPkgJson.bin) {
+      if (materialize && parsedPkgJson && parsedPkgJson.bin) {
         const binEntries = typeof parsedPkgJson.bin === 'string'
           ? [[parsedPkgJson.name || name, parsedPkgJson.bin]]
           : Object.entries(parsedPkgJson.bin);

@@ -7365,7 +7365,7 @@ export function createRuntime({
                 prepared.source = input;
               }
               const commandName = prepared.command.split('/').pop();
-              if (commandName === 'npm') {
+              if (commandName === 'npm' || commandName === 'yarn' || commandName === 'yarnpkg') {
                 child.spawn({ file, args });
                 scope.queueMicrotask(() => child.emit('spawn'));
                 runNpmChild(prepared, ownerProcess, options).then((result) => {
@@ -8773,6 +8773,7 @@ export function createRuntime({
         }
 
         const runNpmChild = async (prepared, ownerProcess, childOptions = {}) => {
+          const yarnLinks = new Map();
           const args = prepared.commandArgs.map(String);
           const optionsWithValues = new Set([
             '--cache', '--prefix', '--registry', '--userconfig', '--loglevel', '--workspace', '-w',
@@ -9021,6 +9022,36 @@ export function createRuntime({
                 cwd: nestedOptions?.cwd || scriptCwd,
                 env: nestedOptions?.env || scriptEnv,
               }),
+              npmInstall: async ({ specs = [], cwd = scriptCwd }) => {
+                const npm = createNpm();
+                const packageJson = await npm.readPackageJson(cwd);
+                const installSpecs = specs.length
+                  ? specs
+                  : Object.entries({
+                    ...packageJson?.dependencies,
+                    ...packageJson?.devDependencies,
+                    ...packageJson?.optionalDependencies,
+                  }).map(([name, range]) => `${name}@${range}`);
+                await npm.install(installSpecs, { cwd });
+                return { code: 0 };
+              },
+              npmLink: async ({ packages = [], cwd = scriptCwd }) => {
+                const npm = createNpm();
+                const packageJson = await npm.readPackageJson(cwd);
+                if (!packages.length) {
+                  if (!packageJson?.name) return { code: 1 };
+                  yarnLinks.set(packageJson.name, cwd);
+                  return { code: 0 };
+                }
+                for (const packageName of packages) {
+                  const source = yarnLinks.get(packageName);
+                  if (!source) return { code: 1 };
+                  const destination = `${cwd.replace(/\/+$/, '')}/node_modules/${packageName}`;
+                  if (vfs.fs.existsSync(destination)) vfs.fs.rmSync(destination, { recursive: true, force: true });
+                  await vfs.fs.promises.symlink(source, destination);
+                }
+                return { code: 0 };
+              },
               runCommand: (commandOptions) => runVirtualCommand({
                 entry: commandOptions.entry,
                 argv: commandOptions.argv,

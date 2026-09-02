@@ -82,7 +82,7 @@ async function expandWords(words, context) {
 async function resolveCommand(name, context) {
   if (BUILTINS.has(name)) return { type: 'builtin', name };
   if (name === 'node' || name === 'nodejs' || name === '/browser/node') return { type: 'node', name };
-  if (name === 'npm' || name === 'npx') return { type: 'npm', name };
+  if (name === 'npm' || name === 'npx' || name === 'yarn' || name === 'yarnpkg') return { type: 'npm', name };
   if (name === 'sh' || name === 'bash' || name === '/bin/sh' || name === '/bin/bash') return { type: 'shell', name };
 
   const candidates = [];
@@ -748,15 +748,49 @@ async function runNpm(name, args, input, context, options) {
   }
   const meaningfulArgs = args.filter((arg) => !['--silent', '--loglevel=silent'].includes(arg));
   if (meaningfulArgs[0] === '--version' || meaningfulArgs[0] === '-v') return result(0, '10.0.0-browser\n');
+  const isYarn = name === 'yarn' || name === 'yarnpkg';
   const isTest = meaningfulArgs[0] === 'test';
-  if ((!['run', 'run-script'].includes(meaningfulArgs[0]) && !isTest)
-    || (!isTest && !meaningfulArgs[1])) {
-    return commandError('npm', 'only npm run is supported by the browser shell');
+  const isRun = ['run', 'run-script'].includes(meaningfulArgs[0]);
+  const isInstall = ['install', 'i', 'add'].includes(meaningfulArgs[0]);
+  if (isYarn && isInstall) {
+    if (typeof options.npmInstall !== 'function') return commandError(name, 'package installation is unavailable');
+    const specs = meaningfulArgs.slice(1).filter((arg) => !arg.startsWith('-'));
+    try {
+      return result((await options.npmInstall({
+        specs,
+        cwd: context.cwd,
+        env: context.env,
+        stdin: input,
+        signal: context.signal,
+        timeout: context.timeout,
+      }))?.code ?? 1);
+    } catch (error) {
+      return commandError(name, error.message || String(error));
+    }
+  }
+  if (isYarn && meaningfulArgs[0] === 'link') {
+    if (typeof options.npmLink !== 'function') return commandError(name, 'package linking is unavailable');
+    try {
+      return result((await options.npmLink({
+        packages: meaningfulArgs.slice(1).filter((arg) => !arg.startsWith('-')),
+        cwd: context.cwd,
+        env: context.env,
+      }))?.code ?? 1);
+    } catch (error) {
+      return commandError(name, error.message || String(error));
+    }
+  }
+  if (isYarn) {
+    if (!isTest && !meaningfulArgs[0]) return commandError(name, 'script name is required');
+  } else if ((!isRun && !isTest) || (!isTest && !meaningfulArgs[1])) {
+    return commandError(name, 'only npm run is supported by the browser shell');
   }
   if (typeof options.npmRun !== 'function') return commandError('npm', 'npm execution is unavailable');
-  const scriptName = isTest ? 'test' : meaningfulArgs[1];
+  const scriptName = isTest ? 'test' : isRun ? meaningfulArgs[1] : meaningfulArgs[0];
   const separator = meaningfulArgs.indexOf('--');
-  const scriptArgs = separator >= 0 ? meaningfulArgs.slice(separator + 1) : isTest ? [] : meaningfulArgs.slice(2);
+  const scriptArgs = separator >= 0
+    ? meaningfulArgs.slice(separator + 1)
+    : isTest ? [] : meaningfulArgs.slice(isRun ? 2 : 1);
   const stdout = [];
   const stderr = [];
   try {
@@ -779,12 +813,14 @@ async function runNpm(name, args, input, context, options) {
         context.onStderr?.(text);
       },
     });
-    const code = await child.exit;
+    const code = child && Object.prototype.hasOwnProperty.call(child, 'code')
+      ? child.code
+      : await child?.exit;
     const res = result(code ?? 1, stdout.join(''), stderr.join(''));
     if (context.onStdout || context.onStderr) res.streamed = true;
     return res;
   } catch (error) {
-    return commandError('npm', error.message || String(error));
+    return commandError(name, error.message || String(error));
   }
 }
 

@@ -152,9 +152,16 @@ class Harness:
         phase = str(event.get("phase", "unknown"))
         name = str(event.get("event", "activity"))
         fields = []
-        for key in ("stream", "bytes", "chunks", "events", "files", "code", "timedOut"):
+        for key in (
+            "stage", "module", "spec", "citgmVersion", "browser", "timeoutMs",
+            "entry", "command", "argumentCount", "label", "childActive",
+            "stream", "bytes", "chunks", "events", "files", "code", "timedOut",
+        ):
             if key in event:
                 fields.append(f"{key}={event[key]}")
+        counters = event.get("counters")
+        if isinstance(counters, dict):
+            fields.append("counters=" + json.dumps(counters, sort_keys=True, separators=(",", ":")))
         message = f"adapter progress · {phase}/{name}"
         if fields:
             message += " · " + " ".join(fields)

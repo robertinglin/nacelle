@@ -59,6 +59,13 @@ function timeoutMsFor(request) {
   return Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 120_000;
 }
 
+function byteLength(value) {
+  if (value instanceof Uint8Array) return value.byteLength;
+  if (ArrayBuffer.isView(value)) return value.byteLength;
+  if (value instanceof ArrayBuffer) return value.byteLength;
+  return new TextEncoder().encode(String(value ?? '')).byteLength;
+}
+
 function failureResult(runId, phase, error, outcome = 'failed') {
   return {
     runId,
@@ -108,6 +115,11 @@ globalThis.__BROWSER_NODE_HARNESS__ = {
     let timedOut = false;
     let timeoutTimer;
     let livenessTimer;
+    let currentStage = 'runtime-reset';
+    const outputCounters = {
+      stdout: { bytes: 0, chunks: 0 },
+      stderr: { bytes: 0, chunks: 0 },
+    };
 
     const runtimeContext = { env, variant, metadata, signal: controller.signal };
     const runId = String(request.context?.run_id || request.metadata?.runId || `browser-${Date.now()}`);
@@ -115,6 +127,39 @@ globalThis.__BROWSER_NODE_HARNESS__ = {
       binding: request.progress?.binding,
       runId,
     });
+    const childActive = () => {
+      const state = child?.state || child?._worker?.state;
+      return state === 'starting' || state === 'running';
+    };
+    const counters = () => ({
+      networkEvents: 0,
+      output: {
+        stdoutBytes: outputCounters.stdout.bytes,
+        stdoutChunks: outputCounters.stdout.chunks,
+        stderrBytes: outputCounters.stderr.bytes,
+        stderrChunks: outputCounters.stderr.chunks,
+        totalBytes: outputCounters.stdout.bytes + outputCounters.stderr.bytes,
+        totalChunks: outputCounters.stdout.chunks + outputCounters.stderr.chunks,
+      },
+    });
+    const report = (phase, event, fields = {}) => {
+      progress.emit(phase, event, {
+        stage: currentStage,
+        childActive: childActive(),
+        counters: counters(),
+        ...fields,
+      });
+    };
+    const recordOutput = (stream, value) => {
+      const target = outputCounters[stream];
+      target.bytes += byteLength(value);
+      target.chunks += 1;
+      progress.output(stream, value, {
+        stage: currentStage,
+        childActive: childActive(),
+        counters: counters(),
+      });
+    };
     runtimeContext.runId = runId;
     runtimeContext.capabilities = request.capabilities;
     runtimeContext.proxy = request.proxy;
@@ -126,38 +171,47 @@ globalThis.__BROWSER_NODE_HARNESS__ = {
     const deadline = new Promise((resolve) => {
       timeoutTimer = setTimeout(async () => {
         timedOut = true;
-        progress.emit('lifecycle', 'timeout', { timedOut: true });
+        currentStage = 'timeout';
+        report('lifecycle', 'timeout', { timedOut: true, childActive: childActive() });
         controller.abort();
         void stopChild();
         resolve({ timedOut: true });
       }, timeoutMs);
     });
     const execute = (async () => {
-      progress.emit('lifecycle', 'started');
+      report('lifecycle', 'started', {
+        stage: 'runtime-reset',
+        browser: String(request.browser || env.BNH_BROWSER || 'unknown'),
+        timeoutMs,
+        entry: request.entry,
+        childActive: false,
+      });
       runtime = runtimeFor(variant);
       if (controller.signal.aborted) {
-        progress.emit('lifecycle', 'cancelled');
+        report('lifecycle', 'cancelled');
         return { exitCode: null, cancelled: true };
       }
-      progress.emit('setup', 'reset-started');
+      report('setup', 'reset-started');
       await runtime.reset(runtimeContext);
-      progress.emit('setup', 'reset-complete');
+      report('setup', 'reset-complete');
       if (controller.signal.aborted) {
-        progress.emit('lifecycle', 'cancelled');
+        report('lifecycle', 'cancelled');
         return { exitCode: null, cancelled: true };
       }
-      progress.emit('setup', 'materialize-started', { files: request.files?.manifest?.length || 0 });
+      currentStage = 'runtime-materialize';
+      report('setup', 'materialize-started', { files: request.files?.manifest?.length || 0 });
       const files = await materialize(request.files, request.metadata?.sourceSha256 || '');
-      progress.emit('setup', 'materialize-complete', { files: Object.keys(files).length });
+      report('setup', 'materialize-complete', { files: Object.keys(files).length });
       if (controller.signal.aborted) {
-        progress.emit('lifecycle', 'cancelled');
+        report('lifecycle', 'cancelled');
         return { exitCode: null, cancelled: true };
       }
-      progress.emit('setup', 'mount-started');
+      currentStage = 'runtime-mount';
+      report('setup', 'mount-started');
       await runtime.mount(files, runtimeContext);
-      progress.emit('setup', 'mount-complete');
+      report('setup', 'mount-complete');
       if (controller.signal.aborted) {
-        progress.emit('lifecycle', 'cancelled');
+        report('lifecycle', 'cancelled');
         return { exitCode: null, cancelled: true };
       }
       child = await runtime.spawn(
@@ -168,14 +222,21 @@ globalThis.__BROWSER_NODE_HARNESS__ = {
           variant,
           metadata,
           signal: controller.signal,
-          onStdout: (value) => progress.output('stdout', value),
-          onStderr: (value) => progress.output('stderr', value),
+          onStdout: (value) => recordOutput('stdout', value),
+          onStderr: (value) => recordOutput('stderr', value),
         },
       );
-      progress.emit('execution', 'child-started');
+      currentStage = 'child-launch';
+      report('execution', 'child-started', {
+        command: 'node',
+        entry: request.entry,
+        argumentCount: 1 + (request.flags || []).length,
+        childActive: childActive(),
+      });
+      currentStage = 'upstream-test-execution';
+      report('execution', 'upstream-test-started');
       livenessTimer = setInterval(() => {
-        const state = child?.state || child?._worker?.state;
-        if (state === 'running') progress.emit('execution', 'child-running');
+        if (!controller.signal.aborted && childActive()) report('execution', 'child-running');
       }, 5000);
       if (timedOut) {
         await stopChild();
@@ -183,7 +244,8 @@ globalThis.__BROWSER_NODE_HARNESS__ = {
       }
       const result = await readChild(child);
       await progress.flush();
-      progress.emit('lifecycle', 'completed', { code: result.exitCode ?? null });
+      currentStage = 'completion';
+      report('lifecycle', 'completed', { code: result.exitCode ?? null, childActive: false });
       return { ...result, structuredResult: child.structuredResult };
     })();
 
@@ -209,10 +271,10 @@ globalThis.__BROWSER_NODE_HARNESS__ = {
         stderr: result.stderr,
         timedOut: false,
         runResult,
-            details: { runtimeVersion: runtime ? runtime.version : null, variant, metadata, tty_supported: false },
+          details: { runtimeVersion: runtime ? runtime.version : null, variant, metadata, tty_supported: false },
       };
     } catch (error) {
-      progress.emit('lifecycle', 'failed', { code: error?.code || 'ERR_BROWSER_RUNTIME' });
+      report('lifecycle', 'failed', { code: error?.code || 'ERR_BROWSER_RUNTIME' });
       const phase = error?.code === 'ERR_CAPABILITY_DENIED' || error?.code === 'ERR_INVALID_CAPABILITY'
         ? 'setup'
         : 'launch';

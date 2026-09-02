@@ -28,16 +28,38 @@ test.describe('browser runtime bridge and core primitives', () => {
     const candidateText = 'candidate-output-must-stay-out-of-progress';
     const result = await harnessPage.run(`
       process.stdout.write(${JSON.stringify(candidateText)});
+      setTimeout(() => {}, 250);
     `);
 
     await expectPass(expect, result);
     const progress = harnessPage.progressEvents.slice(start);
+    expect(progress.find((event) => event.phase === 'lifecycle' && event.event === 'started')).toMatchObject({
+      stage: 'runtime-reset',
+      browser: 'chromium',
+      timeoutMs: 10_000,
+      childActive: false,
+      counters: { networkEvents: 0 },
+    });
     expect(progress.some((event) => event.phase === 'setup' && event.event === 'mount-complete')).toBe(true);
+    const childStart = progress.find((event) => event.phase === 'execution' && event.event === 'child-started');
+    expect(childStart).toMatchObject({
+      stage: 'child-launch',
+      command: 'node',
+      childActive: true,
+    });
+    expect(childStart.entry).toMatch(/\.js$/);
+    expect(progress.some((event) => (
+      event.phase === 'execution'
+      && event.event === 'upstream-test-started'
+      && event.stage === 'upstream-test-execution'
+      && event.childActive === true
+    ))).toBe(true);
     expect(progress.some((event) => (
       event.phase === 'execution'
       && event.event === 'output-activity'
       && event.stream === 'stdout'
       && event.bytes >= candidateText.length
+      && event.counters.output.stdoutBytes >= candidateText.length
     ))).toBe(true);
     expect(progress.at(-1)).toMatchObject({ phase: 'lifecycle', event: 'completed', code: 0 });
     expect(JSON.stringify(progress)).not.toContain(candidateText);

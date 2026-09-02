@@ -112,6 +112,7 @@ async function main() {
         args: options.citgmArgs,
         timeoutMs: options.timeoutMs,
         citgmVersion: options.citgmVersion,
+        browser: options.browserName,
         progress: { binding: '__bnhReportProgress' },
       });
       if (result.stdout) process.stdout.write(result.stdout);

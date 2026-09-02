@@ -48,13 +48,14 @@ export const test = base.extend({
           envVars: { allowed: Object.keys(options.env || {}) },
           'process.env': { allowed: Object.keys(options.env || {}) },
         };
-        return await page.evaluate(async ({ entryPath, sourceText, flags, env, timeoutMs, files, capabilities, proxy, variant }) => {
+        return await page.evaluate(async ({ entryPath, sourceText, flags, env, timeoutMs, files, capabilities, proxy, variant, browser }) => {
           return await globalThis.__BROWSER_NODE_HARNESS__.run({
             schemaVersion: 1,
             entry: entryPath,
             variant,
             capabilities,
             proxy,
+            browser,
             files: {
               mode: 'playwright-binding',
               readBinding: '__bnhReadFile',
@@ -84,6 +85,7 @@ export const test = base.extend({
           capabilities,
           proxy: options.proxy,
           variant,
+          browser: options.browser || 'chromium',
         });
       },
       progressEvents,

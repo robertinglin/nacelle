@@ -148,11 +148,23 @@ function fileCandidates(base) {
   ];
 }
 
+function commonJsFileCandidates(base) {
+  return [base, `${base}.js`, `${base}.json`, `${base}${NATIVE_ADDON_EXTENSION}`];
+}
+
 function directoryCandidates(base) {
   return [
     posix.join(base, 'index.js'),
     posix.join(base, 'index.cjs'),
     posix.join(base, 'index.mjs'),
+    posix.join(base, 'index.json'),
+    posix.join(base, `index${NATIVE_ADDON_EXTENSION}`),
+  ];
+}
+
+function commonJsDirectoryCandidates(base) {
+  return [
+    posix.join(base, 'index.js'),
     posix.join(base, 'index.json'),
     posix.join(base, `index${NATIVE_ADDON_EXTENSION}`),
   ];
@@ -312,8 +324,8 @@ export function createModuleLoader({
   const isBuiltinSpecifier = (specifier) => hasBuiltin(builtinName(specifier));
 
   const fileURL = (path) => `file://${path}`;
-  const hookContext = (specifier, importer) => ({
-    conditions: ['node', 'import'],
+  const hookContext = (specifier, importer, conditions = ['node', 'import']) => ({
+    conditions,
     importAttributes: {},
     parentURL: importer.startsWith('data:') || /^[A-Za-z][A-Za-z\d+.-]*:/.test(importer)
       ? importer : fileURL(importer),
@@ -334,8 +346,8 @@ export function createModuleLoader({
     };
   };
 
-  const runResolveHooks = (specifier, importer) => {
-    const context = hookContext(specifier, importer);
+  const runResolveHooks = (specifier, importer, conditions = ['node', 'import']) => {
+    const context = hookContext(specifier, importer, conditions);
     const fallback = (nextSpecifier, nextContext) => defaultResolve(
       nextSpecifier,
       nextContext?.parentURL?.startsWith('file:')
@@ -364,9 +376,9 @@ export function createModuleLoader({
     return result;
   };
 
-  const runResolveHooksAsync = async (specifier, importer) => {
-    if (!sharedRunModuleHook) return runResolveHooks(specifier, importer);
-    const context = hookContext(specifier, importer);
+  const runResolveHooksAsync = async (specifier, importer, conditions = ['node', 'import']) => {
+    if (!sharedRunModuleHook) return runResolveHooks(specifier, importer, conditions);
+    const context = hookContext(specifier, importer, conditions);
     const fallback = (nextSpecifier, nextContext) => defaultResolve(
       nextSpecifier,
       nextContext?.parentURL?.startsWith('file:')
@@ -434,11 +446,15 @@ export function createModuleLoader({
     ? value
     : new TextDecoder().decode(value);
 
+  const packageConfigCache = new Map();
   const packageConfig = (base) => {
     const packagePath = posix.join(base, 'package.json');
     if (!hasFile(packagePath)) return undefined;
+    if (packageConfigCache.has(packagePath)) return packageConfigCache.get(packagePath);
     try {
-      return JSON.parse(sourceText(readFile(packagePath)));
+      const config = JSON.parse(sourceText(readFile(packagePath)));
+      packageConfigCache.set(packagePath, config);
+      return config;
     } catch (cause) {
       const error = new Error(`Invalid package config '${packagePath}'`);
       error.code = 'ERR_INVALID_PACKAGE_CONFIG';
@@ -479,11 +495,11 @@ export function createModuleLoader({
     return 'commonjs';
   };
 
-  const packageEntry = (base) => {
+  const packageEntry = (base, useExports = true) => {
     const packagePath = posix.join(base, 'package.json');
     if (!hasFile(packagePath)) return undefined;
     const config = packageConfig(base);
-    const exportsValue = config.exports;
+    const exportsValue = useExports ? config.exports : undefined;
     const rootExport = typeof exportsValue === 'string'
       ? exportsValue
       : exportsValue && typeof exportsValue === 'object'
@@ -628,17 +644,22 @@ export function createModuleLoader({
     throw packageError('ERR_PACKAGE_IMPORT_NOT_DEFINED', `Package import '${specifier}' is not defined`);
   };
 
-  const resolveFileOrDirectory = (base) => {
-    const file = fileCandidates(base).find((candidate) => hasFile(candidate));
+  const resolveFileOrDirectory = (
+    base,
+    useExports = true,
+    fileCandidateList = fileCandidates,
+    directoryCandidateList = directoryCandidates,
+  ) => {
+    const file = fileCandidateList(base).find((candidate) => hasFile(candidate));
     if (file) return file;
-    const entry = packageEntry(base);
+    const entry = packageEntry(base, useExports);
     if (typeof entry === 'string') {
       const target = posix.join(base, entry);
-      const packageFile = fileCandidates(target).find((candidate) => hasFile(candidate))
-        || directoryCandidates(target).find((candidate) => hasFile(candidate));
+      const packageFile = fileCandidateList(target).find((candidate) => hasFile(candidate))
+        || directoryCandidateList(target).find((candidate) => hasFile(candidate));
       if (packageFile) return packageFile;
     }
-    return directoryCandidates(base).find((candidate) => hasFile(candidate));
+    return directoryCandidateList(base).find((candidate) => hasFile(candidate));
   };
 
   const resolvePackage = (specifier, importer, conditions = ['node', 'import']) => {
@@ -660,6 +681,9 @@ export function createModuleLoader({
         }
         throw error;
       }
+      const requireConditions = conditions.includes('require') && !conditions.includes('import');
+      const fileCandidateList = requireConditions ? commonJsFileCandidates : fileCandidates;
+      const directoryCandidateList = requireConditions ? commonJsDirectoryCandidates : directoryCandidates;
       if (config?.exports !== undefined) {
         const request = subpath ? `./${subpath}` : '.';
         const exportsMap = typeof config.exports === 'string' || Array.isArray(config.exports)
@@ -677,7 +701,7 @@ export function createModuleLoader({
         throw packageError('ERR_PACKAGE_PATH_NOT_EXPORTED', `Package subpath '${request}' is not defined`);
       }
       const base = subpath ? posix.join(packageRoot, subpath) : packageRoot;
-      const resolved = resolveFileOrDirectory(base);
+      const resolved = resolveFileOrDirectory(base, false, fileCandidateList, directoryCandidateList);
       if (resolved) return resolved;
       if (directory === '/') break;
       directory = posix.dirname(directory);
@@ -748,7 +772,32 @@ export function createModuleLoader({
     // ESM resolution does not add file extensions. CommonJS resolution keeps
     // the Node-style extension and index fallbacks through require conditions.
     if (conditions.includes('import') && !posix.extname(value)) return base;
-    return resolveFileOrDirectory(base) || base;
+    return resolveFileOrDirectory(base, false) || base;
+  };
+
+  const resolveRequire = (specifier, importer = '/node/index.js') => {
+    const rawValue = String(specifier);
+    const value = rawValue.startsWith('file:') ? fileURLToPath(rawValue) : rawValue;
+    const name = builtinName(value);
+    if (hasBuiltin(name)) return value.startsWith('node:') ? `node:${name}` : name;
+    if (value.startsWith('node:')) {
+      const libraryFile = resolveInternalModule(name) || resolveNodeLibrary(name);
+      if (libraryFile) return libraryFile;
+      throw packageError('ERR_UNKNOWN_BUILTIN_MODULE', `No such built-in module: ${name}`);
+    }
+    if (value.startsWith('data:') || /^[A-Za-z][A-Za-z\d+.-]*:/.test(value)) return resolve(value, importer, ['node', 'require']);
+    if (!isPathSpecifier(value)) {
+      const resolved = resolvePackage(value, importer, ['node', 'require']);
+      if (resolved) {
+        const candidate = resolveFileOrDirectory(resolved, false, commonJsFileCandidates, commonJsDirectoryCandidates);
+        if (candidate) return candidate;
+      }
+      throw packageError('MODULE_NOT_FOUND', `Cannot find module '${value}'`);
+    }
+    const base = value.startsWith('/') ? value : posix.join(posix.dirname(importer), value);
+    const resolved = resolveFileOrDirectory(base, false, commonJsFileCandidates, commonJsDirectoryCandidates);
+    if (resolved) return resolved;
+    throw packageError('MODULE_NOT_FOUND', `Cannot find module '${value}'`);
   };
 
   const read = (specifier, importer) => {
@@ -1710,7 +1759,10 @@ export function createModuleLoader({
   return {
     cache,
     resolve,
-    resolveWithHooks: (specifier, importer) => runResolveHooks(specifier, importer),
+    resolveRequire,
+    resolveWithHooks: (specifier, importer, conditions = ['node', 'import']) => (
+      runResolveHooks(specifier, importer, conditions)
+    ),
     require: (specifier, importer, globals = {}, processOverride) => evaluate(specifier, importer, globals, processOverride),
     import: (specifier, importer = '/node/index.mjs', globals = {}, options, processOverride) => importModule(specifier, importer, globals, options, processOverride),
     syncBuiltinESMExports,

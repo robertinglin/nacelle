@@ -3051,6 +3051,19 @@ function moduleCandidates(pathname) {
     `${pathname}/index.json`, `${pathname}/index.node`];
 }
 
+// CommonJS resolution only performs the historical .js/.json/.node probes.
+// .cjs and .mjs are valid when named explicitly (including by package.json
+// "main" or "exports"), but Node does not discover them from an extensionless
+// require() request.
+function commonJsModuleCandidates(pathname) {
+  return [pathname, `${pathname}.js`, `${pathname}.json`, `${pathname}.node`,
+    `${pathname}/index.js`, `${pathname}/index.json`, `${pathname}/index.node`];
+}
+
+function commonJsFileCandidates(pathname) {
+  return [pathname, `${pathname}.js`, `${pathname}.json`, `${pathname}.node`];
+}
+
 function addonsDisabled(processObject, pathname = '') {
   return processObject?.execArgv?.some((argument) => String(argument) === '--no-addons') === true
     || String(pathname).includes('/test/addons/no-addons/');
@@ -4766,6 +4779,17 @@ export function createRuntime({
   function makeBuiltins(processObject, runtimeRequire, diagnosticsChannels, runtimeOptions, performancePrimitives, trackTask, stdout, stderr, readSource, sourcePath, runtimeFetchRef) {
     const fs = vfs.fs;
     const cjsPackageEntryCache = new Map();
+    const cjsPackageConfigCache = new Map();
+    const cjsPackageTypeCache = new Map();
+    const readCjsPackageConfig = (packageBase) => {
+      const manifest = `${packageBase}/package.json`;
+      if (!vfs.files.has(manifest)) return undefined;
+      if (cjsPackageConfigCache.has(packageBase)) return cjsPackageConfigCache.get(packageBase);
+      const source = readSource(manifest);
+      const config = JSON.parse(typeof source === 'string' ? source : new TextDecoder().decode(source));
+      cjsPackageConfigCache.set(packageBase, config);
+      return config;
+    };
     const recordPerformanceEntry = performancePrimitives.recordEntry || (() => {});
     const performanceNow = () => Number(scope.performance?.now?.()) || 0;
     const recordDnsEntry = (name, startTime, detail) => {
@@ -5560,9 +5584,9 @@ export function createRuntime({
             }
             return BUILTIN_NAMES.includes(builtinName(name))
               ? moduleApi._load(name, importer)
-              : runtimeRequire(name, importer, processObj);
+              : loadModule(esmLoader.resolveRequire(name, importer), importer, true, processObj);
           };
-          req.resolve = (name) => moduleApi._resolve ? moduleApi._resolve(name, importer) : name;
+          req.resolve = (name) => moduleApi._resolve ? moduleApi._resolve(name, importer) : esmLoader.resolveRequire(name, importer);
           req.main = moduleApi._main || null;
           req.cache = moduleApi._cache || new Map();
           req.extensions = moduleExtensions;
@@ -6839,7 +6863,7 @@ export function createRuntime({
               continue;
             }
             if (!stopOptions && argument.startsWith('-')) continue;
-            if (script === null) script = argument;
+            if (script === null && evalCode === null && !printResult) script = argument;
             else afterScript.push(argument);
           }
           const executionArgv = [executable, ...rawArgs];
@@ -7705,42 +7729,43 @@ export function createRuntime({
           const internalName = source.startsWith('node:') ? source.slice(5) : source;
           if (internalName.startsWith('internal/')) {
             const internalBase = `/node/lib/${internalName}`;
-            const internalCandidate = moduleCandidates(internalBase).find((candidate) => vfs.files.has(candidate));
+            const internalCandidate = commonJsFileCandidates(internalBase).find((candidate) => vfs.files.has(candidate));
             if (internalCandidate) return internalCandidate;
           }
           if (!source.startsWith('.') && !source.startsWith('/')) {
             const coreName = source.startsWith('node:') ? source.slice(5) : source;
-            const coreCandidate = moduleCandidates(`/node/lib/${coreName}`).find((candidate) => vfs.files.has(candidate));
+            const coreCandidate = commonJsFileCandidates(`/node/lib/${coreName}`).find((candidate) => vfs.files.has(candidate));
             if (coreCandidate) return coreCandidate;
             let directory = path.dirname(importer || '/node/index.js');
             while (true) {
               const packageBase = path.join(directory, 'node_modules', source);
-              const directCandidate = moduleCandidates(packageBase).find((candidate) => vfs.files.has(candidate));
-              if (directCandidate) return directCandidate;
+              let packageConfig;
+              try { packageConfig = readCjsPackageConfig(packageBase); } catch { packageConfig = undefined; }
+              if (packageConfig?.exports !== undefined && typeof processObj?.__bnhModuleResolve === 'function') {
+                const exported = processObj.__bnhModuleResolve(source, importer, ['node', 'require']).url;
+                const exportedPath = exported?.startsWith('file:') ? fileURLToPath(exported) : exported;
+                const exportedCandidate = typeof exportedPath === 'string'
+                  ? commonJsFileCandidates(exportedPath).find((candidate) => vfs.files.has(candidate))
+                  : undefined;
+                if (exportedCandidate) return exportedCandidate;
+              }
               if (!cjsPackageEntryCache.has(packageBase)) {
                 let packageEntry = null;
-                const packageManifest = `${packageBase}/package.json`;
-                if (vfs.files.has(packageManifest)) try {
-                  const packageSource = readSource(packageManifest);
-                  const packageConfig = JSON.parse(typeof packageSource === 'string'
-                    ? packageSource
-                    : new TextDecoder().decode(packageSource));
-                  const main = typeof packageConfig.main === 'string'
-                    ? packageConfig.main
-                    : null;
+                if (packageConfig) try {
+                  const main = typeof packageConfig.main === 'string' ? packageConfig.main : null;
                   if (main && !main.startsWith('/')) packageEntry = path.join(packageBase, main);
                 } catch { /* package directory has no readable manifest */ }
                 cjsPackageEntryCache.set(packageBase, packageEntry);
               }
               const packageEntry = cjsPackageEntryCache.get(packageBase);
               if (packageEntry) {
-                const packageCandidate = moduleCandidates(packageEntry).find((candidate) => vfs.files.has(candidate));
+                const packageCandidate = commonJsFileCandidates(packageEntry).find((candidate) => vfs.files.has(candidate));
                 if (packageCandidate) return packageCandidate;
               }
               // A package manifest's main entry takes precedence over the
               // package-root extension probes. Packages may ship an
               // index.mjs alongside a CommonJS main for require callers.
-              for (const candidate of moduleCandidates(packageBase)) {
+              for (const candidate of commonJsModuleCandidates(packageBase)) {
                 try { readSource(candidate); return candidate; } catch { /* ignore */ }
               }
               if (directory === '/' || directory === '.' || directory === '') break;
@@ -7748,8 +7773,22 @@ export function createRuntime({
             }
           }
           const base = specifier.startsWith('/') ? specifier : normalizePath(specifier, importer ? path.dirname(importer) : '/node');
-          const candidate = moduleCandidates(base).find((pathname) => vfs.files.has(pathname));
+          const candidate = commonJsFileCandidates(base).find((pathname) => vfs.files.has(pathname));
           if (candidate) return candidate;
+          let isDirectory = false;
+          try { isDirectory = vfs.fs.statSync(base).isDirectory?.() === true; } catch { /* missing path */ }
+          if (isDirectory) {
+            let packageConfig;
+            try { packageConfig = readCjsPackageConfig(base); } catch { packageConfig = undefined; }
+            if (typeof packageConfig?.main === 'string' && !packageConfig.main.startsWith('/')) {
+              const packageCandidate = commonJsFileCandidates(path.resolve(base, packageConfig.main))
+                .find((pathname) => vfs.files.has(pathname));
+              if (packageCandidate) return packageCandidate;
+            }
+            const indexCandidate = commonJsModuleCandidates(path.join(base, 'index'))
+              .find((pathname) => vfs.files.has(pathname));
+            if (indexCandidate) return indexCandidate;
+          }
           if (addonsDisabled(processObj) || isNativeAddonBuildPath(base)) return nativeAddonPath(base);
           return base;
         }
@@ -7757,18 +7796,16 @@ export function createRuntime({
           let directory = path.dirname(entryPath);
           for (;;) {
             if (directory.endsWith('/node_modules')) return 'commonjs';
-            const packagePath = path.join(directory, 'package.json');
-            if (vfs.files.has(packagePath)) {
-              try {
-                const packageSource = readSource(packagePath);
-                const packageText = typeof packageSource === 'string'
-                  ? packageSource
-                  : new TextDecoder().decode(packageSource);
-                const packageConfig = JSON.parse(packageText);
-                return packageConfig.type === 'module' ? 'module' : 'commonjs';
-              } catch (error) {
-                if (error?.code !== 'ENOENT') return 'commonjs';
+            if (cjsPackageTypeCache.has(directory)) return cjsPackageTypeCache.get(directory);
+            try {
+              const packageConfig = readCjsPackageConfig(directory);
+              if (packageConfig) {
+                const type = packageConfig.type === 'module' ? 'module' : 'commonjs';
+                cjsPackageTypeCache.set(directory, type);
+                return type;
               }
+            } catch (error) {
+              if (error?.code !== 'ENOENT') return 'commonjs';
             }
             // Unresolved specifiers ('node:nope') reach here as relative paths;
             // dirname('.') is '.', so without this guard the climb never ends.
@@ -10441,7 +10478,7 @@ export function createRuntime({
     builtins.module._main = null;
     builtins.module._resolve = (name, parent) => {
       const importer = typeof parent === 'string' ? parent : parent?.filename || entry;
-      return BUILTIN_NAMES.includes(builtinName(name)) ? name : resolveFile(name, importer, processObject);
+      return BUILTIN_NAMES.includes(builtinName(name)) ? name : esmLoader.resolveRequire(name, importer);
     };
     builtins.module._load = (name, parent) => {
       if (String(name).startsWith('file:') && String(name).endsWith('.mjs')) {
@@ -10457,7 +10494,8 @@ export function createRuntime({
       if (builtin === 'trace_events' && processObject._bnhTraceEventsUnavailable) {
         throw traceEventsUnavailableError();
       }
-      return BUILTIN_NAMES.includes(builtin) ? builtins[builtin] ?? {} : loadModule(name, importer);
+      if (BUILTIN_NAMES.includes(builtin)) return builtins[builtin] ?? {};
+      return loadModule(esmLoader.resolveRequire(name, importer), importer, true, processObject);
     };
     const streamWebApi = builtins['stream/web'];
     installBlobStreamClass(() => streamWebApi.ReadableStream);
@@ -11111,10 +11149,10 @@ export function createRuntime({
       activeModuleApi._cache = moduleCache;
       if (resolved.endsWith('.json')) module.exports = JSON.parse(text);
       else {
-        const require = (name) => loadModule(esmLoader.resolve(name, resolved, ['node', 'require']), resolved, false, processObj);
+        const require = (name) => loadModule(esmLoader.resolveRequire(name, resolved), resolved, true, processObj);
         require.resolve = (name) => BUILTIN_NAMES.includes(builtinName(name))
           ? name
-          : esmLoader.resolve(name, resolved, ['node', 'require']);
+          : esmLoader.resolveRequire(name, resolved);
         require.main = mainModule;
         require.cache = moduleCache;
         require.extensions = activeModuleApi._extensions;
@@ -11184,8 +11222,8 @@ export function createRuntime({
         (argument) => String(argument) === '--experimental-default-type=module',
       ) ? 'module' : 'commonjs',
     });
-    processObject.__bnhModuleResolve = (specifier, importer) => (
-      esmLoader.resolveWithHooks(specifier, importer)
+    processObject.__bnhModuleResolve = (specifier, importer, conditions = ['node', 'import']) => (
+      esmLoader.resolveWithHooks(specifier, importer, conditions)
     );
     processObject.__bnhModuleImport = (specifier, importer, options, ownerProcess = processObject) => {
       const release = ownerProcess?._bnhTaskTracker?.() || trackTask();

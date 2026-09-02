@@ -174,6 +174,40 @@ test('node -e resolves packages relative to its child cwd', async () => {
   assert.equal(await child.stdoutText(), 'child-cwd');
 });
 
+test('CommonJS resolution honors exports, directory main, and extension boundaries', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/app/main.cjs': `const assert = require('node:assert/strict');
+const pkg = require('pkg');
+assert.equal(pkg, 'require-target');
+assert.throws(() => require('pkg/private'), (error) => error.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED', 'unexported package subpath');
+assert.equal(require('./dir'), 'directory-main', 'relative directory package main');
+assert.throws(() => require.resolve('./only-cjs'), (error) => error.code === 'MODULE_NOT_FOUND', 'implicit cjs require.resolve');
+assert.throws(() => require('./only-cjs'), (error) => error.code === 'MODULE_NOT_FOUND', 'implicit cjs require');
+const { spawnSync } = require('node:child_process');
+const child = spawnSync('node', ['-e', 'process.stdout.write(JSON.stringify(process.argv))', '--', 'arg'], { cwd: '/node/app', encoding: 'utf8' });
+assert.equal(child.status, 0);
+assert.deepEqual(JSON.parse(child.stdout), ['node', 'arg']);
+process.stdout.write('commonjs resolver contracts completed');`,
+      '/node/app/dir/package.json': JSON.stringify({ main: 'entry.cjs' }),
+      '/node/app/dir/entry.cjs': "module.exports = 'directory-main';",
+      '/node/app/only-cjs.cjs': "module.exports = 'should-not-be-discovered';",
+      '/node/app/node_modules/pkg/package.json': JSON.stringify({
+        main: 'main.js',
+        exports: { '.': { require: './require.cjs', import: './import.mjs' }, './public': './public.js' },
+      }),
+      '/node/app/node_modules/pkg/main.js': "module.exports = 'wrong-main';",
+      '/node/app/node_modules/pkg/require.cjs': "module.exports = 'require-target';",
+      '/node/app/node_modules/pkg/import.mjs': 'export default "import-target";',
+      '/node/app/node_modules/pkg/private.js': "module.exports = 'private';",
+    },
+  });
+  const child = await node.run({ entry: '/node/app/main.cjs', cwd: '/node/app' });
+  assert.equal(await child.exit, 0, `${await child.stdoutText()}${await child.stderrText()}`);
+  assert.equal(await child.stdoutText(), 'commonjs resolver contracts completed');
+});
+
 test('output capture is bounded and reports dropped bytes without retaining the full stream', async () => {
   const output = createOutputCollector({ limits: { total: 4, stdout: 4, stderr: 4 }, tailBytes: 2 });
   output.stdout.write(new TextEncoder().encode('abcd'));

@@ -8683,7 +8683,10 @@ export function createRuntime({
         }
 
         function runPreparedESM(prepared, options, writeStdout, writeStderr) {
-          const snapshot = vfs.snapshot();
+          // Child descriptors are created in this same browser realm. VFS
+          // file buffers are replaced, never mutated in place, so sharing
+          // them avoids copying the complete mounted tree for every child.
+          const snapshot = vfs.snapshot({ copy: false });
           const files = Object.fromEntries(
             snapshot.artifacts.map(({ path, bytes }) => [path, bytes]),
           );

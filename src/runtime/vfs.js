@@ -3330,8 +3330,8 @@ export function createVfs(options = {}) {
     return (declared.length ? declared : [...files.keys()]).sort(lexicalCompare);
   }
 
-  function snapshot({ copy = true } = {}) {
-    const artifactList = artifactPaths().filter((path) => files.has(path)).map((path) => {
+  function snapshot({ copy = true, includeBackend = false } = {}) {
+    const artifactList = (includeBackend ? [] : artifactPaths()).filter((path) => files.has(path)).map((path) => {
       const bytes = files.get(path);
       return {
         path,
@@ -3339,7 +3339,7 @@ export function createVfs(options = {}) {
         size: bytes.byteLength,
       };
     });
-    return {
+    const result = {
       version: 1,
       mounts: [...mounts.values()].map((mountRecord) => ({
         path: mountRecord.path,
@@ -3350,6 +3350,14 @@ export function createVfs(options = {}) {
       artifacts: artifactList,
       files: Object.fromEntries(artifactList.map(({ path, bytes }) => [path, bytes])),
     };
+    if (includeBackend) {
+      result.backend = {
+        files: new Map(files),
+        directories: new Set(directories),
+        symlinks: new Map(symlinks),
+      };
+    }
+    return result;
   }
 
   function reset() {

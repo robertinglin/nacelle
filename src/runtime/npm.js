@@ -225,12 +225,48 @@ export function parseNpmAlias(range) {
  * Persistent IndexedDB and in-memory cache for NPM package metadata and tarball archives.
  */
 export class BrowserNpmCache {
-  constructor({ dbName = 'bnh_npm_cache', globalObject = globalThis } = {}) {
+  constructor({ dbName = 'bnh_npm_cache', globalObject = globalThis, maxUnpackedBytes = 768 * 1024 * 1024 } = {}) {
     this.dbName = dbName;
     this.globalObject = globalObject;
+    this.maxUnpackedBytes = maxUnpackedBytes;
     this.memoryMeta = new Map();
     this.memoryTarballs = new Map();
+    this.unpackedPackages = new Map();
+    this.unpackedBytes = 0;
     this.dbPromise = null;
+  }
+
+  getUnpackedPackage(name, version) {
+    const key = `${name}@${version}`;
+    const record = this.unpackedPackages.get(key);
+    if (!record) return null;
+    // Keep frequently reused package contents hot while retaining a bounded
+    // per-run cache. The entries are immutable for the lifetime of a cache.
+    this.unpackedPackages.delete(key);
+    this.unpackedPackages.set(key, record);
+    return record.entries;
+  }
+
+  setUnpackedPackage(name, version, entries) {
+    const key = `${name}@${version}`;
+    const bytes = entries.reduce((total, entry) => total + (entry.data?.byteLength || 0), 0);
+    if (!Number.isFinite(this.maxUnpackedBytes) || this.maxUnpackedBytes <= 0 || bytes > this.maxUnpackedBytes) return;
+    const previous = this.unpackedPackages.get(key);
+    if (previous) this.unpackedBytes -= previous.bytes;
+    this.unpackedPackages.delete(key);
+    this.unpackedPackages.set(key, { entries, bytes });
+    this.unpackedBytes += bytes;
+    while (this.unpackedBytes > this.maxUnpackedBytes && this.unpackedPackages.size) {
+      const oldestKey = this.unpackedPackages.keys().next().value;
+      const oldest = this.unpackedPackages.get(oldestKey);
+      this.unpackedPackages.delete(oldestKey);
+      this.unpackedBytes -= oldest.bytes;
+    }
+  }
+
+  clearUnpackedPackages() {
+    this.unpackedPackages.clear();
+    this.unpackedBytes = 0;
   }
 
   async _getDb() {
@@ -369,6 +405,7 @@ export class BrowserNpmCache {
   async clear() {
     this.memoryMeta.clear();
     this.memoryTarballs.clear();
+    this.clearUnpackedPackages();
     const db = await this._getDb();
     if (!db) return;
     try {
@@ -592,6 +629,7 @@ export class BrowserNpm {
     limits = this.limits,
     includeDevDependencies = false,
     materialize = true,
+    cacheUnpacked = true,
   } = {}) {
     let rawSpecs = packageSpecs;
     if (!rawSpecs || (Array.isArray(rawSpecs) && rawSpecs.length === 0)) {
@@ -692,13 +730,29 @@ export class BrowserNpm {
         tarballBytes = await this.fetchTarball(tarballUrl, { name: packageName, version, integrity: versionDoc?.dist?.integrity, onProgress });
       }
 
-      onProgress?.({ phase: 'unpacking', name, version });
       const pkgDir = `${itemNodeModulesDir}/${name}`;
-      const entries = await unpackTarGz(tarballBytes, {
-        stripPrefix: 'package/',
-        targetDir: pkgDir,
-        ...limits,
-      }, this.globalObject);
+      let entries = await this.cache.getUnpackedPackage(packageName, version);
+      if (entries) {
+        entries = entries.map((entry) => ({
+          ...entry,
+          path: `${pkgDir}/${entry.name}`,
+          data: entry.data?.slice?.() || entry.data,
+        }));
+        onProgress?.({ phase: 'cache-hit-unpacked', name, version });
+      } else {
+        onProgress?.({ phase: 'unpacking', name, version });
+        entries = await unpackTarGz(tarballBytes, {
+          stripPrefix: 'package/',
+          targetDir: pkgDir,
+          ...limits,
+        }, this.globalObject);
+        if (cacheUnpacked) {
+          this.cache.setUnpackedPackage(packageName, version, entries.map((entry) => ({
+            ...entry,
+            data: entry.data?.slice?.() || entry.data,
+          })));
+        }
+      }
 
       let pkgFilesCount = 0;
       let pkgTotalBytes = 0;

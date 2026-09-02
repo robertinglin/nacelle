@@ -32,6 +32,14 @@ function createRemoteNpmCache(context) {
     if (!result?.bytes) return null;
     return result.bytes instanceof Uint8Array ? result.bytes : new Uint8Array(result.bytes);
   };
+  cache.getUnpackedPackage = async (name, version) => {
+    const result = await request({ type: 'package-entries', name, version });
+    if (!result?.entries) return null;
+    return result.entries.map((entry) => ({
+      ...entry,
+      data: entry.data instanceof Uint8Array ? entry.data : entry.data ? new Uint8Array(entry.data) : entry.data,
+    }));
+  };
   return cache;
 }
 

@@ -326,6 +326,10 @@ function text(value) {
   return String(value);
 }
 
+function progressIdentity(value, limit = 128) {
+  return text(value).replace(/[^a-zA-Z0-9@._/:=-]/g, '_').slice(0, limit);
+}
+
 function byteLength(value) {
   if (value instanceof Uint8Array) return value.byteLength;
   if (ArrayBuffer.isView(value)) return value.byteLength;
@@ -374,6 +378,14 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
   const controller = new AbortController();
   const timeout = Number(timeoutMs) > 0 ? Number(timeoutMs) : 15 * 60 * 1000;
   const runId = `citgm-${Date.now()}`;
+  const childIdentity = {
+    module: progressIdentity(module),
+    spec: progressIdentity(module),
+    citgmVersion: progressIdentity(citgmVersion),
+    browser: progressIdentity(browser || 'unknown', 32),
+    command: 'node',
+    entry: CITGM_ENTRY,
+  };
   const progressReporter = createProgressReporter({
     binding: progressConfig?.binding,
     runId,
@@ -547,13 +559,16 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       },
     );
     report('execution', 'child-started', {
-      command: 'node',
-      entry: CITGM_ENTRY,
+      ...childIdentity,
+      testStage: 'citgm-runner',
       argumentCount: Math.max(0, processArgv.length - 2),
       childActive: childActive(),
     });
     currentStage = 'upstream-test-execution';
-    report('execution', 'upstream-test-started');
+    report('execution', 'upstream-test-started', {
+      ...childIdentity,
+      testStage: 'package-manager-test',
+    });
     livenessTimer = setInterval(() => {
       if (!controller.signal.aborted && childActive()) report('execution', 'child-running');
     }, 5000);

@@ -180,6 +180,10 @@ function createBrowserProxyAdapter(loadCachedResource) {
         const bytes = await npmCache.getTarball(String(request.key));
         return bytes ? { bytes } : null;
       }
+      if (request.type === 'package-entries' && request.name && request.version) {
+        const entries = npmCache.getUnpackedPackage(String(request.name), String(request.version));
+        return entries ? { entries } : null;
+      }
       return null;
     },
     resolve() {
@@ -350,6 +354,10 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
   if (running) throw new Error('a CITGM run is already active in this browser page');
   if (!module || typeof module !== 'string') throw new TypeError('module is required');
   running = true;
+  // Unpacked package contents are an ephemeral acceleration layer. Keep it
+  // scoped to this CITGM invocation so repeated runs cannot retain an
+  // unbounded second copy of the persistent tarball cache.
+  npmCache.clearUnpackedPackages();
 
   const registry = String(env.npm_config_registry || DEFAULT_REGISTRY).replace(/\/+$/, '');
   const runEnv = {
@@ -512,6 +520,7 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       nodeModulesDir: '/node/node_modules',
       includeDevDependencies: true,
       materialize: false,
+      cacheUnpacked: true,
       onProgress: (event) => recordProgress(progress.preload, event),
     });
     await progressReporter.flush();
@@ -586,6 +595,7 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     clearTimeout(timer);
     clearInterval(livenessTimer);
     await progressReporter.flush();
+    npmCache.clearUnpackedPackages();
     running = false;
   }
 }

@@ -581,6 +581,7 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     const [stdout, stderr] = await Promise.all([child.stdoutText(), child.stderrText()]);
     return {
       module,
+      runId,
       citgmVersion,
       exitCode,
       timedOut: controller.signal.aborted,
@@ -590,6 +591,10 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       precache: { used: precacheUsed, packages: npmCache.artifactManifest?.packageCount || 0 },
       install: { packages: installStats?.packages?.length || 0, files: installStats?.totalFiles || 0 },
       preload: { packages: preloadStats?.packages?.length || 0, files: preloadStats?.totalFiles || 0 },
+      output: {
+        stdout: { ...outputCounters.stdout },
+        stderr: { ...outputCounters.stderr },
+      },
       progress,
       networkEvents,
     };
@@ -597,6 +602,7 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     report('lifecycle', 'failed', { code: error?.code || 'ERR_CITGM_RUN' });
     return {
       module,
+      runId,
       citgmVersion,
       exitCode: 1,
       timedOut: controller.signal.aborted,
@@ -604,6 +610,10 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       stderr: '',
       error: { name: error.name || 'Error', message: String(error.message || error), code: error.code || null },
       precache: { used: Boolean(npmCache.artifactManifest), packages: npmCache.artifactManifest?.packageCount || 0 },
+      output: {
+        stdout: { ...outputCounters.stdout },
+        stderr: { ...outputCounters.stderr },
+      },
       progress,
       networkEvents,
     };

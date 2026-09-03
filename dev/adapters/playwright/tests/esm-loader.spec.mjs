@@ -130,4 +130,38 @@ test.describe('browser ESM loader', () => {
     await expectPass(expect, result);
     expect(result.stdout).toContain('hashbang esm completed');
   });
+
+  test('defers unknown extensions to a registered ESM loader hook', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { registerHooks } from 'node:module';
+
+      const registration = registerHooks({
+        resolve(specifier, context, nextResolve) {
+          if (specifier === './virtual.ts') {
+            return { url: 'file:///node/esm/virtual.ts', format: 'module', shortCircuit: true };
+          }
+          return nextResolve(specifier, context);
+        },
+        load(url, context, nextLoad) {
+          if (url === 'file:///node/esm/virtual.ts') {
+            return { format: 'module', source: 'export const marker = "hooked ts";', shortCircuit: true };
+          }
+          return nextLoad(url, context);
+        },
+      });
+
+      const module = await import('./virtual.ts');
+      assert.strictEqual(module.marker, 'hooked ts');
+      registration.deregister();
+      await assert.rejects(import('./unhandled.ts'), { code: 'ERR_UNKNOWN_FILE_EXTENSION' });
+      process.stdout.write('unknown extension hook completed');
+    `, {
+      entryPath: '/node/esm/loader-hook-entry.mjs',
+      files: { '/node/esm/unhandled.ts': 'export const marker = "not handled";' },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('unknown extension hook completed');
+  });
 });

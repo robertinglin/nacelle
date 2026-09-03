@@ -21,6 +21,7 @@ test.describe('browser runtime test contracts', () => {
     expect(contract).toContain('timedOut?: boolean');
     expect(contract).toContain('expected?:');
     expect(contract).toContain("binding: '__bnhReportProgress'");
+    expect(contract).toContain("binding: '__bnhRecordOutput'");
     expect(contract).toContain("type: 'progress'");
   });
 
@@ -48,6 +49,9 @@ test.describe('browser runtime test contracts', () => {
     expect(adapter).toContain("page.exposeBinding('__bnhReportProgress'");
     expect(adapter).toContain("progress: onProgress ? { binding: '__bnhReportProgress' }");
     expect(adapter).not.toContain('spawn(process.execPath');
+    const runner = await source('adapters/playwright/run-citgm.mjs');
+    expect(runner).toContain("page.exposeBinding('__bnhRecordOutput'");
+    expect(runner).toContain("output: { binding: '__bnhRecordOutput' }");
   });
 
   test('uses a bounded, candidate-output-free progress protocol', async () => {

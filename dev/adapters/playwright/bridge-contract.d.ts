@@ -56,6 +56,9 @@ export interface NacelleHarnessRequest {
   progress?: {
     binding: '__bnhReportProgress';
   } | null;
+  output?: {
+    binding: '__bnhRecordOutput';
+  } | null;
 }
 
 export interface NacelleHarnessProgressEvent {

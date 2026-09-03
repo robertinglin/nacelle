@@ -65,6 +65,36 @@ test('preserves a granted proxy adapter for an ESM child', async ({ harnessPage,
   });
 });
 
+test('transports only serializable proxy capabilities to an ESM fork child', async ({ harnessPage, page }) => {
+  await page.evaluate(() => {
+    globalThis.__BNH_PROXY_ADAPTER__ = async () => ({ status: 200, body: 'fork proxy survived' });
+  });
+  const result = await harnessPage.run(`
+    const assert = require('node:assert/strict');
+    const { fork } = require('node:child_process');
+    const child = fork('/node/proxy-fork-child.mjs');
+    let output = '';
+    child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+    child.once('close', (code, signal) => {
+      assert.strictEqual(code, 0);
+      assert.strictEqual(signal, null);
+      assert.strictEqual(output, 'fork proxy survived');
+      process.stdout.write('fork proxy transport completed');
+    });
+  `, {
+    capabilities,
+    proxy: { mode: 'proxy', enabled: true, capability: { proxy: true } },
+    files: {
+      '/node/proxy-fork-child.mjs': `
+        process.stdout.write('fork proxy survived');
+      `,
+    },
+  });
+
+  await expectPass(expect, result);
+  expect(result.stdout).toContain('fork proxy transport completed');
+});
+
 test('reports the Node-like synchronous ERR_REQUIRE_ESM boundary', async ({ harnessPage }) => {
   const result = await harnessPage.run(`
     const { spawnSync } = require('node:child_process');

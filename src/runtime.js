@@ -8984,7 +8984,26 @@ export function createRuntime({
               childExecArgv.push(String(prepared.executionArgv[++index]));
             }
           }
-          const childProxy = proxyCapability.adapter ? proxyCapability : capabilities.manifest.proxy;
+          const proxyOperations = proxyCapability.adapter
+            ? typeof proxyCapability.adapter === 'function' || typeof proxyCapability.adapter.handle === 'function'
+              ? ['request', 'connect', 'send', 'resolve', 'tls']
+              : ['request', 'connect', 'send', 'resolve', 'tls'].filter((operation) => (
+                  typeof proxyCapability.adapter[operation] === 'function'
+                ))
+            : [];
+          // A worker boundary can only receive structured-cloneable data.
+          // Keep the live adapter in the parent and expose its allowlisted
+          // operations through the existing process RPC channel.
+          const proxySelection = {
+            mode: proxyCapability.mode,
+            enabled: proxyCapability.enabled,
+            capabilityKey: proxyCapability.capabilityKey,
+            capability: proxyCapability.capability,
+            capabilityGranted: proxyCapability.capabilityGranted,
+          };
+          const childProxy = options.ipc && proxyCapability.adapter
+            ? { ...proxySelection, operations: proxyOperations, rpc: true }
+            : proxyCapability.adapter ? proxyCapability : capabilities.manifest.proxy;
           const esmDescriptor = {
             capabilities: capabilities.manifest,
             nodeVersion: resolvedProfile.id,
@@ -9033,6 +9052,7 @@ export function createRuntime({
             forceFallback: !options.ipc,
             preserveReferences: true,
             networkPort: networkChannel?.raw.port2,
+            proxyAdapter: options.ipc ? proxyCapability.adapter : undefined,
             stdout: forwardStdout,
             stderr: forwardStderr,
           });
@@ -12142,8 +12162,15 @@ export function createRuntime({
               typeof proxyCapability.adapter[operation] === 'function'
             ))
         : [];
+      const proxySelection = {
+        mode: proxyCapability.mode,
+        enabled: proxyCapability.enabled,
+        capabilityKey: proxyCapability.capabilityKey,
+        capability: proxyCapability.capability,
+        capabilityGranted: proxyCapability.capabilityGranted,
+      };
       const spawnProxy = workerIsolation && proxyCapability.adapter
-        ? { ...capabilities.manifest.proxy, operations: proxyOperations, rpc: true }
+        ? { ...proxySelection, operations: proxyOperations, rpc: true }
         : proxyCapability.adapter ? proxyCapability : capabilities.manifest.proxy;
       const childExecArgv = [];
       const valueTakingFlags = new Set(['--import', '--experimental-loader', '--loader', '--require', '--input-type']);

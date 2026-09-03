@@ -6757,7 +6757,10 @@ export function createRuntime({
             error.code = 'ERR_INVALID_ARG_TYPE';
             throw error;
           }
-          const executable = String(file || owner.execPath || '/browser/node');
+          const requestedExecutable = String(file || owner.execPath || '/browser/node');
+          const executable = requestedExecutable === 'node' || requestedExecutable === 'nodejs'
+            ? String(owner.execPath || '/browser/node')
+            : requestedExecutable;
           // This environment is copied into the in-memory browser child only.
           // The outer process.env was already assembled under the manifest, and
           // these overrides cannot reach a host subprocess or host I/O.
@@ -7146,6 +7149,11 @@ export function createRuntime({
               Object.assign(scope, previous);
             }
           };
+          const wrapOutputStream = (stream) => {
+            const emit = stream.emit.bind(stream);
+            stream.emit = (name, ...args) => runInOwnerContext(() => emit(name, ...args));
+            return stream;
+          };
           const wrapChildHandle = (handle) => {
             if (!handle || typeof handle.on !== 'function') return handle;
             const cached = childHandleCache.get(handle);
@@ -7246,8 +7254,8 @@ export function createRuntime({
           child.pid = 10000 + childSequence;
           const childInput = stdioIgnored(0) ? null : outputStream();
           const stdinSource = stdioInherited(0) ? ownerProcess.stdin : childInput;
-          child.stdout = stdioIgnored(1) || stdioInherited(1) ? null : stdoutStream;
-          child.stderr = stdioIgnored(2) || stdioInherited(2) ? null : stderrStream;
+          child.stdout = stdioIgnored(1) || stdioInherited(1) ? null : wrapOutputStream(stdoutStream);
+          child.stderr = stdioIgnored(2) || stdioInherited(2) ? null : wrapOutputStream(stderrStream);
           child.stdin = stdioIgnored(0) || stdioInherited(0) ? null : childInput;
           if (prepared.interactive && prepared.scriptPath === null && prepared.evalCode === null) {
             let input = '';
@@ -8444,7 +8452,7 @@ export function createRuntime({
               },
             });
             childProc.processObject._bnhHasPendingTasks = () => childTaskReleases.size > 0;
-            childProc.processObject._bnhTryExit = () => childProc.processObject.exit?.(0);
+            childProc.processObject._bnhTryExit = () => tryExitChild();
             childProc.processObject._bnhRunInContext = (callback) => {
               const previousProcess = scope.process;
               const previousConsole = scope.console;

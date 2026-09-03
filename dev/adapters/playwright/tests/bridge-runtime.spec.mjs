@@ -245,6 +245,88 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('forwards output and status through a package-manager child entrypoint', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('node', ['/node/yarn.js', 'test'], {
+          cwd: '/node',
+        });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(output, 'manager start\\npackage manager child ran\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/yarn.js': [
+          '#!/usr/bin/env node',
+          "const { spawn } = require('node:child_process');",
+          "process.stdout.write('manager start\\n');",
+          "const child = spawn(process.execPath, ['/node/package-manager-child.js'], { stdio: ['ignore', 'pipe', 'pipe'] });",
+          "child.stdout.on('data', (chunk) => process.stdout.write(chunk));",
+          "child.stderr.on('data', (chunk) => process.stderr.write(chunk));",
+          "child.once('exit', (code, signal) => { if (signal) process.kill(process.pid, signal); else process.exit(code); });",
+        ].join('\n'),
+        '/node/package-manager-child.js': "process.stdout.write('package manager child ran\\n');",
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('preserves piped child output and stream listener semantics', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+      const { Writable } = require('node:stream');
+
+      (async () => {
+        const child = spawn('node', ['/node/stream-child.js']);
+        let observed = '';
+        const removed = () => { observed += 'removed'; };
+        child.stdout.on('data', removed);
+        child.stdout.removeListener('data', removed);
+        child.stdout.once('data', (chunk) => { observed += chunk.toString(); });
+        const chunks = [];
+        const sink = new Writable({
+          write(chunk, _encoding, callback) {
+            chunks.push(chunk.toString());
+            callback();
+          },
+        });
+        child.stdout.pipe(sink);
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0);
+        assert.strictEqual(observed, 'piped child output\\n');
+        assert.strictEqual(chunks.join(''), 'piped child output\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/stream-child.js': "process.stdout.write('piped child output\\n');",
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
   test('runs ESM Node files from npm package scripts through the ESM lifecycle', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert');

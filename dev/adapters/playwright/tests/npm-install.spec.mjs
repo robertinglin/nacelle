@@ -261,6 +261,39 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     expect(imported.answer()).toBe(42);
   });
 
+  test('creates ESM-compatible shims for ESM package bin entries', async () => {
+    const encoder = new TextEncoder();
+    const vfs = createVfs({
+      mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }],
+    });
+    const esmBinPackage = await packTarGz([
+      {
+        path: 'package/package.json',
+        data: encoder.encode(JSON.stringify({
+          name: 'esm-bin-package',
+          version: '1.0.0',
+          type: 'module',
+          bin: 'cli.mjs',
+        })),
+      },
+      {
+        path: 'package/cli.mjs',
+        mode: 0o755,
+        data: encoder.encode("process.stdout.write('esm-bin-ran\\n');"),
+      },
+    ]);
+    const npm = new BrowserNpm({
+      vfs,
+      cache: new Map([['pkg-tarball:esm-bin-package@1.0.0', esmBinPackage]]),
+    });
+
+    await npm.install('esm-bin-package@1.0.0', { cwd: '/node' });
+
+    const shim = new TextDecoder().decode(vfs.read('/node/node_modules/.bin/esm-bin-package'));
+    expect(shim).toContain('await import("../esm-bin-package/cli.mjs");');
+    expect(shim).not.toContain('require(');
+  });
+
   test('BrowserNpm nests incompatible concurrent dependency versions', async () => {
     const encoder = new TextEncoder();
     const vfs = createVfs({

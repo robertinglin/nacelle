@@ -90,6 +90,16 @@ export function tokenizeShellScript(command) {
       continue;
     }
     if (character === '`') throw shellSyntaxError('command substitution is not supported in npm scripts');
+    if (character === '\n' || character === '\r') {
+      if (character === '\r' && source[index + 1] === '\n') index += 1;
+      if (wordStarted) {
+        pushWord();
+        tokens.push({ type: 'operator', value: ';' });
+      } else if (tokens.at(-1)?.type === 'word') {
+        tokens.push({ type: 'operator', value: ';' });
+      }
+      continue;
+    }
     if (character === '\\') {
       const next = source[index + 1];
       if (next === '\n') index += 1;

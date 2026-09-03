@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Nacelle } from '../../../../src/index.js';
+import { satisfiesSemver } from '../../../../src/runtime/npm.js';
 import { createShellProcess, runShellScript } from '../../../../src/runtime/shell.js';
 import { parseShellScript } from '../../../../src/runtime/shell-parser.js';
 
@@ -51,6 +52,35 @@ test('shell parser preserves conditional pipelines and redirections', () => {
   assert.equal(script[1].connector, '&&');
   assert.equal(script[1].commands.length, 2);
   assert.deepEqual(script[1].commands[1].redirects.map(({ operator }) => operator), ['>', '2>&1']);
+});
+
+test('shell parser treats physical newlines as command separators', () => {
+  const script = parseShellScript('echo first\r\necho second');
+  assert.equal(script.length, 2);
+  assert.deepEqual(script.map((pipeline) => pipeline.commands[0].words[0].parts[0].text), ['echo', 'echo']);
+});
+
+test('shell dot and source builtins execute in the current shell state', async () => {
+  const fs = memoryShellFs({
+    '/node/env.sh': 'export MODE=production\ncd work\n',
+    '/node/work/.keep': '',
+  });
+  const output = [];
+  const outcome = await runShellScript('. env.sh; pwd; printenv MODE', {
+    cwd: '/node',
+    env: {},
+    fs,
+    onStdout: (value) => output.push(value),
+  });
+  assert.equal(outcome.code, 0);
+  assert.deepEqual(output, ['/node/work\n', 'production\n']);
+});
+
+test('semver comparator ranges support wildcard bounds', () => {
+  assert.equal(satisfiesSemver('6.0.4', '>=5.1.6 <=6.0.x'), true);
+  assert.equal(satisfiesSemver('6.1.0', '>=5.1.6 <=6.0.x'), false);
+  assert.equal(satisfiesSemver('5.9.0', '<6.x'), true);
+  assert.equal(satisfiesSemver('6.0.0', '<6.x'), false);
 });
 
 test('shell executor handles environment, lookup, pipes, globs, and redirects', async () => {

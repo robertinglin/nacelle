@@ -9022,7 +9022,20 @@ export function createRuntime({
             }
             return { name: '', index: -1 };
           })();
-          const env = ownerProcess.env || processObject.env || {};
+          // Package managers receive the child environment assembled by
+          // prepareChild. Reading only the owner would drop child-specific
+          // npm/TMP settings and makes a nested package command observe the
+          // wrong process contract.
+          const env = prepared.env || ownerProcess.env || processObject.env || {};
+          // npm resolves its temporary directory during startup. The browser
+          // implementation does not run npm's host-side setup, so establish
+          // the standard virtual paths before emulating the child.
+          for (const key of ['npm_config_tmp', 'TMPDIR', 'TMP', 'TEMP']) {
+            const configuredPath = env[key];
+            if (typeof configuredPath === 'string' && configuredPath.startsWith('/')) {
+              vfs.fs.mkdirSync(configuredPath, { recursive: true });
+            }
+          }
           const registry = String(env.npm_config_registry || env.NPM_CONFIG_REGISTRY || 'https://registry.npmjs.org');
           if (command.name === 'config' && args[command.index + 1] === 'get') {
             const key = args[command.index + 2];
@@ -9093,6 +9106,38 @@ export function createRuntime({
               }, ownerProcess);
               const stdout = [];
               const stderr = [];
+              const complete = (code, signalValue) => ({
+                code: signalValue ? null : code ?? 1,
+                stdout: stdout.join(''),
+                stderr: stderr.join(''),
+                streamed: Boolean(stdout.length || stderr.length),
+              });
+              // A shebang launcher may itself be an ESM file (for example a
+              // package bin in a module-typed package). Preserve Node's
+              // module format at this boundary instead of forcing every
+              // direct virtual command through the CommonJS evaluator.
+              if (isRuntimeEsmModule(prepared.entryPath, prepared.executionArgv)) {
+                const processHandle = runPreparedESM(prepared, { signal, timeout, asyncLifecycle: true }, (value) => {
+                  const chunk = normalizeOutputChunk(value);
+                  stdout.push(chunk);
+                  onStdout?.(chunk);
+                }, (value) => {
+                  const chunk = normalizeOutputChunk(value);
+                  stderr.push(chunk);
+                  onStderr?.(chunk);
+                });
+                return processHandle.wait().then(
+                  (terminal) => complete(terminal.code, terminal.signal),
+                  (error) => {
+                    const message = `${error?.stack || error?.message || error}\n`;
+                    if (!stderr.length) {
+                      stderr.push(message);
+                      onStderr?.(message);
+                    }
+                    return complete(1, null);
+                  },
+                );
+              }
               const result = runPreparedSync(prepared, {
                 asyncLifecycle: true,
                 encoding: 'utf8',
@@ -9121,14 +9166,14 @@ export function createRuntime({
               };
               forwardReturnedOutput(result.stdout, stdout, onStdout);
               forwardReturnedOutput(result.stderr, stderr, onStderr);
-              const complete = (code, signalValue) => ({
+              const syncComplete = (code, signalValue) => ({
                 code: signalValue ? null : code ?? result.status ?? 1,
                 stdout: stdout.join(''),
                 stderr: stderr.join(''),
                 streamed: Boolean(stdout.length || stderr.length),
               });
               if (!result.pending || !result.process) {
-                return Promise.resolve(complete(result.status, result.signal));
+                return Promise.resolve(syncComplete(result.status, result.signal));
               }
               return new Promise((resolve) => {
                 result.process.once('exit', (code, signalValue) => {
@@ -9137,7 +9182,7 @@ export function createRuntime({
                     const finalCode = finalSignal
                       ? null
                       : (result.process.getCode?.() ?? code);
-                    resolve(complete(finalCode, finalSignal));
+                    resolve(syncComplete(finalCode, finalSignal));
                   });
                 });
               });
@@ -11923,19 +11968,21 @@ export function createRuntime({
         if (message?.type === 'bnh-artifacts') artifacts = message.artifacts || {};
       });
       const child = {
-        exit: worker.wait().then((terminal) => terminal.code),
+        exit: null,
         _worker: worker,
-        stdoutText: async () => { await worker.wait(); return new TextDecoder().decode(capabilities.output.stdoutBytes); },
-        stderrText: async () => { await worker.wait(); return new TextDecoder().decode(capabilities.output.stderrBytes); },
+        stdoutText: async () => { await terminalPromise; return new TextDecoder().decode(capabilities.output.stdoutBytes); },
+        stderrText: async () => { await terminalPromise; return new TextDecoder().decode(capabilities.output.stderrBytes); },
         structuredResult: null,
         output: capabilities.output,
         async kill() {
           try { worker.kill('SIGKILL'); } catch { /* already terminal */ }
-          await worker.wait();
+          await terminalPromise;
         },
       };
-      activeChild = child;
-      worker.wait().then((terminal) => {
+      // Publish the structured result on the same settlement chain as
+      // child.exit. Callers that await exit must not race the result cleanup
+      // callback, especially when the runner records terminal artifacts.
+      const terminalPromise = worker.wait().then((terminal) => {
         workerNetworkBridge?.close();
         if (activeChild === child) activeChild = null;
         capabilities.output.off('data', outputListener);
@@ -11960,7 +12007,10 @@ export function createRuntime({
           },
           artifacts,
         };
+        return terminal;
       });
+      child.exit = terminalPromise.then((terminal) => terminal.code);
+      activeChild = child;
       return child;
     },
     get vfs() { return vfs; },

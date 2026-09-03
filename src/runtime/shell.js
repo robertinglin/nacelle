@@ -9,9 +9,9 @@ import { resolveNodeVersionProfile } from '../versions/index.js';
 const DEFAULT_NODE_VERSION = resolveNodeVersionProfile('lts').runtimeVersion;
 
 const BUILTINS = new Set([
-  ':', '[', 'alias', 'basename', 'cat', 'cd', 'command', 'cp', 'cut', 'dirname', 'echo', 'env', 'export',
+  ':', '.', '[', 'alias', 'basename', 'cat', 'cd', 'command', 'cp', 'cut', 'dirname', 'echo', 'env', 'export',
   'false', 'find', 'grep', 'head', 'ls', 'mkdir', 'mv', 'printenv', 'printf', 'ps', 'pwd', 'realpath', 'rm',
-  'rmdir', 'sed', 'sort', 'tail', 'tee', 'test', 'touch', 'tr', 'true', 'type', 'umask', 'uniq', 'unset', 'wc', 'which',
+  'rmdir', 'sed', 'sort', 'source', 'tail', 'tee', 'test', 'touch', 'tr', 'true', 'type', 'umask', 'uniq', 'unset', 'wc', 'which',
 ]);
 
 const GLOB_PATTERN = /[*?\[\]{}()!@]/;
@@ -556,7 +556,7 @@ async function runFileUtility(name, args, input, context) {
   return null;
 }
 
-async function runBuiltin(name, args, input, context, runProgram) {
+async function runBuiltin(name, args, input, context, runProgram, options) {
   if (name === ':' || name === 'true') return result(0);
   if (name === 'false') return result(1);
   if (name === 'echo') return runEcho(args);
@@ -576,6 +576,34 @@ async function runBuiltin(name, args, input, context, runProgram) {
     shellState.previousCwd = shellState.cwd;
     shellState.cwd = pathname;
     return result(0);
+  }
+  if (name === '.' || name === 'source') {
+    const script = args[0];
+    if (!script) return commandError(name, 'filename argument required');
+    let source;
+    try { source = String(await context.fs.readFile(shellPath(script, context.cwd))); }
+    catch { return commandError(name, `${script}: No such file or directory`); }
+
+    const shellState = context.shellState || context;
+    const stdout = [];
+    const stderr = [];
+    const nested = await runShellScript(source, {
+      ...options,
+      args: args.slice(1),
+      cwd: shellState.cwd,
+      env: shellState.env,
+      fs: context.fs,
+      stdin: input,
+      signal: context.signal,
+      timeout: context.timeout,
+      onNetwork: context.onNetwork,
+      onStdout: (chunk) => stdout.push(String(chunk)),
+      onStderr: (chunk) => stderr.push(String(chunk)),
+    });
+    shellState.cwd = nested.cwd;
+    for (const key of Object.keys(shellState.env)) delete shellState.env[key];
+    Object.assign(shellState.env, nested.env);
+    return result(nested.code, stdout.join(''), stderr.join(''));
   }
   if (name === 'export') {
     const shellState = context.shellState || context;
@@ -827,7 +855,7 @@ async function runNpm(name, args, input, context, options) {
 async function runProgram(name, args, input, context, options) {
   const resolved = await resolveCommand(name, context);
   if (!resolved) return commandError(name, 'command not found', 127);
-  if (resolved.type === 'builtin') return runBuiltin(resolved.name, args, input, context, (childName, childArgs, childInput, childContext) => runProgram(childName, childArgs, childInput, childContext, options));
+  if (resolved.type === 'builtin') return runBuiltin(resolved.name, args, input, context, (childName, childArgs, childInput, childContext) => runProgram(childName, childArgs, childInput, childContext, options), options);
   if (resolved.type === 'node') return runNode(args, input, context, options);
   if (resolved.type === 'npm') return runNpm(resolved.name, args, input, context, options);
   if (resolved.type === 'shell') return runShell(resolved.name, args, input, context, options);

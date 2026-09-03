@@ -7765,9 +7765,9 @@ export function createRuntime({
               // A package manifest's main entry takes precedence over the
               // package-root extension probes. Packages may ship an
               // index.mjs alongside a CommonJS main for require callers.
-              for (const candidate of commonJsModuleCandidates(packageBase)) {
-                try { readSource(candidate); return candidate; } catch { /* ignore */ }
-              }
+              const packageRootCandidate = commonJsModuleCandidates(packageBase)
+                .find((candidate) => vfs.files.has(candidate));
+              if (packageRootCandidate) return packageRootCandidate;
               if (directory === '/' || directory === '.' || directory === '') break;
               directory = path.dirname(directory);
             }

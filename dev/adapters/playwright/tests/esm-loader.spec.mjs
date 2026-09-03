@@ -91,6 +91,76 @@ test.describe('browser ESM loader', () => {
     expect(result.stdout).toContain('package builtin completed');
   });
 
+  test('preserves conditional package imports and ESM named exports', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { marker } from 'conditional-esm-package';
+      assert.strictEqual(marker, 'node-condition');
+      process.stdout.write('conditional ESM package completed');
+    `, {
+      entryPath: '/node/conditional-entry.mjs',
+      files: {
+        '/node/node_modules/conditional-esm-package/package.json': JSON.stringify({
+          type: 'module',
+          imports: {
+            '#runtime': {
+              node: './node-runtime.js',
+              default: './default-runtime.js',
+            },
+          },
+          exports: { '.': './index.js' },
+        }),
+        '/node/node_modules/conditional-esm-package/index.js': "export { marker } from '#runtime';",
+        '/node/node_modules/conditional-esm-package/node-runtime.js': "export const marker = 'node-condition';",
+        '/node/node_modules/conditional-esm-package/default-runtime.js': "export const marker = 'default-condition';",
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('conditional ESM package completed');
+  });
+
+  test('preserves named exports through dynamic conditional ESM imports', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      const module = await import('dynamic-conditional-package');
+      assert.deepStrictEqual(module.supportsColor, { level: 0 });
+      assert.deepStrictEqual(module.supportsColorNamed, { level: 0 });
+      process.stdout.write('dynamic conditional ESM package completed');
+    `, {
+      entryPath: '/node/dynamic-conditional-entry.mjs',
+      files: {
+        '/node/node_modules/dynamic-conditional-package/package.json': JSON.stringify({
+          type: 'module',
+          imports: {
+            '#supports-color': {
+              node: './node-supports-color.js',
+              default: './browser-supports-color.js',
+            },
+          },
+          exports: './source/index.js',
+        }),
+        '/node/dynamic-conditional-entry.mjs': `
+          import assert from 'node:assert/strict';
+          const module = await import('dynamic-conditional-package');
+          assert.deepStrictEqual(module.supportsColor, { level: 0 });
+          assert.deepStrictEqual(module.supportsColorNamed, { level: 0 });
+          process.stdout.write('dynamic conditional ESM package completed');
+        `,
+        '/node/node_modules/dynamic-conditional-package/source/index.js': `
+          import supportsColor from '#supports-color';
+          const { stdout } = supportsColor;
+          export { stdout as supportsColor, stdout as supportsColorNamed };
+        `,
+        '/node/node_modules/dynamic-conditional-package/node-supports-color.js': 'export default { stdout: { level: 0 } };',
+        '/node/node_modules/dynamic-conditional-package/browser-supports-color.js': 'export default { stdout: { level: 3 } };',
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('dynamic conditional ESM package completed');
+  });
+
   test('loads a cyclic ESM graph without deadlocking URL materialization', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       import { value } from './cycle-a.mjs';

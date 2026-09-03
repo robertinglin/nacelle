@@ -15,6 +15,39 @@ function asText(value) {
   return typeof value === 'string' ? value : String(value ?? '');
 }
 
+function asBytes(value, fallback = '') {
+  if (value instanceof Uint8Array) return value;
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  return new TextEncoder().encode(asText(value ?? fallback));
+}
+
+function jsonReplacer() {
+  const seen = new WeakSet();
+  return (_key, value) => {
+    if (value instanceof Uint8Array || ArrayBuffer.isView(value)) {
+      const bytes = value instanceof Uint8Array
+        ? value
+        : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+      let binary = '';
+      for (let index = 0; index < bytes.length; index += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+      }
+      return {
+        type: 'bytes',
+        byteLength: bytes.byteLength,
+        encoding: 'base64',
+        data: typeof btoa === 'function' ? btoa(binary) : Buffer.from(bytes).toString('base64'),
+      };
+    }
+    if (value && typeof value === 'object') {
+      if (seen.has(value)) return '[Circular]';
+      seen.add(value);
+    }
+    return value;
+  };
+}
+
 export function compactForSummary(value, depth = 0) {
   if (value === null || typeof value === 'number' || typeof value === 'boolean') return value;
   if (typeof value === 'string') return value.slice(0, MAX_SUMMARY_STRING);
@@ -33,13 +66,13 @@ export function outputSummary(result = {}, lastProgressEvent = null) {
   const progressOutput = lastProgressEvent?.counters?.output || {};
   const resultOutput = result.output || {};
   const stream = (name) => {
-    const captured = asText(result[name]);
+    const captured = asBytes(result[`${name}Bytes`], result[name]);
     const metadata = resultOutput[name] || {};
     const progressChunks = progressOutput[`${name}Chunks`];
     const chunks = Number.isSafeInteger(metadata.chunks)
       ? metadata.chunks
       : Number.isSafeInteger(progressChunks) ? progressChunks : captured ? 1 : 0;
-    return { bytes: Buffer.byteLength(captured, 'utf8'), chunks };
+    return { bytes: captured.byteLength, chunks };
   };
   const stdout = stream('stdout');
   const stderr = stream('stderr');
@@ -81,25 +114,47 @@ export async function createCITGMArtifactWriter({ rootDir, module, runId } = {})
     stderr: path.join(directory, 'stderr.log'),
     progress: path.join(directory, 'progress.ndjson'),
     network: path.join(directory, 'network.ndjson'),
+    runResult: path.join(directory, 'run-result.json'),
     summary: path.join(directory, 'summary.json'),
+    terminalSummary: path.join(directory, 'terminal-summary.json'),
   };
+  await Promise.all([writeFile(paths.progress, ''), writeFile(paths.network, '')]);
   const progressStream = createWriteStream(paths.progress, { encoding: 'utf8' });
   const networkStream = createWriteStream(paths.network, { encoding: 'utf8' });
+  let writeChain = Promise.resolve();
   let closed = false;
+
+  const append = (stream, value) => {
+    if (closed) return writeChain;
+    const line = `${JSON.stringify(value, jsonReplacer())}\n`;
+    writeChain = writeChain.then(() => new Promise((resolve, reject) => {
+      const complete = () => resolve();
+      stream.once('error', reject);
+      if (stream.write(line)) complete();
+      else stream.once('drain', complete);
+    }));
+    return writeChain;
+  };
 
   return {
     paths,
     recordProgress(event) {
-      if (!closed) writeJsonLine(progressStream, event);
+      return append(progressStream, event);
     },
-    async close({ stdout = '', stderr = '', networkEvents = [], summary = null } = {}) {
+    recordNetwork(event) {
+      return append(networkStream, event);
+    },
+    async close({ stdout = '', stderr = '', stdoutBytes, stderrBytes, networkEvents = [], runResult = null, summary = null } = {}) {
       if (closed) return paths;
+      for (const event of networkEvents) append(networkStream, event);
       closed = true;
-      for (const event of networkEvents) writeJsonLine(networkStream, event);
+      await writeChain;
       await Promise.all([
-        writeFile(paths.stdout, asText(stdout), 'utf8'),
-        writeFile(paths.stderr, asText(stderr), 'utf8'),
-        writeFile(paths.summary, JSON.stringify(summary, null, 2), 'utf8'),
+        writeFile(paths.stdout, asBytes(stdoutBytes, stdout)),
+        writeFile(paths.stderr, asBytes(stderrBytes, stderr)),
+        writeFile(paths.runResult, `${JSON.stringify(runResult, jsonReplacer(), 2)}\n`, 'utf8'),
+        writeFile(paths.summary, `${JSON.stringify(summary, jsonReplacer(), 2)}\n`, 'utf8'),
+        writeFile(paths.terminalSummary, `${JSON.stringify(summary, jsonReplacer(), 2)}\n`, 'utf8'),
         finishStream(progressStream),
         finishStream(networkStream),
       ]);

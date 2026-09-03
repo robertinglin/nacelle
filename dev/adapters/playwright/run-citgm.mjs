@@ -131,16 +131,20 @@ async function main() {
       page.setDefaultTimeout(0);
       await page.goto(url, { waitUntil: 'domcontentloaded' });
       await page.waitForFunction(() => typeof globalThis.__NACELLE_CITGM__?.run === 'function');
-      const artifactWriter = await createCITGMArtifactWriter({
-        rootDir: process.env.NACELLE_CITGM_ARTIFACT_DIR,
-        module: options.module,
-        runId: `pending-${Date.now()}`,
-      });
+      let artifactWriterPromise = null;
       let lastProgressEvent = null;
       await page.exposeBinding('__bnhReportProgress', async (_source, event) => {
         try {
           lastProgressEvent = event;
-          artifactWriter.recordProgress(event);
+          if (!artifactWriterPromise) {
+            artifactWriterPromise = createCITGMArtifactWriter({
+              rootDir: process.env.NACELLE_CITGM_ARTIFACT_DIR,
+              module: options.module,
+              runId: event.runId || `browser-${Date.now()}`,
+            });
+          }
+          const writer = await artifactWriterPromise;
+          await writer.recordProgress(event);
           process.stderr.write(formatProgressLine(event));
         } catch { /* diagnostics cannot affect the run */ }
       });
@@ -154,6 +158,13 @@ async function main() {
         progress: { binding: '__bnhReportProgress' },
       });
       const runId = result.runId || result.runResult?.runId || `unknown-${Date.now()}`;
+      const artifactWriter = artifactWriterPromise
+        ? await artifactWriterPromise
+        : await createCITGMArtifactWriter({
+            rootDir: process.env.NACELLE_CITGM_ARTIFACT_DIR,
+            module: options.module,
+            runId,
+          });
       const output = outputSummary(result, lastProgressEvent);
       const networkEvents = result.networkEvents || [];
       const artifactPaths = artifactWriter.paths;
@@ -183,7 +194,10 @@ async function main() {
       await artifactWriter.close({
         stdout: result.stdout || '',
         stderr: result.stderr || '',
+        stdoutBytes: result.stdoutBytes,
+        stderrBytes: result.stderrBytes,
         networkEvents,
+        runResult: result.runResult || null,
         summary,
       });
       process.stdout.write(`${JSON.stringify(summary)}\n`);

@@ -851,8 +851,14 @@ export class BrowserNpm {
             throw npmSecurityError('ERR_NPM_PACKAGE_PATH', `package bin escapes its package directory: ${binRel}`);
           }
           const targetFile = `${pkgDir}/${cleanRel}`;
+          const targetSpecifier = `../${name}/${cleanRel}`;
+          const isEsmBin = cleanRel.endsWith('.mjs')
+            || (parsedPkgJson.type === 'module' && !cleanRel.endsWith('.cjs'));
+          const launcher = isEsmBin
+            ? `await import(${JSON.stringify(targetSpecifier)});`
+            : `require(${JSON.stringify(targetFile)});`;
           filesToMount[binPath] = {
-            data: new TextEncoder().encode(`#!/usr/bin/env node\nrequire('${targetFile}');\n`),
+            data: new TextEncoder().encode(`#!/usr/bin/env node\n${launcher}\n`),
             mode: 0o755,
           };
         }

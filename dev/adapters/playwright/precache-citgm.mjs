@@ -6,7 +6,9 @@ import path from 'node:path';
 import process from 'node:process';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { gunzipSync } from 'node:zlib';
 import { compareSemver, parseNpmAlias, parseSemver, satisfiesSemver } from '../../../src/runtime/npm.js';
+import { resolveCitgmProjectUrl } from './citgm-project-url.mjs';
 
 const adapterRoot = path.dirname(fileURLToPath(import.meta.url));
 const defaultRegistry = 'https://registry.npmjs.org';
@@ -56,22 +58,6 @@ function packageNameFromSpec(spec) {
   }
   const separator = spec.indexOf('@');
   return separator > 0 ? spec.slice(0, separator) : spec;
-}
-
-function githubProjectUrl(document) {
-  const repository = typeof document?.repository === 'string'
-    ? document.repository
-    : document?.repository?.url;
-  const gitHead = document?.gitHead;
-  if (typeof repository !== 'string' || typeof gitHead !== 'string' || !gitHead) return null;
-  const normalized = repository
-    .replace(/^git\+/, '')
-    .replace(/^git:/, 'https:')
-    .replace(/^ssh:\/\/git@/, 'https://')
-    .replace(/\.git$/, '')
-    .replace(/\/+$/, '');
-  if (!/^https:\/\/github\.com\//i.test(normalized)) return null;
-  return `${normalized}/archive/${encodeURIComponent(gitHead)}.tar.gz`;
 }
 
 async function runHostNpm(args, cwd) {
@@ -156,6 +142,27 @@ async function fetchBytes(url) {
   const response = await fetch(url);
   if (!response.ok) throw new Error(`GET ${url} failed with HTTP ${response.status}`);
   return new Uint8Array(await response.arrayBuffer());
+}
+
+function projectPackageManifest(bytes) {
+  const tar = gunzipSync(bytes);
+  for (let offset = 0; offset + 512 <= tar.byteLength;) {
+    const header = tar.subarray(offset, offset + 512);
+    if (header.every((value) => value === 0)) break;
+    const name = new TextDecoder().decode(header.subarray(0, 100)).replace(/\0.*$/, '');
+    const sizeText = new TextDecoder().decode(header.subarray(124, 136)).replace(/\0.*$/, '').trim();
+    const size = parseInt(sizeText || '0', 8);
+    const contentStart = offset + 512;
+    if (name.endsWith('/package.json') || name === 'package.json') {
+      try {
+        return JSON.parse(new TextDecoder().decode(tar.subarray(contentStart, contentStart + size)));
+      } catch {
+        return null;
+      }
+    }
+    offset = contentStart + Math.ceil(size / 512) * 512;
+  }
+  return null;
 }
 
 function resolveVersion(document, range) {
@@ -252,10 +259,35 @@ async function main() {
       const targetManifest = JSON.parse(await readFile(targetManifestPath, 'utf8'));
       targetPackage.devDependencies = { ...targetManifest.devDependencies };
     }
+    const citgmLookup = JSON.parse(await readFile(
+      path.join(stagingDir, 'node_modules', 'citgm', 'lib', 'lookup.json'),
+      'utf8',
+    ));
     const metadata = new Map();
     process.stdout.write(`Resolving metadata for ${new Set(installedPackages.map(({ name }) => name)).size} packages...\n`);
-    const packageList = await resolvePackageGraph(installedPackages, metadata, registry, new Set([targetName]));
+    let packageList = await resolvePackageGraph(installedPackages, metadata, registry, new Set([targetName]));
     process.stdout.write(`Fetching metadata for ${metadata.size} packages...\n`);
+
+    const projectPaths = {};
+    const projectUrl = resolveCitgmProjectUrl({
+      moduleSpec: options.module,
+      metadata: metadata.get(targetName),
+      lookup: citgmLookup?.[targetName],
+    });
+    let projectArchive = null;
+    if (projectUrl) {
+      process.stdout.write(`Fetching CITGM project archive ${projectUrl}...\n`);
+      projectArchive = await fetchBytes(projectUrl);
+      const projectManifest = projectPackageManifest(projectArchive);
+      if (targetPackage && projectManifest?.devDependencies) {
+        targetPackage.devDependencies = {
+          ...targetPackage.devDependencies,
+          ...projectManifest.devDependencies,
+        };
+        packageList = await resolvePackageGraph(installedPackages, metadata, registry, new Set([targetName]));
+        process.stdout.write(`Resolved project test dependencies; metadata now covers ${metadata.size} packages.\n`);
+      }
+    }
 
     await rm(cacheDir, { recursive: true, force: true });
     await mkdir(path.join(cacheDir, 'metadata'), { recursive: true });
@@ -280,14 +312,10 @@ async function main() {
       tarballPaths[`tarball:${tarballUrl}`] = relative;
     });
 
-    const projectPaths = {};
-    const targetPackageDocument = packageList.find(({ name }) => name === targetName);
-    const projectUrl = githubProjectUrl(metadata.get(targetName)?.versions?.[targetPackageDocument?.version]);
-    if (projectUrl) {
-      process.stdout.write(`Fetching CITGM project archive ${projectUrl}...\n`);
+    if (projectUrl && projectArchive) {
       const relative = `projects/${createHash('sha256').update(projectUrl).digest('hex')}.tar.gz`;
       await mkdir(path.join(cacheDir, 'projects'), { recursive: true });
-      await writeFile(path.join(cacheDir, relative), await fetchBytes(projectUrl));
+      await writeFile(path.join(cacheDir, relative), projectArchive);
       projectPaths[projectUrl] = relative;
     }
 

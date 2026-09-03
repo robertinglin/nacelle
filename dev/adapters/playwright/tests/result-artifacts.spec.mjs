@@ -21,6 +21,7 @@ test('CITGM artifacts preserve complete streams and separate traces from bounded
     stdout,
     stderr,
     networkEvents: [{ url: 'https://example.test', method: 'GET' }],
+    runResult: { outputEvents: [{ stream: 'stdout', bytes: new Uint8Array([1, 2, 3]) }] },
     summary,
   });
 
@@ -33,6 +34,12 @@ test('CITGM artifacts preserve complete streams and separate traces from bounded
     url: 'https://example.test', method: 'GET',
   });
   assert.deepEqual(JSON.parse(await readFile(writer.paths.summary, 'utf8')), {
+    details: { networkEvents: { count: 1000 } },
+  });
+  assert.deepEqual(JSON.parse(await readFile(writer.paths.runResult, 'utf8')).outputEvents[0].bytes, {
+    type: 'bytes', byteLength: 3, encoding: 'base64', data: 'AQID',
+  });
+  assert.deepEqual(JSON.parse(await readFile(writer.paths.terminalSummary, 'utf8')), {
     details: { networkEvents: { count: 1000 } },
   });
   const bounded = compactForSummary({

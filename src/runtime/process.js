@@ -698,6 +698,7 @@ export function createProcess({
     }
     return ipc.send(...args);
   };
+  process.__bnhSendInternal = (value) => ipc?.sendInternal?.(value) || false;
   process.disconnect = () => {
     if (!ipc) return false;
     process.connected = false;

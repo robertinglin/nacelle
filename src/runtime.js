@@ -58,6 +58,7 @@ import {
   createHmacShim,
   createSignClass,
   createVerifyClass,
+  createKeyObjectContract,
   createSecretKeyShim,
   installCryptoKeyMaterialTracking,
   checkPrime,
@@ -3338,6 +3339,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       if (!repeat) {
         timers.delete(handle);
         timerHandles.delete(String(handle.id));
+        processObject._bnhTryExit?.();
       }
     };
     handle._run = run;
@@ -9109,6 +9111,7 @@ export function createRuntime({
           };
 
           const runVirtualCommand = ({ entry, argv, cwd, commandEnv, stdin, signal, timeout, onStdout, onStderr }) => {
+            const isNodeExecutable = (pathname) => /(?:^|\/)node(?:js)?$/.test(String(pathname));
             let shebangScript = false;
             try {
               const source = readSource(normalizePath(entry, cwd || ownerProcess.cwd?.() || '/node'));
@@ -9118,7 +9121,7 @@ export function createRuntime({
               // The virtual child path below handles commands that are not
               // executable files mounted in the VFS.
             }
-            if (shebangScript && entry !== processObject.execPath) {
+            if (shebangScript && entry !== processObject.execPath && !isNodeExecutable(entry)) {
               const prepared = prepareChild(processObject.execPath, [entry, ...(argv || [])], {
                 cwd,
                 env: commandEnv,
@@ -9209,7 +9212,7 @@ export function createRuntime({
                 });
               });
             }
-            if (entry === processObject.execPath && Array.isArray(argv)
+            if ((entry === processObject.execPath || isNodeExecutable(entry)) && Array.isArray(argv)
               && typeof argv[0] === 'string' && !argv[0].startsWith('-')) {
               const prepared = prepareChild(entry, argv, {
                 cwd,
@@ -9297,7 +9300,7 @@ export function createRuntime({
                 });
               });
             }
-            if (entry === processObject.execPath && Array.isArray(argv) && argv[0] === '-e') {
+            if ((entry === processObject.execPath || isNodeExecutable(entry)) && Array.isArray(argv) && argv[0] === '-e') {
               const prepared = prepareChild(entry, argv, {
                 cwd,
                 env: commandEnv,
@@ -9404,6 +9407,68 @@ export function createRuntime({
             return { code: 0, stdout: '', stderr: '' };
           };
 
+          const runNodeCommand = (nodeOptions) => {
+            const argv = nodeOptions.script
+              ? [nodeOptions.script, ...(nodeOptions.args || [])]
+              : [nodeOptions.print ? '-p' : '-e', nodeOptions.code, ...(nodeOptions.args || [])];
+            const prepared = prepareChild(processObject.execPath, argv, {
+              cwd: nodeOptions.cwd,
+              env: nodeOptions.env,
+              input: nodeOptions.input,
+              signal: nodeOptions.signal,
+              timeout: nodeOptions.timeout,
+            }, ownerProcess);
+            if (!isRuntimeEsmModule(prepared.entryPath, prepared.executionArgv)) {
+              return runVirtualCommand({
+                entry: processObject.execPath,
+                argv,
+                cwd: nodeOptions.cwd,
+                commandEnv: nodeOptions.env,
+                stdin: nodeOptions.input,
+                signal: nodeOptions.signal,
+                timeout: nodeOptions.timeout,
+                onStdout: nodeOptions.onStdout,
+                onStderr: nodeOptions.onStderr,
+              });
+            }
+            const stdout = [];
+            const stderr = [];
+            const processHandle = runPreparedESM(prepared, {
+              signal: nodeOptions.signal,
+              timeout: nodeOptions.timeout,
+              asyncLifecycle: true,
+            }, (value) => {
+              const chunk = normalizeOutputChunk(value);
+              stdout.push(chunk);
+              nodeOptions.onStdout?.(chunk);
+            }, (value) => {
+              const chunk = normalizeOutputChunk(value);
+              stderr.push(chunk);
+              nodeOptions.onStderr?.(chunk);
+            });
+            return processHandle.wait().then(
+              (terminal) => ({
+                code: terminal.signal ? null : terminal.code ?? 1,
+                stdout: stdout.join(''),
+                stderr: stderr.join(''),
+                streamed: Boolean(stdout.length || stderr.length),
+              }),
+              (error) => {
+                const message = `${error?.stack || error?.message || error}\n`;
+                if (!stderr.length) {
+                  stderr.push(message);
+                  nodeOptions.onStderr?.(message);
+                }
+                return {
+                  code: 1,
+                  stdout: stdout.join(''),
+                  stderr: stderr.join(''),
+                  streamed: Boolean(stdout.length || stderr.length),
+                };
+              },
+            );
+          };
+
           const runScriptBody = async (scriptName, packageJson, scriptOptions = {}) => {
             const script = packageJson?.scripts?.[scriptName];
             if (typeof script !== 'string' || !script) {
@@ -9475,19 +9540,7 @@ export function createRuntime({
                 onStdout: commandOptions.onStdout,
                 onStderr: commandOptions.onStderr,
               }),
-              runNode: (nodeOptions) => runVirtualCommand({
-                entry: processObject.execPath,
-                argv: nodeOptions.script
-                  ? [nodeOptions.script, ...(nodeOptions.args || [])]
-                  : [nodeOptions.print ? '-p' : '-e', nodeOptions.code, ...(nodeOptions.args || [])],
-                cwd: nodeOptions.cwd,
-                commandEnv: nodeOptions.env,
-                stdin: nodeOptions.input,
-                signal: nodeOptions.signal,
-                timeout: nodeOptions.timeout,
-                onStdout: nodeOptions.onStdout,
-                onStderr: nodeOptions.onStderr,
-              }),
+              runNode: runNodeCommand,
               nodeVersion: resolvedProfile.runtimeVersion,
             });
             return {
@@ -10678,7 +10731,7 @@ export function createRuntime({
       isX509Certificate: (value) => value instanceof builtins.crypto.X509Certificate,
     });
     builtins['internal/crypto/x509'] = x509Module;
-    builtins['internal/crypto/keys'] = Object.freeze({});
+    builtins['internal/crypto/keys'] = createKeyObjectContract(Buffer);
     processObject.getBuiltinModule = function getBuiltinModule(id) {
       if (typeof id !== 'string') throw moduleArgumentTypeError('id', 'of type string', id);
       const name = builtinName(id);

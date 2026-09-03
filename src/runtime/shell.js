@@ -1,5 +1,5 @@
 import {
-  expandShellWord,
+  expandShellWordAsync,
   literalShellWord,
   parseShellScript,
   rawShellWord,
@@ -60,7 +60,13 @@ async function fileIs(fs, pathname, type = 'file') {
 }
 
 async function expandWord(word, context, { pathname = false } = {}) {
-  const expanded = expandShellWord(word, context.env, context.lastStatus);
+  const expanded = await expandShellWordAsync(word, context.env, context.lastStatus, context.runSubstitution
+    ? async (command) => {
+      const nested = await context.runSubstitution(command);
+      if (nested?.stderr) context.onStderr?.(nested.stderr);
+      return nested;
+    }
+    : undefined);
   if (pathname || !expanded.glob || !GLOB_PATTERN.test(expanded.value) || !context.fs.glob) {
     return [expanded.value];
   }
@@ -94,7 +100,14 @@ async function resolveCommand(name, context) {
     }
   }
   for (const pathname of candidates) {
-    if (await fileIs(context.fs, pathname)) return { type: 'external', path: pathname, name };
+    if (await fileIs(context.fs, pathname)) {
+      const commandName = pathname.slice(pathname.lastIndexOf('/') + 1);
+      // PATH lookup must preserve Node command identity. A virtual install can
+      // expose node through node_modules/.bin, but package scripts still
+      // invoke the Node child lifecycle (including ESM format selection).
+      if (commandName === 'node' || commandName === 'nodejs') return { type: 'node', name };
+      return { type: 'external', path: pathname, name };
+    }
   }
   return null;
 }
@@ -980,6 +993,19 @@ export async function runShellScript(command, options) {
     lastStatus: 0,
     fs: options.fs,
     onNetwork: options.onNetwork,
+  };
+  state.runSubstitution = async (nestedCommand) => {
+    const stdout = [];
+    const stderr = [];
+    const nested = await runShellScript(nestedCommand, {
+      ...options,
+      args: [],
+      cwd: state.cwd,
+      env: state.env,
+      onStdout: (chunk) => stdout.push(String(chunk)),
+      onStderr: (chunk) => stderr.push(String(chunk)),
+    });
+    return { ...nested, stdout: stdout.join(''), stderr: stderr.join('') };
   };
   const finalPipeline = pipelines.at(-1);
   const extraArgs = Array.isArray(options.args) ? options.args : [];

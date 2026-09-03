@@ -451,6 +451,47 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('forwards complete output through nested package-manager lifecycle levels', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/npm', ['test'], { cwd: '/node' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 7, errorOutput);
+        assert.strictEqual(output, 'outer output\\n');
+        assert.strictEqual(errorOutput, 'inner failure\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/package.json': JSON.stringify({
+          name: 'nested-script-depth-fixture',
+          version: '1.0.0',
+          scripts: {
+            pretest: "node -e \"process.stdout.write('outer output\\\\n')\"",
+            test: 'yarn verify',
+            verify: 'yarn check',
+            check: "node -e \"process.stderr.write('inner failure\\\\n'); process.exitCode = 7\"",
+          },
+        }),
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\\n',
+        '/node/node_modules/.bin/yarn': '#!/usr/bin/env node\\n',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
   test('forwards package-script output before a nonzero child close', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert');

@@ -165,6 +165,41 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('package-manager scripts resolve extensionless directory Node entries', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/npm', ['test'], { cwd: '/node/project' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(output, 'package directory script\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/project/package.json': JSON.stringify({
+          name: 'package-directory-script-fixture',
+          version: '1.0.0',
+          scripts: { test: 'node node_modules/example-tool/command' },
+        }),
+        '/node/project/node_modules/example-tool/command/index.js': "process.stdout.write('package directory script\\n');",
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\\n',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
   test('loads CommonJS package entrypoints from Node child scripts', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert/strict');
@@ -597,6 +632,39 @@ test.describe('browser runtime bridge and core primitives', () => {
             test: 'node missing-entry.js',
           },
         }),
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\n',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('forwards nested Node launch errors through package-manager stderr', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/npm', ['test'], { cwd: '/node' });
+        let errorOutput = '';
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 1);
+        assert.match(errorOutput, /SyntaxError/);
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/package.json': JSON.stringify({
+          name: 'nested-launch-error-fixture',
+          version: '1.0.0',
+          scripts: { test: 'node broken-entry.js' },
+        }),
+        '/node/broken-entry.js': 'const = invalid JavaScript;\n',
         '/node/node_modules/.bin/npm': '#!/usr/bin/env node\n',
       },
     });

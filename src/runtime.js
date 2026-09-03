@@ -7824,8 +7824,14 @@ export function createRuntime({
           const base = specifier.startsWith('/') ? specifier : normalizePath(specifier, importer ? path.dirname(importer) : '/node');
           const candidate = commonJsFileCandidates(base).find((pathname) => vfs.files.has(pathname));
           if (candidate) return candidate;
+          // A mounted package graph may expose the directory only through its
+          // indexed child entries. Treat an existing CommonJS index as
+          // sufficient directory evidence before consulting package.json.
+          const indexCandidate = commonJsModuleCandidates(path.join(base, 'index'))
+            .find((pathname) => vfs.files.has(pathname));
           let isDirectory = false;
           try { isDirectory = vfs.fs.statSync(base).isDirectory?.() === true; } catch { /* missing path */ }
+          isDirectory ||= Boolean(indexCandidate);
           if (isDirectory) {
             let packageConfig;
             try { packageConfig = readCjsPackageConfig(base); } catch { packageConfig = undefined; }
@@ -7834,8 +7840,6 @@ export function createRuntime({
                 .find((pathname) => vfs.files.has(pathname));
               if (packageCandidate) return packageCandidate;
             }
-            const indexCandidate = commonJsModuleCandidates(path.join(base, 'index'))
-              .find((pathname) => vfs.files.has(pathname));
             if (indexCandidate) return indexCandidate;
           }
           if (addonsDisabled(processObj) || isNativeAddonBuildPath(base)) return nativeAddonPath(base);

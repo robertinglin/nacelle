@@ -80,6 +80,47 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('exposes synchronous Node KeyObjects for browser crypto callers', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const crypto = require('node:crypto');
+      const util = require('node:util');
+
+      (async () => {
+        const secret = crypto.createSecretKey(Buffer.from([1, 2, 3]));
+        assert.strictEqual(secret[Symbol.toStringTag], 'KeyObject');
+        assert.strictEqual(util.types.isKeyObject(secret), true);
+        assert.deepStrictEqual(secret.export({ format: 'jwk' }), { kty: 'oct', k: 'AQID' });
+
+        const jwk = {
+          kty: 'EC',
+          crv: 'P-256',
+          x: 'f83OJ3D2xF4jKJ5Wl9Hf9sQfJYlB8jQ7K8x7c4f3e1A',
+          y: 'x_FEzRu9M9k4j4lB4tP4Y6rK6cQ4sX3mV7nQ2wP1k0Q',
+        };
+        const publicKey = crypto.createPublicKey({ format: 'jwk', key: jwk });
+        assert.strictEqual(publicKey[Symbol.toStringTag], 'KeyObject');
+        assert.deepStrictEqual(publicKey.export({ format: 'jwk' }), jwk);
+
+        const pair = await new Promise((resolve, reject) => {
+          crypto.generateKeyPair('ec', { namedCurve: 'P-256' }, (error, publicPart, privatePart) => {
+            if (error) reject(error);
+            else resolve({ publicPart, privatePart });
+          });
+        });
+        assert.strictEqual(pair.publicPart[Symbol.toStringTag], 'KeyObject');
+        assert.strictEqual(pair.privatePart[Symbol.toStringTag], 'KeyObject');
+        assert.strictEqual(pair.publicPart.export({ format: 'jwk' }).kty, 'EC');
+        assert.strictEqual(pair.privatePart.export({ format: 'jwk' }).kty, 'EC');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `);
+
+    await expectPass(expect, result);
+  });
+
   test('reports browser output as non-TTY while preserving tty window APIs', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       (() => {
@@ -198,6 +239,126 @@ test.describe('browser runtime bridge and core primitives', () => {
         }),
         '/node/node_modules/.bin/node': '#!/usr/bin/env node\\n',
         '/node/node_modules/.bin/npm': '#!/usr/bin/env node\\n',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('runs ESM Node files from npm package scripts through the ESM lifecycle', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/npm', ['test'], { cwd: '/node' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(output, 'nested esm script\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/package.json': JSON.stringify({
+          name: 'npm-esm-script-fixture',
+          version: '1.0.0',
+          scripts: { test: '/browser/node /node/sub/nested-script.mjs' },
+        }),
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\n',
+        '/node/sub/package.json': JSON.stringify({ type: 'module' }),
+        '/node/sub/nested-script.mjs': [
+          "if (typeof import.meta.url !== 'string') process.exitCode = 1;",
+          "process.stdout.write('nested esm script\\n');",
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('supports source files and command substitution in npm scripts', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/npm', ['test'], { cwd: '/node' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(output, 'Using Node.js v22.23.2 loaded\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/package.json': JSON.stringify({
+          name: 'shell-substitution-fixture',
+          version: '1.0.0',
+          scripts: { test: 'source .node_flags.sh && printf "%s\\n" "Using Node.js $(node --version) $NODE_FLAG"' },
+        }),
+        '/node/.node_flags.sh': 'export NODE_FLAG=loaded\n',
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\n',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('preserves conditional imports and named exports across ESM package boundaries', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+
+      (async () => {
+        const chalk = await import('chalk');
+        assert.ok(Object.hasOwn(chalk, 'supportsColor'));
+        assert.ok(Object.hasOwn(chalk, 'supportsColorStderr'));
+        assert.strictEqual(chalk.supportsColor, false);
+        assert.strictEqual(chalk.supportsColorStderr, false);
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/package.json': JSON.stringify({ type: 'commonjs' }),
+        '/node/node_modules/chalk/package.json': JSON.stringify({
+          name: 'chalk',
+          type: 'module',
+          imports: { '#supports-color': { node: './source/vendor/supports-color/index.js', default: './source/vendor/supports-color/browser.js' } },
+          exports: { '.': './source/index.js' },
+        }),
+        '/node/node_modules/chalk/source/index.js': [
+          "import supportsColor from '#supports-color';",
+          'const { stdout: stdoutColor, stderr: stderrColor } = supportsColor;',
+          'export { stdoutColor as supportsColor, stderrColor as supportsColorStderr };',
+        ].join('\n'),
+        '/node/node_modules/chalk/source/vendor/supports-color/index.js': [
+          "import process from 'node:process';",
+          "import os from 'node:os';",
+          "import tty from 'node:tty';",
+          'const { env } = process;',
+          'const supportsColor = { stdout: tty.isatty(1) ? { level: 2 } : false, stderr: tty.isatty(2) ? { level: 1 } : false };',
+          'void env; void os;',
+          'export default supportsColor;',
+        ].join('\n'),
+        '/node/node_modules/chalk/source/vendor/supports-color/browser.js': 'export default { stdout: false, stderr: false };',
       },
     });
 
@@ -497,7 +658,7 @@ test.describe('browser runtime bridge and core primitives', () => {
         '/node/node_modules/.bin/tool': [
           '#!/usr/bin/env node',
           "setTimeout(() => process.stdout.write('async inherited child\\n'), 1);",
-        ].join('\\n'),
+        ].join('\n'),
       },
     });
 
@@ -530,7 +691,7 @@ test.describe('browser runtime bridge and core primitives', () => {
           "const { spawn } = require('node:child_process');",
           "const child = spawn(process.execPath, ['--require', '/node/preload.js', '/node/inner.js'], { stdio: 'inherit' });",
           "child.once('exit', (code, signal) => { if (signal) process.kill(process.pid, signal); else process.exit(code); });",
-        ].join('\\n'),
+        ].join('\n'),
         '/node/preload.js': "process.stdout.write('preloaded\\n');",
         '/node/inner.js': "const assert = require('node:assert'); assert.strictEqual(require.main, module); setTimeout(() => process.stdout.write('inner child\\n'), 1);",
       },

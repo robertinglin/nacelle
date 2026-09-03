@@ -410,6 +410,15 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         callback?.(null);
         return true;
       },
+      __bnhSendInternal(value) {
+        if (disconnected) return false;
+        try {
+          user.postMessage({ channel: USER, runId: identity.runId, childId: identity.childId, direction: 'child-to-parent', type: 'message', internal: true, payload: value });
+          return true;
+        } catch {
+          return false;
+        }
+      },
       disconnect() {
         if (disconnected) return false;
         disconnected = true;

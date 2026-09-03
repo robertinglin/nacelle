@@ -158,7 +158,8 @@ export async function runProcessEntry(context) {
   if (descriptor.capabilities.ipc.enabled && context.process.connected) {
     const declared = descriptor.capabilities.vfs.mounts.some((mount) => mount.artifacts?.length);
     const artifacts = declared ? runtime.exportArtifacts() : { version: 1, artifacts: [] };
-    await context.process.send({ type: 'bnh-artifacts', artifacts });
+    const sendInternal = context.process.__bnhSendInternal || context.process.send;
+    await sendInternal.call(context.process, { type: 'bnh-artifacts', artifacts });
   }
   return code;
 }

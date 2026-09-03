@@ -184,10 +184,16 @@ test.describe('browser ESM loader', () => {
           export async function load(url, context, nextLoad) {
             if (!url.endsWith('/typed-source.ts')) return nextLoad(url, context);
             const loaded = await nextLoad(url, { ...context, format: 'module' });
+            // Node permits nextLoad() to return either text or a byte buffer;
+            // the harness VFS intentionally exposes raw file bytes. A loader
+            // must accept both representations before transforming source.
+            const source = typeof loaded.source === 'string'
+              ? loaded.source
+              : new TextDecoder().decode(loaded.source);
             return {
               format: 'module',
               shortCircuit: true,
-            source: new TextDecoder().decode(loaded.source).replace(
+              source: source.replace(
               'export const answer: number = 42',
               'export const answer = 42',
             ),

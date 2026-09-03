@@ -8862,10 +8862,11 @@ export function createRuntime({
           // file buffers are replaced, never mutated in place, so sharing
           // them avoids copying the complete mounted tree for every child.
           // An IPC child crosses a Worker boundary and cannot receive the
-          // live backend. Give that boundary a complete serializable snapshot;
-          // same-realm ESM children retain the backend fast path.
+          // live backend. Give that boundary a complete serializable snapshot
+          // without first duplicating every immutable file buffer; the worker
+          // boundary converts those buffers to shared storage when available.
           const snapshot = options.ipc
-            ? vfs.snapshot()
+            ? vfs.snapshot({ copy: false })
             : vfs.snapshot({ copy: false, includeBackend: true });
           const files = snapshot.backend
             ? {}

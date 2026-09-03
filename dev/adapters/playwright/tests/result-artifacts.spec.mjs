@@ -15,7 +15,9 @@ test('CITGM artifacts preserve complete streams and separate traces from bounded
   const writer = await createCITGMArtifactWriter({ rootDir, module: 'module/name', runId: 'run-1' });
   const stdout = `prefix\n${'x'.repeat(5000)}\n`;
   const stderr = 'Error: upstream failure\nfull stderr detail\n';
-  writer.recordProgress({ runId: 'run-1', phase: 'execution', event: 'child-running' });
+  for (let index = 0; index < 64; index += 1) {
+    writer.recordProgress({ runId: 'run-1', phase: 'execution', event: 'child-running', sequence: index });
+  }
   const summary = compactForSummary({ details: { networkEvents: Array(1000).fill('trace') } });
   await writer.close({
     stdout,
@@ -27,9 +29,9 @@ test('CITGM artifacts preserve complete streams and separate traces from bounded
 
   assert.equal(await readFile(writer.paths.stdout, 'utf8'), stdout);
   assert.equal(await readFile(writer.paths.stderr, 'utf8'), stderr);
-  assert.deepEqual(JSON.parse(await readFile(writer.paths.progress, 'utf8')), {
-    runId: 'run-1', phase: 'execution', event: 'child-running',
-  });
+  const progressLines = (await readFile(writer.paths.progress, 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(progressLines.length, 64);
+  assert.equal(progressLines.at(-1).sequence, 63);
   assert.deepEqual(JSON.parse(await readFile(writer.paths.network, 'utf8')), {
     url: 'https://example.test', method: 'GET',
   });
@@ -64,6 +66,15 @@ test('CITGM artifacts preserve complete streams and separate traces from bounded
     stderr: { bytes: 0, chunks: 2 },
     totalBytes: 3,
     totalChunks: 6,
+  });
+  assert.deepEqual(outputSummary(
+    {},
+    { counters: { output: { stdoutBytes: 662, stdoutChunks: 9, stderrBytes: 178, stderrChunks: 1 } } },
+  ), {
+    stdout: { bytes: 662, chunks: 9 },
+    stderr: { bytes: 178, chunks: 1 },
+    totalBytes: 840,
+    totalChunks: 10,
   });
   assert.ok(Buffer.byteLength(failureExcerpt(stdout, 64)) <= 90);
   assert.match(failureExcerpt(stderr, 4096), /upstream failure/);

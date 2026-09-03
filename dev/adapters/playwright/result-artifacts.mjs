@@ -66,13 +66,18 @@ export function outputSummary(result = {}, lastProgressEvent = null) {
   const progressOutput = lastProgressEvent?.counters?.output || {};
   const resultOutput = result.output || {};
   const stream = (name) => {
-    const captured = asBytes(result[`${name}Bytes`], result[name]);
+    const rawBytes = result[`${name}Bytes`];
+    const captured = Number.isSafeInteger(rawBytes) ? null : asBytes(rawBytes, result[name]);
     const metadata = resultOutput[name] || {};
+    const progressBytes = progressOutput[`${name}Bytes`];
+    const bytes = Number.isSafeInteger(rawBytes)
+      ? rawBytes
+      : Number.isSafeInteger(progressBytes) ? progressBytes : captured.byteLength;
     const progressChunks = progressOutput[`${name}Chunks`];
     const chunks = Number.isSafeInteger(metadata.chunks)
       ? metadata.chunks
       : Number.isSafeInteger(progressChunks) ? progressChunks : captured ? 1 : 0;
-    return { bytes: captured.byteLength, chunks };
+    return { bytes, chunks };
   };
   const stdout = stream('stdout');
   const stderr = stream('stderr');
@@ -128,10 +133,22 @@ export async function createCITGMArtifactWriter({ rootDir, module, runId } = {})
     if (closed) return writeChain;
     const line = `${JSON.stringify(value, jsonReplacer())}\n`;
     writeChain = writeChain.then(() => new Promise((resolve, reject) => {
-      const complete = () => resolve();
-      stream.once('error', reject);
+      const cleanup = () => {
+        stream.off('error', onError);
+        stream.off('drain', onDrain);
+      };
+      const complete = () => {
+        cleanup();
+        resolve();
+      };
+      const onError = (error) => {
+        cleanup();
+        reject(error);
+      };
+      const onDrain = complete;
+      stream.once('error', onError);
       if (stream.write(line)) complete();
-      else stream.once('drain', complete);
+      else stream.once('drain', onDrain);
     }));
     return writeChain;
   };

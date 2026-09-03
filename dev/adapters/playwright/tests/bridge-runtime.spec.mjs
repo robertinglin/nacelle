@@ -672,6 +672,50 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('preserves nested package-script output when its Node child exits nonzero', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/npm', ['test'], { cwd: '/node' });
+        let output = '';
+        const code = await new Promise((resolve, reject) => {
+          child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 7);
+        assert.strictEqual(output, 'nested nonzero output\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/package.json': JSON.stringify({
+          name: 'nested-output-status-fixture',
+          version: '1.0.0',
+          scripts: { test: 'node nested-status.js' },
+        }),
+        '/node/nested-status.js': "console.log('nested nonzero output'); process.exitCode = 7;",
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\\n',
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.runResult?.details?.childActivity).toMatchObject({
+      launched: 1,
+      completed: 1,
+      failed: 1,
+      last: {
+        command: 'node',
+        code: 7,
+        stdoutBytes: 22,
+        stderrBytes: 0,
+      },
+    });
+  });
+
   test('forwards nested output before a package-manager child exits nonzero', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert');

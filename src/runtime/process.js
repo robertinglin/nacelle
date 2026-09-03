@@ -606,6 +606,7 @@ function createTerminalRecord(identity, state, frame) {
     signal: frame.signal ?? null,
     forced: Boolean(frame.forced),
     error: frame.error ? { ...frame.error } : null,
+    runtimeState: frame.runtimeState || null,
   });
 }
 

@@ -4787,6 +4787,18 @@ export function createRuntime({
 
   function makeBuiltins(processObject, runtimeRequire, diagnosticsChannels, runtimeOptions, performancePrimitives, trackTask, stdout, stderr, readSource, sourcePath, runtimeFetchRef) {
     const fs = vfs.fs;
+    const childActivity = processObject.__bnhChildActivity || {
+      launched: 0,
+      completed: 0,
+      failed: 0,
+      first: null,
+      last: null,
+    };
+    Object.defineProperty(processObject, '__bnhChildActivity', {
+      configurable: true,
+      enumerable: false,
+      value: childActivity,
+    });
     const cjsPackageEntryCache = new Map();
     const cjsPackageConfigCache = new Map();
     const cjsPackageTypeCache = new Map();
@@ -9143,7 +9155,57 @@ export function createRuntime({
             return { npm, metadata, parsed, ...resolved };
           };
 
-          const runVirtualCommand = ({ entry, argv, cwd, commandEnv, stdin, signal, timeout, onStdout, onStderr }) => {
+          const safeChildPath = (value, cwd = '/node') => {
+            const normalized = normalizePath(String(value || ''), cwd || '/node');
+            if (normalized === '/node' || normalized.startsWith('/node/')) return normalized.slice(0, 256);
+            return `<path:${normalized.split('/').pop()?.slice(0, 80) || 'unknown'}>`;
+          };
+          const safeChildArg = (value, cwd) => {
+            const text = String(value ?? '');
+            if (text.startsWith('/') || text.startsWith('.') || text.includes('/')) return safeChildPath(text, cwd);
+            if (text.startsWith('-')) return text.split('=', 1)[0].slice(0, 80);
+            return `<arg:${text.length}>`;
+          };
+          const outputBytes = (value) => {
+            if (value instanceof ArrayBuffer) return value.byteLength;
+            if (ArrayBuffer.isView(value)) return value.byteLength;
+            return new TextEncoder().encode(String(value || '')).byteLength;
+          };
+          const recordChildActivity = (options, result, error = null) => {
+            childActivity.completed += 1;
+            if (error || result?.code !== 0) childActivity.failed += 1;
+            const terminal = result?.terminal;
+            const record = {
+              command: String(options.entry || '').split('/').pop() || '<unknown>',
+              entry: safeChildPath(options.entry, options.cwd),
+              argv: (options.argv || []).slice(0, 32).map((value) => safeChildArg(value, options.cwd)),
+              argumentCount: Array.isArray(options.argv) ? options.argv.length : 0,
+              cwd: safeChildPath(options.cwd || '/node'),
+              code: result?.code ?? null,
+              signal: terminal?.signal ?? null,
+              stdoutBytes: outputBytes(result?.stdout || ''),
+              stderrBytes: outputBytes(result?.stderr || ''),
+              terminal: terminal ? {
+                status: terminal.status || null,
+                kind: terminal.kind || null,
+                code: terminal.code ?? null,
+                signal: terminal.signal ?? null,
+                error: terminal.error ? {
+                  name: terminal.error.name || 'Error',
+                  code: terminal.error.code || null,
+                } : null,
+              } : null,
+              error: error ? {
+                name: error.name || 'Error',
+                code: error.code || null,
+              } : null,
+            };
+            if (!childActivity.first) childActivity.first = record;
+            childActivity.last = record;
+          };
+          const runVirtualCommandInternal = (options) => {
+            const { entry, argv, cwd, commandEnv, stdin, signal, timeout, onStdout, onStderr } = options;
+            childActivity.launched += 1;
             const isNodeExecutable = (pathname) => /(?:^|\/)node(?:js)?$/.test(String(pathname));
             let shebangScript = false;
             try {
@@ -9400,6 +9462,23 @@ export function createRuntime({
                 finish(code);
               });
               child.stdin?.end(stdin === undefined ? undefined : stdin);
+            });
+          };
+
+          const runVirtualCommand = (options) => {
+            let result;
+            try {
+              result = runVirtualCommandInternal(options);
+            } catch (error) {
+              recordChildActivity(options, null, error);
+              throw error;
+            }
+            return Promise.resolve(result).then((value) => {
+              recordChildActivity(options, value);
+              return value;
+            }, (error) => {
+              recordChildActivity(options, null, error);
+              throw error;
             });
           };
 
@@ -10750,6 +10829,13 @@ export function createRuntime({
       entry,
       runtimeFetchRef,
     );
+    if (injectedProcess && injectedProcess !== processObject) {
+      Object.defineProperty(injectedProcess, '__bnhChildActivity', {
+        configurable: true,
+        enumerable: false,
+        value: processObject.__bnhChildActivity,
+      });
+    }
     if (options.workerThread || String(options.entry || '').startsWith('/node/.bnh-worker-eval-')) {
       Object.defineProperty(builtins, 'trace_events', {
         configurable: true,
@@ -12110,8 +12196,10 @@ export function createRuntime({
       };
       capabilities.output.on('data', outputListener);
       let artifacts = {};
+      let runtimeState = null;
       worker.on('message', (message) => {
         if (message?.type === 'bnh-artifacts') artifacts = message.artifacts || {};
+        if (message?.type === 'bnh-runtime-state') runtimeState = message.state || null;
       });
       const child = {
         exit: null,
@@ -12150,6 +12238,8 @@ export function createRuntime({
             network_mode: proxyCapability.mode,
             proxy_enabled: Boolean(proxyCapability.enabled && proxyCapability.capabilityGranted && proxyCapability.adapter),
             virtual_network: true,
+            runtimeState: terminal.runtimeState || runtimeState,
+            childActivity: terminal.runtimeState?.childActivity || runtimeState?.childActivity || null,
           },
           artifacts,
         };

@@ -17,6 +17,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
   let proxySequence = 0;
   let exitCode = 0;
   let signalCode = null;
+  let processStateSource;
   const processExitSignal = {};
   const remoteHandles = new Map();
   const proxyRequests = new Map();
@@ -310,6 +311,9 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       forced,
       lastUserSequence: userSequence,
       error: errorRecord(error),
+      runtimeState: processStateSource?.__bnhRuntimeState
+        || processStateSource?.__bnhChildActivity
+        || null,
     });
     // Keep the user port alive for one turn. MessagePort has independent
     // delivery from the control port, so closing it synchronously can discard
@@ -323,6 +327,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     key = message.key;
     identity = message.identity;
     const process = makeEmitter();
+    processStateSource = process;
     const pendingMessages = [];
     let pendingMessageFlushQueued = false;
     const flushPendingMessages = () => {

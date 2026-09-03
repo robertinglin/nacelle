@@ -156,6 +156,14 @@ export async function runProcessEntry(context) {
   // process.exitCode instead of the bootstrap default of zero.
   if (context.process && Number.isInteger(code)) context.process.exitCode = code;
   if (descriptor.capabilities.ipc.enabled && context.process.connected) {
+    const runtimeState = {
+      exitCode: context.process.exitCode,
+      runtimeCode: code,
+      childActivity: context.process.__bnhChildActivity || null,
+    };
+    context.process.__bnhRuntimeState = runtimeState;
+    const sendRuntimeState = context.process.__bnhSendInternal || context.process.send;
+    await sendRuntimeState.call(context.process, { type: 'bnh-runtime-state', state: runtimeState });
     const declared = descriptor.capabilities.vfs.mounts.some((mount) => mount.artifacts?.length);
     const artifacts = declared ? runtime.exportArtifacts() : { version: 1, artifacts: [] };
     const sendInternal = context.process.__bnhSendInternal || context.process.send;

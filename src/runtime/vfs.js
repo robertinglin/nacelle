@@ -3377,6 +3377,7 @@ export function createVfs(options = {}) {
         artifacts: [...mountRecord.artifacts].sort(lexicalCompare),
       })),
       symlinks: [...symlinks.entries()].sort(([left], [right]) => lexicalCompare(left, right)),
+      directories: [...directories].sort(lexicalCompare),
       artifacts: artifactList,
       files: Object.fromEntries(artifactList.map(({ path, bytes }) => [path, bytes])),
     };

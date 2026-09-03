@@ -124,6 +124,50 @@ test('supports synchronous require of an ESM graph when the Node profile enables
   expect(JSON.parse(child.stdout)).toEqual({ __esModule: true, default: 'default', named: 'named', packageValue: 'main' });
 });
 
+test('isolates a nested ESM fork from its parent execution gate', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const { fork } = require('node:child_process');
+    const child = fork('/node/parent.mjs', [], {
+      cwd: '/node',
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    });
+    child.once('message', (value) => process.stdout.write(String(value)));
+    child.once('error', (error) => {
+      console.error(error.stack || error);
+      process.exitCode = 1;
+    });
+    child.once('exit', (code) => { if (code !== 0) process.exitCode = code ?? 1; });
+  `, {
+    timeoutMs: 2_000,
+    files: {
+      '/node/parent.mjs': `
+        import { fork } from 'node:child_process';
+        const child = fork('/node/leaf.mjs', [], {
+          cwd: '/node',
+          stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+        });
+        child.once('message', (value) => {
+          process.send('parent:' + value, (error) => {
+            if (error) process.exitCode = 1;
+            else process.exit(0);
+          });
+        });
+        child.once('error', (error) => {
+          console.error(error.stack || error);
+          process.exitCode = 1;
+        });
+      `,
+      '/node/leaf.mjs': `
+        process.send('leaf');
+        setTimeout(() => process.exit(0), 10);
+      `,
+    },
+  });
+
+  await expectPass(expect, result);
+  expect(result.stdout).toBe('parent:leaf');
+});
+
 test('keeps the owning process environment in a same-realm native ESM graph', async ({ harnessPage }) => {
   const result = await harnessPage.run(`
     const assert = require('node:assert/strict');

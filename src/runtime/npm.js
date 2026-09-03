@@ -251,15 +251,77 @@ export function parseNpmAlias(range) {
  * Persistent IndexedDB and in-memory cache for NPM package metadata and tarball archives.
  */
 export class BrowserNpmCache {
-  constructor({ dbName = 'bnh_npm_cache', globalObject = globalThis, maxUnpackedBytes = 768 * 1024 * 1024 } = {}) {
+  constructor({
+    dbName = 'bnh_npm_cache',
+    globalObject = globalThis,
+    maxMetadataBytes = 256 * 1024 * 1024,
+    maxTarballBytes = 512 * 1024 * 1024,
+    maxUnpackedBytes = 768 * 1024 * 1024,
+  } = {}) {
     this.dbName = dbName;
     this.globalObject = globalObject;
+    this.maxMetadataBytes = maxMetadataBytes;
+    this.maxTarballBytes = maxTarballBytes;
     this.maxUnpackedBytes = maxUnpackedBytes;
     this.memoryMeta = new Map();
+    this.memoryMetaBytes = 0;
     this.memoryTarballs = new Map();
+    this.memoryTarballBytes = 0;
     this.unpackedPackages = new Map();
     this.unpackedBytes = 0;
     this.dbPromise = null;
+  }
+
+  metadataSize(value) {
+    try { return new TextEncoder().encode(JSON.stringify(value)).byteLength; } catch { return 0; }
+  }
+
+  getMemoryMetadata(packageName) {
+    const value = this.memoryMeta.get(packageName);
+    if (value === undefined) return undefined;
+    this.memoryMeta.delete(packageName);
+    this.memoryMeta.set(packageName, value);
+    return value;
+  }
+
+  setMemoryMetadata(packageName, value) {
+    const bytes = this.metadataSize(value);
+    const previous = this.memoryMeta.get(packageName);
+    if (previous !== undefined) this.memoryMetaBytes -= this.metadataSize(previous);
+    this.memoryMeta.delete(packageName);
+    if (!Number.isFinite(this.maxMetadataBytes) || this.maxMetadataBytes <= 0 || bytes > this.maxMetadataBytes) return;
+    this.memoryMeta.set(packageName, value);
+    this.memoryMetaBytes += bytes;
+    while (this.memoryMetaBytes > this.maxMetadataBytes && this.memoryMeta.size) {
+      const oldestKey = this.memoryMeta.keys().next().value;
+      const oldest = this.memoryMeta.get(oldestKey);
+      this.memoryMeta.delete(oldestKey);
+      this.memoryMetaBytes -= this.metadataSize(oldest);
+    }
+  }
+
+  getMemoryTarball(key) {
+    const value = this.memoryTarballs.get(key);
+    if (!value) return undefined;
+    this.memoryTarballs.delete(key);
+    this.memoryTarballs.set(key, value);
+    return value;
+  }
+
+  setMemoryTarball(key, value) {
+    const bytes = value?.byteLength || 0;
+    const previous = this.memoryTarballs.get(key);
+    if (previous) this.memoryTarballBytes -= previous.byteLength || 0;
+    this.memoryTarballs.delete(key);
+    if (!Number.isFinite(this.maxTarballBytes) || this.maxTarballBytes <= 0 || bytes > this.maxTarballBytes) return;
+    this.memoryTarballs.set(key, value);
+    this.memoryTarballBytes += bytes;
+    while (this.memoryTarballBytes > this.maxTarballBytes && this.memoryTarballs.size) {
+      const oldestKey = this.memoryTarballs.keys().next().value;
+      const oldest = this.memoryTarballs.get(oldestKey);
+      this.memoryTarballs.delete(oldestKey);
+      this.memoryTarballBytes -= oldest?.byteLength || 0;
+    }
   }
 
   getUnpackedPackage(name, version) {
@@ -322,7 +384,8 @@ export class BrowserNpmCache {
   }
 
   async getMetadata(packageName) {
-    if (this.memoryMeta.has(packageName)) return this.memoryMeta.get(packageName);
+    const memoryValue = this.getMemoryMetadata(packageName);
+    if (memoryValue !== undefined) return memoryValue;
     const db = await this._getDb();
     if (!db) return null;
     return new Promise((resolve) => {
@@ -333,7 +396,7 @@ export class BrowserNpmCache {
         req.onsuccess = () => {
           const record = req.result;
           if (record && record.data) {
-            this.memoryMeta.set(packageName, record.data);
+            this.setMemoryMetadata(packageName, record.data);
             resolve(record.data);
           } else {
             resolve(null);
@@ -347,7 +410,7 @@ export class BrowserNpmCache {
   }
 
   async setMetadata(packageName, data) {
-    this.memoryMeta.set(packageName, data);
+    this.setMemoryMetadata(packageName, data);
     const db = await this._getDb();
     if (!db) return;
     try {
@@ -362,7 +425,8 @@ export class BrowserNpmCache {
     const rawKey = key.replace(/^(?:pkg-tarball:|tarball:|pkg:)/, '');
     const candidateKeys = [key, rawKey, `tarball:${rawKey}`, `pkg-tarball:${rawKey}`, `pkg:${rawKey}`];
     for (const k of candidateKeys) {
-      if (this.memoryTarballs.has(k)) return this.memoryTarballs.get(k);
+      const memoryValue = this.getMemoryTarball(k);
+      if (memoryValue) return memoryValue;
     }
     const db = await this._getDb();
     if (!db) return null;
@@ -375,7 +439,7 @@ export class BrowserNpmCache {
           const record = req.result;
           if (record && record.bytes) {
             const bytes = record.bytes instanceof Uint8Array ? record.bytes : new Uint8Array(record.bytes);
-            this.memoryTarballs.set(key, bytes);
+            this.setMemoryTarball(key, bytes);
             resolve(bytes);
           } else {
             resolve(null);
@@ -390,7 +454,7 @@ export class BrowserNpmCache {
 
   async setTarball(key, bytes, meta = {}) {
     const uint8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-    this.memoryTarballs.set(key, uint8);
+    this.setMemoryTarball(key, uint8);
     const db = await this._getDb();
     if (!db) return;
     try {
@@ -430,7 +494,9 @@ export class BrowserNpmCache {
 
   async clear() {
     this.memoryMeta.clear();
+    this.memoryMetaBytes = 0;
     this.memoryTarballs.clear();
+    this.memoryTarballBytes = 0;
     this.clearUnpackedPackages();
     const db = await this._getDb();
     if (!db) return;
@@ -484,11 +550,11 @@ export class BrowserNpm {
     if (cache instanceof Map) {
       for (const [k, v] of cache.entries()) {
         if (k.startsWith('pkg-tarball:') || k.startsWith('tarball:')) {
-          this.cache.memoryTarballs.set(k, v);
+          this.cache.setMemoryTarball(k, v);
         } else if (k.startsWith('meta:')) {
-          this.cache.memoryMeta.set(k.slice(5), v);
+          this.cache.setMemoryMetadata(k.slice(5), v);
         } else {
-          this.cache.memoryTarballs.set(k, v);
+          this.cache.setMemoryTarball(k, v);
         }
       }
     }

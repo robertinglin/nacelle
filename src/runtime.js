@@ -8937,8 +8937,8 @@ export function createRuntime({
           // without first duplicating every immutable file buffer; the worker
           // boundary converts those buffers to shared storage when available.
           const snapshot = options.ipc
-            ? vfs.snapshot({ copy: false })
-            : vfs.snapshot({ copy: false, includeBackend: true });
+            ? vfs.snapshot({ copy: false, includeFiles: false })
+            : vfs.snapshot({ copy: false, includeBackend: true, includeFiles: false });
           const files = snapshot.backend
             ? {}
             : Object.fromEntries(snapshot.artifacts.map(({ path, bytes }) => [path, bytes]));
@@ -10386,7 +10386,7 @@ export function createRuntime({
         error.code = 'ERR_CAPABILITY_DENIED';
         throw error;
       }
-      const snapshot = vfs.snapshot({ copy: false });
+      const snapshot = vfs.snapshot({ copy: false, includeFiles: false });
       const files = Object.fromEntries(
         snapshot.artifacts.map(({ path, bytes }) => [path, bytes]),
       );
@@ -12143,7 +12143,7 @@ export function createRuntime({
       const stdout = capabilities.output.stdout;
       const stderr = capabilities.output.stderr;
       const workerSource = new URL('./runtime/process-entry.js', import.meta.url).href;
-      const snapshot = vfs.snapshot({ copy: false });
+      const snapshot = vfs.snapshot({ copy: false, includeFiles: false });
       const files = Object.fromEntries(
         snapshot.artifacts.map(({ path, bytes }) => [path, {
           data: bytes,

@@ -1088,6 +1088,20 @@ export function createVfs(options = {}) {
     return new Uint8Array(value);
   }
 
+  // Module evaluation only inspects file bytes and must not allocate a second
+  // buffer for every resolver probe. Keep the public read() copy semantics,
+  // while exposing the backing immutable bytes to the runtime's internal
+  // loader seam. Callers of readBytes() must treat the returned view as
+  // read-only; all filesystem APIs continue to use readBytes() above.
+  function readStoredBytes(path, operation = 'open') {
+    path = resolvePath(path);
+    access(path, operation);
+    if (directories.has(path)) throw isDirectory(path, operation);
+    const value = files.get(path);
+    if (value === undefined) throw missing(path, operation);
+    return value;
+  }
+
   function removeFile(path, operation = 'unlink') {
     path = resolvePath(path, false);
     access(path, operation, true);
@@ -3360,7 +3374,7 @@ export function createVfs(options = {}) {
     return (declared.length ? declared : [...files.keys()]).sort(lexicalCompare);
   }
 
-  function snapshot({ copy = true, includeBackend = false } = {}) {
+  function snapshot({ copy = true, includeBackend = false, includeFiles = true } = {}) {
     const artifactList = (includeBackend ? [] : artifactPaths()).filter((path) => files.has(path)).map((path) => {
       const bytes = files.get(path);
       return {
@@ -3379,8 +3393,8 @@ export function createVfs(options = {}) {
       symlinks: [...symlinks.entries()].sort(([left], [right]) => lexicalCompare(left, right)),
       directories: [...directories].sort(lexicalCompare),
       artifacts: artifactList,
-      files: Object.fromEntries(artifactList.map(({ path, bytes }) => [path, bytes])),
     };
+    if (includeFiles) result.files = Object.fromEntries(artifactList.map(({ path, bytes }) => [path, bytes]));
     if (includeBackend) {
       const backendDirectoryIndex = syncDirectoryIndex();
       result.backend = {
@@ -3987,6 +4001,11 @@ export function createVfs(options = {}) {
       // operation so callers can inspect or export an addon fixture safely.
       if (path.endsWith('.node') && files.has(path)) unsupportedNativeAddon(path);
       return readBytes(path);
+    },
+    readBytes(pathValue) {
+      const path = resolve(pathValue);
+      if (path.endsWith('.node') && files.has(path)) unsupportedNativeAddon(path);
+      return readStoredBytes(path);
     },
     readDescriptor: readDescriptorAsync,
     readFile,

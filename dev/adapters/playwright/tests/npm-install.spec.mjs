@@ -69,6 +69,27 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     expect([...vfs.fs.readFileSync('/node/numeric.txt')]).toEqual([7, 8, 9]);
   });
 
+  test('VFS exposes immutable backing bytes separately from filesystem copies', () => {
+    const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
+    vfs.fs.writeFileSync('/node/module.js', 'module.exports = 1;');
+    const stored = vfs.readBytes('/node/module.js');
+    const copy = vfs.read('/node/module.js');
+
+    expect(stored).toBe(vfs.readBytes('/node/module.js'));
+    expect(copy).not.toBe(stored);
+    copy[0] ^= 0xff;
+    expect(new TextDecoder().decode(vfs.readBytes('/node/module.js'))).toBe('module.exports = 1;');
+  });
+
+  test('VFS can omit the redundant file map from internal snapshots', () => {
+    const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
+    vfs.fs.writeFileSync('/node/module.js', 'module.exports = 1;');
+    const snapshot = vfs.snapshot({ copy: false, includeFiles: false });
+
+    expect(snapshot.files).toBeUndefined();
+    expect(snapshot.artifacts.find(({ path }) => path === '/node/module.js')).toBeDefined();
+  });
+
   test('semver utilities parse and match version specs', () => {
     expect(parsePackageSpec('express@4.19.2')).toEqual({ name: 'express', range: '4.19.2' });
     expect(parsePackageSpec('@types/node@^20.0.0')).toEqual({ name: '@types/node', range: '^20.0.0' });
@@ -309,6 +330,25 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     expect(afterClearMeta).toBeNull();
     const afterClearTarball = await cache.getTarball('tarball:test-pkg@2.0.0');
     expect(afterClearTarball).toBeNull();
+  });
+
+  test('BrowserNpmCache bounds in-memory metadata and tarball acceleration layers', async () => {
+    const { BrowserNpmCache } = await import('../runtime/npm.js');
+    const cache = new BrowserNpmCache({
+      dbName: 'test_bnh_npm_cache_bounds',
+      maxMetadataBytes: 40,
+      maxTarballBytes: 5,
+    });
+
+    cache.setMemoryMetadata('old', { value: '12345678901234567890' });
+    cache.setMemoryMetadata('new', { value: 'abcdefghijklmnopqrst' });
+    cache.setMemoryTarball('old', new Uint8Array([1, 2, 3, 4]));
+    cache.setMemoryTarball('new', new Uint8Array([5, 6, 7, 8]));
+
+    expect(cache.memoryMetaBytes).toBeLessThanOrEqual(40);
+    expect(cache.memoryTarballBytes).toBeLessThanOrEqual(5);
+    expect(cache.memoryMeta.has('old')).toBe(false);
+    expect(cache.memoryTarballs.has('old')).toBe(false);
   });
 
   test('BrowserNpm installs from custom/live registry and leverages BrowserNpmCache', async () => {

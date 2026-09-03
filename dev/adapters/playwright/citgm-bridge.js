@@ -354,7 +354,7 @@ function structuredCitgmStage(value) {
   return null;
 }
 
-async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 1000, citgmVersion = DEFAULT_CITGM_VERSION, browser = 'unknown', progress: progressConfig = null }) {
+async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 1000, citgmVersion = DEFAULT_CITGM_VERSION, browser = 'unknown', progress: progressConfig = null, output: outputConfig = null }) {
   if (running) throw new Error('a CITGM run is already active in this browser page');
   if (!module || typeof module !== 'string') throw new TypeError('module is required');
   running = true;
@@ -400,7 +400,7 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     stderr: { bytes: 0, chunks: 0 },
   };
   const outputChunks = { stdout: [], stderr: [] };
-  const outputBinding = progressConfig?.outputBinding;
+  const outputBinding = outputConfig?.binding || progressConfig?.outputBinding;
   const pendingOutputWrites = new Set();
   let installStats = null;
   let preloadStats = null;

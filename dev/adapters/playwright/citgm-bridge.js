@@ -2,6 +2,7 @@ import { BrowserNpm, BrowserNpmCache } from './runtime/npm.js';
 import { createRuntime } from './runtime.js';
 import { createVfs } from './runtime/vfs.js';
 import { createProgressReporter } from './progress-protocol.mjs';
+import { createCitgmProcessArgv } from './citgm-argv.mjs';
 
 const DEFAULT_CITGM_VERSION = '10.0.2';
 const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
@@ -515,7 +516,7 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     report('setup', 'candidate-dependency-preload-complete', { events: progress.preload.events });
     await runtime.mount({});
 
-    const processArgv = ['node', CITGM_ENTRY, ...args, module];
+    const processArgv = createCitgmProcessArgv(CITGM_ENTRY, module, args);
     currentStage = 'child-launch';
     child = await runtime.spawn(
       ['node', CITGM_ENTRY],

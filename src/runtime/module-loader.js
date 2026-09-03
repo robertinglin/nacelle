@@ -447,6 +447,11 @@ export function createModuleLoader({
     : new TextDecoder().decode(value);
 
   const packageConfigCache = new Map();
+  // npm's .bin directory contains executable shims rather than package
+  // modules. Its owning project package scope remains relevant when a shim
+  // is an extensionless ESM entry point.
+  const isNpmBinShimPath = (pathname) => /\/node_modules\/\.bin(?:\/|$)/.test(String(pathname));
+
   const packageConfig = (base) => {
     const packagePath = posix.join(base, 'package.json');
     if (!hasFile(packagePath)) return undefined;
@@ -467,7 +472,7 @@ export function createModuleLoader({
   const packageScopeType = (resolved) => {
     let directory = posix.dirname(resolved);
     while (true) {
-      if (directory.endsWith('/node_modules')) return undefined;
+      if (directory.endsWith('/node_modules') && !isNpmBinShimPath(resolved)) return undefined;
       const config = packageConfig(directory);
       if (config !== undefined) {
         if (config.type === 'module' || config.type === 'commonjs') return config.type;

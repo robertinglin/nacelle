@@ -148,6 +148,19 @@ async function main() {
           process.stderr.write(formatProgressLine(event));
         } catch { /* diagnostics cannot affect the run */ }
       });
+      await page.exposeBinding('__bnhRecordOutput', async (_source, event) => {
+        try {
+          if (!artifactWriterPromise) {
+            artifactWriterPromise = createCITGMArtifactWriter({
+              rootDir: process.env.NACELLE_CITGM_ARTIFACT_DIR,
+              module: options.module,
+              runId: event?.runId || `browser-${Date.now()}`,
+            });
+          }
+          const writer = await artifactWriterPromise;
+          await writer.recordOutput(event?.stream, event?.value);
+        } catch { /* artifact capture cannot affect the run */ }
+      });
       process.stdout.write('Starting browser-side CITGM execution...\n');
       const result = await page.evaluate((request) => globalThis.__NACELLE_CITGM__.run(request), {
         module: options.module,
@@ -156,6 +169,7 @@ async function main() {
         citgmVersion: options.citgmVersion,
         browser: options.browserName,
         progress: { binding: '__bnhReportProgress' },
+        output: { binding: '__bnhRecordOutput' },
       });
       const runId = result.runId || result.runResult?.runId || `unknown-${Date.now()}`;
       const artifactWriter = artifactWriterPromise

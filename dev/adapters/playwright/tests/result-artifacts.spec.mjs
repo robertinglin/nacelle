@@ -79,3 +79,13 @@ test('CITGM artifacts preserve complete streams and separate traces from bounded
   assert.ok(Buffer.byteLength(failureExcerpt(stdout, 64)) <= 90);
   assert.match(failureExcerpt(stderr, 4096), /upstream failure/);
 });
+
+test('CITGM artifacts retain output already received before a browser failure', async () => {
+  const rootDir = await mkdtemp(path.join(os.tmpdir(), 'bnh-artifacts-stream-'));
+  const writer = await createCITGMArtifactWriter({ rootDir, module: 'module', runId: 'run-stream' });
+  await writer.recordOutput('stdout', 'partial stdout\n');
+  await writer.recordOutput('stderr', Uint8Array.from([101, 114, 114, 111, 114, 10]));
+  await writer.close({ stdout: 'unavailable fallback', stderr: 'unavailable fallback' });
+  assert.equal(await readFile(writer.paths.stdout, 'utf8'), 'partial stdout\n');
+  assert.equal(await readFile(writer.paths.stderr, 'utf8'), 'error\n');
+});

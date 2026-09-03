@@ -7721,7 +7721,7 @@ export function createRuntime({
                   finish(terminalCode, terminalSignal);
                 });
               } else if (result.process) {
-                result.process.once?.('exit', (code, signal) => {
+                const handlePreparedExit = (code, signal) => {
                   if (!stdioInherited(1) && result.stdoutChunks?.length) {
                     const complete = result.stdoutChunks.join('');
                     const missing = stdoutEmitted && complete.endsWith(stdout)
@@ -7747,7 +7747,18 @@ export function createRuntime({
                       : (result.process?.getCode?.() ?? code);
                     finish(finalCode, finalSignal);
                   });
-                });
+                };
+                if (result.process._bnhIsExited?.() || result.process._exitRequested?.()) {
+                  // Same-realm process exit can precede listener attachment.
+                  // Defer the equivalent exit delivery so the parent can wire
+                  // its stdout/stderr and exit/close listeners first.
+                  scope.queueMicrotask(() => handlePreparedExit(
+                    result.process.getCode?.(),
+                    result.process.getSignal?.(),
+                  ));
+                } else {
+                  result.process.once?.('exit', handlePreparedExit);
+                }
               }
             } catch (error) {
               finish(1, null, error);

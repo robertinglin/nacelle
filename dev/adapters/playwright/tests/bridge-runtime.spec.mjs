@@ -378,6 +378,48 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('runs nested package-manager lifecycle scripts through a Node child', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/node', [
+          '/node/node_modules/.bin/npm', 'test',
+        ], { cwd: '/node/.citgm/tmp/package-under-test' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(output, 'nested lifecycle test ran\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/.citgm/tmp/package-under-test/package.json': JSON.stringify({
+          name: 'nested-lifecycle-fixture',
+          version: '1.0.0',
+          scripts: {
+            test: 'yarn test:base',
+            'test:base': "node -e \"process.stdout.write('nested lifecycle test ran\\\\n')\"",
+          },
+        }),
+        '/node/node_modules/.bin/node': '#!/usr/bin/env node\\n',
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\\n',
+        '/node/node_modules/.bin/yarn': '#!/usr/bin/env node\\n',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
   test('forwards package-script output before a nonzero child close', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert');
@@ -449,6 +491,50 @@ test.describe('browser runtime bridge and core primitives', () => {
           "child.once('exit', (code, signal) => { if (signal) process.kill(process.pid, signal); else process.exit(code); });",
         ].join('\n'),
         '/node/package-manager-child.js': "process.stdout.write('package manager child ran\\n');",
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('forwards nested output before a package-manager child exits nonzero', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('node', ['/node/yarn.js', 'test'], { cwd: '/node' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 7, errorOutput);
+        assert.strictEqual(output, 'manager start\\npackage manager child ran\\n');
+        assert.strictEqual(errorOutput, 'package manager failure\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/yarn.js': [
+          '#!/usr/bin/env node',
+          "const { spawn } = require('node:child_process');",
+          "process.stdout.write('manager start\\n');",
+          "const child = spawn(process.execPath, ['/node/package-manager-child.js'], { stdio: ['ignore', 'pipe', 'pipe'] });",
+          "child.stdout.on('data', (chunk) => process.stdout.write(chunk));",
+          "child.stderr.on('data', (chunk) => process.stderr.write(chunk));",
+          "child.once('exit', (code, signal) => { if (signal) process.kill(process.pid, signal); else process.exit(code); });",
+        ].join('\n'),
+        '/node/package-manager-child.js': [
+          "process.stdout.write('package manager child ran\\n');",
+          "process.stderr.write('package manager failure\\n');",
+          'process.exit(7);',
+        ].join('\n'),
       },
     });
 

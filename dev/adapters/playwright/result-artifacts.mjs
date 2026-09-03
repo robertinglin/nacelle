@@ -18,6 +18,8 @@ function asText(value) {
 export function compactForSummary(value, depth = 0) {
   if (value === null || typeof value === 'number' || typeof value === 'boolean') return value;
   if (typeof value === 'string') return value.slice(0, MAX_SUMMARY_STRING);
+  if (ArrayBuffer.isView(value)) return { bytes: value.byteLength };
+  if (value instanceof ArrayBuffer) return { bytes: value.byteLength };
   if (depth >= 4) return '[summary depth limit]';
   if (Array.isArray(value)) return { count: value.length };
   if (typeof value !== 'object') return String(value).slice(0, MAX_SUMMARY_STRING);

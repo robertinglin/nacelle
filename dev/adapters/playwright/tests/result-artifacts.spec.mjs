@@ -42,6 +42,7 @@ test('CITGM artifacts preserve complete streams and separate traces from bounded
   assert.deepEqual(bounded.outputEvents, { count: 10000 });
   assert.deepEqual(bounded.nested.details.networkEvents, { count: 3 });
   assert.ok(JSON.stringify(bounded).length < 500);
+  assert.deepEqual(compactForSummary({ bytes: new Uint8Array(4096) }), { bytes: { bytes: 4096 } });
   assert.deepEqual(outputSummary({ stdout: 'λ\n', stderr: 'x', output: { stdout: { chunks: 7 } } }), {
     stdout: { bytes: 3, chunks: 7 },
     stderr: { bytes: 1, chunks: 1 },

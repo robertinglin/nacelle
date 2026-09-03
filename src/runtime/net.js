@@ -1441,16 +1441,18 @@ export class Server extends EventEmitter {
     accepted._readyState = 'open';
     accepted._activateTask?.();
     accepted._sockname = {
-      address: connection.remoteAddress,
+      address: connection.remoteAddress || '127.0.0.1',
       family: connection.remoteAddress
         ? (virtualAddressFamily(connection.remoteAddress) === 6 ? 'IPv6' : 'IPv4')
-        : undefined,
+        : 'IPv4',
       port: this._boundPort,
     };
     accepted._peername = {
-      address: connection.localAddress,
+      address: connection.localAddress || '127.0.0.1',
       port: connection.localPort,
-      family: accepted.localFamily,
+      family: connection.localAddress
+        ? accepted.localFamily
+        : 'IPv4',
     };
     this._activeSockets.add(accepted);
     this._connections += 1;

@@ -147,7 +147,7 @@ function makeInMemoryIpcPair(scope, { preserveReferences = false } = {}) {
   return { parent: left, child: right };
 }
 
-function makeTerminal(identity, state, kind, code, signal, error, forced) {
+function makeTerminal(identity, state, kind, code, signal, error, forced, runtimeState = null) {
   return Object.freeze({
     runId: identity.runId,
     childId: identity.childId,
@@ -163,6 +163,7 @@ function makeTerminal(identity, state, kind, code, signal, error, forced) {
     signal: signal ?? null,
     forced: Boolean(forced),
     error: error ? { name: error.name, message: error.message, stack: error.stack, code: error.code } : null,
+    runtimeState,
   });
 }
 
@@ -244,7 +245,19 @@ function createInMemoryProcess(options) {
   const finish = (kind, code = childProcess.getCode?.() || 0, signal = null, error = null, forced = false) => {
     if (terminal) return;
     transition(error || forced ? 'failed' : 'exited');
-    terminal = makeTerminal(identity, state, kind, code, signal, error, forced);
+    terminal = makeTerminal(
+      identity,
+      state,
+      kind,
+      code,
+      signal,
+      error,
+      forced,
+      childProcess.__bnhRuntimeState
+        || childProcess.__bnhNodeTestState
+        || childProcess.__bnhChildActivity
+        || null,
+    );
     if (childProcess.connected) childProcess.disconnect?.();
     else ipcPair.child.close();
     emitDisconnect();

@@ -17,6 +17,10 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
   let proxySequence = 0;
   let exitCode = 0;
   let signalCode = null;
+  // The control terminal frame is the reliable end-of-process boundary. Keep
+  // the injected process here so state produced immediately before natural
+  // completion cannot be stranded behind a separately ordered IPC message.
+  let processStateSource;
   const processExitSignal = {};
   const remoteHandles = new Map();
   const proxyRequests = new Map();
@@ -310,6 +314,10 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       forced,
       lastUserSequence: userSequence,
       error: errorRecord(error),
+      runtimeState: processStateSource?.__bnhRuntimeState
+        || processStateSource?.__bnhNodeTestState
+        || processStateSource?.__bnhChildActivity
+        || null,
     });
     // Keep the user port alive for one turn. MessagePort has independent
     // delivery from the control port, so closing it synchronously can discard
@@ -323,6 +331,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     key = message.key;
     identity = message.identity;
     const process = makeEmitter();
+    processStateSource = process;
     const pendingMessages = [];
     let pendingMessageFlushQueued = false;
     const flushPendingMessages = () => {
@@ -444,6 +453,13 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         callback?.();
         return true;
       },
+      end(value, encoding, callback) {
+        if (typeof value === 'function') callback = value;
+        else if (typeof encoding === 'function') callback = encoding;
+        if (value !== undefined && value !== null && typeof value !== 'function') this.write(value, encoding);
+        callback?.();
+        return this;
+      },
     };
     process.stderr = {
       isTTY: false,
@@ -452,6 +468,13 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         sendControl('output', { stream: 'stderr', value: outputText(value) });
         callback?.();
         return true;
+      },
+      end(value, encoding, callback) {
+        if (typeof value === 'function') callback = value;
+        else if (typeof encoding === 'function') callback = encoding;
+        if (value !== undefined && value !== null && typeof value !== 'function') this.write(value, encoding);
+        callback?.();
+        return this;
       },
     };
 

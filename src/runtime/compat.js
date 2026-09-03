@@ -1,4 +1,4 @@
-import { ensureOutputStream } from './streams.js';
+import { ensureOutputStream, Stream } from './streams.js';
 import { AsyncResource } from './async-hooks.js';
 import { inspect as runtimeInspect } from './assert.js';
 
@@ -2741,7 +2741,7 @@ export function addAbortSignal(signal, stream) {
 export function finished(stream, options, callbackArgument) {
   try {
     const isNodeStream = stream && typeof stream.on === 'function'
-      && (stream._readableState || stream._writableState);
+      && (stream instanceof Stream || stream._readableState || stream._writableState);
     const isWebStream = stream && (typeof stream.getReader === 'function'
       || typeof stream.getWriter === 'function');
     if (!isNodeStream && !isWebStream && !(stream && kIsClosedPromise in stream)) {
@@ -2779,13 +2779,19 @@ export function finished(stream, options, callbackArgument) {
     const callbackResource = callback ? new AsyncResource('STREAMFINISHED') : null;
     return new Promise((resolve, reject) => {
       let settled = false;
+      const readable = options?.readable ?? Boolean(
+        stream?._readableState || stream?.readable === true,
+      );
+      const writable = options?.writable ?? Boolean(
+        stream?._writableState || stream?.writable === true,
+      );
       const complete = (error = undefined) => {
         if (settled) return;
         settled = true;
         try {
           if (options?.cleanup) {
             stream.off?.('finish', onFinish);
-            stream.off?.('end', onFinish);
+            stream.off?.('end', onEnd);
             stream.off?.('close', onClose);
             stream.off?.('error', onError);
           }
@@ -2796,7 +2802,12 @@ export function finished(stream, options, callbackArgument) {
           callbackResource?.emitDestroy();
         }
       };
-      const onFinish = () => complete();
+      const onFinish = () => {
+        if (writable) complete();
+      };
+      const onEnd = () => {
+        if (readable) complete();
+      };
       const onError = (err) => complete(err || abortError());
       const onClose = () => {
         const readableState = stream?._readableState;
@@ -2807,8 +2818,10 @@ export function finished(stream, options, callbackArgument) {
           return;
         }
         const premature = Boolean(
-          (readableState?.readable !== false && !readableState?.endEmitted)
-          || (writableState?.writable !== false && !writableState?.finished),
+          (readable && readableState?.readable !== false && !readableState?.endEmitted
+            && stream?.readable !== false)
+          || (writable && writableState?.writable !== false && !writableState?.finished
+            && stream?.writable !== false),
         );
         if (!premature) {
           complete();
@@ -2820,7 +2833,7 @@ export function finished(stream, options, callbackArgument) {
       };
       if (stream && typeof stream.on === 'function') {
         stream.on('finish', onFinish);
-        stream.on('end', onFinish);
+        stream.on('end', onEnd);
         stream.on('close', onClose);
         if (options && options.error !== false) {
           stream.on('error', onError);
@@ -2830,38 +2843,57 @@ export function finished(stream, options, callbackArgument) {
           if (options.signal.aborted) onAbort();
           else options.signal.addEventListener('abort', onAbort, { once: true });
         }
+        // `finished()` is allowed to observe a stream after its terminal
+        // event was emitted.  This is common when an async reporter awaits
+        // its own output before checking the source stream.  Event listeners
+        // alone would miss that transition and leave the promise pending.
+        const readableState = stream?._readableState;
+        const writableState = stream?._writableState;
+        const readableFinished = !readable
+          || !readableState && stream.readable !== true
+          || readableState?.endEmitted
+          || stream.readable === false;
+        const writableFinished = !writable
+          || !writableState && stream.writable !== true
+          || writableState?.finished
+          || stream.writable === false;
+        if (readableFinished && writableFinished) queueMicrotask(() => complete());
     } else if (stream && typeof stream.getReader === 'function') {
-      if (stream.locked) {
-        const closedPromise = stream[kIsClosedPromise];
-        Promise.resolve(closedPromise?.promise).then(
-          () => resolve(),
-          (err) => reject(err || abortError())
+      const closedPromise = stream[kIsClosedPromise];
+      if (closedPromise?.promise) {
+        Promise.resolve(closedPromise.promise).then(
+          () => complete(),
+          (err) => complete(err || abortError()),
         );
+        return;
+      }
+      if (stream.locked) {
+        complete();
         return;
       }
       (async () => {
         try {
-            const reader = stream.getReader();
+          const reader = stream.getReader();
             while (true) {
-              const result = await reader.read();
-              if (result.done) break;
-            }
-            reader.releaseLock();
-            resolve();
+            const result = await reader.read();
+            if (result.done) break;
+          }
+          reader.releaseLock();
+            complete();
           } catch (err) {
-            reject(err || abortError());
+            complete(err || abortError());
           }
         })();
         return;
       } else if (stream && kIsClosedPromise in stream && stream[kIsClosedPromise]) {
         const closedPromise = stream[kIsClosedPromise];
         Promise.resolve(closedPromise.promise).then(
-          () => resolve(),
-          (err) => reject(err || abortError())
+          () => complete(),
+          (err) => complete(err || abortError())
         );
         return;
       } else {
-        resolve();
+        complete();
       }
     });
   } catch (e) {

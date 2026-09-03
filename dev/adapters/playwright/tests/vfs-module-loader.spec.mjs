@@ -87,6 +87,81 @@ test.describe('browser-native VFS and module loading', () => {
     expect(result.stdout).toContain('module resolution completed');
   });
 
+  test('uses CommonJS extension probing for Module._resolveFilename', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (() => {
+        const assert = require('node:assert/strict');
+        const Module = require('node:module');
+        const resolved = Module._resolveFilename('../lib/target', module);
+        assert.strictEqual(resolved, '/node/cjs-loader/lib/target.js');
+        assert.strictEqual(require(resolved), 'resolved');
+        process.stdout.write('CommonJS filename resolution completed');
+      })();
+    `, {
+      entryPath: '/node/cjs-loader/test/entry.cjs',
+      files: {
+        '/node/cjs-loader/lib/target.js': 'module.exports = "resolved";\n',
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('CommonJS filename resolution completed');
+  });
+
+  test('uses CommonJS package main when resolving a directory request', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (() => {
+        const assert = require('node:assert/strict');
+        const Module = require('node:module');
+        const resolved = Module._resolveFilename('..', module);
+        assert.strictEqual(resolved, '/node/cjs-package/main.cjs');
+        assert.strictEqual(require(resolved), 'package-main');
+        process.stdout.write('CommonJS package main resolution completed');
+      })();
+    `, {
+      entryPath: '/node/cjs-package/test/entry.cjs',
+      files: {
+        '/node/cjs-package/package.json': JSON.stringify({ main: 'main.cjs' }),
+        '/node/cjs-package/main.cjs': 'module.exports = "package-main";\n',
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('CommonJS package main resolution completed');
+  });
+
+  test('invokes overridden CommonJS extension handlers and preserves module require hooks', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (() => {
+        const assert = require('node:assert/strict');
+        const Module = require('node:module');
+        const original = Module._extensions['.js'];
+        let invoked = false;
+        Module._extensions['.js'] = (moduleRecord, filename) => {
+          invoked = true;
+          const originalRequire = moduleRecord.require;
+          moduleRecord.require = (specifier) => specifier === './dep' ? 'extension-stub' : originalRequire(specifier);
+          return original(moduleRecord, filename);
+        };
+        try {
+          assert.strictEqual(require('/node/extension-hook/main.js'), 'extension-stub');
+          assert.strictEqual(invoked, true);
+        } finally {
+          Module._extensions['.js'] = original;
+        }
+        process.stdout.write('CommonJS extension hook completed');
+      })();
+    `, {
+      files: {
+        '/node/extension-hook/main.js': 'module.exports = require(\'./dep\');\n',
+        '/node/extension-hook/dep.js': 'module.exports = "original";\n',
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('CommonJS extension hook completed');
+  });
+
   test('shares and invalidates the CommonJS require cache like Node', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert/strict');

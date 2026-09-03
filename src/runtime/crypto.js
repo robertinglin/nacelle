@@ -1567,6 +1567,129 @@ function encodePem(label, der, cipher, iv) {
   return `-----BEGIN ${label}-----${headers}\n${body}\n-----END ${label}-----\n`;
 }
 
+function concatBytes(...parts) {
+  const length = parts.reduce((total, part) => total + part.length, 0);
+  const result = new Uint8Array(length);
+  let offset = 0;
+  for (const part of parts) {
+    result.set(part, offset);
+    offset += part.length;
+  }
+  return result;
+}
+
+function derLength(length) {
+  if (length < 0x80) return Uint8Array.of(length);
+  const bytes = [];
+  for (let value = length; value > 0; value = Math.floor(value / 256)) bytes.unshift(value & 0xff);
+  return Uint8Array.of(0x80 | bytes.length, ...bytes);
+}
+
+function derValue(tag, value) {
+  return concatBytes(Uint8Array.of(tag), derLength(value.length), value);
+}
+
+function derSequence(...values) {
+  return derValue(0x30, concatBytes(...values));
+}
+
+function derInteger(value) {
+  let bytes = bigintToBytes(value);
+  if (bytes.length === 0) bytes = Uint8Array.of(0);
+  if (bytes[0] & 0x80) bytes = concatBytes(Uint8Array.of(0), bytes);
+  return derValue(0x02, bytes);
+}
+
+function derOctetString(value) {
+  return derValue(0x04, value);
+}
+
+function derBitString(value) {
+  return derValue(0x03, concatBytes(Uint8Array.of(0), value));
+}
+
+function rsaAlgorithmIdentifier() {
+  return derSequence(
+    Uint8Array.of(0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01),
+    Uint8Array.of(0x05, 0x00),
+  );
+}
+
+function rsaKeyDer(material, keyType) {
+  if (keyType === 'public-pkcs1') {
+    return derSequence(derInteger(material.modulus), derInteger(material.publicExponent));
+  }
+  if (keyType === 'public-spki') {
+    return derSequence(rsaAlgorithmIdentifier(), derBitString(rsaKeyDer(material, 'public-pkcs1')));
+  }
+  const pkcs1 = derSequence(
+    derInteger(0n),
+    derInteger(material.modulus),
+    derInteger(material.publicExponent),
+    derInteger(material.privateExponent),
+    derInteger(material.primeP),
+    derInteger(material.primeQ),
+    derInteger(material.exponentP),
+    derInteger(material.exponentQ),
+    derInteger(material.coefficient),
+  );
+  if (keyType === 'private-pkcs1') return pkcs1;
+  if (keyType === 'private-pkcs8') {
+    return derSequence(derInteger(0n), rsaAlgorithmIdentifier(), derOctetString(pkcs1));
+  }
+  throw new TypeError(`Unsupported RSA key type: ${keyType}`);
+}
+
+function rsaKeyEncoding(material, keyType, encoding) {
+  const der = rsaKeyDer(material, keyType);
+  if (encoding?.format === 'pem') {
+    const label = keyType === 'public-spki' ? 'PUBLIC KEY'
+      : keyType === 'public-pkcs1' ? 'RSA PUBLIC KEY'
+        : keyType === 'private-pkcs1' ? 'RSA PRIVATE KEY' : 'PRIVATE KEY';
+    return encodePem(label, der);
+  }
+  return encodeKeyBytes(der, encoding?.encoding);
+}
+
+function rsaKeyJwk(material, privateKey) {
+  const encode = (value) => base64(bigintToBytes(value))
+    .replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+  const jwk = {
+    kty: 'RSA',
+    n: encode(material.modulus),
+    e: encode(material.publicExponent),
+  };
+  if (privateKey) {
+    Object.assign(jwk, {
+      d: encode(material.privateExponent),
+      p: encode(material.primeP),
+      q: encode(material.primeQ),
+      dp: encode(material.exponentP),
+      dq: encode(material.exponentQ),
+      qi: encode(material.coefficient),
+    });
+  }
+  return jwk;
+}
+
+function rsaKeyObject(material, privateKey) {
+  const keyType = privateKey ? 'private' : 'public';
+  const object = { type: keyType, asymmetricKeyType: 'rsa' };
+  Object.defineProperty(object, '_bnhRsaMaterial', { configurable: true, value: material });
+  Object.defineProperty(object, 'export', {
+    configurable: true,
+    value(options = {}) {
+      if (options.format === 'jwk') return rsaKeyJwk(material, privateKey);
+      const type = options.type || (privateKey ? 'pkcs8' : 'spki');
+      const keyTypeName = privateKey
+        ? type === 'pkcs1' ? 'private-pkcs1' : 'private-pkcs8'
+        : type === 'pkcs1' ? 'public-pkcs1' : 'public-spki';
+      return rsaKeyEncoding(material, keyTypeName, options);
+    },
+  });
+  return object;
+}
+
 function publicExponentBytes(value = 0x10001) {
   if (isArrayBufferView(value) || isArrayBuffer(value)) return new Uint8Array(toCryptoBytes(value));
   if (!Number.isSafeInteger(value) || value < 0 || value > 0xffffffff) {
@@ -1833,9 +1956,101 @@ export function generateKeyPair(type, options, callback, globalObject = globalTh
   return undefined;
 }
 
-export function generateKeyPairSync(type, options = {}) {
-  keyPairAlgorithm(type, options);
-  if (type.toLowerCase() === 'ed25519') {
+function gcdBigInt(left, right) {
+  let a = left < 0n ? -left : left;
+  let b = right < 0n ? -right : right;
+  while (b !== 0n) {
+    const remainder = a % b;
+    a = b;
+    b = remainder;
+  }
+  return a;
+}
+
+function modInverse(value, modulus) {
+  let oldR = value;
+  let r = modulus;
+  let oldS = 1n;
+  let s = 0n;
+  while (r !== 0n) {
+    const quotient = oldR / r;
+    [oldR, r] = [r, oldR - quotient * r];
+    [oldS, s] = [s, oldS - quotient * s];
+  }
+  if (oldR !== 1n) throw new Error('RSA public exponent is not invertible');
+  return (oldS % modulus + modulus) % modulus;
+}
+
+function generateRsaKeyMaterial(options, globalObject) {
+  const modulusLength = options.modulusLength || 2048;
+  if (modulusLength < 512) {
+    const error = new Error('error:1C8000AB:Provider routines::key size too small');
+    error.code = 'ERR_OSSL_KEYGEN_KEY_SIZE';
+    throw error;
+  }
+  const publicExponent = bytesToBigInt(publicExponentBytes(options.publicExponent));
+  if (publicExponent < 3n || (publicExponent & 1n) === 0n) {
+    const error = new Error('error:1C8000AB:Provider routines::invalid exponent');
+    error.code = 'ERR_OSSL_RSA_BAD_E_VALUE';
+    throw error;
+  }
+  const primeLength = Math.floor(modulusLength / 2);
+  for (;;) {
+    const primeP = generatePrimeValue(primeLength, { bigint: true }, globalObject);
+    const primeQ = generatePrimeValue(modulusLength - primeLength, { bigint: true }, globalObject);
+    if (primeP === primeQ) continue;
+    if (gcdBigInt(publicExponent, primeP - 1n) !== 1n
+      || gcdBigInt(publicExponent, primeQ - 1n) !== 1n) continue;
+    const modulus = primeP * primeQ;
+    if (bigIntBitLength(modulus) !== modulusLength) continue;
+    const phi = (primeP - 1n) * (primeQ - 1n);
+    if (gcdBigInt(publicExponent, phi) !== 1n) continue;
+    const privateExponent = modInverse(publicExponent, phi);
+    return {
+      modulus,
+      publicExponent,
+      privateExponent,
+      primeP,
+      primeQ,
+      exponentP: privateExponent % (primeP - 1n),
+      exponentQ: privateExponent % (primeQ - 1n),
+      coefficient: modInverse(primeQ, primeP),
+    };
+  }
+}
+
+export function generateKeyPairSync(type, options = {}, globalObject = globalThis) {
+  const { algorithm } = keyPairAlgorithm(type, options);
+  const normalized = type.toLowerCase().replaceAll('-', '');
+  if (normalized === 'rsa' || normalized === 'rsapss') {
+    if (options.privateKeyEncoding?.cipher || options.publicKeyEncoding?.cipher) {
+      throw new UnsupportedWebCapabilityError(
+        'crypto.generateKeyPairSync RSA encryption',
+        'encrypted PEM export is not available in this browser runtime',
+      );
+    }
+    const material = generateRsaKeyMaterial({ ...options, modulusLength: algorithm.modulusLength }, globalObject);
+    const publicKey = options.publicKeyEncoding
+      ? options.publicKeyEncoding.format === 'jwk'
+        ? rsaKeyJwk(material, false)
+        : rsaKeyEncoding(
+          material,
+          options.publicKeyEncoding.type === 'pkcs1' ? 'public-pkcs1' : 'public-spki',
+          options.publicKeyEncoding,
+        )
+      : rsaKeyObject(material, false);
+    const privateKey = options.privateKeyEncoding
+      ? options.privateKeyEncoding.format === 'jwk'
+        ? rsaKeyJwk(material, true)
+        : rsaKeyEncoding(
+          material,
+          options.privateKeyEncoding.type === 'pkcs1' ? 'private-pkcs1' : 'private-pkcs8',
+          options.privateKeyEncoding,
+        )
+      : rsaKeyObject(material, true);
+    return { publicKey, privateKey };
+  }
+  if (normalized === 'ed25519') {
     const publicKey = { type: 'public' };
     const privateKey = { type: 'private' };
     Object.defineProperty(publicKey, '_bnhGenerated', { value: true });
@@ -2803,22 +3018,21 @@ function validatePrimeGenerationOptions(options, size) {
   return options;
 }
 
-export function generatePrime(size, options, callback) {
+export function generatePrime(size, options, callback, globalObject = globalThis) {
   if (typeof options === 'function') callback = options;
   validatePrimeSize(size);
   const actualOptions = typeof options === 'function' ? {} : validatePrimeGenerationOptions(options, size);
   if (typeof callback !== 'function') {
     throw invalidArgumentType('callback', 'of type function', callback);
   }
-  if (size >= 1024) return undefined;
-  Promise.resolve().then(() => generatePrimeValue(size, actualOptions)).then(
+  Promise.resolve().then(() => generatePrimeValue(size, actualOptions, globalObject)).then(
     (value) => callback(null, value),
     (error) => callback(error),
   );
   return undefined;
 }
 
-export function generatePrimeSync(size, options = {}) {
+export function generatePrimeSync(size, options = {}, globalObject = globalThis) {
   validatePrimeSize(size);
   const actualOptions = validatePrimeGenerationOptions(options, size);
   if (actualOptions.add !== undefined) {
@@ -2839,7 +3053,7 @@ export function generatePrimeSync(size, options = {}) {
       }
     }
   }
-  return generatePrimeValue(size, actualOptions);
+  return generatePrimeValue(size, actualOptions, globalObject);
 }
 
 function bytesToBigInt(value) {
@@ -2856,6 +3070,12 @@ function bigIntToBytes(value, size) {
     current >>= 8n;
   }
   return result;
+}
+
+function bigIntBitLength(value) {
+  let length = 0;
+  for (let current = value; current > 0n; current >>= 1n) length += 1;
+  return length;
 }
 
 function modPow(base, exponent, modulus) {
@@ -2912,7 +3132,7 @@ function primeBuffer(bytesValue) {
   return value;
 }
 
-function generatePrimeValue(size, options) {
+function generatePrimeValue(size, options, globalObject = globalThis) {
   if (size === 3 && options.add === undefined && options.rem === undefined && !options.safe) {
     return options.bigint ? 7n : primeBuffer(Uint8Array.of(7));
   }
@@ -2924,10 +3144,10 @@ function generatePrimeValue(size, options) {
   // Safe primes are rarer than ordinary primes. Keep this randomized search
   // bounded, but large enough that browser-native entropy almost certainly
   // finds one before falling back to an exhaustive search.
-  const attempts = safe ? 65536 : 128;
+  const attempts = safe ? 65536 : Math.max(128, size * 4);
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const candidateBytes = new Uint8Array(byteLength);
-    globalThis.crypto.getRandomValues(candidateBytes);
+    requireCrypto(globalObject).getRandomValues(candidateBytes);
     if (excessBits) candidateBytes[0] &= 0xff >>> excessBits;
     candidateBytes[0] |= 1 << (7 - excessBits);
     candidateBytes[byteLength - 1] |= 1;
@@ -3596,7 +3816,7 @@ export function createCryptoContract(globalObject = globalThis) {
       verify(algorithm, value, key, signature, { ...options, globalObject })
     ),
     generateKeyPair: (type, options, callback) => generateKeyPair(type, options, callback, globalObject),
-    generateKeyPairSync: (type, options = {}) => generateKeyPairSync(type, options),
+    generateKeyPairSync: (type, options = {}) => generateKeyPairSync(type, options, globalObject),
     createECDH: (curve) => createECDH(curve, globalObject),
     ECDH: class ECDH extends BrowserECDH {
       constructor(curve) { super(curve, globalObject); }

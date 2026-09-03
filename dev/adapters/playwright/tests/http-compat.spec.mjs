@@ -74,6 +74,72 @@ test.describe('browser-native http compatibility', () => {
     `);
   });
 
+  test('preserves numeric fetch status and streamed response bodies', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'fetch/stream-status', `
+      const assert = require('node:assert');
+      const http = require('node:http');
+      const { Readable } = require('node:stream');
+
+      const server = http.createServer((_request, response) => {
+        const source = new Readable({ read() {} });
+        response.setHeader('content-type', 'application/json');
+        source.pipe(response);
+        source.push('[{"hello":"world"}');
+        source.push(',{"a":42}]');
+        source.push(null);
+      });
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+
+      try {
+        const response = await fetch('http://localhost:' + server.address().port);
+        assert.strictEqual(typeof response.status, 'number');
+        assert.strictEqual(response.status, 200);
+        assert.strictEqual(response.ok, true);
+        assert.strictEqual(response.headers.get('content-type'), 'application/json');
+        assert.deepStrictEqual(JSON.parse(await response.text()), [
+          { hello: 'world' },
+          { a: 42 },
+        ]);
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    `);
+  });
+
+  test('preserves status when a piped stream writes after the route returns', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'fetch/async-stream-status', `
+      const assert = require('node:assert');
+      const http = require('node:http');
+      const { PassThrough } = require('node:stream');
+
+      const server = http.createServer((_request, response) => {
+        const source = new PassThrough();
+        response.setHeader('content-type', 'application/json');
+        source.pipe(response);
+        setImmediate(() => {
+          source.write('[{"hello":"world"}]');
+          source.end(',{"a":42}]');
+        });
+      });
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+
+      try {
+        const response = await fetch('http://localhost:' + server.address().port);
+        assert.strictEqual(response.status, 200);
+        assert.strictEqual(response.headers.get('content-type'), 'application/json');
+        assert.strictEqual(await response.text(), '[{"hello":"world"}],{"a":42}]');
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    `);
+  });
+
   test('propagates AbortSignal cancellation and exposes virtual server boundaries', async ({ harnessPage }) => {
     await runContract(expect, harnessPage, 'abort/boundaries', `
       const assert = require('node:assert');

@@ -658,61 +658,66 @@ function mapValues(source, fn, options) {
   })();
 }
 
+function initializeReadable(stream, options = {}) {
+  const objectMode = Boolean(options.readableObjectMode ?? options.objectMode);
+  stream._buffer = [];
+  stream._bufferedBytes = 0;
+  stream._ended = false;
+  stream._endEmitted = false;
+  stream._destroyed = false;
+  stream._closeEmitted = false;
+  stream._error = null;
+  const inheritedRead = stream._read;
+  const inheritedDestroy = stream._destroy;
+  if (typeof options.read === 'function') stream._read = options.read;
+  else if (typeof inheritedRead !== 'function') stream._read = Readable.prototype._read;
+  stream._destroyHook = options.destroy || inheritedDestroy;
+  stream._preserveStrings = Boolean(options.preserveStrings);
+  stream._decoder = null;
+  stream._flowing = null;
+  stream._readableState = new ReadableState(options, stream);
+  Object.assign(stream._readableState, {
+    readable: true, destroyed: false,
+    pipes: [], reading: false, ended: false, endEmitted: false,
+    readableListening: false, needReadable: false, emittedReadable: false, readingMore: false,
+    resumeScheduled: false, errorEmitted: false, closeEmitted: false, multiAwaitDrain: false,
+    constructed: true, sync: true,
+    objectMode,
+    highWaterMark: options.highWaterMark
+      ?? (objectMode ? defaultObjectHighWaterMark : defaultHighWaterMark),
+    buffer: stream._buffer,
+    length: 0,
+    autoDestroy: options.autoDestroy !== false, emitClose: options.emitClose !== false,
+    closeEmitted: false,
+    closed: false, errorEmitted: false,
+  });
+  if (options.encoding) stream.setEncoding(options.encoding);
+  if (options.readable === false) {
+    stream._ended = true;
+    stream._endEmitted = true;
+    stream._readableState.readable = false;
+    stream._readableState.ended = true;
+    stream._readableState.endEmitted = true;
+  }
+  stream._resumeScheduled = false;
+  stream._resumePending = false;
+  stream._reading = false;
+  stream._readProduced = false;
+  stream._pipes = new Map();
+  stream._blockedPipes = new Set();
+  stream._sourceWaiter = null;
+  const autoDestroyOnError = (error) => {
+    if (stream._readableState.autoDestroy && !stream._destroyed) stream.destroy(error);
+  };
+  autoDestroyOnError._bnhInternal = true;
+  stream.on('error', autoDestroyOnError);
+  return stream;
+}
+
 export class Readable extends EventEmitter {
   constructor(options = {}) {
     super();
-    const objectMode = Boolean(options.readableObjectMode ?? options.objectMode);
-    this._buffer = [];
-    this._bufferedBytes = 0;
-    this._ended = false;
-    this._endEmitted = false;
-    this._destroyed = false;
-    this._closeEmitted = false;
-    this._error = null;
-    const inheritedRead = this._read;
-    const inheritedDestroy = this._destroy;
-    if (typeof options.read === 'function') this._read = options.read;
-    else if (typeof inheritedRead !== 'function') this._read = Readable.prototype._read;
-    this._destroyHook = options.destroy || inheritedDestroy;
-    this._preserveStrings = Boolean(options.preserveStrings);
-    this._decoder = null;
-    this._flowing = null;
-    this._readableState = new ReadableState(options, this);
-    Object.assign(this._readableState, {
-      readable: true, destroyed: false,
-      pipes: [], reading: false, ended: false, endEmitted: false,
-      readableListening: false, needReadable: false, emittedReadable: false, readingMore: false,
-      resumeScheduled: false, errorEmitted: false, closeEmitted: false, multiAwaitDrain: false,
-      constructed: true, sync: true,
-      objectMode,
-      highWaterMark: options.highWaterMark
-        ?? (objectMode ? defaultObjectHighWaterMark : defaultHighWaterMark),
-      buffer: this._buffer,
-      length: 0,
-      autoDestroy: options.autoDestroy !== false, emitClose: options.emitClose !== false,
-      closeEmitted: false,
-      closed: false, errorEmitted: false,
-    });
-    if (options.encoding) this.setEncoding(options.encoding);
-    if (options.readable === false) {
-      this._ended = true;
-      this._endEmitted = true;
-      this._readableState.readable = false;
-      this._readableState.ended = true;
-      this._readableState.endEmitted = true;
-    }
-    this._resumeScheduled = false;
-    this._resumePending = false;
-    this._reading = false;
-    this._readProduced = false;
-    this._pipes = new Map();
-    this._blockedPipes = new Set();
-    this._sourceWaiter = null;
-    const autoDestroyOnError = (error) => {
-      if (this._readableState.autoDestroy && !this._destroyed) this.destroy(error);
-    };
-    autoDestroyOnError._bnhInternal = true;
-    this.on('error', autoDestroyOnError);
+    initializeReadable(this, options);
   }
 
   on(name, listener) {
@@ -730,7 +735,10 @@ export class Readable extends EventEmitter {
         || this._bufferedBytes < this.readableHighWaterMark)) this._readOnce();
       this._scheduleReadable();
     }
-    if (name === 'end') this._maybeEmitEnd();
+    // Node does not emit an already-ready end event re-entrantly from
+    // EventEmitter#on. Defer the check so multi-listener helpers such as
+    // ee-first can finish installing their cancellation handles first.
+    if (name === 'end') queueMicrotask(() => this._maybeEmitEnd());
     return this;
   }
 
@@ -1553,6 +1561,15 @@ export class Readable extends EventEmitter {
   }
 }
 
+// Core modules and older userland constructors still invoke Readable as a
+// function (for example, `Readable.call(this, options)` before
+// `util.inherits`). Initialize that receiver in place so its prototype and
+// stream state stay attached to the same object.
+export function initializeCallableReadable(receiver, options = {}) {
+  EventEmitter.call(receiver);
+  return initializeReadable(receiver, options);
+}
+
 // Node's default readable hook is deliberately abstract. Keeping it on the
 // prototype lets subclasses inherit the public/internal method descriptor and
 // makes a missing implementation fail with the standard stream error.
@@ -2246,7 +2263,9 @@ class WritableImpl extends EventEmitter {
       queueMicrotask(() => callback(error));
       return this;
     }
-    if (chunk !== undefined) this.write(chunk, encoding);
+    // Node treats null like an omitted final chunk for Writable#end(), while
+    // Writable#write(null) correctly rejects null values.
+    if (chunk !== undefined && chunk !== null) this.write(chunk, encoding);
     this._ending = true;
     this._writableState.ending = true;
     this._endCallbacks.push(callback);
@@ -3416,7 +3435,7 @@ export function compose(...stages) {
     }
 
     if (current && !terminal && (isNodeStream(current) || isIterable(current))) {
-      await consumeInto(output, asReadable(current));
+      await consumeInto(output, current);
     } else if (terminal && stages.at(-1)?.on) {
       await waitForWritable(stages.at(-1));
     }

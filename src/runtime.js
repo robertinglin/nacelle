@@ -10168,9 +10168,14 @@ export function createRuntime({
         error.code = 'ERR_CAPABILITY_DENIED';
         throw error;
       }
+      const snapshot = vfs.snapshot({ copy: false });
       const files = Object.fromEntries(
-        vfs.snapshot({ copy: false }).artifacts.map(({ path, bytes }) => [path, bytes]),
+        snapshot.artifacts.map(({ path, bytes }) => [path, bytes]),
       );
+      for (const directory of snapshot.directories || []) {
+        if (directory !== '/node' && !directory.startsWith('/node/')) continue;
+        if (!files[directory]) files[directory] = { type: 'directory' };
+      }
       if (isEval) files[workerPath] = new scope.TextEncoder().encode(String(source));
       const child = createBrowserProcess({
         scope,
@@ -11913,12 +11918,17 @@ export function createRuntime({
       const stdout = capabilities.output.stdout;
       const stderr = capabilities.output.stderr;
       const workerSource = new URL('./runtime/process-entry.js', import.meta.url).href;
+      const snapshot = vfs.snapshot({ copy: false });
       const files = Object.fromEntries(
-        vfs.snapshot({ copy: false }).artifacts.map(({ path, bytes }) => [path, {
+        snapshot.artifacts.map(({ path, bytes }) => [path, {
           data: bytes,
           mode: vfs.stat(path).mode & 0o777,
         }]),
       );
+      for (const directory of snapshot.directories || []) {
+        if (directory !== '/node' && !directory.startsWith('/node/')) continue;
+        if (!files[directory]) files[directory] = { type: 'directory' };
+      }
       const workerIsolation = executionIsolation === 'worker';
       const proxyOperations = proxyCapability.adapter
         ? typeof proxyCapability.adapter === 'function' || typeof proxyCapability.adapter.handle === 'function'

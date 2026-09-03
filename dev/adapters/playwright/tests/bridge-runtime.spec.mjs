@@ -579,6 +579,34 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('preserves empty VFS directories in worker snapshots', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const fs = require('node:fs');
+      const { Worker } = require('node:worker_threads');
+      fs.mkdirSync('/node/empty-worker-directory');
+      const worker = new Worker('/node/empty-directory-worker.js');
+      worker.once('message', (value) => {
+        assert.deepStrictEqual(value, { exists: true, entries: [] });
+        process.stdout.write('empty directory snapshot completed');
+      });
+    `, {
+      files: {
+        '/node/empty-directory-worker.js': `
+          const { parentPort } = require('node:worker_threads');
+          const fs = require('node:fs');
+          parentPort.postMessage({
+            exists: fs.existsSync('/node/empty-worker-directory'),
+            entries: fs.readdirSync('/node/empty-worker-directory'),
+          });
+        `,
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('empty directory snapshot completed');
+  });
+
   test('uses the mounted virtual filesystem rather than the host filesystem', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       (async () => {

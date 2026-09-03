@@ -716,6 +716,89 @@ test.describe('browser runtime bridge and core primitives', () => {
     });
   });
 
+  test('forwards async package-script output and exit status after Promise completion', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/npm', ['test'], { cwd: '/node' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 7, errorOutput);
+        assert.strictEqual(output, 'async package output\\n');
+        assert.strictEqual(errorOutput, 'async package failure\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/package.json': JSON.stringify({
+          name: 'async-package-script-fixture',
+          version: '1.0.0',
+          scripts: { test: 'node async-status.js' },
+        }),
+        '/node/async-status.js': [
+          '(async () => {',
+          "await Promise.resolve();",
+          "process.stdout.write('async package output\\n');",
+          "process.stderr.write('async package failure\\n');",
+          'process.exitCode = 7;',
+          '})();',
+        ].join('\n'),
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\n',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('preserves nested template boundaries while transforming async CommonJS children', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      const child = spawn('node', ['/node/nested-template.js'], { cwd: '/node' });
+      let output = '';
+      child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+      child.once('close', (code) => {
+        assert.strictEqual(code, 0);
+        assert.strictEqual(output, 'nested template child\\n');
+        process.stdout.write('nested template child completed');
+      });
+    `, {
+      files: {
+        '/node/nested-template.js': [
+          '(async () => {',
+          "const args = 'x,y';",
+          "const name = 'runtime';",
+          'const templateLiteral = true;',
+          "const runtimeTemplate = { basicFunction() { return 'ok'; }, supportsArrowFunction() { return true; } };",
+          "const code = 'function(x) {}'.replace(/function\\(([^)]+)\\)/g, (m, args) => {",
+          "  return `\\${runtimeTemplate.supportsArrowFunction() ? '${",
+          '    args.includes(",") ? `(${args})` : args',
+          "  }=>' : 'function(${args})'}`;",
+          '});',
+          'const generated = `var ${name} = \\${runtimeTemplate.basicFunction("${args}", [',
+          '  "comment",',
+          "  ${templateLiteral ? `\\`${code}\\`` : `'${code}'`}",
+          '])}`;',
+          'await Promise.resolve(code);',
+          "process.stdout.write(generated.includes('runtimeTemplate') ? 'nested template child\\n' : generated);",
+          '})();',
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('nested template child completed');
+  });
+
   test('forwards nested output before a package-manager child exits nonzero', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert');

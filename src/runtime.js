@@ -8711,6 +8711,19 @@ export function createRuntime({
                 const snapshot = JSON.parse(String(fs.readFileSync(prepared.snapshotBlobPath, 'utf8')));
                 entryPath = normalizePath(snapshot.entry, cwd);
               }
+              // Node's CLI resolves a script argument with the same legacy
+              // file probes as CommonJS when the exact argument is absent;
+              // for example, `node tools/check` loads `tools/check.js`.
+              // Keep the original argv intact while using the resolved file
+              // as the module identity and source path.
+              if (prepared.scriptPath && !vfs.files.has(entryPath)) {
+                const scriptCandidate = resolveFileSync(
+                  prepared.scriptPath,
+                  path.join(cwd, '.bnh-child.js'),
+                  childProc.processObject,
+                );
+                if (vfs.files.has(scriptCandidate)) entryPath = scriptCandidate;
+              }
               const commandName = prepared.command.split('/').pop();
               if (prepared.experimentalLoader) {
                 const loaderPath = resolveFileSync(prepared.experimentalLoader, entryPath, childProc.processObject);
@@ -8918,8 +8931,7 @@ export function createRuntime({
             : null;
           const suppressWarnings = prepared.executionArgv.some((value) => String(value) === '--no-warnings');
           const forwardStdout = (value) => {
-            let text = normalizeOutputChunk(value);
-            text = text.replace(/^# tests 0\n# pass 0\n# fail 0\n/, '');
+            const text = normalizeOutputChunk(value);
             if (text) writeStdout(text);
           };
           const forwardStderr = (value) => {

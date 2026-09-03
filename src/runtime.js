@@ -4793,6 +4793,7 @@ export function createRuntime({
       failed: 0,
       first: null,
       last: null,
+      recent: [],
     };
     Object.defineProperty(processObject, '__bnhChildActivity', {
       configurable: true,
@@ -9177,6 +9178,7 @@ export function createRuntime({
             const terminal = result?.terminal;
             const record = {
               command: String(options.entry || '').split('/').pop() || '<unknown>',
+              stage: options.stage || null,
               entry: safeChildPath(options.entry, options.cwd),
               argv: (options.argv || []).slice(0, 32).map((value) => safeChildArg(value, options.cwd)),
               argumentCount: Array.isArray(options.argv) ? options.argv.length : 0,
@@ -9202,6 +9204,8 @@ export function createRuntime({
             };
             if (!childActivity.first) childActivity.first = record;
             childActivity.last = record;
+            childActivity.recent.push(record);
+            if (childActivity.recent.length > 16) childActivity.recent.shift();
           };
           const runVirtualCommandInternal = (options) => {
             const { entry, argv, cwd, commandEnv, stdin, signal, timeout, onStdout, onStderr } = options;
@@ -9644,6 +9648,7 @@ export function createRuntime({
               runCommand: (commandOptions) => runVirtualCommand({
                 entry: commandOptions.entry,
                 argv: commandOptions.argv,
+                stage: scriptName,
                 cwd: commandOptions.cwd,
                 commandEnv: commandOptions.env,
                 stdin: commandOptions.stdin,
@@ -12239,7 +12244,10 @@ export function createRuntime({
             proxy_enabled: Boolean(proxyCapability.enabled && proxyCapability.capabilityGranted && proxyCapability.adapter),
             virtual_network: true,
             runtimeState: terminal.runtimeState || runtimeState,
-            childActivity: terminal.runtimeState?.childActivity || runtimeState?.childActivity || null,
+            childActivity: terminal.runtimeState?.childActivity
+              || (terminal.runtimeState?.launched !== undefined ? terminal.runtimeState : null)
+              || runtimeState?.childActivity
+              || (runtimeState?.launched !== undefined ? runtimeState : null),
           },
           artifacts,
         };

@@ -539,6 +539,33 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('executes direct ESM Node-file children through the ESM lifecycle', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+      const child = spawn(process.execPath, ['/node/direct-child.mjs']);
+      let stdout = '';
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.once('close', (code, signal) => {
+        assert.strictEqual(code, 0);
+        assert.strictEqual(signal, null);
+        assert.strictEqual(stdout, 'direct esm child\\n');
+        process.stdout.write('direct ESM child completed');
+      });
+    `, {
+      files: {
+        '/node/direct-child.mjs': `
+          import assert from 'node:assert/strict';
+          assert.strictEqual(typeof import.meta.url, 'string');
+          process.stdout.write('direct esm child\\n');
+        `,
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('direct ESM child completed');
+  });
+
   test('runs the upstream worker abort-on-uncaught-exception case', async ({ harnessPage }) => {
     const entryPath = '/node/test/abort/test-worker-abort-uncaught-exception.js';
     const result = await harnessPage.run(`

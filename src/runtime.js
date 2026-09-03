@@ -9220,6 +9220,34 @@ export function createRuntime({
               }, ownerProcess);
               const stdout = [];
               const stderr = [];
+              const complete = (code, signalValue) => ({
+                code: signalValue ? null : code ?? 1,
+                stdout: stdout.join(''),
+                stderr: stderr.join(''),
+                streamed: Boolean(stdout.length || stderr.length),
+              });
+              if (isRuntimeEsmModule(prepared.entryPath, prepared.executionArgv)) {
+                const processHandle = runPreparedESM(prepared, { signal, timeout, asyncLifecycle: true }, (value) => {
+                  const chunk = normalizeOutputChunk(value);
+                  stdout.push(chunk);
+                  onStdout?.(chunk);
+                }, (value) => {
+                  const chunk = normalizeOutputChunk(value);
+                  stderr.push(chunk);
+                  onStderr?.(chunk);
+                });
+                return processHandle.wait().then(
+                  (terminal) => complete(terminal.code, terminal.signal),
+                  (error) => {
+                    const message = String(error?.stack || error?.message || error) + '\n';
+                    if (!stderr.length) {
+                      stderr.push(message);
+                      onStderr?.(message);
+                    }
+                    return complete(1, null);
+                  },
+                );
+              }
               const result = runPreparedSync(prepared, {
                 asyncLifecycle: true,
                 encoding: 'utf8',
@@ -9248,14 +9276,14 @@ export function createRuntime({
               };
               forwardReturnedOutput(result.stdout, stdout, onStdout);
               forwardReturnedOutput(result.stderr, stderr, onStderr);
-              const complete = (code, signalValue) => ({
+              const syncComplete = (code, signalValue) => ({
                 code: signalValue ? null : code ?? result.status ?? 1,
                 stdout: stdout.join(''),
                 stderr: stderr.join(''),
                 streamed: Boolean(stdout.length || stderr.length),
               });
               if (!result.pending || !result.process) {
-                return Promise.resolve(complete(result.status, result.signal));
+                return Promise.resolve(syncComplete(result.status, result.signal));
               }
               return new Promise((resolve) => {
                 result.process.once('exit', (code, signalValue) => {
@@ -9264,7 +9292,7 @@ export function createRuntime({
                     const finalCode = finalSignal
                       ? null
                       : (result.process.getCode?.() ?? code);
-                    resolve(complete(finalCode, finalSignal));
+                    resolve(syncComplete(finalCode, finalSignal));
                   });
                 });
               });

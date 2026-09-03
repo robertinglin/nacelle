@@ -393,14 +393,14 @@ export function createModuleLoader({
     return result;
   };
 
-  const defaultLoad = (url) => {
+  const defaultLoad = (url, context = {}) => {
     if (url.startsWith('node:')) return { format: 'builtin', source: null };
     if (url.startsWith('data:')) return { format: 'module', source: null };
     const resolved = url.startsWith('file:') ? fileURLToPath(url) : url;
     if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) unsupportedNativeAddon(resolved);
     const value = read(resolved, resolved).value;
     return {
-      format: resolved.endsWith('.json') ? 'json' : moduleFormat(resolved),
+      format: context?.format ?? (resolved.endsWith('.json') ? 'json' : moduleFormat(resolved)),
       source: value,
     };
   };
@@ -417,11 +417,11 @@ export function createModuleLoader({
       parentURL: fileURL(resolved),
     };
     if (sharedRunModuleHook) {
-      const result = sharedRunModuleHook('load', url, context, (nextURL) => defaultLoad(nextURL));
+      const result = sharedRunModuleHook('load', url, context, (nextURL, nextContext) => defaultLoad(nextURL, nextContext));
       if (!result || typeof result !== 'object') throw new TypeError('module load hook must return an object');
       return { ...result, url: result.url || url };
     }
-    let next = (nextURL) => defaultLoad(nextURL);
+    let next = (nextURL, nextContext) => defaultLoad(nextURL, nextContext);
     for (let index = registeredHooks.length - 1; index >= 0; index -= 1) {
       const hook = registeredHooks[index]?.load;
       if (typeof hook !== 'function') continue;
@@ -431,7 +431,7 @@ export function createModuleLoader({
     const result = next(url, context);
     if (!result || typeof result !== 'object') throw new TypeError('module load hook must return an object');
     if (result.source === undefined && result.format !== 'builtin' && !result.shortCircuit) {
-      return { ...defaultLoad(result.url || url), ...result };
+      return { ...defaultLoad(result.url || url, result), ...result };
     }
     return { ...result, url: result.url || url };
   };
@@ -1506,7 +1506,7 @@ export function createModuleLoader({
         ? resolved : fileURL(resolved),
     };
     const result = sharedRunModuleHook
-      ? await sharedRunModuleHook('load', url, context, (nextURL) => defaultLoad(nextURL))
+      ? await sharedRunModuleHook('load', url, context, (nextURL, nextContext) => defaultLoad(nextURL, nextContext))
       : runLoadHooks(resolved, format);
     if (!result || typeof result !== 'object') throw new TypeError('module load hook must return an object');
     return { ...result, url: result.url || url };

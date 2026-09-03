@@ -9142,6 +9142,20 @@ export function createRuntime({
                   onStderr?.(chunk);
                 },
               });
+              const forwardReturnedOutput = (value, target, callback) => {
+                const returned = normalizeOutputChunk(value);
+                if (!returned) return;
+                const streamed = target.join('');
+                if (streamed === returned || streamed.endsWith(returned)) return;
+                const missing = returned.startsWith(streamed)
+                  ? returned.slice(streamed.length)
+                  : returned;
+                if (!missing) return;
+                target.push(missing);
+                callback?.(missing);
+              };
+              forwardReturnedOutput(result.stdout, stdout, onStdout);
+              forwardReturnedOutput(result.stderr, stderr, onStderr);
               const complete = (code, signalValue) => ({
                 code: signalValue ? null : code ?? result.status ?? 1,
                 stdout: stdout.join(''),

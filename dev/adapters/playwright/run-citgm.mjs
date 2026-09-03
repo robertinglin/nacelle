@@ -121,6 +121,8 @@ async function main() {
   let serverError = '';
   server.stderr.setEncoding('utf8');
   server.stderr.on('data', (chunk) => { serverError += chunk; });
+  let artifactWriterPromise = null;
+  let lastProgressEvent = null;
 
   try {
     const url = `http://127.0.0.1:${port}/citgm.html`;
@@ -131,8 +133,6 @@ async function main() {
       page.setDefaultTimeout(0);
       await page.goto(url, { waitUntil: 'domcontentloaded' });
       await page.waitForFunction(() => typeof globalThis.__NACELLE_CITGM__?.run === 'function');
-      let artifactWriterPromise = null;
-      let lastProgressEvent = null;
       await page.exposeBinding('__bnhReportProgress', async (_source, event) => {
         try {
           lastProgressEvent = event;
@@ -207,6 +207,46 @@ async function main() {
     } finally {
       await browser.close();
     }
+  } catch (error) {
+    const runId = lastProgressEvent?.runId || `runner-${Date.now()}`;
+    try {
+      const artifactWriter = artifactWriterPromise
+        ? await artifactWriterPromise
+        : await createCITGMArtifactWriter({
+            rootDir: process.env.NACELLE_CITGM_ARTIFACT_DIR,
+            module: options.module,
+            runId,
+          });
+      const errorText = String(error?.stack || error);
+      const summary = {
+        type: 'citgm-terminal',
+        runId: compactForSummary(runId),
+        module: compactForSummary(options.module),
+        citgmVersion: compactForSummary(options.citgmVersion),
+        browser: options.browserName,
+        exitCode: null,
+        timedOut: false,
+        error: compactForSummary(errorText),
+        stage: compactForSummary(lastProgressEvent?.stage || 'runner-failure'),
+        output: outputSummary({}, lastProgressEvent),
+        stdoutExcerpt: '',
+        stderrExcerpt: failureExcerpt(serverError),
+        runResult: null,
+        precache: null,
+        install: null,
+        preload: null,
+        progress: compactForSummary(lastProgressEvent || null),
+        artifacts: {
+          ...artifactWriter.paths,
+          networkEvents: { count: 0, path: artifactWriter.paths.network },
+        },
+      };
+      await artifactWriter.close({ summary });
+      process.stdout.write(`${JSON.stringify(summary)}\n`);
+    } catch {
+      // Preserve the original runner error if failure-artifact persistence also fails.
+    }
+    throw error;
   } finally {
     server.kill('SIGTERM');
     if (serverError && server.exitCode !== 0) process.stderr.write(serverError);

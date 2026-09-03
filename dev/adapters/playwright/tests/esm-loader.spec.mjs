@@ -58,6 +58,17 @@ test.describe('browser ESM loader', () => {
     expect(result.stdout).toContain('dynamic builtin completed');
   });
 
+  test('routes global ESM console errors to the child stderr stream', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      console.error('esm child diagnostic');
+      process.exitCode = 1;
+    `, { entryPath: '/node/esm/console-error.mjs' });
+
+    expect(result.timedOut).toBe(false);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('esm child diagnostic');
+  });
+
   test('rewrites minified static imports with no whitespace around from', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       import marker from './minified.mjs';

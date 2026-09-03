@@ -40,7 +40,7 @@ function artifactId(citgmVersion, module, registry) {
 
 function packageUrl(registry, name) {
   const encodedName = name.startsWith('@')
-    ? `@${encodeURIComponent(name.slice(1))}`
+    ? `@${name.slice(1).split('/').map(encodeURIComponent).join('/')}`
     : encodeURIComponent(name);
   return `${registry}/${encodedName}`;
 }

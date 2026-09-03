@@ -779,7 +779,9 @@ async function runNpm(name, args, input, context, options) {
         context.onStderr?.(text);
       },
     });
-    const code = await child.exit;
+    const code = child && typeof child === 'object' && 'exit' in child
+      ? await child.exit
+      : child?.code;
     const res = result(code ?? 1, stdout.join(''), stderr.join(''));
     if (context.onStdout || context.onStderr) res.streamed = true;
     return res;

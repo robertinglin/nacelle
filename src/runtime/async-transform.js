@@ -151,6 +151,96 @@ function matchingToken(tokens, index, opening, closing) {
   return -1;
 }
 
+function rewriteForAwaitLoops(source) {
+  const tokens = tokenize(source);
+  const asyncGeneratorBodies = [];
+  for (let index = 0; index < tokens.length - 2; index += 1) {
+    const isFunctionGenerator = tokens[index].value === 'async'
+      && tokens[index + 1].value === 'function'
+      && tokens[index + 2].value === '*';
+    const isMethodGenerator = tokens[index].value === 'async'
+      && tokens[index + 1].value === '*';
+    if (!isFunctionGenerator && !isMethodGenerator) continue;
+    const bodyIndex = tokens.findIndex((token, tokenIndex) => tokenIndex > index && token.value === '{');
+    if (bodyIndex < 0) continue;
+    const bodyEnd = matchingToken(tokens, bodyIndex, '{', '}');
+    if (bodyEnd >= 0) asyncGeneratorBodies.push({ start: bodyIndex, end: bodyEnd });
+  }
+  const names = new Set(tokens.filter((token) => token.value !== '<literal>').map((token) => token.value));
+  const replacements = [];
+  let sequence = 0;
+  for (let index = 0; index < tokens.length - 2; index += 1) {
+    if (tokens[index].value !== 'for' || tokens[index + 1].value !== 'await') continue;
+    if (asyncGeneratorBodies.some(({ start, end }) => index > start && index < end)) continue;
+    const openIndex = index + 2;
+    if (tokens[openIndex]?.value !== '(') continue;
+    const closeIndex = matchingToken(tokens, openIndex, '(', ')');
+    if (closeIndex < 0) continue;
+    const bodyOpenIndex = closeIndex + 1;
+    if (tokens[bodyOpenIndex]?.value !== '{') continue;
+    const bodyCloseIndex = matchingToken(tokens, bodyOpenIndex, '{', '}');
+    if (bodyCloseIndex < 0) continue;
+
+    let roundDepth = 0;
+    let squareDepth = 0;
+    let curlyDepth = 0;
+    let ofIndex = -1;
+    for (let cursor = openIndex + 1; cursor < closeIndex; cursor += 1) {
+      const value = tokens[cursor].value;
+      if (value === '(') roundDepth += 1;
+      else if (value === ')') roundDepth -= 1;
+      else if (value === '[') squareDepth += 1;
+      else if (value === ']') squareDepth -= 1;
+      else if (value === '{') curlyDepth += 1;
+      else if (value === '}') curlyDepth -= 1;
+      else if (value === 'of' && roundDepth === 0 && squareDepth === 0 && curlyDepth === 0) {
+        ofIndex = cursor;
+        break;
+      }
+    }
+    if (ofIndex < 0) continue;
+    const declaration = source.slice(tokens[openIndex + 1].start, tokens[ofIndex].start).trim();
+    const declarationMatch = /^(const|let|var)\s+([\s\S]+)$/.exec(declaration);
+    if (!declarationMatch) continue;
+    const iterable = source.slice(tokens[ofIndex].end, tokens[closeIndex].start).trim();
+    if (!iterable) continue;
+
+    const uniqueName = (base) => {
+      let name = `${base}${sequence}`;
+      while (names.has(name)) name = `${base}${++sequence}`;
+      names.add(name);
+      return name;
+    };
+    const valueName = uniqueName('__bnhForAwaitValue');
+    const iteratorName = uniqueName('__bnhForAwaitIterator');
+    const stepName = uniqueName('__bnhForAwaitStep');
+    const body = source.slice(tokens[bodyOpenIndex].end, tokens[bodyCloseIndex].start);
+    replacements.push({
+      start: tokens[index].start,
+      end: tokens[bodyCloseIndex].end,
+      value: `{
+  const ${valueName} = (${iterable});
+  const ${iteratorName} = ${valueName}[Symbol.asyncIterator]
+    ? ${valueName}[Symbol.asyncIterator]()
+    : ${valueName}[Symbol.iterator]();
+  let ${stepName};
+  try {
+    while (!(${stepName} = (yield Promise.resolve(${iteratorName}.next()).then((result) => (
+      Promise.resolve(result.value).then((value) => ({ ...result, value }))
+    )))).done) {
+      ${declarationMatch[1]} ${declarationMatch[2]} = ${stepName}.value;${body}
+    }
+  } finally {
+    if (${stepName} && !${stepName}.done && typeof ${iteratorName}.return === 'function') {
+      yield Promise.resolve(${iteratorName}.return());
+    }
+  }
+}`,
+    });
+  }
+  return applyReplacements(source, replacements);
+}
+
 function findArrowBodyEnd(tokens, arrowIndex, sourceLength) {
   let round = 0;
   let square = 0;
@@ -287,10 +377,6 @@ function asyncFunctionCandidates(source) {
   return { candidates, unsupported };
 }
 
-function removeToken(source, start, end, tokenStart, tokenEnd) {
-  return `${source.slice(start, tokenStart)}${source.slice(tokenEnd, end)}`;
-}
-
 function awaitOperandEnd(tokens, awaitIndex) {
   let index = awaitIndex + 1;
   const consumePrimary = () => {
@@ -314,7 +400,10 @@ function awaitOperandEnd(tokens, awaitIndex) {
   while (index < tokens.length) {
     const value = tokens[index].value;
     if (value === '.' || value === '?.') {
-      index += 2;
+      // Private fields are tokenized as '.', '#', and the field name.
+      // Consume the whole member just like a normal dot property so an
+      // awaited private-field access remains valid after rewriting.
+      index += tokens[index + 1]?.value === '#' ? 3 : 2;
       continue;
     }
     if (value === '[' || value === '(') {
@@ -421,7 +510,17 @@ function replaceAwaitExpressions(source) {
   return applyReplacements(templateExpanded, outerSpans.map((span) => ({
     start: span.start,
     end: span.end,
-    value: `(yield ${replaceAwaitExpressions(templateExpanded.slice(span.token.end, span.end))})`,
+    value: `${(() => {
+      const previous = tokens[tokens.indexOf(span.token) - 1];
+      const hasLineBreak = previous
+        && /\r?\n/u.test(templateExpanded.slice(previous.end, span.token.start));
+      const continuation = new Set([
+        '(', '[', '{', ',', '.', '?.', ':', '?', '=', '=>',
+        '!', '~', '+', '-', '*', '/', '%', '&', '|', '^', '&&', '||', '??',
+        'return', 'throw', 'case', 'delete', 'void', 'typeof', 'instanceof', 'in', 'of',
+      ]);
+      return hasLineBreak && !continuation.has(previous.value) ? ';' : '';
+    })()}(yield ${replaceAwaitExpressions(templateExpanded.slice(span.token.end, span.end))})`,
   })));
 }
 
@@ -452,7 +551,10 @@ function transformCandidates(source, candidates, bindingName) {
     const rawBody = source.slice(bodyStart, bodyEnd);
     const transformedNested = transformAsyncSource(rawBody, bindingName).source;
     const body = replaceAwaitExpressions(transformedNested);
-    const header = removeToken(source, candidate.start, candidate.headerEnd, candidate.start, candidate.asyncEnd);
+    // Keep the async marker on the generated function. The body still routes
+    // through the runtime generator bridge for task tracking, but callers must
+    // observe the standard AsyncFunction constructor/toString identity.
+    const header = source.slice(candidate.start, candidate.headerEnd);
     if (candidate.kind === 'function' || candidate.kind === 'method') {
       return {
         start: candidate.start,
@@ -464,7 +566,7 @@ function transformCandidates(source, candidates, bindingName) {
       return {
         start: candidate.start,
         end: candidate.bodyEnd,
-        value: `${header}${bindingName}(function* () {${body}}, this, arguments)`,
+        value: `${header}{ return ${bindingName}(function* () {${body}}, this, arguments); }`,
       };
     }
     return {
@@ -477,7 +579,7 @@ function transformCandidates(source, candidates, bindingName) {
 }
 
 export function transformAsyncSource(source, preferredBinding = '__bnhAsync') {
-  const text = String(source);
+  const text = rewriteForAwaitLoops(String(source));
   const names = new Set(text.match(/\b[$A-Z_a-z][$\w]*\b/gu) || []);
   let bindingName = preferredBinding;
   while (names.has(bindingName)) bindingName = `${preferredBinding}$`;

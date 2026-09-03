@@ -114,6 +114,20 @@ test.describe('browser runtime platform primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('loads core zlib WASM from the shared runtime asset path', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (() => {
+      const assert = require('node:assert');
+      const zlib = require('node:zlib');
+      const input = Buffer.from('default runtime zlib asset');
+      const compressed = zlib.gzipSync(input);
+      assert.deepStrictEqual([...zlib.gunzipSync(compressed)], [...input]);
+      })();
+    `);
+
+    await expectPass(expect, result);
+  });
+
   test('streams gzip output incrementally through the browser compression stream', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       (async () => {

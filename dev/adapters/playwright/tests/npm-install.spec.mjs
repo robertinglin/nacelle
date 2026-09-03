@@ -88,6 +88,28 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     expect(satisfiesSemver('1.5.0', '1.2.0 - 1.8.0')).toBe(true);
   });
 
+  test('BrowserNpm requests scoped registry metadata with an unescaped scope separator', async () => {
+    const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
+    const requests = [];
+    const npm = new BrowserNpm({
+      vfs,
+      registry: 'https://registry.test',
+      proxyUrl: null,
+      fetchFn: async (url) => {
+        requests.push(url);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ name: '@scope/package', versions: {}, 'dist-tags': {} }),
+        };
+      },
+    });
+
+    await npm.fetchPackageMetadata('@scope/package');
+
+    expect(requests).toEqual(['https://registry.test/@scope/package']);
+  });
+
   test('BrowserNpm installs packages into VFS and module-loader requires them', async () => {
     const encoder = new TextEncoder();
     const vfs = createVfs({
@@ -154,6 +176,50 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     const app = miniExpress();
     app.get('/hello', () => 'Hello from mini-express!');
     expect(app.handle('/hello')).toBe('Hello from mini-express!');
+  });
+
+  test('BrowserNpm launches an installed ESM bin through its generated shim', async () => {
+    const encoder = new TextEncoder();
+    const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
+    const esmBinTarball = await packTarGz([
+      {
+        path: 'package/package.json',
+        data: encoder.encode(JSON.stringify({
+          name: 'esm-bin-package',
+          version: '1.0.0',
+          type: 'module',
+          bin: { 'esm-bin-command': 'bin.js' },
+        })),
+      },
+      {
+        path: 'package/bin.js',
+        data: encoder.encode("#!/usr/bin/env node\nexport const ran = true;\nglobalThis.__BNH_INSTALLED_ESM_BIN_RAN__ = true;\n"),
+      },
+    ]);
+
+    const npm = new BrowserNpm({
+      vfs,
+      cache: new Map([['pkg-tarball:esm-bin-package@1.0.0', esmBinTarball]]),
+    });
+    await npm.install('esm-bin-package@1.0.0', { cwd: '/node' });
+
+    const launcher = new TextDecoder().decode(vfs.read('/node/node_modules/.bin/esm-bin-command'));
+    expect(launcher).toContain('import(');
+    expect(launcher).not.toContain('require(');
+
+    const loader = createModuleLoader({
+      files: {
+        has: (pathname) => vfs.files.has(pathname),
+        get: (pathname) => vfs.read(pathname),
+      },
+      globalObject: globalThis,
+      builtins: {},
+    });
+    delete globalThis.__BNH_INSTALLED_ESM_BIN_RAN__;
+    await loader.import('/node/node_modules/.bin/esm-bin-command', '/node/entry.mjs');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(globalThis.__BNH_INSTALLED_ESM_BIN_RAN__).toBe(true);
+    delete globalThis.__BNH_INSTALLED_ESM_BIN_RAN__;
   });
 
   test('module-loader preserves named exports from an installed ESM package', async () => {

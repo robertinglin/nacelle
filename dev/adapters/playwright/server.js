@@ -8,6 +8,7 @@ const args = process.argv.slice(2);
 let port = 3000;
 let host = '127.0.0.1';
 const root = process.env.BNH_WORKTREE || process.cwd();
+const runtimeRoot = path.resolve(root, '../../..');
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--port' && i + 1 < args.length) {
     port = parseInt(args[i + 1], 10);
@@ -28,11 +29,19 @@ const mimeTypes = {
   '.png': 'image/png',
 };
 
+function staticFilePath(pathname) {
+  const normalized = path.posix.normalize(pathname);
+  if (normalized.startsWith('/wasm/')) {
+    return path.join(runtimeRoot, 'src', normalized.slice(1));
+  }
+  return path.join(root, normalized);
+}
+
 const server = http.createServer((req, res) => {
   const parsedUrl = new URL(req.url, 'http://localhost');
   let pathname = parsedUrl.pathname || '/';
   if (pathname === '/') pathname = '/harness.html';
-  const filePath = path.join(root, pathname);
+  const filePath = staticFilePath(pathname);
   const ext = path.extname(filePath).toLowerCase();
   const contentType = mimeTypes[ext] || 'application/octet-stream';
 

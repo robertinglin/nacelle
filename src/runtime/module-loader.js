@@ -1304,7 +1304,7 @@ export function createModuleLoader({
       return exports;
     }
     const rawSource = read(resolved, importer).value;
-    const source = sourceText(rawSource);
+    const source = stripHashbang(sourceText(rawSource));
     const module = { exports: {}, id: resolved, filename: resolved, loaded: false, parent: null, children: [] };
     if (!mainModule) mainModule = module;
     cache[moduleCacheKey] = module;
@@ -1485,7 +1485,19 @@ export function createModuleLoader({
       const token = register((dynamicSpecifier, options) => {
         const pending = globalObject.process?.__bnhModuleRegistrationPromises;
         const load = () => importModule(dynamicSpecifier, importer, {}, options, processOverride);
-        return pending?.length ? Promise.all([...pending]).then(load) : load();
+        const tracker = processOverride?._bnhTaskTracker || globalObject.process?._bnhTaskTracker;
+        const release = typeof tracker === 'function' ? tracker() : null;
+        let result;
+        try {
+          result = pending?.length ? Promise.all([...pending]).then(load) : load();
+        } catch (error) {
+          release?.();
+          throw error;
+        }
+        return Promise.resolve(result).then(
+          (value) => { release?.(); return value; },
+          (error) => { release?.(); throw error; },
+        );
       });
       rewritten = rewritten.replace(/\bimport\s*\(/g, `globalThis[${quote(registryName)}][${quote(token)}](`);
     }

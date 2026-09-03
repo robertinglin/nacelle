@@ -533,10 +533,62 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
   let passCount = 0;
   let failCount = 0;
   let testApiUsed = false;
+  let activeRun = null;
+  // `node:test.run()` discovers every requested file before starting any of
+  // their tests.  Keep registration-time chains behind this gate so a test
+  // from the first file cannot start while a later file is still registering
+  // its root hooks.
+  let testStartGate = Promise.resolve();
+  const runtimeState = {
+    registered: 0,
+    completed: 0,
+    files: [],
+    requestedFiles: [],
+    activeRun: false,
+    streamEvents: [],
+    streamError: null,
+    streamTerminal: null,
+  };
+  processObject.__bnhNodeTestState = runtimeState;
+  function emitRunEvent(type, data, { emit = true, push = true } = {}) {
+    if (!activeRun) return;
+    const event = { type, data };
+    runtimeState.streamEvents.push(type);
+    if (emit) activeRun.stream.emit(type, data);
+    if (push) activeRun.stream.push(event);
+    return event;
+  }
   function recordResult(result) {
     testCount += 1;
+    runtimeState.completed = testCount;
     if (result.status === 'fail') failCount += 1;
     else if (result.status === 'pass') passCount += 1;
+    if (!activeRun) return;
+    const passed = result.status === 'pass';
+    const data = {
+      name: result.name,
+      nesting: 0,
+      testNumber: testCount,
+      testId: testCount,
+      parentId: 0,
+      details: {
+        duration_ms: result.duration_ms || 0,
+        type: 'test',
+        passed,
+        ...(passed ? {} : { error: { cause: result.error || new Error(`test '${result.name}' failed`) } }),
+      },
+      tags: [],
+      line: 1,
+      column: 1,
+      file: result.file || activeRun.file || sourcePath || processObject.argv?.[1],
+    };
+    emitRunEvent('test:complete', data);
+    emitRunEvent('test:start', data);
+    const outcomeData = passed
+      ? { ...data, details: { ...data.details } }
+      : data;
+    if (passed) delete outcomeData.details.passed;
+    emitRunEvent(passed ? 'test:pass' : 'test:fail', outcomeData);
   }
   const assertionRegistry = new Map();
   let activeProcessOverride;
@@ -617,12 +669,22 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
   function hookChain(suite, name) { const chain = []; for (let current = suite; current; current = current.parent) chain.push(...current[name]); return name === 'afterEach' ? chain : chain.reverse(); }
   function createSuite(name, options, callback, parent) {
     const suite = { name: String(name ?? '(anonymous suite)'), fullName: parent === root ? String(name ?? '(anonymous suite)') : `${parent.fullName} > ${String(name ?? '(anonymous suite)')}`, parent, signal: options.signal, before: [], after: [], beforeEach: [], afterEach: [], children: [], started: false, beforeReady: null, completion: null, runTail: Promise.resolve() };
+    let definitionError = null;
+    if (!options.skip && !options.todo && typeof callback === 'function') {
+      suiteStack.push(suite);
+      const context = { name: suite.name, fullName: suite.fullName, signal: suite.signal, diagnostic, assert };
+      try { Reflect.apply(callback, context, [context]); } catch (error) { definitionError = error; } finally { suiteStack.pop(); }
+    }
+    // Hooks are registered while the suite definition callback runs. Start
+    // the suite only after that callback has returned so async before hooks
+    // cannot race test execution with an empty hook list.
     parent.children.push(startSuite(suite).completion);
-    if (!options.skip && !options.todo && typeof callback === 'function') { suiteStack.push(suite); const context = { name: suite.name, fullName: suite.fullName, signal: suite.signal, diagnostic, assert }; try { Reflect.apply(callback, context, [context]); } finally { suiteStack.pop(); } }
+    if (definitionError) throw definitionError;
     return suite.completion;
   }
   function register(name, options, callback, parent = suiteStack.at(-1), ownerNode = null) {
     testApiUsed = true;
+    runtimeState.registered += 1;
     const task = splitDefinition(name, options, callback); const label = String(task.name ?? '(unnamed test)'); const testOptions = task.options; const fullName = ownerNode?.fullName ? `${ownerNode.fullName} > ${label}` : parent === root ? label : `${parent.fullName} > ${label}`;
     const result = new Promise((resolve) => {
       const node = { children: [], fullName, before: [], after: [], beforeEach: [], afterEach: [], beforeReady: null, context: null, mock: null };
@@ -641,14 +703,123 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
       } finally { release?.(); } };
       const finish = (value) => { recordResult(value); resolve(value); };
       if (ownerNode) schedule(() => run().then(finish, (error) => finish({ name: label, status: 'fail', error })));
-      else { const previous = testTail; testTail = previous.then(() => run()).then(finish, (error) => finish({ name: label, status: 'fail', error })); }
+      else {
+        const previous = testTail;
+        testTail = previous.then(() => testStartGate).then(() => run()).then(
+          finish,
+          (error) => finish({ name: label, status: 'fail', error }),
+        );
+      }
     });
     parent.children.push(result); return result;
   }
   const test = (name, options, callback) => register(name, options, callback);
   const describe = (name, options, callback) => { const definition = splitDefinition(name, options, callback); return createSuite(definition.name, definition.options, definition.callback, suiteStack.at(-1)); };
   const mock = globalMock;
-  Object.assign(test, { test, it: test, describe, suite: describe, only: test, skip: (name, options, callback) => { const d = splitDefinition(name, options, callback); return register(d.name, { ...d.options, skip: true }, d.callback); }, todo: (name, options, callback) => { const d = splitDefinition(name, options, callback); return register(d.name, { ...d.options, todo: true }, d.callback); }, before: (callback) => hook('before', callback), after: (callback) => hook('after', callback), beforeEach: (callback) => hook('beforeEach', callback), afterEach: (callback) => hook('afterEach', callback), run: (options = {}) => ({ concurrency: options.concurrency ?? 1 }) });
+  const run = (options = {}) => {
+    if (activeRun) return activeRun.stream;
+    const streamApi = scope.require('node:stream');
+    const Readable = streamApi?.Readable;
+    if (typeof Readable !== 'function') throw codedError(Error, 'ERR_UNSUPPORTED_NODE_TEST_RUN', 'node:test run requires node:stream.Readable');
+    const stream = new Readable({ objectMode: true, read() {} });
+    activeRun = { stream, file: null };
+    runtimeState.activeRun = true;
+    runtimeState.streamEvents = [];
+    runtimeState.streamError = null;
+    runtimeState.streamTerminal = null;
+    stream.once('error', (error) => {
+      runtimeState.streamError = formatError(error);
+      runtimeState.streamTerminal = 'error';
+    });
+    stream.once('end', () => { runtimeState.streamTerminal = 'end'; });
+    stream.once('close', () => { runtimeState.streamTerminal ||= 'close'; });
+    const files = Array.isArray(options.files) ? options.files : options.files ? [options.files] : [];
+    runtimeState.requestedFiles = files.map((file) => String(file));
+    runtimeState.files = [];
+    const importer = processObject.argv?.[1] || sourcePath || '/node/index.js';
+    let releaseDiscovery;
+    const discoveryComplete = new Promise((resolve) => { releaseDiscovery = resolve; });
+    testStartGate = discoveryComplete;
+    const finishDiscovery = () => {
+      releaseDiscovery?.();
+      releaseDiscovery = null;
+      if (testStartGate === discoveryComplete) testStartGate = Promise.resolve();
+    };
+    (async () => {
+      try {
+        // Match Node's TestsStream scheduling: give callers a turn to attach
+        // event listeners before discovery and execution begin.
+        await Promise.resolve();
+        for (const file of files) {
+          activeRun.file = String(file);
+          runtimeState.files.push(activeRun.file);
+          emitRunEvent('test:enqueue', {
+            nesting: 0,
+            name: activeRun.file,
+            type: 'test',
+            testId: runtimeState.files.length,
+            parentId: 0,
+            tags: [],
+            line: 1,
+            column: 1,
+            file: activeRun.file,
+          }, { emit: false });
+          emitRunEvent('test:dequeue', {
+            nesting: 0,
+            name: activeRun.file,
+            type: 'test',
+            testId: runtimeState.files.length,
+            parentId: 0,
+            tags: [],
+            line: 1,
+            column: 1,
+            file: activeRun.file,
+          });
+          if (typeof processObject.__bnhModuleImport !== 'function') {
+            throw codedError(Error, 'ERR_UNSUPPORTED_NODE_TEST_RUN', 'node:test run cannot load test files in this process');
+          }
+          await processObject.__bnhModuleImport(String(file), importer, undefined, processObject);
+        }
+        // Release test chains only after the final file has finished
+        // registering its tests and root hooks.
+        finishDiscovery();
+        await testTail;
+        emitRunEvent('test:plan', { nesting: 0, count: testCount });
+        for (const [name, count] of [
+          ['tests', testCount], ['suites', 0], ['pass', passCount], ['fail', failCount],
+          ['cancelled', 0], ['skipped', 0], ['todo', 0],
+        ]) emitRunEvent('test:diagnostic', { nesting: 0, message: `${name} ${count}`, level: 'info' });
+        emitRunEvent('test:summary', {
+          success: failCount === 0,
+          counts: {
+            tests: testCount,
+            failed: failCount,
+            passed: passCount,
+            cancelled: 0,
+            skipped: 0,
+            todo: 0,
+            topLevel: testCount,
+            suites: 0,
+          },
+          duration_ms: 0,
+          file: undefined,
+        });
+      } catch (error) {
+        processObject.exitCode ||= 1;
+        runtimeState.streamError = formatError(error);
+        stderr(`${formatError(error)}\n`);
+        stream.destroy(error);
+        return;
+      } finally {
+        finishDiscovery();
+        if (!stream.destroyed) stream.push(null);
+        activeRun = null;
+        runtimeState.activeRun = false;
+      }
+    })();
+    return stream;
+  };
+  Object.assign(test, { test, it: test, describe, suite: describe, only: test, skip: (name, options, callback) => { const d = splitDefinition(name, options, callback); return register(d.name, { ...d.options, skip: true }, d.callback); }, todo: (name, options, callback) => { const d = splitDefinition(name, options, callback); return register(d.name, { ...d.options, todo: true }, d.callback); }, before: (callback) => hook('before', callback), after: (callback) => hook('after', callback), beforeEach: (callback) => hook('beforeEach', callback), afterEach: (callback) => hook('afterEach', callback), run });
   Object.defineProperty(test, 'mock', { configurable: true, enumerable: true, get: () => mock });
   Object.defineProperty(test, '__bnhSetActiveProcess', {
     configurable: true,
@@ -669,7 +840,10 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
   });
   const instances = new WeakMap([[processObject, test]]);
   const activeInstance = () => {
-    const activeProcess = scope.process || processObject;
+    // ESM evaluation resumes after the loader has restored the ambient
+    // scope.process.  Keep builtin node:test imports bound to the logical
+    // process selected by the loader instead of creating a second registry.
+    const activeProcess = activeProcessOverride || scope.__bnhActiveProcess || scope.process || processObject;
     if (activeProcess === processObject) return test;
     let instance = instances.get(activeProcess);
     if (!instance) {

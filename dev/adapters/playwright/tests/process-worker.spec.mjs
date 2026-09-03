@@ -116,4 +116,83 @@ test.describe('browser-native worker process boundary', () => {
     expect(terminal).toMatchObject({ status: 'failed', kind: 'uncaught-exception', code: 1, signal: null });
     expect(terminal.error).toMatchObject({ code: 'ERR_WORKER_EXCEPTION', message: 'uncaught worker boom' });
   });
+
+  test('carries terminal runtime state across the worker control boundary', async ({ page }) => {
+    await openRuntime(page);
+    const terminal = await page.evaluate(async () => {
+      const { createBrowserProcess } = await import('/runtime/process.js');
+      const child = createBrowserProcess({
+        scope: globalThis,
+        run: ({ process }) => {
+          process.__bnhNodeTestState = {
+            requestedFiles: ['/node/example.test.js'],
+            files: ['/node/example.test.js'],
+            registered: 1,
+            completed: 1,
+          };
+          process.exit(0);
+        },
+      });
+      return await child.wait();
+    });
+
+    expect(terminal).toMatchObject({ status: 'exited', kind: 'exit', code: 0 });
+    expect(terminal.runtimeState).toEqual({
+      requestedFiles: ['/node/example.test.js'],
+      files: ['/node/example.test.js'],
+      registered: 1,
+      completed: 1,
+    });
+  });
+
+  test('reports node:test discovery state from a VFS worker entry', async ({ page }) => {
+    await openRuntime(page);
+    const result = await page.evaluate(async () => {
+      const { createVirtualProcess } = await import('/runtime/virtual-process.js');
+      const capabilities = {
+        vfs: { mounts: [{ path: '/node', mode: 'read-write' }] },
+        workers: { entryModules: ['*'], maxChildren: 4 },
+        ipc: { enabled: true },
+        signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
+        output: { maxBytes: 1024 * 1024, stdoutBytes: 1024 * 1024, stderrBytes: 1024 * 1024 },
+        envVars: { allowed: [] },
+      };
+      const entry = '/node/runner.js';
+      const encode = (source) => new TextEncoder().encode(source);
+      const stdout = [];
+      const stderr = [];
+      const child = createVirtualProcess({
+        scope: globalThis,
+        forceFallback: true,
+        entry,
+        argv: ['node', entry],
+        cwd: '/node',
+        vfs: {
+          capabilities,
+          files: {
+            [entry]: encode(`
+              const assert = require('node:assert/strict');
+              const { run } = require('node:test');
+              const stream = run({ files: ['/node/example.test.js'] });
+              stream.resume();
+              stream.on('end', () => {
+                assert.deepStrictEqual(process.__bnhNodeTestState.requestedFiles, ['/node/example.test.js']);
+                process.stdout.write('worker node:test complete\\n');
+              });
+            `),
+            '/node/example.test.js': encode("const { test } = require('node:test'); test('worker pass', () => {});"),
+          },
+        },
+        stdout: (value) => stdout.push(String(value)),
+        stderr: (value) => stderr.push(String(value)),
+      });
+      const terminal = await child.wait();
+      return { terminal, stdout: stdout.join(''), stderr: stderr.join('') };
+    });
+
+    expect(result.terminal).toMatchObject({ status: 'exited', code: 0 });
+    expect(result.terminal.runtimeState?.nodeTest?.requestedFiles, JSON.stringify(result)).toEqual(['/node/example.test.js']);
+    expect(result.stdout).toContain('worker node:test complete');
+    expect(result.stderr).toBe('');
+  });
 });

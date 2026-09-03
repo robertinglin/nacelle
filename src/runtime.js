@@ -7026,6 +7026,7 @@ export function createRuntime({
           }
           const ipc = options?.ipc ? {
             process: null,
+            pendingExit: null,
             queued: [],
             pendingIncoming: [],
             handleBacklog: 0,
@@ -7047,7 +7048,18 @@ export function createRuntime({
               if (ipc.process) scope.queueMicrotask(deliver);
               else ipc.pendingIncoming.push({ value, handle });
             },
-            onChildExit: (code) => finish(code, null),
+            onChildExit: (code, signal = null) => {
+              // A same-realm fork can call process.exit() while its bootstrap
+              // is still synchronous. Defer the outer terminal event until
+              // the ChildProcess has been associated with that process, so
+              // queued IPC messages and the caller's listeners are observed
+              // in Node order.
+              if (!ipc.process) {
+                ipc.pendingExit = { code, signal };
+                return;
+              }
+              finish(code, signal);
+            },
             onChildDisconnect: () => {
               if (child.connected) {
                 child.connected = false;
@@ -7664,9 +7676,12 @@ export function createRuntime({
                 for (const message of ipc.queued.splice(0)) {
                   runInChildContext(() => ipc.process?.emit('message', message.value, message.sendHandle));
                 }
-                if (result.status !== 0 || result.process?._exitRequested?.() || result.process?._bnhIsExited?.()) {
+                const pendingExit = ipc.pendingExit;
+                ipc.pendingExit = null;
+                if (result.status !== 0 || (!pendingExit && (result.process?._exitRequested?.() || result.process?._bnhIsExited?.()))) {
                   finish(terminalCode, terminalSignal);
                 }
+                if (pendingExit) scope.queueMicrotask(() => finish(pendingExit.code, pendingExit.signal));
               } else if (!result.pending && !result.process) {
                 // A spawned child must not emit exit/close until the caller
                 // has had a chance to attach listeners. The synchronous

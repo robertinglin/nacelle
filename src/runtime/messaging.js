@@ -85,6 +85,12 @@ function closedError() {
   return createIpcError(IPC_ERROR_CODES.CLOSED, 'IPC channel is closed');
 }
 
+function workerMessagingError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
 function canStructuredClone(value, scope) {
   if (typeof scope.structuredClone !== 'function') return;
   try {
@@ -1273,8 +1279,30 @@ export function createMessagingPrimitives(scope = globalThis) {
     SHARE_ENV,
     MessagePort: nodeMessagePortClass,
     isMainThread: true,
+    threadId: 0,
     parentPort: null,
     workerData: undefined,
+    postMessageToThread(threadId, value, transferList, timeout) {
+      if (typeof transferList === 'number' && timeout === undefined) {
+        timeout = transferList;
+        transferList = [];
+      }
+      if (timeout !== undefined && (!Number.isFinite(timeout) || timeout < 0)) {
+        return Promise.reject(workerMessagingError('ERR_OUT_OF_RANGE', 'The value of "timeout" is out of range. It must be >= 0.'));
+      }
+      if (Number(threadId) === 0) {
+        return Promise.reject(workerMessagingError('ERR_WORKER_MESSAGING_SAME_THREAD', 'Cannot send a message to the same thread'));
+      }
+      const target = [...scope.__BNH_BROWSER_WORKERS__ || []]
+        .find((candidate) => Number(candidate.threadId) === Number(threadId));
+      if (!target) return Promise.reject(workerMessagingError('ERR_WORKER_MESSAGING_FAILED', 'Cannot find the destination thread or listener'));
+      try {
+        target.postMessage({ __bnhThreadMessage: true, value, source: 0 }, transferList);
+        return Promise.resolve();
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    },
     ...createMessagePortHelpers(),
     markAsUncloneable,
     markAsUntransferable,

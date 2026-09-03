@@ -164,4 +164,41 @@ test.describe('browser ESM loader', () => {
     await expectPass(expect, result);
     expect(result.stdout).toContain('unknown extension hook completed');
   });
+
+  test('lets an async module.register load hook transform an unknown extension', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { register } from 'node:module';
+
+      register('/node/unknown-extension-loader.mjs', import.meta.url);
+      const loaded = await import('./typed-source.ts');
+      assert.strictEqual(loaded.answer, 42);
+      process.stdout.write('unknown extension async loader completed');
+    `, {
+      entryPath: '/node/unknown-extension-entry.mjs',
+      files: {
+        '/node/unknown-extension-loader.mjs': `
+          export async function resolve(specifier, context, nextResolve) {
+            return nextResolve(specifier, context);
+          }
+          export async function load(url, context, nextLoad) {
+            if (!url.endsWith('/typed-source.ts')) return nextLoad(url, context);
+            const loaded = await nextLoad(url, { ...context, format: 'module' });
+            return {
+              format: 'module',
+              shortCircuit: true,
+            source: new TextDecoder().decode(loaded.source).replace(
+              'export const answer: number = 42',
+              'export const answer = 42',
+            ),
+            };
+          }
+        `,
+        '/node/typed-source.ts': 'export const answer: number = 42;',
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('unknown extension async loader completed');
+  });
 });

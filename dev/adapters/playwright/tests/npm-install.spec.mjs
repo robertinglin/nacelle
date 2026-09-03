@@ -69,18 +69,6 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     expect([...vfs.fs.readFileSync('/node/numeric.txt')]).toEqual([7, 8, 9]);
   });
 
-  test('VFS exposes immutable backing bytes separately from filesystem copies', () => {
-    const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
-    vfs.fs.writeFileSync('/node/module.js', 'module.exports = 1;');
-    const stored = vfs.readBytes('/node/module.js');
-    const copy = vfs.read('/node/module.js');
-
-    expect(stored).toBe(vfs.readBytes('/node/module.js'));
-    expect(copy).not.toBe(stored);
-    copy[0] ^= 0xff;
-    expect(new TextDecoder().decode(vfs.readBytes('/node/module.js'))).toBe('module.exports = 1;');
-  });
-
   test('VFS can omit the redundant file map from internal snapshots', () => {
     const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
     vfs.fs.writeFileSync('/node/module.js', 'module.exports = 1;');

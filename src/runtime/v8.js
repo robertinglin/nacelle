@@ -560,18 +560,18 @@ class Serializer {
     if (clone && isObject(value) && hasOwnSymbolState(value, globalObject)) {
       return this._encodeHostObject(value);
     }
-    if (isObject(value) && hasCustomPrototypeMethods(value, globalObject)) {
+    const builtIn = (globalObject.ArrayBuffer && value instanceof globalObject.ArrayBuffer)
+      || (globalObject.Date && value instanceof globalObject.Date)
+      || (globalObject.RegExp && value instanceof globalObject.RegExp)
+      || (globalObject.Map && value instanceof globalObject.Map)
+      || (globalObject.Set && value instanceof globalObject.Set);
+    if (isObject(value) && !builtIn && hasCustomPrototypeMethods(value, globalObject)) {
       return this._encodeHostObject(value);
     }
     if (clone && isObject(value)) {
       const prototype = globalObject.Object.getPrototypeOf(value);
       const standardPrototype = prototype === globalObject.Object.prototype
         || prototype === globalObject.Array.prototype;
-      const builtIn = (globalObject.ArrayBuffer && value instanceof globalObject.ArrayBuffer)
-        || (globalObject.Date && value instanceof globalObject.Date)
-        || (globalObject.RegExp && value instanceof globalObject.RegExp)
-        || (globalObject.Map && value instanceof globalObject.Map)
-        || (globalObject.Set && value instanceof globalObject.Set);
       if (!standardPrototype && !builtIn) {
         try {
           clone.call(globalObject, value);

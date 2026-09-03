@@ -281,6 +281,21 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('serializes ordinary Map values through the v8 structured clone contract', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const v8 = require('node:v8');
+      const original = new Map([['stats', { count: 2 }]]);
+      const restored = v8.deserialize(v8.serialize(original));
+      assert.strictEqual(restored instanceof Map, true);
+      assert.deepStrictEqual([...restored.entries()], [['stats', { count: 2 }]]);
+      process.stdout.write('map serialization completed');
+    `);
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('map serialization completed');
+  });
+
   test('reports browser output as non-TTY while preserving tty window APIs', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       (() => {

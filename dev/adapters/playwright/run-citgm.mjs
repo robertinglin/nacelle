@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { firefox, chromium } from 'playwright';
 import { launchBrowser } from './adapter-core.mjs';
 import { formatProgressLine } from './progress-protocol.mjs';
+import { createCITGMArtifactWriter, failureExcerpt } from './result-artifacts.mjs';
 
 const adapterRoot = path.dirname(new URL(import.meta.url).pathname);
 const browserTypes = { chromium, firefox };
@@ -51,6 +52,19 @@ function parseArgs(rawArgs) {
   if (!module) throw new Error(usage());
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('--run-timeout must be a positive number of milliseconds');
   return { browserName, citgmVersion, timeoutMs, module, citgmArgs };
+}
+
+function boundedRunResult(value) {
+  if (!value || typeof value !== 'object') return null;
+  return {
+    runId: value.runId || null,
+    outcome: value.outcome || null,
+    phase: value.phase || null,
+    exit: value.exit || null,
+    error: value.error || null,
+    lifecycleEvents: Array.isArray(value.lifecycleEvents) ? value.lifecycleEvents : [],
+    details: value.details || {},
+  };
 }
 
 async function allocatePort() {
@@ -103,8 +117,18 @@ async function main() {
       page.setDefaultTimeout(0);
       await page.goto(url, { waitUntil: 'domcontentloaded' });
       await page.waitForFunction(() => typeof globalThis.__NACELLE_CITGM__?.run === 'function');
+      const artifactWriter = await createCITGMArtifactWriter({
+        rootDir: process.env.NACELLE_CITGM_ARTIFACT_DIR,
+        module: options.module,
+        runId: `pending-${Date.now()}`,
+      });
+      let lastProgressEvent = null;
       await page.exposeBinding('__bnhReportProgress', async (_source, event) => {
-        try { process.stderr.write(formatProgressLine(event)); } catch { /* diagnostics cannot affect the run */ }
+        try {
+          lastProgressEvent = event;
+          artifactWriter.recordProgress(event);
+          process.stderr.write(formatProgressLine(event));
+        } catch { /* diagnostics cannot affect the run */ }
       });
       process.stdout.write('Starting browser-side CITGM execution...\n');
       const result = await page.evaluate((request) => globalThis.__NACELLE_CITGM__.run(request), {
@@ -115,24 +139,37 @@ async function main() {
         browser: options.browserName,
         progress: { binding: '__bnhReportProgress' },
       });
-      if (result.stdout) process.stdout.write(result.stdout);
-      if (result.stderr) process.stderr.write(result.stderr);
+      const runId = result.runId || result.runResult?.runId || `unknown-${Date.now()}`;
+      const artifactPaths = await artifactWriter.close({
+        stdout: result.stdout || '',
+        stderr: result.stderr || '',
+        networkEvents: result.networkEvents || [],
+      });
       process.stdout.write(`${JSON.stringify({
+        type: 'citgm-terminal',
+        runId,
         module: result.module,
         citgmVersion: result.citgmVersion,
         browser: options.browserName,
         exitCode: result.exitCode,
         timedOut: result.timedOut,
         error: result.error || result.runResult?.error || null,
-        stdout: result.stdout || '',
-        stderr: result.stderr || '',
-        runResult: result.runResult || null,
+        stage: lastProgressEvent?.stage || result.stage || null,
+        output: result.output || null,
+        stdoutExcerpt: failureExcerpt(result.stdout || ''),
+        stderrExcerpt: failureExcerpt(result.stderr || ''),
+        runResult: boundedRunResult(result.runResult),
         precache: result.precache || null,
         install: result.install || null,
         preload: result.preload || null,
         progress: result.progress || null,
-        networkEvents: result.networkEvents || [],
+        artifacts: {
+          ...artifactPaths,
+          networkEvents: { count: (result.networkEvents || []).length, path: artifactPaths.network },
+        },
       })}\n`);
+      if (result.stdout) process.stdout.write(result.stdout);
+      if (result.stderr) process.stderr.write(result.stderr);
       process.exitCode = result.exitCode === null ? 1 : result.exitCode;
     } finally {
       await browser.close();

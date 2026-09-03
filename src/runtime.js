@@ -3064,6 +3064,13 @@ function commonJsFileCandidates(pathname) {
   return [pathname, `${pathname}.js`, `${pathname}.json`, `${pathname}.node`];
 }
 
+// npm's .bin directory contains executable shims rather than package
+// modules. Its owning project package scope remains relevant when a shim is
+// extensionless and the project is an ESM package.
+function isNpmBinShimPath(pathname) {
+  return /\/node_modules\/\.bin(?:\/|$)/.test(String(pathname));
+}
+
 function addonsDisabled(processObject, pathname = '') {
   return processObject?.execArgv?.some((argument) => String(argument) === '--no-addons') === true
     || String(pathname).includes('/test/addons/no-addons/');
@@ -4728,7 +4735,7 @@ export function createRuntime({
   function runtimePackageType(entryPath) {
     let directory = path.dirname(entryPath);
     for (;;) {
-      if (directory.endsWith('/node_modules')) return 'commonjs';
+      if (directory.endsWith('/node_modules') && !isNpmBinShimPath(entryPath)) return 'commonjs';
       const packagePath = path.join(directory, 'package.json');
       if (vfs.files.has(packagePath)) {
         try {
@@ -7803,7 +7810,7 @@ export function createRuntime({
         function packageType(entryPath) {
           let directory = path.dirname(entryPath);
           for (;;) {
-            if (directory.endsWith('/node_modules')) return 'commonjs';
+            if (directory.endsWith('/node_modules') && !isNpmBinShimPath(entryPath)) return 'commonjs';
             if (cjsPackageTypeCache.has(directory)) return cjsPackageTypeCache.get(directory);
             try {
               const packageConfig = readCjsPackageConfig(directory);

@@ -349,7 +349,7 @@ test.describe('browser runtime bridge and core primitives', () => {
       });
     `, {
       files: {
-        '/node/node_modules/.bin/package.json': JSON.stringify({ type: 'module' }),
+        '/node/package.json': JSON.stringify({ type: 'module' }),
         '/node/node_modules/.bin/esm-tool': [
           '#!/usr/bin/env node',
           "if (typeof import.meta.url !== 'string') process.exitCode = 1;",

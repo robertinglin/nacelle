@@ -47,6 +47,23 @@ test.describe('browser ESM loader', () => {
     expect(result.stdout).toContain('esm entry completed');
   });
 
+  test('exposes the default export of a JSON ESM import', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import irregularPlurals from './irregular-plurals.json' with { type: 'json' };
+      assert.deepStrictEqual(irregularPlurals, { person: 'people', mouse: 'mice' });
+      process.stdout.write('json default completed');
+    `, {
+      entryPath: '/node/esm/json-entry.mjs',
+      files: {
+        '/node/esm/irregular-plurals.json': JSON.stringify({ person: 'people', mouse: 'mice' }),
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('json default completed');
+  });
+
   test('resolves dynamic imports of builtin modules inside ESM', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const fs = await import('fs');

@@ -160,6 +160,22 @@ test('npm scripts run through the shell compatibility layer', async () => {
   assert.strictEqual(globalThis.AbortSignal?.any, hostAbortSignalAny);
 });
 
+test('package script errors are forwarded when the shell returns them directly', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/package.json': JSON.stringify({
+        name: 'script-output-fixture',
+        version: '1.0.0',
+        scripts: { test: 'missing-command' },
+      }),
+    },
+  });
+  const child = await node.npm.run('test');
+  assert.equal(await child.exit, 127);
+  assert.equal(await child.stderrText(), 'missing-command: command not found\n');
+});
+
 test('nested npm lifecycle waits for sequential node and yarn children', async () => {
   const hostSetTimeout = globalThis.setTimeout.bind(globalThis);
   const setup = `const { spawn } = require('node:child_process');

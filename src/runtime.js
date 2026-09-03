@@ -9328,6 +9328,7 @@ export function createRuntime({
             };
             const stdout = [];
             const stderr = [];
+            let forwarded = false;
             const result = await runShellScript(script, {
               args: scriptOptions.args,
               cwd: scriptCwd,
@@ -9340,11 +9341,13 @@ export function createRuntime({
               onStdout: (chunk) => {
                 const textChunk = String(chunk);
                 stdout.push(textChunk);
+                forwarded = true;
                 scriptOptions.onStdout?.(textChunk);
               },
               onStderr: (chunk) => {
                 const textChunk = String(chunk);
                 stderr.push(textChunk);
+                forwarded = true;
                 scriptOptions.onStderr?.(textChunk);
               },
               npmRun: (nestedName, nestedOptions) => runPackageScript(nestedName, {
@@ -9397,7 +9400,7 @@ export function createRuntime({
               stdout: stdout.join(''),
               stderr: stderr.join(''),
               streamed: Boolean(stdout.length || stderr.length),
-              forwarded: Boolean(scriptOptions.onStdout || scriptOptions.onStderr),
+              forwarded,
             };
           };
 

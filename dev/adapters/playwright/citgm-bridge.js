@@ -400,6 +400,8 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     stderr: { bytes: 0, chunks: 0 },
   };
   const outputChunks = { stdout: [], stderr: [] };
+  const outputBinding = progressConfig?.outputBinding;
+  const pendingOutputWrites = new Set();
   let installStats = null;
   let preloadStats = null;
   let child = null;
@@ -453,6 +455,11 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       childActive: childActive(),
       counters: counters(),
     });
+    if (outputBinding && typeof globalThis[outputBinding] === 'function') {
+      const write = Promise.resolve(globalThis[outputBinding]({ stream, value })).catch(() => {});
+      pendingOutputWrites.add(write);
+      void write.finally(() => pendingOutputWrites.delete(write));
+    }
     const label = structuredCitgmStage(value);
     if (label) report('execution', 'stage-label', { label });
   };
@@ -645,6 +652,7 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       networkEvents,
     };
   } finally {
+    await Promise.allSettled([...pendingOutputWrites]);
     clearTimeout(timer);
     clearInterval(livenessTimer);
     await progressReporter.flush();

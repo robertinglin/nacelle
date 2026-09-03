@@ -19,6 +19,9 @@ function asBytes(value, fallback = '') {
   if (value instanceof Uint8Array) return value;
   if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (Array.isArray(value) && value.every((item) => Number.isInteger(item) && item >= 0 && item <= 255)) {
+    return Uint8Array.from(value);
+  }
   return new TextEncoder().encode(asText(value ?? fallback));
 }
 
@@ -126,6 +129,11 @@ export async function createCITGMArtifactWriter({ rootDir, module, runId } = {})
   await Promise.all([writeFile(paths.progress, ''), writeFile(paths.network, '')]);
   const progressStream = createWriteStream(paths.progress, { encoding: 'utf8' });
   const networkStream = createWriteStream(paths.network, { encoding: 'utf8' });
+  const outputStreams = {
+    stdout: createWriteStream(paths.stdout),
+    stderr: createWriteStream(paths.stderr),
+  };
+  const outputWritten = { stdout: false, stderr: false };
   let writeChain = Promise.resolve();
   let closed = false;
 
@@ -153,6 +161,32 @@ export async function createCITGMArtifactWriter({ rootDir, module, runId } = {})
     return writeChain;
   };
 
+  const appendOutput = (streamName, value) => {
+    const stream = outputStreams[streamName];
+    if (!stream || closed) return writeChain;
+    outputWritten[streamName] = true;
+    const bytes = asBytes(value);
+    writeChain = writeChain.then(() => new Promise((resolve, reject) => {
+      const cleanup = () => {
+        stream.off('error', onError);
+        stream.off('drain', onDrain);
+      };
+      const complete = () => {
+        cleanup();
+        resolve();
+      };
+      const onError = (error) => {
+        cleanup();
+        reject(error);
+      };
+      const onDrain = complete;
+      stream.once('error', onError);
+      if (stream.write(bytes)) complete();
+      else stream.once('drain', onDrain);
+    }));
+    return writeChain;
+  };
+
   return {
     paths,
     recordProgress(event) {
@@ -161,19 +195,24 @@ export async function createCITGMArtifactWriter({ rootDir, module, runId } = {})
     recordNetwork(event) {
       return append(networkStream, event);
     },
+    recordOutput(stream, value) {
+      return appendOutput(stream, value);
+    },
     async close({ stdout = '', stderr = '', stdoutBytes, stderrBytes, networkEvents = [], runResult = null, summary = null } = {}) {
       if (closed) return paths;
       for (const event of networkEvents) append(networkStream, event);
       closed = true;
       await writeChain;
       await Promise.all([
-        writeFile(paths.stdout, asBytes(stdoutBytes, stdout)),
-        writeFile(paths.stderr, asBytes(stderrBytes, stderr)),
+        outputWritten.stdout ? Promise.resolve() : writeFile(paths.stdout, asBytes(stdoutBytes, stdout)),
+        outputWritten.stderr ? Promise.resolve() : writeFile(paths.stderr, asBytes(stderrBytes, stderr)),
         writeFile(paths.runResult, `${JSON.stringify(runResult, jsonReplacer(), 2)}\n`, 'utf8'),
         writeFile(paths.summary, `${JSON.stringify(summary, jsonReplacer(), 2)}\n`, 'utf8'),
         writeFile(paths.terminalSummary, `${JSON.stringify(summary, jsonReplacer(), 2)}\n`, 'utf8'),
         finishStream(progressStream),
         finishStream(networkStream),
+        finishStream(outputStreams.stdout),
+        finishStream(outputStreams.stderr),
       ]);
       return paths;
     },

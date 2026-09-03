@@ -134,6 +134,37 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('resolves extensionless Node directory scripts through index files', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      (async () => {
+        const child = spawn(process.execPath, ['node_modules/example-tool/command'], {
+          cwd: '/node/project',
+        });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(output, 'directory-script');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/project/node_modules/example-tool/command/index.js': "process.stdout.write('directory-script');",
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
   test('loads CommonJS package entrypoints from Node child scripts', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert/strict');
@@ -491,6 +522,41 @@ test.describe('browser runtime bridge and core primitives', () => {
           "child.once('exit', (code, signal) => { if (signal) process.kill(process.pid, signal); else process.exit(code); });",
         ].join('\n'),
         '/node/package-manager-child.js': "process.stdout.write('package manager child ran\\n');",
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('forwards nested package-script resolution errors through child stderr', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/npm', ['test'], { cwd: '/node' });
+        let errorOutput = '';
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 1);
+        assert.match(errorOutput, /ENOENT|Cannot find module/);
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/package.json': JSON.stringify({
+          name: 'nested-error-fixture',
+          version: '1.0.0',
+          scripts: {
+            pretest: "node -e \"process.stdout.write('pretest output')\"",
+            test: 'node missing-entry.js',
+          },
+        }),
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\n',
       },
     });
 

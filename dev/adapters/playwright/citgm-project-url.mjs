@@ -33,15 +33,21 @@ function normalizeRepository(repository) {
  */
 export function resolveCitgmProjectUrl({ moduleSpec, metadata, lookup = {} } = {}) {
   if (lookup?.npm) return null;
+  const { range } = parseModuleSpec(moduleSpec);
+  const publishedVersion = metadata?.['dist-tags']?.[range] || range;
+  const published = metadata?.versions?.[publishedVersion] || {};
   const repository = normalizeRepository(
-    typeof metadata?.repository === 'string' ? metadata.repository : metadata?.repository?.url,
+    typeof (published.repository || metadata?.repository) === 'string'
+      ? (published.repository || metadata.repository)
+      : (published.repository || metadata?.repository)?.url,
   );
   if (!repository) return null;
 
-  const { range } = parseModuleSpec(moduleSpec);
   let archiveRef;
   if (lookup.head) archiveRef = 'HEAD';
-  else if (lookup.sha || metadata.gitHead) archiveRef = lookup.sha || metadata.gitHead;
+  else if (lookup.sha || published.gitHead || metadata.gitHead) {
+    archiveRef = lookup.sha || published.gitHead || metadata.gitHead;
+  }
   else archiveRef = `${lookup.prefix || ''}${metadata['dist-tags']?.[range] || range}`;
   return `${repository}/archive/${encodeURIComponent(archiveRef)}.tar.gz`;
 }

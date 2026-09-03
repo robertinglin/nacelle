@@ -242,13 +242,14 @@ class ArtifactNpmCache extends BrowserNpmCache {
   }
 
   async getMetadata(packageName) {
-    if (this.memoryMeta.has(packageName)) return this.memoryMeta.get(packageName);
+    const memoryValue = this.getMemoryMetadata(packageName);
+    if (memoryValue !== undefined) return memoryValue;
     const relative = this.artifactManifest?.metadata?.[packageName];
     if (relative && this.artifactBaseUrl) {
       const response = await fetch(new URL(relative, this.artifactBaseUrl));
       if (response.ok) {
         const metadata = await response.json();
-        this.memoryMeta.set(packageName, metadata);
+        this.setMemoryMetadata(packageName, metadata);
         return metadata;
       }
     }
@@ -259,14 +260,15 @@ class ArtifactNpmCache extends BrowserNpmCache {
     const rawKey = key.replace(/^(?:pkg-tarball:|tarball:|pkg:)/, '');
     const candidateKeys = [key, rawKey, `tarball:${rawKey}`, `pkg-tarball:${rawKey}`, `pkg:${rawKey}`];
     for (const candidate of candidateKeys) {
-      if (this.memoryTarballs.has(candidate)) return this.memoryTarballs.get(candidate);
+      const memoryValue = this.getMemoryTarball(candidate);
+      if (memoryValue) return memoryValue;
     }
     const relative = candidateKeys.map((candidate) => this.artifactManifest?.tarballs?.[candidate]).find(Boolean);
     if (relative && this.artifactBaseUrl) {
       const response = await fetch(new URL(relative, this.artifactBaseUrl));
       if (response.ok) {
         const bytes = new Uint8Array(await response.arrayBuffer());
-        this.memoryTarballs.set(key, bytes);
+        this.setMemoryTarball(key, bytes);
         return bytes;
       }
     }

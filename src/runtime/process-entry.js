@@ -89,11 +89,12 @@ export async function runProcessEntry(context) {
     globalThis.__BNH_NPM_CACHE__ = createRemoteNpmCache(context);
   } else if (descriptor.npmCache) {
     const cache = new BrowserNpmCache({ globalObject: globalThis });
-    cache.memoryMeta = new Map(Object.entries(descriptor.npmCache.metadata || {}));
-    cache.memoryTarballs = new Map(Object.entries(descriptor.npmCache.tarballs || {}).map(([key, bytes]) => [
-      key,
-      bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes),
-    ]));
+    for (const [key, value] of Object.entries(descriptor.npmCache.metadata || {})) {
+      cache.setMemoryMetadata(key, value);
+    }
+    for (const [key, bytes] of Object.entries(descriptor.npmCache.tarballs || {})) {
+      cache.setMemoryTarball(key, bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+    }
     globalThis.__BNH_NPM_CACHE__ = cache;
   } else {
     delete globalThis.__BNH_NPM_CACHE__;

@@ -8,11 +8,7 @@ import { chromium, firefox, webkit } from 'playwright';
 const browserTypes = { chromium, firefox, webkit };
 const dependencyPattern = /(?:require\s*\(\s*|from\s+|import\s*\(\s*|new\s+Worker\s*\(\s*|fork\s*\(\s*)['"](\.\.?\/[^'"]+)['"]/g;
 const BROWSER_LAUNCH_RETRY_DELAY_MS = 100;
-// Browser-side Node graphs can legitimately exceed Chromium's default V8
-// renderer heap. Keep the ceiling explicit and below the host's available
-// memory so large dependency graphs fail with a useful runtime result rather
-// than taking down the renderer.
-const CHROMIUM_RUNTIME_ARGS = ['--js-flags=--max-old-space-size=16384'];
+const CHROMIUM_RUNTIME_ARGS = ['--js-flags=--max-old-space-size=8192'];
 
 function browserLaunchErrorText(error) {
   const message = error?.stack || error?.message || String(error);

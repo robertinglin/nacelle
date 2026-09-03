@@ -38,6 +38,141 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('compiles ordinary CommonJS object exports from a package module', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      assert.strictEqual(require('/node/package/lib/eslint.js').ESLint, 'eslint');
+      const entry = require('/node/package/lib/index.js');
+      assert.deepStrictEqual(entry, { ESLint: 'eslint', LegacyESLint: 'legacy-eslint' });
+    `, {
+      files: {
+        '/node/package/lib/index.js': [
+          '"use strict";',
+          '',
+          'const { ESLint } = require("./eslint");',
+          'const { LegacyESLint } = require("./legacy-eslint");',
+          '',
+          'module.exports = {',
+          '  ESLint,',
+          '  LegacyESLint,',
+          '};',
+        ].join('\n'),
+        '/node/package/lib/eslint.js': 'exports.ESLint = "eslint";',
+        '/node/package/lib/legacy-eslint.js': 'exports.LegacyESLint = "legacy-eslint";',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('resolves extensionless Node script arguments through standard file probes', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      (async () => {
+        const child = spawn(process.execPath, ['/node/tools/check'], { cwd: '/node' });
+        let output = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0);
+        assert.strictEqual(output, 'extensionless script\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/tools/check.js': "process.stdout.write('extensionless script\\n');",
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('loads CommonJS package entrypoints from Node child scripts', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      (async () => {
+        const child = spawn(process.execPath, ['/node/runner.js'], { cwd: '/node' });
+        let output = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0);
+        assert.strictEqual(output, 'eslint,legacy-eslint\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/runner.js': [
+          'const { ESLint, LegacyESLint } = require("/node/package/lib/index.js");',
+          'process.stdout.write(`${ESLint},${LegacyESLint}\\n`);',
+        ].join('\n'),
+        '/node/package/lib/index.js': [
+          '"use strict";',
+          '',
+          'const { ESLint } = require("./eslint");',
+          'const { LegacyESLint } = require("./legacy-eslint");',
+          '',
+          'module.exports = { ESLint, LegacyESLint };',
+        ].join('\n'),
+        '/node/package/lib/eslint.js': 'exports.ESLint = "eslint";',
+        '/node/package/lib/legacy-eslint.js': 'exports.LegacyESLint = "legacy-eslint";',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('exposes synchronous Node KeyObjects for browser crypto callers', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const crypto = require('node:crypto');
+      const util = require('node:util');
+
+      (async () => {
+        const secret = crypto.createSecretKey(Buffer.from([1, 2, 3]));
+        assert.strictEqual(secret[Symbol.toStringTag], 'KeyObject');
+        assert.strictEqual(util.types.isKeyObject(secret), true);
+        assert.deepStrictEqual(secret.export({ format: 'jwk' }), { kty: 'oct', k: 'AQID' });
+
+        const jwk = {
+          kty: 'EC',
+          crv: 'P-256',
+          x: 'f83OJ3D2xF4jKJ5Wl9Hf9sQfJYlB8jQ7K8x7c4f3e1A',
+          y: 'x_FEzRu9M9k4j4lB4tP4Y6rK6cQ4sX3mV7nQ2wP1k0Q',
+        };
+        const publicKey = crypto.createPublicKey({ format: 'jwk', key: jwk });
+        assert.strictEqual(publicKey[Symbol.toStringTag], 'KeyObject');
+        assert.deepStrictEqual(publicKey.export({ format: 'jwk' }), jwk);
+
+        const pair = await new Promise((resolve, reject) => {
+          crypto.generateKeyPair('ec', { namedCurve: 'P-256' }, (error, publicPart, privatePart) => {
+            if (error) reject(error);
+            else resolve({ publicPart, privatePart });
+          });
+        });
+        assert.strictEqual(pair.publicPart[Symbol.toStringTag], 'KeyObject');
+        assert.strictEqual(pair.privatePart[Symbol.toStringTag], 'KeyObject');
+        assert.strictEqual(pair.publicPart.export({ format: 'jwk' }).kty, 'EC');
+        assert.strictEqual(pair.privatePart.export({ format: 'jwk' }).kty, 'EC');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `);
+
+    await expectPass(expect, result);
+  });
+
   test('initializes legacy function-inherited Readable receivers in place', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       (async () => {
@@ -409,6 +544,42 @@ test.describe('browser runtime bridge and core primitives', () => {
           scripts: { test: "node -e \"process.stdout.write('npm entrypoint ran\\\\n')\"" },
         }),
         '/node/node_modules/.bin/node': '#!/usr/bin/env node\\n',
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\\n',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('forwards package-script output before a nonzero child close', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/npm', ['test'], { cwd: '/node' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 9, errorOutput);
+        assert.strictEqual(output, 'before failure\\n');
+        assert.strictEqual(errorOutput, 'failure detail\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/package.json': JSON.stringify({
+          name: 'npm-failure-output-fixture',
+          version: '1.0.0',
+          scripts: { test: "node -e \"process.stdout.write('before failure\\\\n'); process.stderr.write('failure detail\\\\n'); process.exitCode = 9\"" },
+        }),
         '/node/node_modules/.bin/npm': '#!/usr/bin/env node\\n',
       },
     });

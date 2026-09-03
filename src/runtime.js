@@ -8861,13 +8861,28 @@ export function createRuntime({
           // Child descriptors are created in this same browser realm. VFS
           // file buffers are replaced, never mutated in place, so sharing
           // them avoids copying the complete mounted tree for every child.
-          const snapshot = vfs.snapshot({ copy: false, includeBackend: true });
+          // An IPC child crosses a Worker boundary and cannot receive the
+          // live backend. Give that boundary a complete serializable snapshot;
+          // same-realm ESM children retain the backend fast path.
+          const snapshot = options.ipc
+            ? vfs.snapshot()
+            : vfs.snapshot({ copy: false, includeBackend: true });
           const files = snapshot.backend
             ? {}
             : Object.fromEntries(snapshot.artifacts.map(({ path, bytes }) => [path, bytes]));
+          if (options.ipc) {
+            for (const directory of snapshot.directories || []) {
+              if (directory !== '/node' && !directory.startsWith('/node/')) continue;
+              if (!files[directory]) files[directory] = { type: 'directory' };
+            }
+          }
           if (prepared.source !== null) {
             files[prepared.entryPath] = new TextEncoder().encode(prepared.source);
           }
+          const networkChannel = options.ipc ? createMessageChannel(scope) : null;
+          const workerNetworkBridge = networkChannel
+            ? createWorkerNetworkBridge({ network: virtualNetwork, port: networkChannel.port1 })
+            : null;
           const suppressWarnings = prepared.executionArgv.some((value) => String(value) === '--no-warnings');
           const forwardStdout = (value) => {
             let text = normalizeOutputChunk(value);
@@ -8903,15 +8918,14 @@ export function createRuntime({
             capabilities: capabilities.manifest,
             nodeVersion: resolvedProfile.id,
             files,
-            vfsBackend: snapshot.backend,
+            ...(options.ipc ? {} : { vfsBackend: snapshot.backend }),
             symlinks: snapshot.symlinks,
             entry: prepared.entryPath,
             execArgv: childExecArgv,
             proxy: childProxy,
-            virtualNetwork: {
-              shared: true,
-              network: virtualNetwork,
-            },
+            virtualNetwork: options.ipc
+              ? { shared: true }
+              : { shared: true, network: virtualNetwork },
           };
           const run = async (context) => {
             const previous = esmExecutionTail;
@@ -8925,7 +8939,7 @@ export function createRuntime({
               release();
             }
           };
-          return createVirtualProcess({
+          const processHandle = createVirtualProcess({
             scope,
             nodeVersion: resolvedProfile.id,
             runId: runSpec?.runId,
@@ -8941,13 +8955,23 @@ export function createRuntime({
             execArgv: childExecArgv,
             vfs: esmDescriptor,
             run,
-            // Child processes may create a server after they start. Keep them
-            // in this realm so later siblings can share the live registry.
-            forceFallback: true,
+            // ESM fork children are independent process boundaries. Keep
+            // non-IPC children in this realm so they can share live virtual
+            // resources, but isolate IPC children so a parent awaiting its
+            // own module lifecycle cannot serialize a child behind itself.
+            forceFallback: !options.ipc,
             preserveReferences: true,
+            networkPort: networkChannel?.raw.port2,
             stdout: forwardStdout,
             stderr: forwardStderr,
           });
+          if (workerNetworkBridge) {
+            processHandle.wait().then(
+              () => workerNetworkBridge.close(),
+              () => workerNetworkBridge.close(),
+            );
+          }
+          return processHandle;
         }
 
         function execFileSync(file, args, options = {}) {

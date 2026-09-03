@@ -31,3 +31,21 @@ test('does not turn npm-managed projects or non-GitHub repositories into archive
     lookup: { npm: true },
   }), null);
 });
+
+test('uses the selected published version gitHead when registry metadata nests it', () => {
+  assert.equal(
+    resolveCitgmProjectUrl({
+      moduleSpec: 'project@latest',
+      metadata: {
+        'dist-tags': { latest: '1.2.3' },
+        versions: {
+          '1.2.3': {
+            repository: { type: 'git', url: 'git+https://github.com/example/project.git' },
+            gitHead: 'published-version-sha',
+          },
+        },
+      },
+    }),
+    'https://github.com/example/project/archive/published-version-sha.tar.gz',
+  );
+});

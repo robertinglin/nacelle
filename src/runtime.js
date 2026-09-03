@@ -7344,8 +7344,6 @@ export function createRuntime({
             if (abortListener) options.signal.removeEventListener('abort', abortListener);
             childProcess?._markExited?.();
             childProcess = null;
-            releaseChildTask?.();
-            releaseChildTask = null;
             if (prepared.executionArgv.some((value) => String(value) === '--no-warnings')) {
               stderr = stderr.replace(/\[DEP0005\] DeprecationWarning: Buffer\(\) is deprecated due to security and usability issues\. Please use the Buffer\.alloc\(\), Buffer\.allocUnsafe\(\), or Buffer\.from\(\) methods instead\.\n/g, '');
             }
@@ -7372,6 +7370,16 @@ export function createRuntime({
             } finally {
               for (const resource of pipeResources) resource.emitDestroy();
               processResource.emitDestroy();
+              // Keep the owner alive through child exit/close listeners and
+              // the Promise continuations those listeners schedule. Releasing
+              // before emit() lets the owner's exit check win that microtask
+              // race and can terminate a setup script between sequential
+              // child commands.
+              if (releaseChildTask) {
+                const release = releaseChildTask;
+                releaseChildTask = null;
+                runtimeQueueMicrotask(release);
+              }
             }
           };
           let invalidCwdError = null;
@@ -8972,7 +8980,10 @@ export function createRuntime({
         }
 
         const runNpmChild = async (prepared, ownerProcess, childOptions = {}) => {
-          const yarnLinks = new Map();
+          // Package-manager link registrations belong to the owning process,
+          // so separate child commands in one lifecycle can share them.
+          const yarnLinks = ownerProcess.__bnhYarnLinks || new Map();
+          ownerProcess.__bnhYarnLinks = yarnLinks;
           const args = prepared.commandArgs.map(String);
           const optionsWithValues = new Set([
             '--cache', '--prefix', '--registry', '--userconfig', '--loglevel', '--workspace', '-w',
@@ -9106,6 +9117,52 @@ export function createRuntime({
                 });
               });
             }
+            if (entry === processObject.execPath && Array.isArray(argv)
+              && typeof argv[0] === 'string' && !argv[0].startsWith('-')) {
+              const prepared = prepareChild(entry, argv, {
+                cwd,
+                env: commandEnv,
+                input: stdin,
+                signal,
+                timeout,
+              }, ownerProcess);
+              const stdout = [];
+              const stderr = [];
+              const result = runPreparedSync(prepared, {
+                asyncLifecycle: true,
+                encoding: 'utf8',
+                onStdout: (value) => {
+                  const chunk = normalizeOutputChunk(value);
+                  stdout.push(chunk);
+                  onStdout?.(chunk);
+                },
+                onStderr: (value) => {
+                  const chunk = normalizeOutputChunk(value);
+                  stderr.push(chunk);
+                  onStderr?.(chunk);
+                },
+              });
+              const complete = (code, signalValue) => ({
+                code: signalValue ? null : code ?? result.status ?? 1,
+                stdout: stdout.join(''),
+                stderr: stderr.join(''),
+                streamed: Boolean(stdout.length || stderr.length),
+              });
+              if (!result.pending || !result.process) {
+                return Promise.resolve(complete(result.status, result.signal));
+              }
+              return new Promise((resolve) => {
+                result.process.once('exit', (code, signalValue) => {
+                  scope.queueMicrotask(() => {
+                    const finalSignal = result.process.getSignal?.() || signalValue || null;
+                    const finalCode = finalSignal
+                      ? null
+                      : (result.process.getCode?.() ?? code);
+                    resolve(complete(finalCode, finalSignal));
+                  });
+                });
+              });
+            }
             if (entry === processObject.execPath && Array.isArray(argv) && argv[0] === '-e') {
               const prepared = prepareChild(entry, argv, {
                 cwd,
@@ -9192,6 +9249,27 @@ export function createRuntime({
             glob: async (pattern, cwd) => vfs.fs.globSync(pattern, { cwd }),
           };
 
+          const runPackageLink = async ({ packages = [], cwd = prepared.cwd }) => {
+            const npm = createNpm();
+            const packageJson = await npm.readPackageJson(cwd);
+            if (!packages.length) {
+              if (!packageJson?.name) return { code: 1, stdout: '', stderr: 'npm link requires a named package\n' };
+              yarnLinks.set(packageJson.name, cwd);
+              return { code: 0, stdout: '', stderr: '' };
+            }
+            for (const packageName of packages) {
+              const source = yarnLinks.get(packageName);
+              if (!source) {
+                return { code: 1, stdout: '', stderr: `npm link ${packageName}: package has not been linked\n` };
+              }
+              const destination = `${cwd.replace(/\/+$/, '')}/node_modules/${packageName}`;
+              if (vfs.fs.existsSync(destination)) vfs.fs.rmSync(destination, { recursive: true, force: true });
+              await vfs.fs.promises.mkdir(path.dirname(destination), { recursive: true });
+              await vfs.fs.promises.symlink(source, destination);
+            }
+            return { code: 0, stdout: '', stderr: '' };
+          };
+
           const runScriptBody = async (scriptName, packageJson, scriptOptions = {}) => {
             const script = packageJson?.scripts?.[scriptName];
             if (typeof script !== 'string' || !script) {
@@ -9248,23 +9326,7 @@ export function createRuntime({
                 await npm.install(installSpecs, { cwd });
                 return { code: 0 };
               },
-              npmLink: async ({ packages = [], cwd = scriptCwd }) => {
-                const npm = createNpm();
-                const packageJson = await npm.readPackageJson(cwd);
-                if (!packages.length) {
-                  if (!packageJson?.name) return { code: 1 };
-                  yarnLinks.set(packageJson.name, cwd);
-                  return { code: 0 };
-                }
-                for (const packageName of packages) {
-                  const source = yarnLinks.get(packageName);
-                  if (!source) return { code: 1 };
-                  const destination = `${cwd.replace(/\/+$/, '')}/node_modules/${packageName}`;
-                  if (vfs.fs.existsSync(destination)) vfs.fs.rmSync(destination, { recursive: true, force: true });
-                  await vfs.fs.promises.symlink(source, destination);
-                }
-                return { code: 0 };
-              },
+              npmLink: (linkOptions) => runPackageLink({ ...linkOptions, cwd: linkOptions?.cwd || scriptCwd }),
               runCommand: (commandOptions) => runVirtualCommand({
                 entry: commandOptions.entry,
                 argv: commandOptions.argv,
@@ -9278,7 +9340,9 @@ export function createRuntime({
               }),
               runNode: (nodeOptions) => runVirtualCommand({
                 entry: processObject.execPath,
-                argv: [nodeOptions.print ? '-p' : '-e', nodeOptions.code, ...(nodeOptions.args || [])],
+                argv: nodeOptions.script
+                  ? [nodeOptions.script, ...(nodeOptions.args || [])]
+                  : [nodeOptions.print ? '-p' : '-e', nodeOptions.code, ...(nodeOptions.args || [])],
                 cwd: nodeOptions.cwd,
                 commandEnv: nodeOptions.env,
                 stdin: nodeOptions.input,
@@ -9364,6 +9428,10 @@ export function createRuntime({
             const filename = `${resolved.parsed.name.replace(/^@/, '').replaceAll('/', '-')}-${resolved.version}.tgz`;
             await vfs.fs.promises.writeFile(path.join(prepared.cwd, filename), bytes);
             return { code: 0, stdout: `${filename}\n`, stderr: '' };
+          }
+
+          if (command.name === 'link') {
+            return runPackageLink({ packages: positionalArguments(), cwd: prepared.cwd });
           }
 
           if (command.name === 'run' || command.name === 'run-script' || command.name === 'test') {
@@ -11433,9 +11501,36 @@ export function createRuntime({
     const injectedSetTimeout = (callback, delay, ...args) => setTimer(function timerCallback() {
       return callback.apply(this, args);
     }, delay);
-    Object.defineProperty(injectedSetTimeout, Symbol.for('nodejs.util.promisify.custom'), {
+    const injectedSetInterval = (callback, delay, ...args) => setTimer(function intervalCallback() {
+      return callback.apply(this, args);
+    }, delay, true);
+    const injectedSetImmediate = (callback, ...args) => setTimer(function immediateCallback() {
+      return callback.apply(this, args);
+    }, 0, false, 'Immediate');
+    // execute() shares a realm with its adapter. Keep adapter-owned timers on
+    // native scheduling so they cannot prolong the guest lifecycle.
+    const inGuestTimerContext = () => scope.__bnhUserCode === true;
+    const scopedSetTimeout = (callback, delay, ...args) => inGuestTimerContext()
+      ? injectedSetTimeout(callback, delay, ...args)
+      : nativeSetTimeout(callback, delay, ...args);
+    const scopedSetInterval = (callback, delay, ...args) => inGuestTimerContext()
+      ? injectedSetInterval(callback, delay, ...args)
+      : nativeSetInterval(callback, delay, ...args);
+    const nativeSetImmediate = typeof previous.setImmediate === 'function'
+      ? previous.setImmediate.bind(scope)
+      : (callback, ...args) => nativeSetTimeout(callback, 0, ...args);
+    const nativeClearImmediate = typeof previous.clearImmediate === 'function'
+      ? previous.clearImmediate.bind(scope)
+      : nativeClearTimeout;
+    const scopedSetImmediate = (callback, ...args) => inGuestTimerContext()
+      ? injectedSetImmediate(callback, ...args)
+      : nativeSetImmediate(callback, ...args);
+    const scopedClearTimeout = (handle) => inGuestTimerContext() ? clearTimer(handle) : nativeClearTimeout(handle);
+    const scopedClearInterval = (handle) => inGuestTimerContext() ? clearTimer(handle) : nativeClearInterval(handle);
+    const scopedClearImmediate = (handle) => inGuestTimerContext() ? clearTimer(handle) : nativeClearImmediate(handle);
+    Object.defineProperty(scopedSetTimeout, Symbol.for('nodejs.util.promisify.custom'), {
       configurable: true,
-      value: (delay, ...args) => new Promise((resolve) => injectedSetTimeout(resolve, delay, ...args)),
+      value: (delay, ...args) => new Promise((resolve) => scopedSetTimeout(resolve, delay, ...args)),
     });
     Object.assign(scope, {
       process: processObject,
@@ -11456,16 +11551,12 @@ export function createRuntime({
       URL: builtins.url.URL,
       URLSearchParams: builtins.url.URLSearchParams,
       __bnh: { deterministicEnvironment },
-      setTimeout: injectedSetTimeout,
-      clearTimeout: clearTimer,
-      setInterval: (callback, delay, ...args) => setTimer(function intervalCallback() {
-        return callback.apply(this, args);
-      }, delay, true),
-      clearInterval: clearTimer,
-      setImmediate: (callback, ...args) => setTimer(function immediateCallback() {
-        return callback.apply(this, args);
-      }, 0, false, 'Immediate'),
-      clearImmediate: clearTimer,
+      setTimeout: scopedSetTimeout,
+      clearTimeout: scopedClearTimeout,
+      setInterval: scopedSetInterval,
+      clearInterval: scopedClearInterval,
+      setImmediate: scopedSetImmediate,
+      clearImmediate: scopedClearImmediate,
       fetch: runtimeFetch,
       primordials: createPrimordials(scope),
       internalBinding: internalBindings.internalBinding,
@@ -11520,10 +11611,13 @@ export function createRuntime({
       if (isRuntimeEsmModule(entry, processObject.execArgv)) await esmLoader.import(entry, entry, {}, undefined, processObject);
       else loadModule(entry, entry);
       await Promise.resolve();
+      let lifecyclePollDelay = 0;
       while (!options.isCancelled?.() && !options.signal?.aborted && !processObject._exitRequested?.()) {
         const activeTimers = processObject._timers || timerHandles;
-        if (pending === 0 && !hasReferencedRuntimeTimers(activeTimers) && !hasLiveVirtualProcess()
-          && !hasReferencedIpc() && !hasReferencedWorkerParentPort()) {
+        const canExit = pending === 0 && !hasReferencedRuntimeTimers(activeTimers) && !hasLiveVirtualProcess()
+          && !hasReferencedIpc() && !hasReferencedWorkerParentPort();
+        if (canExit) {
+          lifecyclePollDelay = 0;
           // Node exits when no referenced work remains. beforeExit is the
           // lifecycle signal that gives listeners one chance to create more
           // work; any such work is observed by the predicates above on the
@@ -11531,8 +11625,11 @@ export function createRuntime({
           if (!processObject._emitBeforeExit?.()) break;
           continue;
         }
+        // A referenced handle can live for minutes. Avoid turning the
+        // lifecycle observer into a full-core busy loop while it waits.
+        lifecyclePollDelay = lifecyclePollDelay === 0 ? 1 : Math.min(8, lifecyclePollDelay * 2);
         await new Promise((resolve) => {
-          const handle = nativeSetTimeout(resolve, 0);
+          const handle = nativeSetTimeout(resolve, lifecyclePollDelay);
           if (handle && (typeof handle === 'object' || typeof handle === 'function')) {
             handle[lifecycleWaitTimer] = true;
           }

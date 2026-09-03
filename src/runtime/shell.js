@@ -703,9 +703,9 @@ async function runNode(args, input, context, options) {
   if (args[index] === '--') index += 1;
   const script = args[index];
   if (!script) return commandError('node', 'no script specified');
-  return options.runCommand({
-    entry: shellPath(script, context.cwd), argv: args.slice(index + 1), cwd: context.cwd,
-    env: context.env, stdin: input, signal: context.signal, timeout: context.timeout,
+  return options.runNode({
+    script: shellPath(script, context.cwd), args: args.slice(index + 1), input,
+    cwd: context.cwd, env: context.env, signal: context.signal, timeout: context.timeout,
     onNetwork: context.onNetwork,
     onStdout: context.onStdout, onStderr: context.onStderr,
   });

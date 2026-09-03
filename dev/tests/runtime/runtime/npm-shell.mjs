@@ -160,6 +160,95 @@ test('npm scripts run through the shell compatibility layer', async () => {
   assert.strictEqual(globalThis.AbortSignal?.any, hostAbortSignalAny);
 });
 
+test('nested npm lifecycle waits for sequential node and yarn children', async () => {
+  const hostSetTimeout = globalThis.setTimeout.bind(globalThis);
+  const setup = `const { spawn } = require('node:child_process');
+const run = (command, args, label) => new Promise((resolve, reject) => {
+  console.log('setup:' + label + ':start');
+  const child = spawn(command, args, { cwd: process.cwd(), stdio: 'inherit', shell: true });
+  child.on('error', reject);
+  child.on('exit', (code) => {
+    console.log('setup:' + label + ':exit:' + code);
+    if (code) reject(new Error(label + ' exited ' + code));
+    else resolve();
+  });
+});
+(async () => {
+  await run('yarn', ['-v'], 'version');
+  await run('yarn', ['install'], 'install');
+  await run('yarn', ['link'], 'register-link');
+  await run('yarn', ['link', 'linked-package'], 'consume-link');
+  console.log('setup:done');
+})().catch((error) => { console.error(error); process.exitCode = 1; });`;
+  const driver = `const { spawn } = require('node:child_process');
+const child = spawn('npm', ['test'], { cwd: '/node', stdio: 'inherit', shell: true });
+child.on('exit', (code) => { console.log('npm-exit:' + code); process.exitCode = code || 0; });`;
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/package.json': JSON.stringify({
+        name: 'linked-package',
+        version: '1.0.0',
+        scripts: {
+          pretest: 'yarn lint',
+          prelint: 'yarn setup',
+          setup: 'node ./setup/setup.js',
+          lint: 'echo lint',
+          test: 'echo test',
+        },
+      }),
+      '/node/setup/setup.js': setup,
+      '/node/driver.js': driver,
+    },
+  });
+  const process = await node.run({ entry: '/node/driver.js' });
+  const terminal = await Promise.race([
+    process.exit.then((code) => ({ code })),
+    new Promise((resolve) => hostSetTimeout(() => resolve({ timeout: true }), 1500)),
+  ]);
+  if (terminal.timeout) await process.kill();
+  assert.deepEqual(terminal, { code: 0 });
+  const stdout = await process.stdoutText();
+  const ordered = [
+    'setup:version:start',
+    'setup:version:exit:0',
+    'setup:install:start',
+    'setup:install:exit:0',
+    'setup:register-link:start',
+    'setup:register-link:exit:0',
+    'setup:consume-link:start',
+    'setup:consume-link:exit:0',
+    'setup:done',
+    'lint',
+    'test',
+    'npm-exit:0',
+  ];
+  let cursor = -1;
+  for (const marker of ordered) {
+    const next = stdout.indexOf(marker, cursor + 1);
+    assert.notEqual(next, -1, `missing output marker ${marker}: ${stdout}`);
+    assert.ok(next > cursor, `out-of-order output marker ${marker}: ${stdout}`);
+    cursor = next;
+  }
+});
+
+test('host timers created during a guest run do not become guest handles', async () => {
+  const hostSetTimeout = globalThis.setTimeout.bind(globalThis);
+  const node = await Nacelle.create({
+    gateway: false,
+    files: { '/node/wait.js': "setTimeout(() => console.log('guest-done'), 20);" },
+  });
+  const process = await node.run({ entry: '/node/wait.js' });
+  hostSetTimeout(() => {}, 1000);
+  const terminal = await Promise.race([
+    process.exit.then((code) => ({ code })),
+    new Promise((resolve) => hostSetTimeout(() => resolve({ timeout: true }), 400)),
+  ]);
+  if (terminal.timeout) await process.kill();
+  assert.deepEqual(terminal, { code: 0 });
+  assert.match(await process.stdoutText(), /guest-done/);
+});
+
 test('shell process kill waits for the running command to finish', async () => {
   const fs = memoryShellFs({ '/node/tool': '#!/usr/bin/env node\n' });
   let commandStarted;

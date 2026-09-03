@@ -889,18 +889,33 @@ export class Nacelle {
       fs: shellFs,
       npmRun: options.npmRun || ((name, nestedOptions) => this.npm.run(name, nestedOptions)),
       runCommand,
-      runNode: (nodeOptions) => runInline({
-        source: nodeOptions.print
-          ? `process.stdout.write(String(eval(${JSON.stringify(nodeOptions.code)})) + '\\n');`
-          : nodeOptions.code,
-        argv: nodeOptions.args,
-        env: nodeOptions.env,
-        cwd: nodeOptions.cwd,
-        stdin: nodeOptions.input,
-        signal: nodeOptions.signal,
-        timeout: nodeOptions.timeout,
-        onNetwork: nodeOptions.onNetwork,
-      }),
+      runNode: (nodeOptions) => nodeOptions.script
+        ? runCommand({
+          entry: nodeOptions.script,
+          argv: nodeOptions.args,
+          env: nodeOptions.env,
+          cwd: nodeOptions.cwd,
+          stdin: nodeOptions.input,
+          signal: nodeOptions.signal,
+          timeout: nodeOptions.timeout,
+          onNetwork: nodeOptions.onNetwork,
+          onStdout: nodeOptions.onStdout,
+          onStderr: nodeOptions.onStderr,
+        })
+        : runInline({
+          source: nodeOptions.print
+            ? `process.stdout.write(String(eval(${JSON.stringify(nodeOptions.code)})) + '\\n');`
+            : nodeOptions.code,
+          argv: nodeOptions.args,
+          env: nodeOptions.env,
+          cwd: nodeOptions.cwd,
+          stdin: nodeOptions.input,
+          signal: nodeOptions.signal,
+          timeout: nodeOptions.timeout,
+          onNetwork: nodeOptions.onNetwork,
+          onStdout: nodeOptions.onStdout,
+          onStderr: nodeOptions.onStderr,
+        }),
       nodeVersion: this._nodeProfile.runtimeVersion,
       signal: options.signal,
       timeout: options.timeout,

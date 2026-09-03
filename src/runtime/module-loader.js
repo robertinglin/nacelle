@@ -342,7 +342,7 @@ export function createModuleLoader({
       format: isBuiltinSpecifier(resolved)
         ? 'builtin'
         : resolved.startsWith('data:') ? 'module'
-        : resolved.endsWith('.json') ? 'json' : moduleFormat(resolved),
+        : resolved.endsWith('.json') ? 'json' : moduleFormatForHook(resolved),
     };
   };
 
@@ -498,6 +498,20 @@ export function createModuleLoader({
     if (resolved.includes('/node_modules/')) return 'commonjs';
     if (defaultModuleType === 'module') return 'module';
     return 'commonjs';
+  };
+
+  // A custom ESM loader may intentionally handle an otherwise unknown file
+  // extension (for example a TypeScript source file). Resolve/load hooks must
+  // see that URL before the default loader reports Node's unknown-extension
+  // error. The default loader still calls moduleFormat() directly, so an
+  // unhandled extension remains an ERR_UNKNOWN_FILE_EXTENSION.
+  const moduleFormatForHook = (resolved) => {
+    try {
+      return moduleFormat(resolved);
+    } catch (error) {
+      if (error?.code === 'ERR_UNKNOWN_FILE_EXTENSION') return undefined;
+      throw error;
+    }
   };
 
   const packageEntry = (base, useExports = true) => {
@@ -1024,9 +1038,11 @@ export function createModuleLoader({
 
   function rewriteSpecifier(specifier, importer, exportName, processOverride) {
     specifier = decodeStaticString(specifier);
-    const resolved = hookURLToSpecifier(runResolveHooks(specifier, importer).url);
+    const resolvedResult = runResolveHooks(specifier, importer);
+    const resolved = hookURLToSpecifier(resolvedResult.url);
     if (exportName && cjsHasEsmSyntax(resolved)) return invalidCjsModuleURL(specifier, exportName);
-    const url = moduleURL(resolved, processOverride);
+    const formatHint = Object.hasOwn(resolvedResult, 'format') ? resolvedResult.format : null;
+    const url = moduleURL(resolved, processOverride, formatHint);
     nativeSpecifierHints.set(url, specifier);
     return url;
   }
@@ -1264,11 +1280,12 @@ export function createModuleLoader({
     ].join('\n');
   };
 
-  function moduleSource(resolved, processOverride) {
+  function moduleSource(resolved, processOverride, formatHint = null) {
     const builtinValue = builtin(resolved, processOverride);
-    const format = isBuiltinSpecifier(resolved) ? 'builtin'
+    const format = formatHint !== null ? formatHint
+      : isBuiltinSpecifier(resolved) ? 'builtin'
       : resolved.startsWith('data:') ? 'module'
-      : resolved.endsWith('.json') ? 'json' : moduleFormat(resolved);
+      : resolved.endsWith('.json') ? 'json' : moduleFormatForHook(resolved);
     const loaded = runLoadHooks(resolved, format);
     const loadedResolved = loaded.url ? hookURLToSpecifier(loaded.url) : resolved;
     if (loaded.format === 'builtin' && isBuiltinSpecifier(loadedResolved)) {
@@ -1320,10 +1337,10 @@ export function createModuleLoader({
     return `${bindProcess(rewriteImports(loadedText, resolved, processOverride), processOverride)}\n//# sourceURL=${resolved}`;
   }
 
-  function moduleURL(resolved, processOverride) {
+  function moduleURL(resolved, processOverride, formatHint = null) {
     const key = cacheKey(resolved, processOverride);
     if (moduleURLs.has(key)) return moduleURLs.get(key);
-    const source = moduleSource(resolved, processOverride);
+    const source = moduleSource(resolved, processOverride, formatHint);
     // Native ESM caches by URL for the lifetime of the browser realm. Give
     // each runtime loader a private fragment so a second virtual child using
     // the same VFS path executes its own module instance.
@@ -1518,8 +1535,10 @@ export function createModuleLoader({
         const specifier = original[4];
         const prefix = original[2];
         const quoteOffset = original[0].indexOf(original[3], original[1].length + prefix.length);
-        const resolved = hookURLToSpecifier((await runResolveHooksAsync(specifier, importer)).url);
-        const url = await moduleURLAsync(resolved, processOverride, importer, ancestors);
+        const resolvedResult = await runResolveHooksAsync(specifier, importer);
+        const resolved = hookURLToSpecifier(resolvedResult.url);
+        const formatHint = Object.hasOwn(resolvedResult, 'format') ? resolvedResult.format : null;
+        const url = await moduleURLAsync(resolved, processOverride, importer, ancestors, formatHint);
         nativeSpecifierHints.set(url, specifier);
         if (exportAware && requestedExportName(prefix) && resolved.endsWith('.json')) {
           replacements.push({
@@ -1570,11 +1589,12 @@ export function createModuleLoader({
     return rewritten;
   };
 
-  const moduleSourceAsync = async (resolved, processOverride, ancestors) => {
+  const moduleSourceAsync = async (resolved, processOverride, ancestors, formatHint = null) => {
     const builtinValue = builtin(resolved, processOverride);
-    const format = isBuiltinSpecifier(resolved) ? 'builtin'
+    const format = formatHint !== null ? formatHint
+      : isBuiltinSpecifier(resolved) ? 'builtin'
       : /^[A-Za-z][A-Za-z\d+.-]*:/.test(resolved) ? 'module'
-      : resolved.endsWith('.json') ? 'json' : moduleFormat(resolved);
+      : resolved.endsWith('.json') ? 'json' : moduleFormatForHook(resolved);
     const loaded = await runLoadHooksAsync(resolved, format);
     const loadedResolved = loaded.url ? hookURLToSpecifier(loaded.url) : resolved;
     if (loaded.format === 'builtin' && isBuiltinSpecifier(loadedResolved)) {
@@ -1609,7 +1629,7 @@ export function createModuleLoader({
     return `${bindProcess(await rewriteImportsAsync(moduleText, resolved, processOverride, ancestors), processOverride)}\n//# sourceURL=${resolved}`;
   };
 
-  const moduleURLAsync = async (resolved, processOverride, importer = resolved, ancestors = new Set()) => {
+  const moduleURLAsync = async (resolved, processOverride, importer = resolved, ancestors = new Set(), formatHint = null) => {
     const key = cacheKey(resolved, processOverride);
     if (moduleURLs.has(key)) return moduleURLs.get(key);
     if (isBuiltinSpecifier(resolved)) return moduleURL(resolved, processOverride);
@@ -1621,7 +1641,7 @@ export function createModuleLoader({
     const promise = (async () => {
       const nextAncestors = new Set(ancestors);
       nextAncestors.add(key);
-      const source = await moduleSourceAsync(resolved, processOverride, nextAncestors);
+      const source = await moduleSourceAsync(resolved, processOverride, nextAncestors, formatHint);
       const registration = cycleRegistrations.get(key);
       const publishedSource = registration
         ? `${source}\n${registration.names.size || registration.defaultBinding ? `globalThis[${quote(registryName)}][${quote(registration.token)}]().publish({${[...registration.names].map((name) => {
@@ -1642,12 +1662,12 @@ export function createModuleLoader({
     return promise;
   };
 
-  const importNative = async (resolved, processOverride) => {
+  const importNative = async (resolved, processOverride, formatHint = null) => {
     const key = cacheKey(resolved, processOverride);
     if (!importCache.has(key)) {
       let url;
       try {
-        url = await moduleURLAsync(resolved, processOverride);
+        url = await moduleURLAsync(resolved, processOverride, resolved, new Set(), formatHint);
       } catch (error) {
         if (error?.code === 'MODULE_NOT_FOUND') {
           error.code = 'ERR_MODULE_NOT_FOUND';
@@ -1746,7 +1766,13 @@ export function createModuleLoader({
         || `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}_${moduleSequence++}${processKey(processOverride)}`;
       return import(url);
     }
-    if (isBuiltinSpecifier(resolved) || moduleFormat(resolved) === 'module') return importNative(resolved, processOverride);
+    const resolvedFormat = Object.hasOwn(resolvedResult, 'format') ? resolvedResult.format : null;
+    if (isBuiltinSpecifier(resolved)
+      || resolvedFormat === 'module'
+      || resolvedFormat === undefined
+      || (resolvedFormat === null && moduleFormat(resolved) === 'module')) {
+      return importNative(resolved, processOverride, resolvedFormat);
+    }
     let exports;
     try {
       exports = evaluate(resolved, importer, globals, processOverride);

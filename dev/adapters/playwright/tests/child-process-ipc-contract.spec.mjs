@@ -14,19 +14,29 @@ test('routes Node internal fork messages separately from user messages', async (
       process.exit(0);
     } else {
       const child = fork(process.argv[1], ['child']);
+      const order = [];
       let messageCount = 0;
       let internalMessageCount = 0;
       child.once('message', (message) => {
+        order.push('message');
         messageCount += 1;
         assert.deepStrictEqual(message, { cmd: 'fooNODE_bar' });
       });
       child.once('internalMessage', (message) => {
+        order.push('internalMessage');
         internalMessageCount += 1;
         assert.deepStrictEqual(message, { cmd: 'NODE_bar' });
       });
+      child.once('exit', (code, signal) => {
+        order.push('exit');
+        assert.strictEqual(code, 0);
+        assert.strictEqual(signal, null);
+      });
       child.once('close', () => {
+        order.push('close');
         assert.strictEqual(messageCount, 1);
         assert.strictEqual(internalMessageCount, 1);
+        assert.deepStrictEqual(order, ['message', 'internalMessage', 'exit', 'close']);
         process.stdout.write('child-ipc-contract-passed');
       });
     }

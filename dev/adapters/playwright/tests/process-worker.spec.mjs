@@ -8,6 +8,32 @@ async function openRuntime(page) {
 }
 
 test.describe('browser-native worker process boundary', () => {
+  test('shares bytes in both raw and descriptor-shaped worker VFS entries', async ({ page }) => {
+    await openRuntime(page);
+    const result = await page.evaluate(async () => {
+      const { prepareWorkerVfs } = await import('/runtime/process.js');
+      const bytes = new Uint8Array([1, 2, 3]);
+      const prepared = prepareWorkerVfs({
+        files: {
+          '/node/raw.js': bytes,
+          '/node/descriptor.js': { data: bytes, mode: 0o755 },
+        },
+        artifacts: [{ path: '/node/raw.js', bytes }],
+      }, {
+        crossOriginIsolated: true,
+        SharedArrayBuffer,
+      });
+      return {
+        raw: prepared.files['/node/raw.js'].buffer instanceof SharedArrayBuffer,
+        descriptor: prepared.files['/node/descriptor.js'].data.buffer instanceof SharedArrayBuffer,
+        artifact: prepared.artifacts[0].bytes.buffer instanceof SharedArrayBuffer,
+        sourceUnchanged: bytes.buffer instanceof ArrayBuffer,
+      };
+    });
+
+    expect(result).toEqual({ raw: true, descriptor: true, artifact: true, sourceUnchanged: true });
+  });
+
   test('keeps worker IPC/output FIFO and emits one terminal lifecycle', async ({ page }) => {
     await openRuntime(page);
     const result = await page.evaluate(async () => {

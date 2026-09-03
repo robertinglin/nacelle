@@ -1492,7 +1492,6 @@ export function createModuleLoader({
   // before invoking the browser evaluator so HTTP imports work from both
   // --import preloads and --input-type=module entry points.
   const asyncModuleURLs = new Map();
-  const asyncModuleSources = new Map();
   const runLoadHooksAsync = async (resolved, format) => {
     const url = format === 'builtin'
       ? `node:${builtinName(resolved)}`
@@ -1653,7 +1652,6 @@ export function createModuleLoader({
         }).filter(Boolean).concat(registration.defaultBinding ? [`default: ${registration.defaultBinding}`] : []).join(',')}});` : ''}`
         : source;
       const finalSource = publishedSource;
-      asyncModuleSources.set(key, finalSource);
       const url = `data:text/javascript;charset=utf-8,${encodeModuleSource(finalSource)}#${registryName}_${moduleSequence++}${processKey(processOverride)}`;
       moduleURLs.set(key, url);
       return url;
@@ -1763,11 +1761,10 @@ export function createModuleLoader({
     // using that captured graph on later imports: the backing virtual file may
     // have been removed or replaced after the static import was prepared, but
     // Node's ESM cache is keyed by the module URL rather than fresh file reads.
-    if (asyncModuleSources.has(key)) {
-      const source = asyncModuleSources.get(key);
-      const url = moduleURLs.get(key)
-        || `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}_${moduleSequence++}${processKey(processOverride)}`;
-      return import(url);
+    // moduleURLs is the canonical cache; retaining the generated source beside
+    // its encoded URL needlessly keeps a second copy of every ESM module alive.
+    if (moduleURLs.has(key)) {
+      return import(moduleURLs.get(key));
     }
     const resolvedFormat = Object.hasOwn(resolvedResult, 'format') ? resolvedResult.format : null;
     if (isBuiltinSpecifier(resolved)

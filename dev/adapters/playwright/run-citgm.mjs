@@ -6,7 +6,12 @@ import { spawn } from 'node:child_process';
 import { firefox, chromium } from 'playwright';
 import { launchBrowser } from './adapter-core.mjs';
 import { formatProgressLine } from './progress-protocol.mjs';
-import { createCITGMArtifactWriter, failureExcerpt } from './result-artifacts.mjs';
+import {
+  compactForSummary,
+  createCITGMArtifactWriter,
+  failureExcerpt,
+  outputSummary,
+} from './result-artifacts.mjs';
 
 const adapterRoot = path.dirname(new URL(import.meta.url).pathname);
 const browserTypes = { chromium, firefox };
@@ -56,14 +61,23 @@ function parseArgs(rawArgs) {
 
 function boundedRunResult(value) {
   if (!value || typeof value !== 'object') return null;
+  const boundedEvents = (events) => {
+    if (!Array.isArray(events)) return compactForSummary(events || null);
+    return {
+      count: events.length,
+      first: events.slice(0, 4).map((event) => compactForSummary(event)),
+      recent: events.slice(-32).map((event) => compactForSummary(event)),
+    };
+  };
   return {
-    runId: value.runId || null,
-    outcome: value.outcome || null,
-    phase: value.phase || null,
-    exit: value.exit || null,
-    error: value.error || null,
-    lifecycleEvents: Array.isArray(value.lifecycleEvents) ? value.lifecycleEvents : [],
-    details: value.details || {},
+    runId: compactForSummary(value.runId || null),
+    outcome: compactForSummary(value.outcome || null),
+    phase: compactForSummary(value.phase || null),
+    exit: compactForSummary(value.exit || null),
+    error: compactForSummary(value.error || null),
+    lifecycleEvents: boundedEvents(value.lifecycleEvents),
+    outputEvents: boundedEvents(value.outputEvents),
+    details: compactForSummary(value.details || {}),
   };
 }
 
@@ -140,34 +154,39 @@ async function main() {
         progress: { binding: '__bnhReportProgress' },
       });
       const runId = result.runId || result.runResult?.runId || `unknown-${Date.now()}`;
-      const artifactPaths = await artifactWriter.close({
-        stdout: result.stdout || '',
-        stderr: result.stderr || '',
-        networkEvents: result.networkEvents || [],
-      });
-      process.stdout.write(`${JSON.stringify({
+      const output = outputSummary(result, lastProgressEvent);
+      const networkEvents = result.networkEvents || [];
+      const artifactPaths = artifactWriter.paths;
+      const summary = {
         type: 'citgm-terminal',
-        runId,
-        module: result.module,
-        citgmVersion: result.citgmVersion,
+        runId: compactForSummary(runId),
+        module: compactForSummary(result.module),
+        citgmVersion: compactForSummary(result.citgmVersion),
         browser: options.browserName,
         exitCode: result.exitCode,
         timedOut: result.timedOut,
-        error: result.error || result.runResult?.error || null,
-        stage: lastProgressEvent?.stage || result.stage || null,
-        output: result.output || null,
+        error: compactForSummary(result.error || result.runResult?.error || null),
+        stage: compactForSummary(lastProgressEvent?.stage || result.stage || null),
+        output,
         stdoutExcerpt: failureExcerpt(result.stdout || ''),
         stderrExcerpt: failureExcerpt(result.stderr || ''),
         runResult: boundedRunResult(result.runResult),
-        precache: result.precache || null,
-        install: result.install || null,
-        preload: result.preload || null,
-        progress: result.progress || null,
+        precache: compactForSummary(result.precache || null),
+        install: compactForSummary(result.install || null),
+        preload: compactForSummary(result.preload || null),
+        progress: compactForSummary(result.progress || null),
         artifacts: {
           ...artifactPaths,
-          networkEvents: { count: (result.networkEvents || []).length, path: artifactPaths.network },
+          networkEvents: { count: networkEvents.length, path: artifactPaths.network },
         },
-      })}\n`);
+      };
+      await artifactWriter.close({
+        stdout: result.stdout || '',
+        stderr: result.stderr || '',
+        networkEvents,
+        summary,
+      });
+      process.stdout.write(`${JSON.stringify(summary)}\n`);
       if (result.stdout) process.stdout.write(result.stdout);
       if (result.stderr) process.stderr.write(result.stderr);
       process.exitCode = result.exitCode === null ? 1 : result.exitCode;

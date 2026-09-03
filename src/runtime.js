@@ -7154,6 +7154,22 @@ export function createRuntime({
             stream.emit = (name, ...args) => runInOwnerContext(() => emit(name, ...args));
             return stream;
           };
+          const appendReturnedOutput = (value, current, write) => {
+            const returned = normalizeOutputChunk(value);
+            if (!returned || current === returned || current.endsWith(returned)) return current;
+            let overlap = 0;
+            const maximum = Math.min(current.length, returned.length);
+            for (let length = maximum; length > 0; length -= 1) {
+              if (current.endsWith(returned.slice(0, length))) {
+                overlap = length;
+                break;
+              }
+            }
+            const missing = returned.slice(overlap);
+            if (!missing) return current;
+            write(missing);
+            return current + missing;
+          };
           const wrapChildHandle = (handle) => {
             if (!handle || typeof handle.on !== 'function') return handle;
             const cached = childHandleCache.get(handle);
@@ -7536,30 +7552,20 @@ export function createRuntime({
               if (commandName === 'npm' || commandName === 'yarn' || commandName === 'yarnpkg') {
                 child.spawn({ file, args });
                 scope.queueMicrotask(() => child.emit('spawn'));
-                let streamedStdout = false;
-                let streamedStderr = false;
                 const npmChildOptions = {
                   ...options,
                   onStdout: (value) => {
-                    streamedStdout = true;
                     stdout += normalizeOutputChunk(value);
                     writeStdout(value);
                   },
                   onStderr: (value) => {
-                    streamedStderr = true;
                     stderr += normalizeOutputChunk(value);
                     writeStderr(value);
                   },
                 };
                 runNpmChild(prepared, ownerProcess, npmChildOptions).then((result) => {
-                  if (!streamedStdout && result.stdout) {
-                    stdout += result.stdout;
-                    writeStdout(result.stdout);
-                  }
-                  if (!streamedStderr && result.stderr) {
-                    stderr += result.stderr;
-                    writeStderr(result.stderr);
-                  }
+                  stdout = appendReturnedOutput(result.stdout, stdout, writeStdout);
+                  stderr = appendReturnedOutput(result.stderr, stderr, writeStderr);
                   finish(result.code, null);
                 }, (error) => {
                   const message = `${error?.stack || error?.message || error}\n`;
@@ -7588,30 +7594,20 @@ export function createRuntime({
                   argv: [prepared.entryPath, ...prepared.commandArgs.slice(1)],
                   executionArgv: [prepared.entryPath, ...prepared.commandArgs.slice(1)],
                 };
-                let streamedStdout = false;
-                let streamedStderr = false;
                 const npmChildOptions = {
                   ...options,
                   onStdout: (value) => {
-                    streamedStdout = true;
                     stdout += normalizeOutputChunk(value);
                     writeStdout(value);
                   },
                   onStderr: (value) => {
-                    streamedStderr = true;
                     stderr += normalizeOutputChunk(value);
                     writeStderr(value);
                   },
                 };
                 runNpmChild(npmPrepared, ownerProcess, npmChildOptions).then((result) => {
-                  if (!streamedStdout && result.stdout) {
-                    stdout += result.stdout;
-                    writeStdout(result.stdout);
-                  }
-                  if (!streamedStderr && result.stderr) {
-                    stderr += result.stderr;
-                    writeStderr(result.stderr);
-                  }
+                  stdout = appendReturnedOutput(result.stdout, stdout, writeStdout);
+                  stderr = appendReturnedOutput(result.stderr, stderr, writeStderr);
                   finish(result.code, null);
                 }, (error) => {
                   const message = `${error?.stack || error?.message || error}\n`;

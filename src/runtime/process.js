@@ -101,11 +101,20 @@ function shareFileBytes(bytes, scope) {
   return new Uint8Array(shared);
 }
 
-function prepareWorkerVfs(vfs, scope) {
+export function prepareWorkerVfs(vfs, scope) {
   if (!vfs?.files || scope.crossOriginIsolated !== true
     || typeof scope.SharedArrayBuffer !== 'function') return vfs;
+  const shareFileValue = (value) => {
+    if (value instanceof Uint8Array || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
+      return shareFileBytes(value instanceof Uint8Array ? value : new Uint8Array(value), scope);
+    }
+    if (value && typeof value === 'object' && value.data !== undefined) {
+      return { ...value, data: shareFileValue(value.data) };
+    }
+    return value;
+  };
   const files = Object.fromEntries(
-    Object.entries(vfs.files).map(([path, bytes]) => [path, shareFileBytes(bytes, scope)]),
+    Object.entries(vfs.files).map(([path, value]) => [path, shareFileValue(value)]),
   );
   const artifacts = Array.isArray(vfs.artifacts)
     ? vfs.artifacts.map((artifact) => ({ ...artifact, bytes: shareFileBytes(artifact.bytes, scope) }))

@@ -4,6 +4,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const DEFAULT_EXCERPT_BYTES = 4096;
+const MAX_SUMMARY_STRING = 512;
 
 function safeSegment(value, fallback = 'run') {
   const segment = String(value || fallback).replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80);
@@ -12,6 +13,40 @@ function safeSegment(value, fallback = 'run') {
 
 function asText(value) {
   return typeof value === 'string' ? value : String(value ?? '');
+}
+
+export function compactForSummary(value, depth = 0) {
+  if (value === null || typeof value === 'number' || typeof value === 'boolean') return value;
+  if (typeof value === 'string') return value.slice(0, MAX_SUMMARY_STRING);
+  if (depth >= 4) return '[summary depth limit]';
+  if (Array.isArray(value)) return { count: value.length };
+  if (typeof value !== 'object') return String(value).slice(0, MAX_SUMMARY_STRING);
+  return Object.fromEntries(Object.entries(value).slice(0, 64).map(([key, item]) => [
+    key,
+    compactForSummary(item, depth + 1),
+  ]));
+}
+
+export function outputSummary(result = {}, lastProgressEvent = null) {
+  const progressOutput = lastProgressEvent?.counters?.output || {};
+  const resultOutput = result.output || {};
+  const stream = (name) => {
+    const captured = asText(result[name]);
+    const metadata = resultOutput[name] || {};
+    const progressChunks = progressOutput[`${name}Chunks`];
+    const chunks = Number.isSafeInteger(metadata.chunks)
+      ? metadata.chunks
+      : Number.isSafeInteger(progressChunks) ? progressChunks : captured ? 1 : 0;
+    return { bytes: Buffer.byteLength(captured, 'utf8'), chunks };
+  };
+  const stdout = stream('stdout');
+  const stderr = stream('stderr');
+  return {
+    stdout,
+    stderr,
+    totalBytes: stdout.bytes + stderr.bytes,
+    totalChunks: stdout.chunks + stderr.chunks,
+  };
 }
 
 export function failureExcerpt(value, limit = DEFAULT_EXCERPT_BYTES) {
@@ -44,6 +79,7 @@ export async function createCITGMArtifactWriter({ rootDir, module, runId } = {})
     stderr: path.join(directory, 'stderr.log'),
     progress: path.join(directory, 'progress.ndjson'),
     network: path.join(directory, 'network.ndjson'),
+    summary: path.join(directory, 'summary.json'),
   };
   const progressStream = createWriteStream(paths.progress, { encoding: 'utf8' });
   const networkStream = createWriteStream(paths.network, { encoding: 'utf8' });
@@ -54,13 +90,14 @@ export async function createCITGMArtifactWriter({ rootDir, module, runId } = {})
     recordProgress(event) {
       if (!closed) writeJsonLine(progressStream, event);
     },
-    async close({ stdout = '', stderr = '', networkEvents = [] } = {}) {
+    async close({ stdout = '', stderr = '', networkEvents = [], summary = null } = {}) {
       if (closed) return paths;
       closed = true;
       for (const event of networkEvents) writeJsonLine(networkStream, event);
       await Promise.all([
         writeFile(paths.stdout, asText(stdout), 'utf8'),
         writeFile(paths.stderr, asText(stderr), 'utf8'),
+        writeFile(paths.summary, JSON.stringify(summary, null, 2), 'utf8'),
         finishStream(progressStream),
         finishStream(networkStream),
       ]);

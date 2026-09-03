@@ -3,7 +3,12 @@ import { mkdtemp, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { createCITGMArtifactWriter, failureExcerpt } from '../result-artifacts.mjs';
+import {
+  compactForSummary,
+  createCITGMArtifactWriter,
+  failureExcerpt,
+  outputSummary,
+} from '../result-artifacts.mjs';
 
 test('CITGM artifacts preserve complete streams and separate traces from bounded excerpts', async () => {
   const rootDir = await mkdtemp(path.join(os.tmpdir(), 'bnh-artifacts-'));
@@ -11,7 +16,13 @@ test('CITGM artifacts preserve complete streams and separate traces from bounded
   const stdout = `prefix\n${'x'.repeat(5000)}\n`;
   const stderr = 'Error: upstream failure\nfull stderr detail\n';
   writer.recordProgress({ runId: 'run-1', phase: 'execution', event: 'child-running' });
-  await writer.close({ stdout, stderr, networkEvents: [{ url: 'https://example.test', method: 'GET' }] });
+  const summary = compactForSummary({ details: { networkEvents: Array(1000).fill('trace') } });
+  await writer.close({
+    stdout,
+    stderr,
+    networkEvents: [{ url: 'https://example.test', method: 'GET' }],
+    summary,
+  });
 
   assert.equal(await readFile(writer.paths.stdout, 'utf8'), stdout);
   assert.equal(await readFile(writer.paths.stderr, 'utf8'), stderr);
@@ -20,6 +31,31 @@ test('CITGM artifacts preserve complete streams and separate traces from bounded
   });
   assert.deepEqual(JSON.parse(await readFile(writer.paths.network, 'utf8')), {
     url: 'https://example.test', method: 'GET',
+  });
+  assert.deepEqual(JSON.parse(await readFile(writer.paths.summary, 'utf8')), {
+    details: { networkEvents: { count: 1000 } },
+  });
+  const bounded = compactForSummary({
+    outputEvents: Array.from({ length: 10000 }, (_, index) => ({ index, trace: 'x'.repeat(5000) })),
+    nested: { details: { networkEvents: ['a', 'b', 'c'] } },
+  });
+  assert.deepEqual(bounded.outputEvents, { count: 10000 });
+  assert.deepEqual(bounded.nested.details.networkEvents, { count: 3 });
+  assert.ok(JSON.stringify(bounded).length < 500);
+  assert.deepEqual(outputSummary({ stdout: 'λ\n', stderr: 'x', output: { stdout: { chunks: 7 } } }), {
+    stdout: { bytes: 3, chunks: 7 },
+    stderr: { bytes: 1, chunks: 1 },
+    totalBytes: 4,
+    totalChunks: 8,
+  });
+  assert.deepEqual(outputSummary(
+    { stdout: 'abc', stderr: '' },
+    { counters: { output: { stdoutChunks: 4, stderrChunks: 2 } } },
+  ), {
+    stdout: { bytes: 3, chunks: 4 },
+    stderr: { bytes: 0, chunks: 2 },
+    totalBytes: 3,
+    totalChunks: 6,
   });
   assert.ok(Buffer.byteLength(failureExcerpt(stdout, 64)) <= 90);
   assert.match(failureExcerpt(stderr, 4096), /upstream failure/);

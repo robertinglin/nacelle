@@ -91,6 +91,32 @@ function satisfiesComparator(v, comp) {
   const c = comp.trim();
   if (!c || c === '*' || c === 'x' || c === 'X' || c === 'latest') return true;
 
+  // Wildcards may follow a comparator, for example the upper bound in
+  // `5.1.6 - 6.0.x`. Parse the operator before the wildcard components so
+  // forms such as `<=6.0.x` are compared by their declared precision.
+  const wildcard = c.match(/^(<=|>=|>|<|=)?\s*(\d+)(?:\.(\d+|x|X|\*))?(?:\.(\d+|x|X|\*))?$/);
+  if (wildcard && (wildcard[3] === undefined || /[xX*]/.test(wildcard[3])
+    || wildcard[4] === undefined || /[xX*]/.test(wildcard[4]))) {
+    const operator = wildcard[1] || '=';
+    const major = parseInt(wildcard[2], 10);
+    const minor = wildcard[3] === undefined || /[xX*]/.test(wildcard[3]) ? null : parseInt(wildcard[3], 10);
+    const patch = wildcard[4] === undefined || /[xX*]/.test(wildcard[4]) ? null : parseInt(wildcard[4], 10);
+    if (minor === null) {
+      if (operator === '<') return v.major < major;
+      if (operator === '<=') return v.major <= major;
+      if (operator === '>') return v.major > major;
+      if (operator === '>=') return v.major >= major;
+      return v.major === major;
+    }
+    if (patch === null) {
+      if (operator === '<') return v.major < major || (v.major === major && v.minor < minor);
+      if (operator === '<=') return v.major < major || (v.major === major && v.minor <= minor);
+      if (operator === '>') return v.major > major || (v.major === major && v.minor > minor);
+      if (operator === '>=') return v.major > major || (v.major === major && v.minor >= minor);
+      return v.major === major && v.minor === minor;
+    }
+  }
+
   // normalize x-ranges like 1.x, 1.2.x, 1.*
   if (c.includes('x') || c.includes('X') || c.includes('*')) {
     const parts = c.split('.');

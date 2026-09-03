@@ -291,6 +291,76 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('executes ESM shebang scripts without forcing CommonJS evaluation', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/esm-tool.mjs', ['argument'], { cwd: '/node' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(output, 'esm tool argument\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/node_modules/.bin/package.json': JSON.stringify({ type: 'module' }),
+        '/node/node_modules/.bin/esm-tool.mjs': [
+          '#!/usr/bin/env node',
+          "if (typeof import.meta.url !== 'string') process.exitCode = 1;",
+          "process.stdout.write('esm tool ' + process.argv[2] + '\\n');",
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('executes extensionless ESM shebang bins from their package scope', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/esm-tool', ['argument'], { cwd: '/node' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(output, 'extensionless esm argument\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/node_modules/.bin/package.json': JSON.stringify({ type: 'module' }),
+        '/node/node_modules/.bin/esm-tool': [
+          '#!/usr/bin/env node',
+          "if (typeof import.meta.url !== 'string') process.exitCode = 1;",
+          "process.stdout.write('extensionless esm ' + process.argv[2] + '\\n');",
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
   test('preserves option-looking shebang script arguments after the script path', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const { spawn } = require('node:child_process');

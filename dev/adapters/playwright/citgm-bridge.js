@@ -1,6 +1,5 @@
 import { BrowserNpm, BrowserNpmCache } from './runtime/npm.js';
 import { createRuntime } from './runtime.js';
-import { createVfs } from './runtime/vfs.js';
 import { createProgressReporter } from './progress-protocol.mjs';
 import { createCitgmProcessArgv } from './citgm-argv.mjs';
 import { createSerializedCaptureQueue } from './citgm-capture.mjs';
@@ -380,7 +379,6 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
   const capturePromises = new Set();
   const captureQueue = createSerializedCaptureQueue(globalThis);
   let installStats = null;
-  let preloadStats = null;
   let child = null;
   let timer = null;
   let livenessTimer = null;
@@ -466,8 +464,8 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       candidatePreloadEvents: progress.preload.events,
       citgmInstallPackages: installStats?.packages?.length || 0,
       citgmInstallFiles: installStats?.totalFiles || 0,
-      candidatePreloadPackages: preloadStats?.packages?.length || 0,
-      candidatePreloadFiles: preloadStats?.totalFiles || 0,
+      candidatePreloadPackages: 0,
+      candidatePreloadFiles: 0,
     },
     networkEvents: networkEventCount || networkEvents?.length || 0,
     output: {
@@ -581,29 +579,14 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     await progressReporter.flush();
     report('setup', 'citgm-install-complete', { events: progress.bootstrap.events });
 
-    const preloadVfs = createVfs({
-      mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }],
+    // The candidate package and its dependencies are installed by the real
+    // CITGM child after its worker is active. Persistent metadata/tarball
+    // artifacts remain an acceleration layer, but execution must also work
+    // on a cold cache through the live proxy/RPC fetch path.
+    report('setup', 'candidate-dependency-preload-skipped', {
+      reason: 'candidate-install-runs-on-demand-in-active-child',
     });
-    const preloadNpm = new BrowserNpm({
-      vfs: preloadVfs,
-      registry,
-      cache: npmCache,
-      globalObject: globalThis,
-      proxyUrl: null,
-      platform: 'browser',
-      arch: 'browser',
-      libc: 'browser',
-    });
-    currentStage = 'candidate-dependency-preload';
-    report('setup', 'candidate-dependency-preload-started');
-    preloadStats = await preloadNpm.install(module, {
-      cwd: '/node',
-      nodeModulesDir: '/node/node_modules',
-      includeDevDependencies: true,
-      onProgress: (event) => recordProgress(progress.preload, event),
-    });
-    await progressReporter.flush();
-    report('setup', 'candidate-dependency-preload-complete', { events: progress.preload.events });
+    npmCache.clearMemory();
     await runtime.mount({});
 
     const processArgv = createCitgmProcessArgv(CITGM_ENTRY, module, args);
@@ -682,7 +665,11 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       runResult: child.structuredResult,
       precache: { used: precacheUsed, packages: npmCache.artifactManifest?.packageCount || 0 },
       install: { packages: installStats?.packages?.length || 0, files: installStats?.totalFiles || 0 },
-      preload: { packages: preloadStats?.packages?.length || 0, files: preloadStats?.totalFiles || 0 },
+      preload: { packages: 0, files: 0, enabled: false },
+      output: {
+        stdout: { ...outputCounters.stdout },
+        stderr: { ...outputCounters.stderr },
+      },
       progress,
       progressTrace,
       networkEvents: networkEvents || [],

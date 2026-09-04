@@ -1,5 +1,13 @@
 import { EventEmitter } from './events.js';
 import { resolveEncodingOps } from './buffer.js';
+import { captureAsyncScope, runInCapturedScope } from './async-hooks.js';
+
+// end() callbacks fire from the finish microtask, which — like the write
+// pump — carries whatever context happened to complete the final write.
+function scopedEndCallback(callback) {
+  const scope = captureAsyncScope();
+  return (error) => runInCapturedScope(scope, () => callback(error));
+}
 
 const DEFAULT_READABLE_HIGH_WATER_MARK = 64 * 1024;
 const DEFAULT_WRITABLE_HIGH_WATER_MARK = 16 * 1024;
@@ -2223,7 +2231,17 @@ class WritableImpl extends EventEmitter {
         throw error;
       }
     }
-    const request = { bytes, size, encoding: requestEncoding, callback, settled: false };
+    const request = {
+      bytes,
+      size,
+      encoding: requestEncoding,
+      callback,
+      settled: false,
+      // Write callbacks fire from the pump that drains this queue; without
+      // the writer's captured scope, callbacks queued behind an in-flight
+      // write run detached from their AsyncLocalStorage store.
+      scope: captureAsyncScope(),
+    };
     this._queue.push(request);
     this._pendingBytes += size;
     this._writableState.length = this._pendingBytes;
@@ -2253,7 +2271,7 @@ class WritableImpl extends EventEmitter {
         this.destroy(error);
         return this;
       }
-      this._endCallbacks.push(callback);
+      this._endCallbacks.push(scopedEndCallback(callback));
       return this;
     }
     if (this._ended || this._destroyed) {
@@ -2268,7 +2286,7 @@ class WritableImpl extends EventEmitter {
     if (chunk !== undefined && chunk !== null) this.write(chunk, encoding);
     this._ending = true;
     this._writableState.ending = true;
-    this._endCallbacks.push(callback);
+    this._endCallbacks.push(scopedEndCallback(callback));
     this._finishIfReady();
     return this;
   }
@@ -2416,18 +2434,20 @@ class WritableImpl extends EventEmitter {
     this._writableState.length = this._pendingBytes;
     if (error) {
       try {
-        request.callback(error);
+        runInCapturedScope(request.scope, () => request.callback(error));
       } finally {
         if (!this._destroyed) this.destroy(error);
       }
       return;
     }
-    request.callback();
-    if (this._needDrain && this._pendingBytes === 0) {
-      this._needDrain = false;
-      this._writableState.needDrain = false;
-      if (!this._ending && !this._ended) this.emit('drain');
-    }
+    runInCapturedScope(request.scope, () => {
+      request.callback();
+      if (this._needDrain && this._pendingBytes === 0) {
+        this._needDrain = false;
+        this._writableState.needDrain = false;
+        if (!this._ending && !this._ended) this.emit('drain');
+      }
+    });
     if (continueProcessing) queueMicrotask(() => this._processNext());
   }
 

@@ -7509,6 +7509,9 @@ export function createRuntime({
             stdoutExcerpt: '',
             stderrExcerpt: '',
             terminal: null,
+            ipcMessageCount: 0,
+            ipcMessageTypes: [],
+            ipcError: null,
             error: null,
           };
           // Keep the live process handle out of serialized activity records,
@@ -8162,6 +8165,21 @@ export function createRuntime({
                   ipc.processHandle = processHandle;
                   processHandle.on('message', (value, handle) => {
                     if (value?.type === 'bnh-artifacts') return;
+                    activityRecord.ipcMessageCount += 1;
+                    const messageType = value?.type == null ? null : String(value.type).slice(0, 96);
+                    if (messageType && !activityRecord.ipcMessageTypes.includes(messageType)
+                      && activityRecord.ipcMessageTypes.length < 8) {
+                      activityRecord.ipcMessageTypes.push(messageType);
+                    }
+                    if (messageType && /error|exception|failed/i.test(messageType) && value?.err) {
+                      activityRecord.ipcError = {
+                        type: messageType,
+                        name: String(value.err.name || 'Error').slice(0, 64),
+                        message: String(value.err.message || value.err).slice(0, 512),
+                        stack: String(value.err.stack || '').slice(0, 1024),
+                        code: value.err.code == null ? null : String(value.err.code).slice(0, 64),
+                      };
+                    }
                     emitChildMessage(value, handle);
                   });
                   processHandle.on('spawn', () => {

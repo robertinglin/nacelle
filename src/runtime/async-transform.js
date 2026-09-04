@@ -593,3 +593,44 @@ export function transformAsyncSource(source, preferredBinding = '__bnhAsync') {
     bindingName,
   };
 }
+
+// Bundlers load dev modules through direct eval('...') of string literals.
+// Those module sources bypass runCommonJSWrapper, so without this pass their
+// async functions stay native: a native await of a raw promise resumes through
+// V8's fast path outside any scope wrapper and loses the AsyncLocalStorage
+// context (Next dev's E696). Transform the literal contents in place; the
+// bridge binding resolves through the eval call site's closure, which receives
+// it as a wrapper parameter. The content is still in escaped form (it is the
+// body of the outer string literal), so any replacement that would inject a
+// raw newline is rejected rather than corrupting the literal.
+export function transformEvalLiterals(source, bindingName) {
+  if (!source.includes('eval')) return { source, transformed: false };
+  const tokens = tokenize(source);
+  const bindingPattern = new RegExp(`(?:^|[^$\\w])${bindingName.replace(/\$/g, '\\$')}(?![\\w$])`);
+  const replacements = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.value !== 'eval') continue;
+    const previous = tokens[index - 1];
+    if (previous && (previous.value === '.' || previous.value === '?.'
+      || previous.value === 'function' || previous.value === 'new')) continue;
+    if (tokens[index + 1]?.value !== '(') continue;
+    const literal = tokens[index + 2];
+    if (literal?.value !== '<literal>' || tokens[index + 3]?.value !== ')') continue;
+    const quote = source[literal.start];
+    if (quote !== '"' && quote !== "'") continue;
+    const inner = source.slice(literal.start + 1, literal.end - 1);
+    if (!/\b(?:async|await)\b/u.test(inner) || bindingPattern.test(inner)) continue;
+    const { candidates } = asyncFunctionCandidates(inner);
+    if (!candidates.some((candidate) => !candidate.containsUnsupportedSyntax)) continue;
+    const bridged = replaceAwaitExpressions(transformCandidates(inner, candidates, bindingName));
+    if (/[\r\n]/u.test(bridged)) continue;
+    replacements.push({
+      start: literal.start + 1,
+      end: literal.end - 1,
+      value: bridged,
+    });
+  }
+  if (!replacements.length) return { source, transformed: false };
+  return { source: applyReplacements(source, replacements), transformed: true };
+}

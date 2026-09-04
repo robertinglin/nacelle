@@ -5,6 +5,7 @@ import process from 'node:process';
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { firefox, chromium } from 'playwright';
+import { allocateHostPort } from './host-port.mjs';
 import {
   CITGM_ARTIFACT_ROOT,
   compactRunResult,
@@ -60,18 +61,6 @@ function parseArgs(rawArgs) {
   return { browserName, citgmVersion, timeoutMs, module, citgmArgs };
 }
 
-async function allocatePort() {
-  return await new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address();
-      const port = typeof address === 'object' && address ? address.port : null;
-      server.close((error) => error ? reject(error) : resolve(port));
-    });
-  });
-}
-
 async function waitForServer(url, server) {
   const deadline = Date.now() + 10_000;
   let lastError = '';
@@ -110,7 +99,7 @@ function outputCountsFromProgress(progressEvents, stdout, stderr) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const port = await allocatePort();
+  const port = await allocateHostPort();
   const server = spawn(process.execPath, ['server.js', '--host', '127.0.0.1', '--port', String(port)], {
     cwd: adapterRoot,
     env: { ...process.env, BNH_WORKTREE: adapterRoot },
@@ -120,8 +109,6 @@ async function main() {
   const progressEvents = [];
   server.stderr.setEncoding('utf8');
   server.stderr.on('data', (chunk) => { serverError += chunk; });
-  let artifactWriterPromise = null;
-  let lastProgressEvent = null;
   const loopbackServers = new Map();
   const loopbackSockets = new Map();
   let nextLoopbackId = 1;

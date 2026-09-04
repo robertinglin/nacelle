@@ -600,9 +600,85 @@ export function transformAsyncSource(source, preferredBinding = '__bnhAsync') {
 // V8's fast path outside any scope wrapper and loses the AsyncLocalStorage
 // context (Next dev's E696). Transform the literal contents in place; the
 // bridge binding resolves through the eval call site's closure, which receives
-// it as a wrapper parameter. The content is still in escaped form (it is the
-// body of the outer string literal), so any replacement that would inject a
-// raw newline is rejected rather than corrupting the literal.
+// it as a wrapper parameter.
+//
+// The literal stores the module source in escaped form; tokenizing that raw
+// form chokes on the escape sequences (a literal \n becomes stray tokens), so
+// decode first, transform the real source, then re-encode into the original
+// quote style. A literal whose escapes cannot be decoded faithfully is left
+// untouched rather than corrupted.
+const simpleEscapes = new Map([
+  ['n', '\n'], ['t', '\t'], ['r', '\r'], ['b', '\b'], ['f', '\f'], ['v', '\v'],
+  ['0', '\0'],
+]);
+
+function decodeStringLiteral(text) {
+  let result = '';
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (character !== '\\') {
+      result += character;
+      continue;
+    }
+    const next = text[index + 1];
+    if (next === undefined) return null;
+    if (simpleEscapes.has(next)) {
+      result += simpleEscapes.get(next);
+      index += 1;
+      continue;
+    }
+    if (next === 'x') {
+      const digits = text.slice(index + 2, index + 4);
+      if (!/^[0-9a-fA-F]{2}$/.test(digits)) return null;
+      result += String.fromCharCode(parseInt(digits, 16));
+      index += 3;
+      continue;
+    }
+    if (next === 'u') {
+      if (text[index + 2] === '{') {
+        const close = text.indexOf('}', index + 3);
+        if (close < 0) return null;
+        const code = text.slice(index + 3, close);
+        if (!/^[0-9a-fA-F]{1,6}$/.test(code)) return null;
+        result += String.fromCodePoint(parseInt(code, 16));
+        index = close;
+        continue;
+      }
+      const digits = text.slice(index + 2, index + 6);
+      if (!/^[0-9a-fA-F]{4}$/.test(digits)) return null;
+      result += String.fromCharCode(parseInt(digits, 16));
+      index += 5;
+      continue;
+    }
+    if (next === "'" || next === '"' || next === '\\') {
+      result += next;
+      index += 1;
+      continue;
+    }
+    return null;
+  }
+  return result;
+}
+
+function encodeStringLiteral(text, quote) {
+  let result = '';
+  for (const character of text) {
+    const code = character.codePointAt(0);
+    if (character === '\\' || character === quote) {
+      result += `\\${character}`;
+    } else if (character === '\n') {
+      result += '\\n';
+    } else if (character === '\r') {
+      result += '\\r';
+    } else if (character === '\u2028' || character === '\u2029' || code < 0x20) {
+      result += `\\u${code.toString(16).padStart(4, '0')}`;
+    } else {
+      result += character;
+    }
+  }
+  return result;
+}
+
 export function transformEvalLiterals(source, bindingName) {
   if (!source.includes('eval')) return { source, transformed: false };
   const tokens = tokenize(source);
@@ -619,16 +695,17 @@ export function transformEvalLiterals(source, bindingName) {
     if (literal?.value !== '<literal>' || tokens[index + 3]?.value !== ')') continue;
     const quote = source[literal.start];
     if (quote !== '"' && quote !== "'") continue;
-    const inner = source.slice(literal.start + 1, literal.end - 1);
-    if (!/\b(?:async|await)\b/u.test(inner) || bindingPattern.test(inner)) continue;
-    const { candidates } = asyncFunctionCandidates(inner);
-    if (!candidates.some((candidate) => !candidate.containsUnsupportedSyntax)) continue;
-    const bridged = replaceAwaitExpressions(transformCandidates(inner, candidates, bindingName));
-    if (/[\r\n]/u.test(bridged)) continue;
+    const escaped = source.slice(literal.start + 1, literal.end - 1);
+    if (!/\\|\b(?:async|await)\b/u.test(escaped)) continue;
+    const decoded = decodeStringLiteral(escaped);
+    if (decoded === null) continue;
+    if (!/\b(?:async|await)\b/u.test(decoded) || bindingPattern.test(decoded)) continue;
+    const transformed = transformAsyncSource(decoded, bindingName);
+    if (!transformed.transformed) continue;
     replacements.push({
       start: literal.start + 1,
       end: literal.end - 1,
-      value: bridged,
+      value: encodeStringLiteral(transformed.source, quote),
     });
   }
   if (!replacements.length) return { source, transformed: false };

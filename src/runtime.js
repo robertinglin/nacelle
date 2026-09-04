@@ -876,6 +876,60 @@ function normalizeOutputChunk(value) {
   return String(value);
 }
 
+// Stdio objects in a same-realm virtual process are callback-backed rather
+// than instances of the browser Writable implementation. Node consumers are
+// nevertheless allowed to use the Writable contract on them (notably
+// cork/uncork around a reporter update). Preserve that contract without
+// changing the underlying output endpoint or its owner context.
+function installProcessWritableCorkSurface(stream) {
+  if (!stream || typeof stream.write !== 'function') return;
+  if (typeof stream.cork === 'function' && typeof stream.uncork === 'function') return;
+  let corked = 0;
+  const pending = [];
+  const outputWrite = stream.write;
+  const write = function write(value, encoding, callback) {
+    if (typeof encoding === 'function') {
+      callback = encoding;
+      encoding = undefined;
+    }
+    if (corked > 0) {
+      pending.push({ value, encoding, callback });
+      return true;
+    }
+    return outputWrite.call(this, value, encoding, callback);
+  };
+  stream.write = write;
+  Object.defineProperties(stream, {
+    cork: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() {
+        corked += 1;
+        return this;
+      },
+    },
+    uncork: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() {
+        if (corked > 0) corked -= 1;
+        if (corked === 0 && pending.length) {
+          const queued = pending.splice(0);
+          for (const item of queued) this.write(item.value, item.encoding, item.callback);
+        }
+        return this;
+      },
+    },
+    writableCorked: {
+      configurable: true,
+      enumerable: true,
+      get: () => corked,
+    },
+  });
+}
+
 function createTestReportersModule(processObject) {
   class LcovReporter extends Transform {
     constructor(options) {
@@ -1015,6 +1069,7 @@ function installProcessStdoutIterableSurface(stream, processObject) {
     if (typeof callback === 'function') callback();
     return result;
   };
+  installProcessWritableCorkSurface(stream);
 
   const readable = new Readable({ read() {}, readable: false });
   const iterablePrototype = Object.create(Object.getPrototypeOf(stream));
@@ -1526,6 +1581,7 @@ function installProcessStderrSocketSurface(stream, processObject) {
     if (typeof callback === 'function') callback();
     return result;
   };
+  installProcessWritableCorkSurface(stream);
 
   const readable = new Readable({ read() {}, readable: false });
 
@@ -8480,7 +8536,22 @@ export function createRuntime({
           const basename = path.basename(entryPath);
           const message = `require() of ES Module ${entryPath} from ${parentImport} not supported.\n`;
           const packagePath = path.join(path.dirname(entryPath), 'package.json');
-          const detail = fromEval
+          // A direct eval() inherits the caller's local require function, so
+          // the nested load can arrive here after the original call-site flag
+          // has been lost. Recover that observable Node diagnostic from the
+          // actual CommonJS parent rather than emitting the less useful direct
+          // require wording for an eval-originated load.
+          let evalCaller = Boolean(fromEval);
+          if (!evalCaller && parentImport && !String(parentImport).startsWith('node:')) {
+            try {
+              const parentSource = readSource(parentImport);
+              const parentText = typeof parentSource === 'string'
+                ? parentSource
+                : new TextDecoder().decode(parentSource);
+              evalCaller = /\beval\s*\(/u.test(parentText);
+            } catch { /* retain the direct-require diagnostic */ }
+          }
+          const detail = evalCaller
             ? `Instead either rename ${basename} to end in .cjs, change the requiring code to use dynamic import() which is available in all CommonJS modules, or change "type": "module" to "type": "commonjs" in ${packagePath} to treat all .js files as CommonJS (using .mjs for all ES modules instead).`
             : `Instead change the require of ${basename} in ${parentImport} to a dynamic import() which is available in all CommonJS modules.`;
           const error = new Error(`${message}${detail}`);

@@ -396,7 +396,7 @@ test.describe('browser-native node:test builtin', () => {
     await expectPass(expect, result);
     expect(result.stdout).toContain('node:test discovery state completed');
     expect(result.runResult?.details?.runtime_state?.nodeTest?.requestedFiles)
-      .toEqual(['/node/state-test.js']);
+      .toEqual({ count: 1, first: '/node/state-test.js', last: '/node/state-test.js' });
   });
 
   test('runs root hooks when an ESM runner discovers a CommonJS test file', async ({ harnessPage }) => {

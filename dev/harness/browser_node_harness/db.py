@@ -730,23 +730,22 @@ class Database:
         return [dict(row) for row in event_rows]
 
     def active_runners(self, *, run_id: str | None = None) -> list[dict[str, Any]]:
-        where = "AND started.run_id=?" if run_id else ""
+        where = "AND latest.run_id=?" if run_id else ""
         args: list[Any] = [run_id] if run_id else []
         with self.connect() as conn:
             rows = conn.execute(
                 f"""
-                SELECT started.*
-                FROM events AS started
-                WHERE started.kind='runner' AND started.status='started'
-                  AND started.attempt_id IS NOT NULL {where}
+                SELECT latest.*
+                FROM events AS latest
+                WHERE latest.kind='runner' AND latest.status IN ('started', 'progress')
+                  AND latest.attempt_id IS NOT NULL {where}
                   AND NOT EXISTS (
                       SELECT 1 FROM events AS newer
                       WHERE newer.kind='runner'
-                        AND newer.attempt_id=started.attempt_id
-                        AND newer.id > started.id
-                        AND newer.status IN ('finished', 'failed')
+                        AND newer.attempt_id=latest.attempt_id
+                        AND newer.id > latest.id
                   )
-                ORDER BY started.id DESC
+                ORDER BY latest.id DESC
                 """,
                 args,
             ).fetchall()

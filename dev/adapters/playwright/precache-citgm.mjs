@@ -6,7 +6,9 @@ import path from 'node:path';
 import process from 'node:process';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { compareSemver, parseSemver, satisfiesSemver } from '../../../src/runtime/npm.js';
+import { gunzipSync } from 'node:zlib';
+import { compareSemver, parseNpmAlias, parseSemver, satisfiesSemver } from '../../../src/runtime/npm.js';
+import { resolveCitgmProjectUrl } from './citgm-project-url.mjs';
 
 const adapterRoot = path.dirname(fileURLToPath(import.meta.url));
 const defaultRegistry = 'https://registry.npmjs.org';
@@ -58,20 +60,29 @@ function packageNameFromSpec(spec) {
   return separator > 0 ? spec.slice(0, separator) : spec;
 }
 
-function githubProjectUrl(document) {
-  const repository = typeof document?.repository === 'string'
-    ? document.repository
-    : document?.repository?.url;
-  const gitHead = document?.gitHead;
-  if (typeof repository !== 'string' || typeof gitHead !== 'string' || !gitHead) return null;
-  const normalized = repository
-    .replace(/^git\+/, '')
-    .replace(/^git:/, 'https:')
-    .replace(/^ssh:\/\/git@/, 'https://')
-    .replace(/\.git$/, '')
-    .replace(/\/+$/, '');
-  if (!/^https:\/\/github\.com\//i.test(normalized)) return null;
-  return `${normalized}/archive/${encodeURIComponent(gitHead)}.tar.gz`;
+function remotePackageUrl(spec) {
+  const value = String(spec || '').trim();
+  let source = value.replace(/^git\+/, '');
+  if (source.startsWith('git://github.com/')) source = `https://${source.slice('git://'.length)}`;
+  if (source.startsWith('github:')) source = `https://github.com/${source.slice('github:'.length)}`;
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:#.*)?$/.test(source)) {
+    source = `https://github.com/${source}`;
+  }
+  if (!/^https?:\/\/github\.com\//i.test(source)) return null;
+  const hash = source.indexOf('#');
+  const ref = hash >= 0 ? source.slice(hash + 1) : '';
+  source = hash >= 0 ? source.slice(0, hash) : source;
+  source = source.replace(/\.git$/, '').replace(/\/$/, '');
+  if (!source.endsWith('/archive')) {
+    source += `/archive/${encodeURIComponent(ref || 'HEAD')}.tar.gz`;
+  }
+  return source;
+}
+
+function isRemoteDependency(spec) {
+  const value = String(spec || '').trim();
+  return /^(?:file:|git:|github:|https?:\/\/)/i.test(value)
+    || /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:#.*)?$/.test(value);
 }
 
 async function runHostNpm(args, cwd) {
@@ -82,6 +93,21 @@ async function runHostNpm(args, cwd) {
     child.once('exit', (code, signal) => {
       if (code === 0) resolve();
       else reject(new Error(`host npm exited with ${code ?? signal}`));
+    });
+  });
+}
+
+async function runHostCommand(command, args, cwd) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.once('error', reject);
+    child.once('exit', (code, signal) => {
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(new Error(`${command} exited with ${code ?? signal}: ${stderr || stdout}`));
     });
   });
 }
@@ -128,6 +154,7 @@ async function collectPackage(packageDir, packages) {
   packages.set(key, {
     name: manifest.name,
     version: manifest.version,
+    sourceDir: packageDir,
     dependencies: { ...manifest.dependencies, ...manifest.optionalDependencies },
   });
   await packageDirectories(path.join(packageDir, 'node_modules'), packages);
@@ -158,6 +185,27 @@ async function fetchBytes(url) {
   return new Uint8Array(await response.arrayBuffer());
 }
 
+function projectPackageManifest(bytes) {
+  const tar = gunzipSync(bytes);
+  for (let offset = 0; offset + 512 <= tar.byteLength;) {
+    const header = tar.subarray(offset, offset + 512);
+    if (header.every((value) => value === 0)) break;
+    const name = new TextDecoder().decode(header.subarray(0, 100)).replace(/\0.*$/, '');
+    const sizeText = new TextDecoder().decode(header.subarray(124, 136)).replace(/\0.*$/, '').trim();
+    const size = parseInt(sizeText || '0', 8);
+    const contentStart = offset + 512;
+    if (name.endsWith('/package.json') || name === 'package.json') {
+      try {
+        return JSON.parse(new TextDecoder().decode(tar.subarray(contentStart, contentStart + size)));
+      } catch {
+        return null;
+      }
+    }
+    offset = contentStart + Math.ceil(size / 512) * 512;
+  }
+  return null;
+}
+
 function resolveVersion(document, range) {
   if (range === 'latest' && document['dist-tags']?.latest) {
     const version = document['dist-tags'].latest;
@@ -179,14 +227,25 @@ async function resolvePackageGraph(initialPackages, metadata, registry, includeD
   const processed = new Set();
   const addRequest = (name, range) => {
     if (typeof name !== 'string' || typeof range !== 'string') return;
-    if (/^(?:file:|git:|github:|https?:\/\/)/i.test(range)) {
-      throw new Error(`CITGM precache does not support non-registry dependency ${name}@${range}`);
+    const alias = parseNpmAlias(range);
+    const requestName = alias?.name || name;
+    const requestRange = alias?.range || range;
+    if (!isRemoteDependency(requestRange)
+      && [...packages.values()].some((item) => item.name === requestName && item.version === requestRange)) return;
+    if (isRemoteDependency(requestRange)) {
+      const installed = [...packages.values()].find((item) => item.name === requestName
+        && (item.sourceDir || item.sourceArchive));
+      if (!installed) {
+        throw new Error(`CITGM precache could not preserve non-registry dependency ${requestName}@${requestRange}`);
+      }
+      installed.sourceSpec = requestRange;
+      return;
     }
-    requestedNames.add(name);
-    const key = `${name}@${range}`;
+    requestedNames.add(requestName);
+    const key = `${requestName}@${requestRange}`;
     if (pendingKeys.has(key)) return;
     pendingKeys.add(key);
-    pending.push({ name, range });
+    pending.push({ name: requestName, range: requestRange });
   };
 
   for (const item of initialPackages) {
@@ -228,6 +287,45 @@ async function resolvePackageGraph(initialPackages, metadata, registry, includeD
   return [...packages.values()];
 }
 
+async function preserveRemoteDependencies(packages, targetName) {
+  const bySpec = new Map();
+  const pending = [];
+  const queue = (name, range) => {
+    if (!isRemoteDependency(range)) return;
+    const key = `${name}\u0000${range}`;
+    if (bySpec.has(key) || pending.some((item) => item.key === key)) return;
+    pending.push({ key, name, range });
+  };
+  for (const item of packages) {
+    for (const [name, range] of Object.entries(item.dependencies || {})) queue(name, range);
+    if (item.name === targetName) {
+      for (const [name, range] of Object.entries(item.devDependencies || {})) queue(name, range);
+    }
+  }
+  while (pending.length) {
+    const request = pending.shift();
+    if (bySpec.has(request.key)) continue;
+    const url = remotePackageUrl(request.range);
+    if (!url) throw new Error(`CITGM precache does not support non-GitHub dependency ${request.name}@${request.range}`);
+    process.stdout.write(`Fetching remote package archive ${url}...\n`);
+    const archive = await fetchBytes(url);
+    const manifest = projectPackageManifest(archive);
+    if (!manifest?.name || !manifest.version) {
+      throw new Error(`Remote package archive has no usable package manifest: ${url}`);
+    }
+    const packageItem = {
+      name: manifest.name,
+      version: manifest.version,
+      sourceSpec: request.range,
+      sourceArchive: archive,
+      dependencies: { ...manifest.dependencies, ...manifest.optionalDependencies },
+    };
+    packages.push(packageItem);
+    bySpec.set(request.key, packageItem);
+    for (const [name, range] of Object.entries(packageItem.dependencies)) queue(name, range);
+  }
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const registry = String(process.env.NACELLE_NPM_REGISTRY || defaultRegistry).replace(/\/+$/, '');
@@ -249,10 +347,57 @@ async function main() {
       const targetManifest = JSON.parse(await readFile(targetManifestPath, 'utf8'));
       targetPackage.devDependencies = { ...targetManifest.devDependencies };
     }
+    const citgmLookup = JSON.parse(await readFile(
+      path.join(stagingDir, 'node_modules', 'citgm', 'lib', 'lookup.json'),
+      'utf8',
+    ));
     const metadata = new Map();
     process.stdout.write(`Resolving metadata for ${new Set(installedPackages.map(({ name }) => name)).size} packages...\n`);
-    const packageList = await resolvePackageGraph(installedPackages, metadata, registry, new Set([targetName]));
+    await preserveRemoteDependencies(installedPackages, targetName);
+    let packageList = await resolvePackageGraph(installedPackages, metadata, registry, new Set([targetName]));
     process.stdout.write(`Fetching metadata for ${metadata.size} packages...\n`);
+
+    const projectPaths = {};
+    let projectUrl = resolveCitgmProjectUrl({
+      moduleSpec: options.module,
+      metadata: metadata.get(targetName),
+      lookup: citgmLookup?.[targetName],
+    });
+    let projectArchive = null;
+    if (projectUrl) {
+      const projectUrls = [projectUrl];
+      const archiveMarker = '/archive/';
+      const markerIndex = projectUrl.indexOf(archiveMarker);
+      if (markerIndex >= 0) {
+        const ref = projectUrl.slice(markerIndex + archiveMarker.length, -'.tar.gz'.length);
+        if (/^\d+\.\d+\.\d+(?:[-+].*)?$/.test(ref) && !ref.startsWith('v')) {
+          projectUrls.unshift(`${projectUrl.slice(0, markerIndex + archiveMarker.length)}v${ref}.tar.gz`);
+        }
+      }
+      let projectError = null;
+      for (const candidateUrl of projectUrls) {
+        process.stdout.write(`Fetching CITGM project archive ${candidateUrl}...\n`);
+        try {
+          projectArchive = await fetchBytes(candidateUrl);
+          projectUrl = candidateUrl;
+          projectError = null;
+          break;
+        } catch (error) {
+          projectError = error;
+        }
+      }
+      if (!projectArchive) throw projectError;
+      const projectManifest = projectPackageManifest(projectArchive);
+      if (targetPackage && projectManifest?.devDependencies) {
+        targetPackage.devDependencies = {
+          ...targetPackage.devDependencies,
+          ...projectManifest.devDependencies,
+        };
+        await preserveRemoteDependencies(installedPackages, targetName);
+        packageList = await resolvePackageGraph(installedPackages, metadata, registry, new Set([targetName]));
+        process.stdout.write(`Resolved project test dependencies; metadata now covers ${metadata.size} packages.\n`);
+      }
+    }
 
     await rm(cacheDir, { recursive: true, force: true });
     await mkdir(path.join(cacheDir, 'metadata'), { recursive: true });
@@ -266,25 +411,43 @@ async function main() {
 
     process.stdout.write(`Fetching ${packageList.length} package tarballs...\n`);
     const tarballPaths = {};
-    await mapWithConcurrency(packageList, 12, async ({ name, version }) => {
+    const sourceArchiveDir = path.join(stagingDir, 'source-tarballs');
+    await mkdir(sourceArchiveDir, { recursive: true });
+    await mapWithConcurrency(packageList, 12, async (item) => {
+      const { name, version } = item;
       const document = metadata.get(name);
       const packageDocument = document?.versions?.[version];
       const tarballUrl = packageDocument?.dist?.tarball;
-      if (!tarballUrl) throw new Error(`metadata has no tarball for ${name}@${version}`);
       const relative = `tarballs/${packageAssetId(name, version)}.tgz`;
-      await writeFile(path.join(cacheDir, relative), await fetchBytes(tarballUrl));
+      if (item.sourceSpec) {
+        let archive = item.sourceArchive;
+        if (!archive && item.sourceDir) {
+          const packageArchiveDir = path.join(sourceArchiveDir, packageAssetId(name, version));
+          await mkdir(packageArchiveDir, { recursive: true });
+          const packedResult = await runHostCommand(process.platform === 'win32' ? 'npm.cmd' : 'npm', [
+            'pack', '--ignore-scripts', '--pack-destination', packageArchiveDir, item.sourceDir,
+          ], stagingDir);
+          const packedName = packedResult.stdout.trim().split(/\r?\n/).at(-1);
+          if (!packedName || !packedName.endsWith('.tgz')) {
+            throw new Error(`npm pack produced no archive for ${name}@${version}`);
+          }
+          archive = await readFile(path.join(packageArchiveDir, packedName));
+        }
+        if (!archive) throw new Error(`No source archive for ${name}@${version}`);
+        await writeFile(path.join(cacheDir, relative), archive);
+        tarballPaths[`pkg-tarball:${name}@${item.sourceSpec}`] = relative;
+      } else {
+        if (!tarballUrl) throw new Error(`metadata has no tarball for ${name}@${version}`);
+        await writeFile(path.join(cacheDir, relative), await fetchBytes(tarballUrl));
+      }
       tarballPaths[`pkg-tarball:${name}@${version}`] = relative;
-      tarballPaths[`tarball:${tarballUrl}`] = relative;
+      if (tarballUrl) tarballPaths[`tarball:${tarballUrl}`] = relative;
     });
 
-    const projectPaths = {};
-    const targetPackageDocument = packageList.find(({ name }) => name === targetName);
-    const projectUrl = githubProjectUrl(metadata.get(targetName)?.versions?.[targetPackageDocument?.version]);
-    if (projectUrl) {
-      process.stdout.write(`Fetching CITGM project archive ${projectUrl}...\n`);
+    if (projectUrl && projectArchive) {
       const relative = `projects/${createHash('sha256').update(projectUrl).digest('hex')}.tar.gz`;
       await mkdir(path.join(cacheDir, 'projects'), { recursive: true });
-      await writeFile(path.join(cacheDir, relative), await fetchBytes(projectUrl));
+      await writeFile(path.join(cacheDir, relative), projectArchive);
       projectPaths[projectUrl] = relative;
     }
 

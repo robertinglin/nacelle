@@ -101,11 +101,20 @@ function shareFileBytes(bytes, scope) {
   return new Uint8Array(shared);
 }
 
-function prepareWorkerVfs(vfs, scope) {
+export function prepareWorkerVfs(vfs, scope) {
   if (!vfs?.files || scope.crossOriginIsolated !== true
     || typeof scope.SharedArrayBuffer !== 'function') return vfs;
+  const shareFileValue = (value) => {
+    if (value instanceof Uint8Array || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
+      return shareFileBytes(value instanceof Uint8Array ? value : new Uint8Array(value), scope);
+    }
+    if (value && typeof value === 'object' && value.data !== undefined) {
+      return { ...value, data: shareFileValue(value.data) };
+    }
+    return value;
+  };
   const files = Object.fromEntries(
-    Object.entries(vfs.files).map(([path, bytes]) => [path, shareFileBytes(bytes, scope)]),
+    Object.entries(vfs.files).map(([path, value]) => [path, shareFileValue(value)]),
   );
   const artifacts = Array.isArray(vfs.artifacts)
     ? vfs.artifacts.map((artifact) => ({ ...artifact, bytes: shareFileBytes(artifact.bytes, scope) }))
@@ -606,6 +615,7 @@ function createTerminalRecord(identity, state, frame) {
     signal: frame.signal ?? null,
     forced: Boolean(frame.forced),
     error: frame.error ? { ...frame.error } : null,
+    runtimeState: frame.runtimeState || null,
   });
 }
 
@@ -698,6 +708,7 @@ export function createProcess({
     }
     return ipc.send(...args);
   };
+  process.__bnhSendInternal = (value) => ipc?.sendInternal?.(value) || false;
   process.disconnect = () => {
     if (!ipc) return false;
     process.connected = false;
@@ -810,9 +821,8 @@ export function createBrowserProcess(options = {}) {
       if (terminalRecord) throw errorWithCode('ERR_PROCESS_EXITED', 'process has already exited');
       if (name === 'SIGKILL') {
         moveTo('stopping');
-        const termination = worker?.terminate?.();
         finalize({ status: 'failed', kind: 'signal', code: null, signal: name, forced: true, error: null });
-        return termination ?? true;
+        return true;
       }
       moveTo('stopping');
       sendControl('signal', { signal: name });
@@ -839,6 +849,28 @@ export function createBrowserProcess(options = {}) {
     control.postMessage({ channel: 'bnh-process-control', key, runId, childId, type, ...fields });
   }
 
+  function terminateWorker() {
+    const workerToTerminate = worker;
+    worker = null;
+    const termination = workerToTerminate?.terminate?.();
+    if (termination && typeof termination.catch === 'function') termination.catch(() => {});
+  }
+
+  function requestWorkerCleanup(frame) {
+    const deferredKinds = new Set(['natural', 'exit', 'signal', 'rejection']);
+    if (!worker || frame.forced || !deferredKinds.has(frame.kind)) {
+      control?.close?.();
+      terminateWorker();
+      return;
+    }
+    try {
+      sendControl('cleanup');
+    } catch {
+      control?.close?.();
+      terminateWorker();
+    }
+  }
+
   function finalize(frame) {
     if (terminalRecord) return;
     if (startupTimer) clearTimeout(startupTimer);
@@ -862,7 +894,7 @@ export function createBrowserProcess(options = {}) {
     events.emit('terminal', terminalRecord);
     events.emit('exit', terminalRecord.code, terminalRecord.signal, terminalRecord);
     events.emit('close', terminalRecord.code, terminalRecord.signal, terminalRecord);
-    control?.close?.();
+    requestWorkerCleanup(frame);
     completionResolve(terminalRecord);
   }
 
@@ -878,6 +910,14 @@ export function createBrowserProcess(options = {}) {
     if (frame.type === 'output') { outputWrite(frame.stream === 'stderr' ? child.stderr : child.stdout, frame.value); return; }
     if (frame.type === 'network') { events.emit('network', frame.event); return; }
     if (frame.type === 'child-signal-request') { try { child.kill(frame.signal); } catch (error) { events.emit('error', error); } return; }
+    if (frame.type === 'worker-closed') {
+      // process-worker sends this only after its terminal frame, queued user
+      // messages, and own cleanup turn have completed. Terminate the browser
+      // worker at that boundary so its VFS/module graph is released promptly.
+      control?.close?.();
+      terminateWorker();
+      return;
+    }
     if (frame.type === 'terminal') {
       if (frame.lastUserSequence && ipc?.lastReceivedSequence < frame.lastUserSequence) pendingTerminal = frame;
       else finalize(frame);
@@ -1000,8 +1040,11 @@ export function createBrowserProcess(options = {}) {
       ...(options.workerDataTransferList || []),
     ];
     worker.postMessage(initialData, transferList);
+    // The worker now owns the initialized VFS snapshot. Do not retain the
+    // parent-side descriptor map through the child lifecycle closures.
+    options.vfs = undefined;
     const timeout = options.startupTimeout ?? options.timeout;
-    if (timeout !== undefined) startupTimer = setTimeout(() => { worker?.terminate?.(); finalize({ status: 'failed', kind: 'timeout', code: null, signal: 'SIGKILL', forced: true, error: { name: 'TimeoutError', message: 'worker startup timed out', code: 'ERR_PROCESS_TIMEOUT' } }); }, timeout);
+    if (timeout !== undefined) startupTimer = setTimeout(() => { finalize({ status: 'failed', kind: 'timeout', code: null, signal: 'SIGKILL', forced: true, error: { name: 'TimeoutError', message: 'worker startup timed out', code: 'ERR_PROCESS_TIMEOUT' } }); }, timeout);
     if (options.signal?.addEventListener) {
       abortListener = () => {
         if (terminalRecord) return;

@@ -104,6 +104,13 @@ command = ["node", "daemon.mjs"]
 
 The harness creates a process pool scoped to the candidate worktree. Each process receives one compact request JSON object per stdin line and must emit exactly one result JSON object per stdout line. Copy `request_id` into the response. Diagnostic logging belongs on stderr; non-JSON stdout lines are treated as protocol noise.
 
+Adapters may report live activity on stderr using one line per event with the prefix
+`BNH_PROGRESS ` followed by a JSON object. These events are advisory diagnostics and
+must not include candidate output or guessed percentages. The final result remains the
+single JSONL response on stdout. A worker may drop progress records under backpressure,
+but must never delay, change, or replace the final result because progress delivery is
+slow.
+
 One process handles one request at a time. Several processes run in parallel when target concurrency is greater than one. A timeout kills and replaces that worker. Pools are closed before the integration worktree is patched or a candidate worktree is removed.
 
 A JSONL command and its environment should be worktree-scoped, not test-scoped. The test data already arrives in each request.
@@ -153,7 +160,8 @@ await globalThis.__BROWSER_NODE_HARNESS__.run({
     bundleBytes: 1234,
     omittedFiles: [],
     variant: 'v22'
-  }
+  },
+  progress: { binding: '__bnhReportProgress' }
 });
 ```
 
@@ -176,6 +184,73 @@ It returns:
   details?: Record<string, unknown>;
 }
 ```
+
+When `progress.binding` is present, the page-side bridge may call that binding while
+the run is active. Events have this shape:
+
+```ts
+{
+  schemaVersion: 1;
+  type: 'progress';
+  runId: string;
+  sequence: number;
+  phase: string;
+  event: string;
+  stage?: string;
+  module?: string;
+  spec?: string;
+  citgmVersion?: string;
+  browser?: string;
+  timeoutMs?: number;
+  entry?: string;
+  command?: string;
+  argumentCount?: number;
+  label?: 'upstream-test-execution' | 'upstream-test-completion';
+  childActive?: boolean;
+  counters?: {
+    npm?: {
+      citgmInstallEvents: number;
+      candidatePreloadEvents: number;
+      citgmInstallPackages: number;
+      citgmInstallFiles: number;
+      candidatePreloadPackages: number;
+      candidatePreloadFiles: number;
+    };
+    networkEvents: number;
+    output: {
+      stdoutBytes: number;
+      stdoutChunks: number;
+      stderrBytes: number;
+      stderrChunks: number;
+      totalBytes: number;
+      totalChunks: number;
+    };
+  };
+  stream?: 'stdout' | 'stderr';
+  bytes?: number;
+  chunks?: number;
+  events?: number;
+  files?: number;
+  code?: number | null | string;
+  timedOut?: boolean;
+}
+```
+
+The event names and counters describe work that actually occurred. For CITGM, the
+initial `lifecycle/started` event includes the requested module/spec, CITGM version,
+browser, and timeout. `child-started` includes the fixed command identity, entry path,
+and argument count; it deliberately does not copy the argument values. `stage` is a
+bounded high-level operation such as `runtime-reset`, `citgm-install`,
+`candidate-dependency-preload`, `child-launch`, `upstream-test-execution`,
+`completion`, or `timeout`. `childActive` reflects the browser runtime's observed
+nonterminal child state, not elapsed time.
+
+The CITGM bridge also recognizes only structured `info:`/`notice:`/`citgm:` lines
+whose wording matches an allowlisted start/run/test or completion form and forwards
+only the fixed labels `upstream-test-execution` or `upstream-test-completion`. It
+never forwards arbitrary stdout/stderr text. Counters are bounded numeric telemetry;
+they are not a progress percentage and must not be used to alter the requested
+module, test path, or execution behavior.
 
 The bridge must run the test body in the browser-native runtime. Do not proxy execution to host Node, a remote machine, or a server-side container if browser-native compatibility is the target being measured.
 

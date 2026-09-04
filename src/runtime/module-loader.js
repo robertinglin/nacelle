@@ -148,11 +148,23 @@ function fileCandidates(base) {
   ];
 }
 
+function commonJsFileCandidates(base) {
+  return [base, `${base}.js`, `${base}.json`, `${base}${NATIVE_ADDON_EXTENSION}`];
+}
+
 function directoryCandidates(base) {
   return [
     posix.join(base, 'index.js'),
     posix.join(base, 'index.cjs'),
     posix.join(base, 'index.mjs'),
+    posix.join(base, 'index.json'),
+    posix.join(base, `index${NATIVE_ADDON_EXTENSION}`),
+  ];
+}
+
+function commonJsDirectoryCandidates(base) {
+  return [
+    posix.join(base, 'index.js'),
     posix.join(base, 'index.json'),
     posix.join(base, `index${NATIVE_ADDON_EXTENSION}`),
   ];
@@ -235,6 +247,8 @@ export function createModuleLoader({
   evaluateCommonJS,
   resolveBuiltin,
   runModuleHook: sharedRunModuleHook,
+  readSource,
+  fetchModule,
   defaultModuleType = 'commonjs',
 } = {}) {
   const registeredHooks = sharedRunModuleHook ? [] : wrapSynchronousLoadHook(builtins?.module);
@@ -252,7 +266,27 @@ export function createModuleLoader({
   let moduleSequence = 0;
   const registryName = `__bnhEsmRegistry_${Date.now()}_${nextLoaderId++}_${moduleSequence++}`;
   const registry = Object.create(null);
+  const generatedObjectURLs = new Set();
   globalObject[registryName] = registry;
+
+  const generatedModuleURL = (source, fragment) => {
+    const URLClass = globalObject?.URL;
+    const BlobClass = globalObject?.Blob;
+    const browserLocation = globalObject?.location;
+    const browserRuntime = typeof browserLocation?.href === 'string'
+      && /^(?:https?:|blob:)/i.test(browserLocation.href);
+    if (browserRuntime && typeof URLClass?.createObjectURL === 'function' && typeof BlobClass === 'function') {
+      try {
+        const objectURL = URLClass.createObjectURL(new BlobClass([source], { type: 'text/javascript' }));
+        generatedObjectURLs.add(objectURL);
+        return `${objectURL}#${fragment}`;
+      } catch {
+        // Some embedders expose URL but not a Blob implementation accepted by
+        // createObjectURL. Preserve the portable data-URL fallback there.
+      }
+    }
+    return `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${fragment}`;
+  };
 
   const hasFile = (path) => {
     // A package pattern keeps repeated separators in its substituted target.
@@ -263,6 +297,26 @@ export function createModuleLoader({
     return typeof files?.has === 'function' ? files.has(path) : Object.hasOwn(files || {}, path);
   };
   const readFile = (path) => (typeof files?.get === 'function' ? files.get(path) : files[path]);
+  // Textual module reads can use the VFS source cache, while binary module
+  // formats continue through the byte-oriented files seam below.
+  const readTextFile = (path) => typeof readSource === 'function' ? readSource(path) : readFile(path);
+  const fetchRemoteModule = async (url, context = {}) => {
+    if (typeof fetchModule !== 'function') {
+      const error = new Error(`No fetch capability is registered for ${url}`);
+      error.code = 'ERR_UNSUPPORTED_ESM_URL_SCHEME';
+      throw error;
+    }
+    const response = await fetchModule(url);
+    if (!response?.ok) {
+      const error = new Error(`Failed to fetch module '${url}'`);
+      error.code = 'ERR_MODULE_NOT_FOUND';
+      throw error;
+    }
+    return {
+      format: context.format || 'module',
+      source: await response.text(),
+    };
+  };
   const hasBuiltin = (name) => Object.prototype.hasOwnProperty.call(builtins || {}, name)
     || Object.prototype.hasOwnProperty.call(builtins || {}, `node:${name}`);
   const builtinName = (specifier) => String(specifier).startsWith('node:')
@@ -312,8 +366,8 @@ export function createModuleLoader({
   const isBuiltinSpecifier = (specifier) => hasBuiltin(builtinName(specifier));
 
   const fileURL = (path) => `file://${path}`;
-  const hookContext = (specifier, importer) => ({
-    conditions: ['node', 'import'],
+  const hookContext = (specifier, importer, conditions = ['node', 'import']) => ({
+    conditions,
     importAttributes: {},
     parentURL: importer.startsWith('data:') || /^[A-Za-z][A-Za-z\d+.-]*:/.test(importer)
       ? importer : fileURL(importer),
@@ -330,12 +384,12 @@ export function createModuleLoader({
       format: isBuiltinSpecifier(resolved)
         ? 'builtin'
         : resolved.startsWith('data:') ? 'module'
-        : resolved.endsWith('.json') ? 'json' : moduleFormat(resolved),
+        : resolved.endsWith('.json') ? 'json' : moduleFormatForHook(resolved),
     };
   };
 
-  const runResolveHooks = (specifier, importer) => {
-    const context = hookContext(specifier, importer);
+  const runResolveHooks = (specifier, importer, conditions = ['node', 'import']) => {
+    const context = hookContext(specifier, importer, conditions);
     const fallback = (nextSpecifier, nextContext) => defaultResolve(
       nextSpecifier,
       nextContext?.parentURL?.startsWith('file:')
@@ -364,9 +418,9 @@ export function createModuleLoader({
     return result;
   };
 
-  const runResolveHooksAsync = async (specifier, importer) => {
-    if (!sharedRunModuleHook) return runResolveHooks(specifier, importer);
-    const context = hookContext(specifier, importer);
+  const runResolveHooksAsync = async (specifier, importer, conditions = ['node', 'import']) => {
+    if (!sharedRunModuleHook) return runResolveHooks(specifier, importer, conditions);
+    const context = hookContext(specifier, importer, conditions);
     const fallback = (nextSpecifier, nextContext) => defaultResolve(
       nextSpecifier,
       nextContext?.parentURL?.startsWith('file:')
@@ -381,14 +435,17 @@ export function createModuleLoader({
     return result;
   };
 
-  const defaultLoad = (url) => {
+  const defaultLoad = (url, context = {}) => {
     if (url.startsWith('node:')) return { format: 'builtin', source: null };
     if (url.startsWith('data:')) return { format: 'module', source: null };
+    if (url.startsWith('http:') || url.startsWith('https:')) return fetchRemoteModule(url, context);
     const resolved = url.startsWith('file:') ? fileURLToPath(url) : url;
     if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) unsupportedNativeAddon(resolved);
-    const value = read(resolved, resolved).value;
+    const value = resolved.endsWith('.wasm') || resolved.endsWith('.node')
+      ? read(resolved, resolved).value
+      : readTextFile(resolved);
     return {
-      format: resolved.endsWith('.json') ? 'json' : moduleFormat(resolved),
+      format: context?.format ?? (resolved.endsWith('.json') ? 'json' : moduleFormat(resolved)),
       source: value,
     };
   };
@@ -405,11 +462,11 @@ export function createModuleLoader({
       parentURL: fileURL(resolved),
     };
     if (sharedRunModuleHook) {
-      const result = sharedRunModuleHook('load', url, context, (nextURL) => defaultLoad(nextURL));
+      const result = sharedRunModuleHook('load', url, context, (nextURL, nextContext) => defaultLoad(nextURL, nextContext));
       if (!result || typeof result !== 'object') throw new TypeError('module load hook must return an object');
       return { ...result, url: result.url || url };
     }
-    let next = (nextURL) => defaultLoad(nextURL);
+    let next = (nextURL, nextContext) => defaultLoad(nextURL, nextContext);
     for (let index = registeredHooks.length - 1; index >= 0; index -= 1) {
       const hook = registeredHooks[index]?.load;
       if (typeof hook !== 'function') continue;
@@ -419,7 +476,7 @@ export function createModuleLoader({
     const result = next(url, context);
     if (!result || typeof result !== 'object') throw new TypeError('module load hook must return an object');
     if (result.source === undefined && result.format !== 'builtin' && !result.shortCircuit) {
-      return { ...defaultLoad(result.url || url), ...result };
+      return { ...defaultLoad(result.url || url, result), ...result };
     }
     return { ...result, url: result.url || url };
   };
@@ -434,11 +491,20 @@ export function createModuleLoader({
     ? value
     : new TextDecoder().decode(value);
 
+  const packageConfigCache = new Map();
+  // npm's .bin directory contains executable shims rather than package
+  // modules. Its owning project package scope remains relevant when a shim
+  // is an extensionless ESM entry point.
+  const isNpmBinShimPath = (pathname) => /\/node_modules\/\.bin(?:\/|$)/.test(String(pathname));
+
   const packageConfig = (base) => {
     const packagePath = posix.join(base, 'package.json');
     if (!hasFile(packagePath)) return undefined;
+    if (packageConfigCache.has(packagePath)) return packageConfigCache.get(packagePath);
     try {
-      return JSON.parse(sourceText(readFile(packagePath)));
+      const config = JSON.parse(sourceText(readTextFile(packagePath)));
+      packageConfigCache.set(packagePath, config);
+      return config;
     } catch (cause) {
       const error = new Error(`Invalid package config '${packagePath}'`);
       error.code = 'ERR_INVALID_PACKAGE_CONFIG';
@@ -451,7 +517,7 @@ export function createModuleLoader({
   const packageScopeType = (resolved) => {
     let directory = posix.dirname(resolved);
     while (true) {
-      if (directory.endsWith('/node_modules')) return undefined;
+      if (directory.endsWith('/node_modules') && !isNpmBinShimPath(resolved)) return undefined;
       const config = packageConfig(directory);
       if (config !== undefined) {
         if (config.type === 'module' || config.type === 'commonjs') return config.type;
@@ -479,11 +545,25 @@ export function createModuleLoader({
     return 'commonjs';
   };
 
-  const packageEntry = (base) => {
+  // A custom ESM loader may intentionally handle an otherwise unknown file
+  // extension (for example a TypeScript source file). Resolve/load hooks must
+  // see that URL before the default loader reports Node's unknown-extension
+  // error. The default loader still calls moduleFormat() directly, so an
+  // unhandled extension remains an ERR_UNKNOWN_FILE_EXTENSION.
+  const moduleFormatForHook = (resolved) => {
+    try {
+      return moduleFormat(resolved);
+    } catch (error) {
+      if (error?.code === 'ERR_UNKNOWN_FILE_EXTENSION') return undefined;
+      throw error;
+    }
+  };
+
+  const packageEntry = (base, useExports = true) => {
     const packagePath = posix.join(base, 'package.json');
     if (!hasFile(packagePath)) return undefined;
     const config = packageConfig(base);
-    const exportsValue = config.exports;
+    const exportsValue = useExports ? config.exports : undefined;
     const rootExport = typeof exportsValue === 'string'
       ? exportsValue
       : exportsValue && typeof exportsValue === 'object'
@@ -628,17 +708,22 @@ export function createModuleLoader({
     throw packageError('ERR_PACKAGE_IMPORT_NOT_DEFINED', `Package import '${specifier}' is not defined`);
   };
 
-  const resolveFileOrDirectory = (base) => {
-    const file = fileCandidates(base).find((candidate) => hasFile(candidate));
+  const resolveFileOrDirectory = (
+    base,
+    useExports = true,
+    fileCandidateList = fileCandidates,
+    directoryCandidateList = directoryCandidates,
+  ) => {
+    const file = fileCandidateList(base).find((candidate) => hasFile(candidate));
     if (file) return file;
-    const entry = packageEntry(base);
+    const entry = packageEntry(base, useExports);
     if (typeof entry === 'string') {
       const target = posix.join(base, entry);
-      const packageFile = fileCandidates(target).find((candidate) => hasFile(candidate))
-        || directoryCandidates(target).find((candidate) => hasFile(candidate));
+      const packageFile = fileCandidateList(target).find((candidate) => hasFile(candidate))
+        || directoryCandidateList(target).find((candidate) => hasFile(candidate));
       if (packageFile) return packageFile;
     }
-    return directoryCandidates(base).find((candidate) => hasFile(candidate));
+    return directoryCandidateList(base).find((candidate) => hasFile(candidate));
   };
 
   const resolvePackage = (specifier, importer, conditions = ['node', 'import']) => {
@@ -660,6 +745,9 @@ export function createModuleLoader({
         }
         throw error;
       }
+      const requireConditions = conditions.includes('require') && !conditions.includes('import');
+      const fileCandidateList = requireConditions ? commonJsFileCandidates : fileCandidates;
+      const directoryCandidateList = requireConditions ? commonJsDirectoryCandidates : directoryCandidates;
       if (config?.exports !== undefined) {
         const request = subpath ? `./${subpath}` : '.';
         const exportsMap = typeof config.exports === 'string' || Array.isArray(config.exports)
@@ -677,7 +765,7 @@ export function createModuleLoader({
         throw packageError('ERR_PACKAGE_PATH_NOT_EXPORTED', `Package subpath '${request}' is not defined`);
       }
       const base = subpath ? posix.join(packageRoot, subpath) : packageRoot;
-      const resolved = resolveFileOrDirectory(base);
+      const resolved = resolveFileOrDirectory(base, false, fileCandidateList, directoryCandidateList);
       if (resolved) return resolved;
       if (directory === '/') break;
       directory = posix.dirname(directory);
@@ -748,7 +836,40 @@ export function createModuleLoader({
     // ESM resolution does not add file extensions. CommonJS resolution keeps
     // the Node-style extension and index fallbacks through require conditions.
     if (conditions.includes('import') && !posix.extname(value)) return base;
-    return resolveFileOrDirectory(base) || base;
+    return resolveFileOrDirectory(base, false) || base;
+  };
+
+  const resolveRequire = (specifier, importer = '/node/index.js') => {
+    const rawValue = String(specifier);
+    const value = rawValue.startsWith('file:') ? fileURLToPath(rawValue) : rawValue;
+    const name = builtinName(value);
+    if (hasBuiltin(name)) return value.startsWith('node:') ? `node:${name}` : name;
+    if (value.startsWith('node:')) {
+      const libraryFile = resolveInternalModule(name) || resolveNodeLibrary(name);
+      if (libraryFile) return libraryFile;
+      throw packageError('ERR_UNKNOWN_BUILTIN_MODULE', `No such built-in module: ${name}`);
+    }
+    if (value.startsWith('#')) {
+      const imported = resolvePackageImports(value, importer, ['node', 'require']);
+      if (imported.startsWith('node:') || imported.startsWith('data:')
+        || imported.startsWith('http:') || imported.startsWith('https:')) return imported;
+      const candidate = resolveFileOrDirectory(imported, false, commonJsFileCandidates, commonJsDirectoryCandidates);
+      if (candidate) return candidate;
+      throw packageError('MODULE_NOT_FOUND', `Cannot find module '${value}'`);
+    }
+    if (value.startsWith('data:') || /^[A-Za-z][A-Za-z\d+.-]*:/.test(value)) return resolve(value, importer, ['node', 'require']);
+    if (!isPathSpecifier(value)) {
+      const resolved = resolvePackage(value, importer, ['node', 'require']);
+      if (resolved) {
+        const candidate = resolveFileOrDirectory(resolved, false, commonJsFileCandidates, commonJsDirectoryCandidates);
+        if (candidate) return candidate;
+      }
+      throw packageError('MODULE_NOT_FOUND', `Cannot find module '${value}'`);
+    }
+    const base = value.startsWith('/') ? value : posix.join(posix.dirname(importer), value);
+    const resolved = resolveFileOrDirectory(base, false, commonJsFileCandidates, commonJsDirectoryCandidates);
+    if (resolved) return resolved;
+    throw packageError('MODULE_NOT_FOUND', `Cannot find module '${value}'`);
   };
 
   const read = (specifier, importer) => {
@@ -783,7 +904,9 @@ export function createModuleLoader({
       try {
         const child = read(specifier, resolved);
         if (child.resolved.endsWith('.mjs') || child.resolved.endsWith('.json')) continue;
-        const childMetadata = cjsExportNames(child.resolved, sourceText(child.value), seen);
+        const childValue = child.resolved.endsWith('.wasm') || child.resolved.endsWith('.node')
+          ? child.value : readTextFile(child.resolved);
+        const childMetadata = cjsExportNames(child.resolved, sourceText(childValue), seen);
         for (const name of childMetadata.names) names.add(name);
       } catch {
         // Node keeps the statically detected names when a re-export cannot be resolved.
@@ -925,7 +1048,10 @@ export function createModuleLoader({
     const key = cacheKey(resolved, processOverride);
     if (cycleModuleURLs.has(key)) return cycleModuleURLs.get(key);
     const source = cycleModuleSource(resolved, importer, processOverride);
-    const url = `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}_cycle_${moduleSequence++}${processKey(processOverride)}`;
+    const url = generatedModuleURL(
+      source,
+      `${registryName}_cycle_${moduleSequence++}${processKey(processOverride)}`,
+    );
     cycleModuleURLs.set(key, url);
     return url;
   };
@@ -933,7 +1059,7 @@ export function createModuleLoader({
   const invalidCjsModuleURL = (specifier, exportName) => {
     const message = `The requested module '${specifier}' does not provide an export named '${exportName}'`;
     const source = `export default undefined;\nthrow new SyntaxError(${quote(message)});`;
-    return `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}_${moduleSequence++}`;
+    return generatedModuleURL(source, `${registryName}_${moduleSequence++}`);
   };
 
   const cjsHasEsmSyntax = (resolved) => {
@@ -962,9 +1088,11 @@ export function createModuleLoader({
 
   function rewriteSpecifier(specifier, importer, exportName, processOverride) {
     specifier = decodeStaticString(specifier);
-    const resolved = hookURLToSpecifier(runResolveHooks(specifier, importer).url);
+    const resolvedResult = runResolveHooks(specifier, importer);
+    const resolved = hookURLToSpecifier(resolvedResult.url);
     if (exportName && cjsHasEsmSyntax(resolved)) return invalidCjsModuleURL(specifier, exportName);
-    const url = moduleURL(resolved, processOverride);
+    const formatHint = Object.hasOwn(resolvedResult, 'format') ? resolvedResult.format : null;
+    const url = moduleURL(resolved, processOverride, formatHint);
     nativeSpecifierHints.set(url, specifier);
     return url;
   }
@@ -1202,11 +1330,12 @@ export function createModuleLoader({
     ].join('\n');
   };
 
-  function moduleSource(resolved, processOverride) {
+  function moduleSource(resolved, processOverride, formatHint = null) {
     const builtinValue = builtin(resolved, processOverride);
-    const format = isBuiltinSpecifier(resolved) ? 'builtin'
+    const format = formatHint !== null ? formatHint
+      : isBuiltinSpecifier(resolved) ? 'builtin'
       : resolved.startsWith('data:') ? 'module'
-      : resolved.endsWith('.json') ? 'json' : moduleFormat(resolved);
+      : resolved.endsWith('.json') ? 'json' : moduleFormatForHook(resolved);
     const loaded = runLoadHooks(resolved, format);
     const loadedResolved = loaded.url ? hookURLToSpecifier(loaded.url) : resolved;
     if (loaded.format === 'builtin' && isBuiltinSpecifier(loadedResolved)) {
@@ -1244,7 +1373,9 @@ export function createModuleLoader({
     }
     let value;
     try {
-      value = read(resolved, resolved).value;
+      value = resolved.endsWith('.wasm') || resolved.endsWith('.node')
+        ? read(resolved, resolved).value
+        : readTextFile(resolved);
     } catch (error) {
       if (error?.code === 'MODULE_NOT_FOUND') return missingModuleSource(resolved);
       throw error;
@@ -1258,14 +1389,14 @@ export function createModuleLoader({
     return `${bindProcess(rewriteImports(loadedText, resolved, processOverride), processOverride)}\n//# sourceURL=${resolved}`;
   }
 
-  function moduleURL(resolved, processOverride) {
+  function moduleURL(resolved, processOverride, formatHint = null) {
     const key = cacheKey(resolved, processOverride);
     if (moduleURLs.has(key)) return moduleURLs.get(key);
-    const source = moduleSource(resolved, processOverride);
+    const source = moduleSource(resolved, processOverride, formatHint);
     // Native ESM caches by URL for the lifetime of the browser realm. Give
     // each runtime loader a private fragment so a second virtual child using
     // the same VFS path executes its own module instance.
-    const url = `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}${processKey(processOverride)}`;
+    const url = generatedModuleURL(source, `${registryName}${processKey(processOverride)}`);
     moduleURLs.set(key, url);
     return url;
   }
@@ -1395,13 +1526,15 @@ export function createModuleLoader({
     const promise = (async () => {
       const context = hookContext(resolved, importer);
       const loaded = sharedRunModuleHook
-        ? await sharedRunModuleHook('load', resolved, context, () => undefined)
-        : undefined;
+        ? await sharedRunModuleHook('load', resolved, context, (nextURL, nextContext) => (
+            defaultLoad(nextURL, nextContext)
+          ))
+        : await defaultLoad(resolved, context);
       if (!loaded || loaded.source === undefined || loaded.source === null) {
         throw packageError('ERR_UNSUPPORTED_ESM_URL_SCHEME', `No loader is registered for ${resolved}`);
       }
       const source = await rewriteRemoteImports(sourceText(loaded.source), resolved);
-      const url = `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}_${moduleSequence++}`;
+      const url = generatedModuleURL(source, `${registryName}_${moduleSequence++}`);
       return url;
     })();
     remoteImportCache.set(resolved, promise);
@@ -1413,7 +1546,6 @@ export function createModuleLoader({
   // before invoking the browser evaluator so HTTP imports work from both
   // --import preloads and --input-type=module entry points.
   const asyncModuleURLs = new Map();
-  const asyncModuleSources = new Map();
   const runLoadHooksAsync = async (resolved, format) => {
     const url = format === 'builtin'
       ? `node:${builtinName(resolved)}`
@@ -1427,7 +1559,7 @@ export function createModuleLoader({
         ? resolved : fileURL(resolved),
     };
     const result = sharedRunModuleHook
-      ? await sharedRunModuleHook('load', url, context, (nextURL) => defaultLoad(nextURL))
+      ? await sharedRunModuleHook('load', url, context, (nextURL, nextContext) => defaultLoad(nextURL, nextContext))
       : runLoadHooks(resolved, format);
     if (!result || typeof result !== 'object') throw new TypeError('module load hook must return an object');
     return { ...result, url: result.url || url };
@@ -1456,14 +1588,19 @@ export function createModuleLoader({
         const specifier = original[4];
         const prefix = original[2];
         const quoteOffset = original[0].indexOf(original[3], original[1].length + prefix.length);
-        const resolved = hookURLToSpecifier((await runResolveHooksAsync(specifier, importer)).url);
-        const url = await moduleURLAsync(resolved, processOverride, importer, ancestors);
+        const resolvedResult = await runResolveHooksAsync(specifier, importer);
+        const resolved = hookURLToSpecifier(resolvedResult.url);
+        const formatHint = Object.hasOwn(resolvedResult, 'format') ? resolvedResult.format : null;
+        const url = await moduleURLAsync(resolved, processOverride, importer, ancestors, formatHint);
         nativeSpecifierHints.set(url, specifier);
-        if (exportAware && requestedExportName(prefix) && resolved.endsWith('.json')) {
+        const exportName = exportAware ? requestedExportName(prefix) : undefined;
+        // JSON modules expose one ESM binding: default. Preserve a default
+        // import while retaining the native-style failure for named imports.
+        if (exportName && exportName !== 'default' && resolved.endsWith('.json')) {
           replacements.push({
             start: match.index + quoteOffset,
             end: match.index + quoteOffset + specifier.length + 2,
-            replacement: quote(invalidCjsModuleURL(specifier, requestedExportName(prefix))),
+            replacement: quote(invalidCjsModuleURL(specifier, exportName)),
             exportAware,
             prefix,
           });
@@ -1508,11 +1645,12 @@ export function createModuleLoader({
     return rewritten;
   };
 
-  const moduleSourceAsync = async (resolved, processOverride, ancestors) => {
+  const moduleSourceAsync = async (resolved, processOverride, ancestors, formatHint = null) => {
     const builtinValue = builtin(resolved, processOverride);
-    const format = isBuiltinSpecifier(resolved) ? 'builtin'
+    const format = formatHint !== null ? formatHint
+      : isBuiltinSpecifier(resolved) ? 'builtin'
       : /^[A-Za-z][A-Za-z\d+.-]*:/.test(resolved) ? 'module'
-      : resolved.endsWith('.json') ? 'json' : moduleFormat(resolved);
+      : resolved.endsWith('.json') ? 'json' : moduleFormatForHook(resolved);
     const loaded = await runLoadHooksAsync(resolved, format);
     const loadedResolved = loaded.url ? hookURLToSpecifier(loaded.url) : resolved;
     if (loaded.format === 'builtin' && isBuiltinSpecifier(loadedResolved)) {
@@ -1538,7 +1676,9 @@ export function createModuleLoader({
     if (resolved.startsWith('data:')) {
       return `${bindProcess(await rewriteImportsAsync(decodeDataBody(resolved), resolved, processOverride, ancestors), processOverride)}\n//# sourceURL=${resolved}`;
     }
-    const value = read(resolved, resolved).value;
+    const value = resolved.endsWith('.wasm') || resolved.endsWith('.node')
+      ? read(resolved, resolved).value
+      : readTextFile(resolved);
     if (isWasmBytes(value)) return wasmModuleSource(value, resolved, processOverride);
     if (resolved.endsWith('.json')) return `export default ${JSON.stringify(JSON.parse(sourceText(value)))};`;
     const loadedText = sourceText(value);
@@ -1547,7 +1687,7 @@ export function createModuleLoader({
     return `${bindProcess(await rewriteImportsAsync(moduleText, resolved, processOverride, ancestors), processOverride)}\n//# sourceURL=${resolved}`;
   };
 
-  const moduleURLAsync = async (resolved, processOverride, importer = resolved, ancestors = new Set()) => {
+  const moduleURLAsync = async (resolved, processOverride, importer = resolved, ancestors = new Set(), formatHint = null) => {
     const key = cacheKey(resolved, processOverride);
     if (moduleURLs.has(key)) return moduleURLs.get(key);
     if (isBuiltinSpecifier(resolved)) return moduleURL(resolved, processOverride);
@@ -1559,7 +1699,7 @@ export function createModuleLoader({
     const promise = (async () => {
       const nextAncestors = new Set(ancestors);
       nextAncestors.add(key);
-      const source = await moduleSourceAsync(resolved, processOverride, nextAncestors);
+      const source = await moduleSourceAsync(resolved, processOverride, nextAncestors, formatHint);
       const registration = cycleRegistrations.get(key);
       const publishedSource = registration
         ? `${source}\n${registration.names.size || registration.defaultBinding ? `globalThis[${quote(registryName)}][${quote(registration.token)}]().publish({${[...registration.names].map((name) => {
@@ -1568,8 +1708,10 @@ export function createModuleLoader({
         }).filter(Boolean).concat(registration.defaultBinding ? [`default: ${registration.defaultBinding}`] : []).join(',')}});` : ''}`
         : source;
       const finalSource = publishedSource;
-      asyncModuleSources.set(key, finalSource);
-      const url = `data:text/javascript;charset=utf-8,${encodeModuleSource(finalSource)}#${registryName}_${moduleSequence++}${processKey(processOverride)}`;
+      const url = generatedModuleURL(
+        finalSource,
+        `${registryName}_${moduleSequence++}${processKey(processOverride)}`,
+      );
       moduleURLs.set(key, url);
       return url;
     })();
@@ -1580,12 +1722,12 @@ export function createModuleLoader({
     return promise;
   };
 
-  const importNative = async (resolved, processOverride) => {
+  const importNative = async (resolved, processOverride, formatHint = null) => {
     const key = cacheKey(resolved, processOverride);
     if (!importCache.has(key)) {
       let url;
       try {
-        url = await moduleURLAsync(resolved, processOverride);
+        url = await moduleURLAsync(resolved, processOverride, resolved, new Set(), formatHint);
       } catch (error) {
         if (error?.code === 'MODULE_NOT_FOUND') {
           error.code = 'ERR_MODULE_NOT_FOUND';
@@ -1678,13 +1820,18 @@ export function createModuleLoader({
     // using that captured graph on later imports: the backing virtual file may
     // have been removed or replaced after the static import was prepared, but
     // Node's ESM cache is keyed by the module URL rather than fresh file reads.
-    if (asyncModuleSources.has(key)) {
-      const source = asyncModuleSources.get(key);
-      const url = moduleURLs.get(key)
-        || `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}_${moduleSequence++}${processKey(processOverride)}`;
-      return import(url);
+    // moduleURLs is the canonical cache; retaining the generated source beside
+    // its encoded URL needlessly keeps a second copy of every ESM module alive.
+    if (moduleURLs.has(key)) {
+      return import(moduleURLs.get(key));
     }
-    if (isBuiltinSpecifier(resolved) || moduleFormat(resolved) === 'module') return importNative(resolved, processOverride);
+    const resolvedFormat = Object.hasOwn(resolvedResult, 'format') ? resolvedResult.format : null;
+    if (isBuiltinSpecifier(resolved)
+      || resolvedFormat === 'module'
+      || resolvedFormat === undefined
+      || (resolvedFormat === null && moduleFormat(resolved) === 'module')) {
+      return importNative(resolved, processOverride, resolvedFormat);
+    }
     let exports;
     try {
       exports = evaluate(resolved, importer, globals, processOverride);
@@ -1710,12 +1857,24 @@ export function createModuleLoader({
   return {
     cache,
     resolve,
-    resolveWithHooks: (specifier, importer) => runResolveHooks(specifier, importer),
+    resolveRequire,
+    resolveWithHooks: (specifier, importer, conditions = ['node', 'import']) => (
+      runResolveHooks(specifier, importer, conditions)
+    ),
     require: (specifier, importer, globals = {}, processOverride) => evaluate(specifier, importer, globals, processOverride),
     import: (specifier, importer = '/node/index.mjs', globals = {}, options, processOverride) => importModule(specifier, importer, globals, options, processOverride),
     syncBuiltinESMExports,
     normalize,
     moduleURL,
-    dispose: () => { delete globalObject[registryName]; },
+    dispose: () => {
+      delete globalObject[registryName];
+      for (const objectURL of generatedObjectURLs) {
+        try { globalObject.URL.revokeObjectURL(objectURL); } catch { /* already revoked */ }
+      }
+      generatedObjectURLs.clear();
+      for (const collection of [moduleURLs, importCache, nativeSpecifierHints, cycleModuleURLs,
+        cycleRegistrations, remoteImportCache, asyncModuleURLs]) collection.clear();
+      for (const key of Object.keys(cache)) delete cache[key];
+    },
   };
 }

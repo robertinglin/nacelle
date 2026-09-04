@@ -139,6 +139,42 @@ class Harness:
                 pass
             self.emit(message)
 
+    def _record_adapter_progress(
+        self,
+        event: dict[str, object],
+        *,
+        run_id: str,
+        iteration: int,
+        attempt_id: str,
+    ) -> None:
+        """Persist only generic adapter activity; never echo candidate text."""
+
+        phase = str(event.get("phase", "unknown"))
+        name = str(event.get("event", "activity"))
+        fields = []
+        for key in (
+            "stage", "module", "spec", "citgmVersion", "browser", "timeoutMs",
+            "entry", "command", "argumentCount", "label", "childActive",
+            "stream", "bytes", "chunks", "events", "files", "code", "timedOut",
+        ):
+            if key in event:
+                fields.append(f"{key}={event[key]}")
+        counters = event.get("counters")
+        if isinstance(counters, dict):
+            fields.append("counters=" + json.dumps(counters, sort_keys=True, separators=(",", ":")))
+        message = f"adapter progress · {phase}/{name}"
+        if fields:
+            message += " · " + " ".join(fields)
+        self.db.record_event(
+            message,
+            run_id=run_id,
+            iteration=iteration,
+            kind="runner",
+            status="progress",
+            attempt_id=attempt_id,
+        )
+        self.emit(message)
+
     def _agent_identity(self) -> tuple[str, str]:
         provider = self.config.agent.provider or Path(self.config.agent.command[0]).name
         model = self.config.agent.model or self.config.agent.env.get("BNH_AGENT_MODEL", "auto")
@@ -259,6 +295,12 @@ class Harness:
                 run_id=run_id,
                 iteration=iteration,
                 concurrency=self.config.loop.target_concurrency,
+                on_progress=lambda event: self._record_adapter_progress(
+                    event,
+                    run_id=run_id,
+                    iteration=iteration,
+                    attempt_id=runner_id,
+                ),
             )
         except Exception as exc:
             self.db.record_event(

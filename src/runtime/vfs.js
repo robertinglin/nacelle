@@ -401,8 +401,10 @@ function normalizePath(value, cwd = '/node') {
   for (const part of parts) {
     if (!part || part === '.') continue;
     if (part === '..') {
-      if (result.length <= base.length) throw invalidPath('path escapes its logical mount');
-      result.pop();
+      // Lexical path normalization may reach the logical root. The mount
+      // boundary is enforced by access() after normalization, just as it is
+      // for absolute paths, rather than by rejecting a valid parent step.
+      if (result.length) result.pop();
       continue;
     }
     result.push(part);
@@ -433,11 +435,13 @@ function createMemoryBackend() {
     files,
     directories,
     symlinks,
+    directoryIndex: null,
     reset() {
       files.clear();
       directories.clear();
       symlinks.clear();
       directories.add('/');
+      this.directoryIndex = null;
     },
   };
 }
@@ -724,6 +728,10 @@ export function createVfs(options = {}) {
   const directories = backend.directories instanceof Set ? backend.directories : new Set(['/']);
   const symlinks = backend.symlinks instanceof Map ? backend.symlinks : new Map();
   const metadata = new Map();
+  const sharedDirectoryIndex = Object.prototype.hasOwnProperty.call(backend, 'directoryIndex');
+  let directoryIndex = sharedDirectoryIndex && backend.directoryIndex instanceof Map
+    ? backend.directoryIndex
+    : null;
   let taskTracker = typeof options.trackTask === 'function' ? options.trackTask : null;
   let activeRequestTracker = null;
   if (!directories.has('/')) directories.add('/');
@@ -735,6 +743,9 @@ export function createVfs(options = {}) {
   const descriptors = new Map();
   const hardLinks = new Map();
   const fileHandleRecords = new Set();
+  const sourceCache = new Map();
+  let sourceCacheBytes = 0;
+  const maxSourceCacheBytes = options.sourceCacheBytes ?? 64 * 1024 * 1024;
   let nextDescriptor = 100;
   let nextTemporaryDirectory = 0;
   let mutationQueue = Promise.resolve();
@@ -780,6 +791,103 @@ export function createVfs(options = {}) {
     return path.slice(0, path.lastIndexOf('/')) || '/';
   }
 
+  function invalidateSourceCache(path, recursive = false) {
+    for (const [cachedPath, cached] of sourceCache) {
+      if (cachedPath !== path && (!recursive || !isWithin(cachedPath, path))) continue;
+      sourceCache.delete(cachedPath);
+      sourceCacheBytes -= cached.bytes;
+    }
+  }
+
+  function cacheSource(path, text) {
+    const bytes = textEncoder.encode(text).byteLength;
+    if (!Number.isFinite(maxSourceCacheBytes) || maxSourceCacheBytes <= 0 || bytes > maxSourceCacheBytes) return text;
+    const previous = sourceCache.get(path);
+    if (previous) sourceCacheBytes -= previous.bytes;
+    sourceCache.delete(path);
+    sourceCache.set(path, { text, bytes });
+    sourceCacheBytes += bytes;
+    while (sourceCacheBytes > maxSourceCacheBytes && sourceCache.size) {
+      const oldestPath = sourceCache.keys().next().value;
+      const oldest = sourceCache.get(oldestPath);
+      sourceCache.delete(oldestPath);
+      sourceCacheBytes -= oldest?.bytes || 0;
+    }
+    return text;
+  }
+
+  function readSource(pathValue, operation = 'open') {
+    const path = resolve(pathValue);
+    if (path.endsWith('.node') && files.has(path)) unsupportedNativeAddon(path);
+    const cached = sourceCache.get(path);
+    if (cached) {
+      sourceCache.delete(path);
+      sourceCache.set(path, cached);
+      return cached.text;
+    }
+    const bytes = readBytes(path, operation);
+    const text = typeof bytes === 'string' ? bytes : new TextDecoder().decode(bytes);
+    return cacheSource(path, text);
+  }
+
+  function syncDirectoryIndex() {
+    if (sharedDirectoryIndex && directoryIndex !== backend.directoryIndex) {
+      directoryIndex = backend.directoryIndex instanceof Map ? backend.directoryIndex : null;
+    }
+    return directoryIndex;
+  }
+
+  function indexPath(path, kind) {
+    syncDirectoryIndex();
+    if (!directoryIndex || path === '/') return;
+    let parent = parentOf(path);
+    while (true) {
+      const relative = path.slice(parent === '/' ? 1 : parent.length + 1);
+      const name = relative.split('/')[0];
+      if (name) {
+        let entries = directoryIndex.get(parent);
+        if (!entries) {
+          entries = new Map();
+          directoryIndex.set(parent, entries);
+        }
+        if (!entries.has(name) || kind === 'directory') entries.set(name, kind);
+      }
+      if (parent === '/') break;
+      parent = parentOf(parent);
+    }
+  }
+
+  function indexDirectPath(path, kind) {
+    syncDirectoryIndex();
+    if (!directoryIndex || path === '/') return;
+    const parent = parentOf(path);
+    const name = path.slice(parent === '/' ? 1 : parent.length + 1);
+    if (!name || name.includes('/')) return;
+    let entries = directoryIndex.get(parent);
+    if (!entries) {
+      entries = new Map();
+      directoryIndex.set(parent, entries);
+    }
+    if (!entries.has(name) || kind === 'directory') entries.set(name, kind);
+  }
+
+  function rebuildDirectoryIndex() {
+    syncDirectoryIndex();
+    if (directoryIndex) return directoryIndex;
+    const index = new Map();
+    directoryIndex = index;
+    if (sharedDirectoryIndex) backend.directoryIndex = index;
+    for (const directory of directories) indexPath(directory, 'directory');
+    for (const file of files.keys()) indexPath(file, 'file');
+    for (const link of symlinks.keys()) indexPath(link, 'symlink');
+    return index;
+  }
+
+  function invalidateDirectoryIndex() {
+    directoryIndex = null;
+    if (sharedDirectoryIndex) backend.directoryIndex = null;
+  }
+
   function symlinkTarget(linkPath, targetValue) {
     const target = sourcePath(targetValue);
     const absolute = target.startsWith('/') ? target : `${parentOf(linkPath)}/${target}`;
@@ -820,6 +928,16 @@ export function createVfs(options = {}) {
     return files.has(path) || directories.has(path) || symlinks.has(path) || virtualSocketExists(path);
   }
 
+  function traversesSymlink(path) {
+    if (!symlinks.size) return false;
+    let prefix = '';
+    for (const part of path.split('/').filter(Boolean)) {
+      prefix += `/${part}`;
+      if (symlinks.has(prefix)) return true;
+    }
+    return false;
+  }
+
   function metadataFor(path) {
     let attributes = metadata.get(path);
     if (!attributes) {
@@ -838,6 +956,7 @@ export function createVfs(options = {}) {
   }
 
   function setFileBytes(path, bytes) {
+    invalidateSourceCache(path);
     const attributes = metadataFor(path);
     if (files.has(path)) {
       attributes.mtimeMs = Date.now();
@@ -846,21 +965,28 @@ export function createVfs(options = {}) {
     const group = hardLinks.get(path);
     if (!group) {
       files.set(path, bytes);
+      indexDirectPath(path, 'file');
       return;
     }
     group.bytes = bytes;
-    for (const linkPath of group.paths) files.set(linkPath, bytes);
+    for (const linkPath of group.paths) {
+      files.set(linkPath, bytes);
+      indexDirectPath(linkPath, 'file');
+    }
   }
 
   function removeFileBytes(path) {
+    invalidateSourceCache(path, true);
     const group = hardLinks.get(path);
     if (!group) {
       files.delete(path);
+      invalidateDirectoryIndex();
       return;
     }
     group.paths.delete(path);
     hardLinks.delete(path);
     files.delete(path);
+    invalidateDirectoryIndex();
     if (group.paths.size < 2) {
       for (const linkPath of group.paths) hardLinks.delete(linkPath);
     }
@@ -872,13 +998,17 @@ export function createVfs(options = {}) {
     hardLinks.set(source, group);
     hardLinks.set(destination, group);
     files.set(destination, group.bytes);
+    indexDirectPath(destination, 'file');
   }
 
   function moveFileNode(source, destination) {
+    invalidateSourceCache(source, true);
+    invalidateSourceCache(destination, true);
     const group = hardLinks.get(source);
     if (!group) {
       files.set(destination, files.get(source));
       files.delete(source);
+      invalidateDirectoryIndex();
       return;
     }
     group.paths.delete(source);
@@ -887,6 +1017,7 @@ export function createVfs(options = {}) {
     hardLinks.set(destination, group);
     files.set(destination, group.bytes);
     files.delete(source);
+    invalidateDirectoryIndex();
   }
 
   function notify(path, eventType) {
@@ -913,6 +1044,7 @@ export function createVfs(options = {}) {
     if (directories.has(path)) return false;
     ensureParent(path, operation);
     directories.add(path);
+    indexDirectPath(path, 'directory');
     metadataFor(path);
     notify(path, 'rename');
     return true;
@@ -933,11 +1065,13 @@ export function createVfs(options = {}) {
       if (!recursive) throw missing(parent, operation);
       const createdParent = makeDirectory(parent, true, operation);
       directories.add(path);
+      indexDirectPath(path, 'directory');
       metadataFor(path);
       notify(path, 'rename');
       return createdParent || path;
     }
     directories.add(path);
+    indexDirectPath(path, 'directory');
     metadataFor(path);
     notify(path, 'rename');
     return recursive ? path : undefined;
@@ -1017,6 +1151,7 @@ export function createVfs(options = {}) {
     if (files.has(path) || symlinks.has(path)) throw notDirectory(path, 'rmdir');
     if (!directories.has(path)) throw missing(path, 'rmdir');
     if (path === '/') throw denied(path, 'rmdir');
+    invalidateDirectoryIndex();
     const children = [...files.keys(), ...directories, ...symlinks.keys()]
       .filter((item) => item !== path && isWithin(item, path));
     if (children.length) {
@@ -1047,6 +1182,7 @@ export function createVfs(options = {}) {
       return;
     }
     if (path === '/') throw denied(path, 'rm');
+    invalidateDirectoryIndex();
     const children = [...files.keys(), ...directories, ...symlinks.keys()]
       .filter((item) => item !== path && isWithin(item, path));
     if (children.length && !recursive) throw notEmpty(path);
@@ -1065,26 +1201,7 @@ export function createVfs(options = {}) {
     access(path, 'scandir');
     if (files.has(path) || symlinks.has(path)) throw notDirectory(path, 'scandir');
     if (!directories.has(path)) throw missing(path, 'scandir');
-    const names = new Map();
-    const prefix = path === '/' ? '/' : `${path}/`;
-    for (const directory of directories) {
-      if (directory.startsWith(prefix) && directory !== path) {
-        const name = directory.slice(prefix.length).split('/')[0];
-        names.set(name, 'directory');
-      }
-    }
-    for (const file of files.keys()) {
-      if (file.startsWith(prefix)) {
-        const name = file.slice(prefix.length).split('/')[0];
-        names.set(name, names.get(name) || 'file');
-      }
-    }
-    for (const link of symlinks.keys()) {
-      if (link.startsWith(prefix)) {
-        const name = link.slice(prefix.length).split('/')[0];
-        names.set(name, names.get(name) || 'symlink');
-      }
-    }
+    const names = (syncDirectoryIndex() || rebuildDirectoryIndex()).get(path) || new Map();
     return [...names].sort((left, right) => lexicalCompare(left[0], right[0]))
       .map(([name, kind]) => new Dirent(name, kind, path));
   }
@@ -1361,6 +1478,7 @@ export function createVfs(options = {}) {
     ensureParent(path, 'symlink');
     if (nodeExists(path)) throw existsError(path, 'symlink');
     symlinks.set(path, target);
+    indexDirectPath(path, 'symlink');
     metadataFor(path);
     notify(path, 'rename');
   }
@@ -1388,6 +1506,7 @@ export function createVfs(options = {}) {
       addHardLink(source, destination);
     } else {
       symlinks.set(destination, symlinks.get(source));
+      indexDirectPath(destination, 'symlink');
     }
     const attributes = metadataFor(source);
     attributes.nlink += 1;
@@ -1926,6 +2045,8 @@ export function createVfs(options = {}) {
     if (directories.has(destination) && (files.has(source) || symlinks.has(source))) throw isDirectory(destination, 'rename');
     if (nodeExists(destination)) throw existsError(destination, 'rename');
     if (directories.has(source) && isWithin(destination, source)) throw invalidPath('rename target is inside source directory');
+
+    invalidateDirectoryIndex();
 
     if (files.has(source)) {
       moveFileNode(source, destination);
@@ -3172,6 +3293,7 @@ export function createVfs(options = {}) {
       ensureParent(path, 'mount');
       if (nodeExists(path)) throw existsError(path, 'mount');
       symlinks.set(path, target);
+      indexDirectPath(path, 'symlink');
       return;
     }
     if (type === 'directory') {
@@ -3180,6 +3302,7 @@ export function createVfs(options = {}) {
         current = `${current}/${part}`;
         if (files.has(current)) throw notDirectory(current, 'mount');
         directories.add(current);
+        indexDirectPath(current, 'directory');
       }
       return;
     }
@@ -3192,10 +3315,13 @@ export function createVfs(options = {}) {
         parent = `${parent}/${part}`;
         if (files.has(parent)) throw notDirectory(parent, 'mount');
         directories.add(parent);
+        indexDirectPath(parent, 'directory');
       }
     }
     if (files.has(path) && directories.has(path)) throw invalidPath();
+    invalidateSourceCache(path);
     files.set(path, decode(entryValue.data ?? entryValue.bytes ?? entryValue.content ?? entryValue));
+    indexDirectPath(path, 'file');
     if (entryValue.mode !== undefined) metadataFor(path).mode = modeValue(entryValue.mode);
   }
 
@@ -3215,6 +3341,7 @@ export function createVfs(options = {}) {
       mountConfig = tree;
       fixtureTree = tree.files ?? tree.tree ?? tree.fixtures ?? {};
     }
+    invalidateDirectoryIndex();
     const mountRecord = declareMount(mountConfig);
     seedTree(mountRecord.path, fixtureTree);
     for (const [link, target] of mountConfig.symlinks || []) {
@@ -3227,9 +3354,11 @@ export function createVfs(options = {}) {
         parent = `${parent}/${part}`;
         if (files.has(parent)) throw notDirectory(parent, 'mount');
         directories.add(parent);
+        indexDirectPath(parent, 'directory');
       }
       if (nodeExists(linkPath)) throw existsError(linkPath, 'mount');
       symlinks.set(linkPath, sourcePath(target));
+      indexDirectPath(linkPath, 'symlink');
     }
     return { path: mountRecord.path, mode: mountRecord.mode };
   }
@@ -3278,8 +3407,8 @@ export function createVfs(options = {}) {
     return (declared.length ? declared : [...files.keys()]).sort(lexicalCompare);
   }
 
-  function snapshot({ copy = true } = {}) {
-    const artifactList = artifactPaths().filter((path) => files.has(path)).map((path) => {
+  function snapshot({ copy = true, includeBackend = false, includeFiles = true } = {}) {
+    const artifactList = (includeBackend ? [] : artifactPaths()).filter((path) => files.has(path)).map((path) => {
       const bytes = files.get(path);
       return {
         path,
@@ -3287,7 +3416,7 @@ export function createVfs(options = {}) {
         size: bytes.byteLength,
       };
     });
-    return {
+    const result = {
       version: 1,
       mounts: [...mounts.values()].map((mountRecord) => ({
         path: mountRecord.path,
@@ -3295,9 +3424,35 @@ export function createVfs(options = {}) {
         artifacts: [...mountRecord.artifacts].sort(lexicalCompare),
       })),
       symlinks: [...symlinks.entries()].sort(([left], [right]) => lexicalCompare(left, right)),
+      directories: [...directories].sort(lexicalCompare),
       artifacts: artifactList,
-      files: Object.fromEntries(artifactList.map(({ path, bytes }) => [path, bytes])),
     };
+    if (includeFiles) result.files = Object.fromEntries(artifactList.map(({ path, bytes }) => [path, bytes]));
+    if (includeBackend) {
+      const backendDirectoryIndex = syncDirectoryIndex();
+      result.backend = {
+        files: new Map(files),
+        directories: new Set(directories),
+        symlinks: new Map(symlinks),
+        directoryIndex: backendDirectoryIndex
+          ? new Map([...backendDirectoryIndex].map(([path, entries]) => [path, new Map(entries)]))
+          : null,
+      };
+    }
+    return result;
+  }
+
+  function shareFileBuffers(scope = globalThis) {
+    if (scope?.crossOriginIsolated !== true || typeof scope?.SharedArrayBuffer !== 'function') return 0;
+    let sharedCount = 0;
+    for (const [path, bytes] of files) {
+      if (!(bytes instanceof Uint8Array) || bytes.buffer instanceof scope.SharedArrayBuffer) continue;
+      const shared = new scope.SharedArrayBuffer(bytes.byteLength);
+      new Uint8Array(shared).set(bytes);
+      files.set(path, new Uint8Array(shared));
+      sharedCount += 1;
+    }
+    return sharedCount;
   }
 
   function reset() {
@@ -3308,9 +3463,12 @@ export function createVfs(options = {}) {
       directories.add('/');
     }
     symlinks.clear();
+    invalidateDirectoryIndex();
     hardLinks.clear();
     metadata.clear();
     descriptors.clear();
+    sourceCache.clear();
+    sourceCacheBytes = 0;
     for (const mountRecord of mounts.values()) directories.add(mountRecord.path);
     for (const list of watchers.values()) for (const watcher of list) watcher.close();
     watchers.clear();
@@ -3852,7 +4010,11 @@ export function createVfs(options = {}) {
 
   const fileIndex = Object.freeze({
     has(pathValue) {
-      try { return files.has(resolvePath(resolve(pathValue))); } catch { return false; }
+      try {
+        const path = resolve(pathValue);
+        if (!traversesSymlink(path)) return files.has(path);
+        return files.has(resolvePath(path));
+      } catch { return false; }
     },
   });
 
@@ -3873,6 +4035,7 @@ export function createVfs(options = {}) {
     reset,
     snapshot,
     exportArtifacts: snapshot,
+    shareFileBuffers,
     declareArtifact(pathValue) {
       const path = resolve(pathValue);
       const mountRecord = access(path, 'declareArtifact');
@@ -3888,6 +4051,9 @@ export function createVfs(options = {}) {
       if (path.endsWith('.node') && files.has(path)) unsupportedNativeAddon(path);
       return readBytes(path);
     },
+    readSource,
+    get sourceCacheBytes() { return sourceCacheBytes; },
+    get sourceCacheSize() { return sourceCache.size; },
     readDescriptor: readDescriptorAsync,
     readFile,
     writeFile,

@@ -37,6 +37,7 @@ export interface NacelleHarnessRequest {
   timeoutMs: number;
   proxy?: NacelleHarnessProxySelection;
   variant?: string;
+  browser?: string;
   context?: {
     phase?: string;
     runId?: string;
@@ -52,6 +53,58 @@ export interface NacelleHarnessRequest {
     variant?: string;
     [key: string]: unknown;
   };
+  progress?: {
+    binding: '__bnhReportProgress';
+  } | null;
+  output?: {
+    binding: '__bnhRecordOutput';
+  } | null;
+}
+
+export interface NacelleHarnessProgressEvent {
+  schemaVersion: 1;
+  type: 'progress';
+  runId: string;
+  sequence: number;
+  phase: string;
+  event: string;
+  stage?: string;
+  module?: string;
+  spec?: string;
+  citgmVersion?: string;
+  browser?: string;
+  timeoutMs?: number;
+  entry?: string;
+  command?: string;
+  argumentCount?: number;
+  label?: 'upstream-test-execution' | 'upstream-test-completion';
+  childActive?: boolean;
+  counters?: {
+    npm?: {
+      citgmInstallEvents: number;
+      candidatePreloadEvents: number;
+      citgmInstallPackages: number;
+      citgmInstallFiles: number;
+      candidatePreloadPackages: number;
+      candidatePreloadFiles: number;
+    };
+    networkEvents: number;
+    output: {
+      stdoutBytes: number;
+      stdoutChunks: number;
+      stderrBytes: number;
+      stderrChunks: number;
+      totalBytes: number;
+      totalChunks: number;
+    };
+  };
+  stream?: 'stdout' | 'stderr';
+  bytes?: number;
+  chunks?: number;
+  events?: number;
+  files?: number;
+  code?: number | null | string;
+  timedOut?: boolean;
 }
 
 export interface NacelleHarnessRuntimeContext {

@@ -119,6 +119,197 @@ test('tar extraction rejects traversal, absolute paths, symlinks, and resource e
   assert.deepEqual(extracted.map(({ path }) => path), ['/app/package.json']);
 });
 
+test('VFS existence checks preserve symlink resolution while fast-pathing ordinary files', () => {
+  const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write' }] });
+  vfs.writeFile('/node/target.js', 'module.exports = true;');
+  vfs.fs.symlinkSync('/node/target.js', '/node/link.js');
+  vfs.fs.symlinkSync('/node', '/node/alias');
+
+  assert.equal(vfs.files.has('/node/target.js'), true);
+  assert.equal(vfs.files.has('/node/missing.js'), false);
+  assert.equal(vfs.files.has('/node/link.js'), true);
+  assert.equal(vfs.files.has('/node/alias/target.js'), true);
+});
+
+test('VFS resolves parent paths from a non-root process cwd', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/package.json': 'parent-package',
+      '/node/project/read.js': "process.stdout.write(require('node:fs').readFileSync('../package.json', 'utf8'));",
+    },
+  });
+  const child = await node.run({ entry: '/node/project/read.js', cwd: '/node/project' });
+  assert.equal(await child.exit, 0);
+  assert.equal(await child.stdoutText(), 'parent-package');
+});
+
+test('CommonJS resolution uses main and stops package type lookup at node_modules', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/package.json': JSON.stringify({ type: 'module' }),
+      '/node/app.cjs': "const main = require('main-only'); const implicit = require('implicit-commonjs'); process.stdout.write(main + ':' + implicit);",
+      '/node/node_modules/main-only/package.json': JSON.stringify({ main: 'main.cjs', module: 'module.cjs' }),
+      '/node/node_modules/main-only/main.cjs': "module.exports = 'main';",
+      '/node/node_modules/main-only/module.cjs': "module.exports = 'module';",
+      '/node/node_modules/implicit-commonjs/index.js': "module.exports = 'commonjs';",
+    },
+  });
+  const child = await node.run({ entry: '/node/app.cjs', cwd: '/node' });
+  assert.equal(await child.exit, 0);
+  assert.equal(await child.stdoutText(), 'main:commonjs');
+});
+
+test('node -e resolves packages relative to its child cwd', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/app/runner.js': "const { spawnSync } = require('node:child_process'); const result = spawnSync('node', ['-e', 'process.stdout.write(require(\"pkg\"))'], { cwd: '/node/app', encoding: 'utf8' }); if (result.status !== 0) { process.stderr.write(result.stderr); process.exitCode = 1; } else process.stdout.write(result.stdout);",
+      '/node/app/node_modules/pkg/index.js': "module.exports = 'child-cwd';",
+    },
+  });
+  const child = await node.run({ entry: '/node/app/runner.js', cwd: '/node/app' });
+  assert.equal(await child.exit, 0);
+  assert.equal(await child.stdoutText(), 'child-cwd');
+});
+
+test('CommonJS resolution honors exports, directory main, and extension boundaries', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/app/main.cjs': `const assert = require('node:assert/strict');
+const pkg = require('pkg');
+assert.equal(pkg, 'require-target');
+assert.throws(() => require('pkg/private'), (error) => error.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED', 'unexported package subpath');
+assert.equal(require('./dir'), 'directory-main', 'relative directory package main');
+assert.throws(() => require.resolve('./only-cjs'), (error) => error.code === 'MODULE_NOT_FOUND', 'implicit cjs require.resolve');
+assert.throws(() => require('./only-cjs'), (error) => error.code === 'MODULE_NOT_FOUND', 'implicit cjs require');
+const { spawnSync } = require('node:child_process');
+const child = spawnSync('node', ['-e', 'process.stdout.write(JSON.stringify(process.argv))', '--', 'arg'], { cwd: '/node/app', encoding: 'utf8' });
+assert.equal(child.status, 0);
+assert.deepEqual(JSON.parse(child.stdout), ['node', 'arg']);
+process.stdout.write('commonjs resolver contracts completed');`,
+      '/node/app/dir/package.json': JSON.stringify({ main: 'entry.cjs' }),
+      '/node/app/dir/entry.cjs': "module.exports = 'directory-main';",
+      '/node/app/only-cjs.cjs': "module.exports = 'should-not-be-discovered';",
+      '/node/app/node_modules/pkg/package.json': JSON.stringify({
+        main: 'main.js',
+        exports: { '.': { require: './require.cjs', import: './import.mjs' }, './public': './public.js' },
+      }),
+      '/node/app/node_modules/pkg/main.js': "module.exports = 'wrong-main';",
+      '/node/app/node_modules/pkg/require.cjs': "module.exports = 'require-target';",
+      '/node/app/node_modules/pkg/import.mjs': 'export default "import-target";',
+      '/node/app/node_modules/pkg/private.js': "module.exports = 'private';",
+    },
+  });
+  const child = await node.run({ entry: '/node/app/main.cjs', cwd: '/node/app' });
+  assert.equal(await child.exit, 0, `${await child.stdoutText()}${await child.stderrText()}`);
+  assert.equal(await child.stdoutText(), 'commonjs resolver contracts completed');
+});
+
+test('CommonJS cache hits return before running the load hook again', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/app/main.cjs': `const assert = require('node:assert/strict');
+const moduleApi = require('node:module');
+let resolves = 0;
+let loads = 0;
+const registration = moduleApi.registerHooks({
+  resolve(specifier, context, nextResolve) {
+    resolves += 1;
+    return nextResolve(specifier, context);
+  },
+  load(url, context, nextLoad) {
+    loads += 1;
+    return nextLoad(url, context);
+  },
+});
+const first = require('./cached.cjs');
+const second = require('./cached.cjs');
+registration.deregister();
+assert.equal(first, second);
+assert.equal(resolves, 1);
+assert.equal(loads, 1);
+process.stdout.write('commonjs cache contract completed');`,
+      '/node/app/cached.cjs': "module.exports = { cached: true };",
+    },
+  });
+  const child = await node.run({ entry: '/node/app/main.cjs', cwd: '/node/app' });
+  assert.equal(await child.exit, 0, `${await child.stdoutText()}${await child.stderrText()}`);
+  assert.equal(await child.stdoutText(), 'commonjs cache contract completed');
+});
+
+test('deleting require.cache invalidates the CommonJS request cache', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/app/main.cjs': `const assert = require('node:assert/strict');
+const moduleApi = require('node:module');
+let resolves = 0;
+let loads = 0;
+const registration = moduleApi.registerHooks({
+  resolve(specifier, context, nextResolve) {
+    resolves += 1;
+    return nextResolve(specifier, context);
+  },
+  load(url, context, nextLoad) {
+    loads += 1;
+    return nextLoad(url, context);
+  },
+});
+const filename = require.resolve('./cached.cjs');
+const first = require('./cached.cjs');
+delete require.cache[filename];
+const second = require('./cached.cjs');
+registration.deregister();
+assert.equal(first, 1);
+assert.equal(second, 2);
+assert.equal(resolves, 2);
+assert.equal(loads, 2);
+process.stdout.write('commonjs cache invalidation contract completed');`,
+      '/node/app/cached.cjs': "globalThis.__bnhCacheLoads = (globalThis.__bnhCacheLoads || 0) + 1; module.exports = globalThis.__bnhCacheLoads;",
+    },
+  });
+  const child = await node.run({ entry: '/node/app/main.cjs', cwd: '/node/app' });
+  assert.equal(await child.exit, 0, `${await child.stdoutText()}${await child.stderrText()}`);
+  assert.equal(await child.stdoutText(), 'commonjs cache invalidation contract completed');
+});
+
+test('CommonJS package imports use the normal resolve and cache path', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/package.json': JSON.stringify({ imports: { '#answer': './answer.cjs' } }),
+      '/node/main.cjs': `const assert = require('node:assert/strict');
+const moduleApi = require('node:module');
+let resolves = 0;
+let loads = 0;
+const registration = moduleApi.registerHooks({
+  resolve(specifier, context, nextResolve) {
+    resolves += 1;
+    return nextResolve(specifier, context);
+  },
+  load(url, context, nextLoad) {
+    loads += 1;
+    return nextLoad(url, context);
+  },
+});
+assert.equal(require('#answer'), 42);
+assert.equal(require('#answer'), 42);
+registration.deregister();
+assert.equal(resolves, 1);
+assert.equal(loads, 1);
+process.stdout.write('commonjs package-import contract completed');`,
+      '/node/answer.cjs': 'module.exports = 42;',
+    },
+  });
+  const child = await node.run({ entry: '/node/main.cjs', cwd: '/node' });
+  assert.equal(await child.exit, 0, `${await child.stdoutText()}${await child.stderrText()}`);
+  assert.equal(await child.stdoutText(), 'commonjs package-import contract completed');
+});
+
 test('output capture is bounded and reports dropped bytes without retaining the full stream', async () => {
   const output = createOutputCollector({ limits: { total: 4, stdout: 4, stderr: 4 }, tailBytes: 2 });
   output.stdout.write(new TextEncoder().encode('abcd'));

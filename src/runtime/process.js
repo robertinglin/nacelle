@@ -1040,6 +1040,9 @@ export function createBrowserProcess(options = {}) {
       ...(options.workerDataTransferList || []),
     ];
     worker.postMessage(initialData, transferList);
+    // The worker now owns the initialized VFS snapshot. Do not retain the
+    // parent-side descriptor map through the child lifecycle closures.
+    options.vfs = undefined;
     const timeout = options.startupTimeout ?? options.timeout;
     if (timeout !== undefined) startupTimer = setTimeout(() => { finalize({ status: 'failed', kind: 'timeout', code: null, signal: 'SIGKILL', forced: true, error: { name: 'TimeoutError', message: 'worker startup timed out', code: 'ERR_PROCESS_TIMEOUT' } }); }, timeout);
     if (options.signal?.addEventListener) {

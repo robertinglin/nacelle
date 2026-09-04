@@ -1,0 +1,75 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { transformAsyncSource } from '../../../../src/runtime/async-transform.js';
+
+function runGenerator(generatorFactory) {
+  const iterator = generatorFactory();
+  return new Promise((resolve, reject) => {
+    const step = (method, value) => {
+      let result;
+      try {
+        result = iterator[method](value);
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      if (result.done) {
+        resolve(result.value);
+        return;
+      }
+      Promise.resolve(result.value).then(
+        (nextValue) => step('next', nextValue),
+        (error) => step('throw', error),
+      );
+    };
+    step('next');
+  });
+}
+
+test('keeps awaited function expression calls syntactically valid', async () => {
+  const source = `
+    async function invoke() {
+      return await function ({ value }) {
+        return value;
+      }({ value: 7 });
+    }
+    invoke();
+  `;
+  const transformed = transformAsyncSource(source).source;
+  const invoke = new Function('__bnhAsync', `${transformed}; return invoke;`)(
+    (generatorFactory) => runGenerator(generatorFactory),
+  );
+
+  assert.equal(await invoke(), 7);
+});
+
+test('keeps awaited optional calls syntactically valid', async () => {
+  const source = `
+    async function invoke(callback, value) {
+      return await callback?.(value);
+    }
+    invoke((input) => input, 9);
+  `;
+  const transformed = transformAsyncSource(source).source;
+  const invoke = new Function('__bnhAsync', `${transformed}; return invoke;`)(
+    (generatorFactory) => runGenerator(generatorFactory),
+  );
+
+  assert.equal(await invoke((input) => input, 9), 9);
+});
+
+test('keeps async function boundaries intact across nested template literals', async () => {
+  const source = `
+    async function invoke(value) {
+      const message = \`${'${value ? `nested ${value}` : "fallback"}'}\`;
+      return await Promise.resolve(message);
+    }
+    invoke('value');
+  `;
+  const transformed = transformAsyncSource(source).source;
+  const invoke = new Function('__bnhAsync', `${transformed}; return invoke;`)(
+    (generatorFactory) => runGenerator(generatorFactory),
+  );
+
+  assert.equal(await invoke('value'), 'nested value');
+});

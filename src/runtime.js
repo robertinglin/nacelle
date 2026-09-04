@@ -4608,7 +4608,7 @@ export function createRuntime({
   nodeVersion,
   nodeProfile,
   wasmBaseUrl,
-} = {}) {
+  } = {}) {
   const scope = globalObject;
   const runtimeQueueMicrotask = typeof scope.queueMicrotask === 'function'
     ? scope.queueMicrotask.bind(scope)
@@ -6250,6 +6250,7 @@ export function createRuntime({
       currentProcess: () => scope.process,
       runInProcessContext: (owner, callback) => {
         const previousProcess = scope.process;
+        const previousActiveProcess = scope.__bnhActiveProcess;
         const previousTimers = {
           setTimeout: scope.setTimeout,
           clearTimeout: scope.clearTimeout,
@@ -6264,6 +6265,8 @@ export function createRuntime({
           return callback();
         } finally {
           Object.assign(scope, previousTimers);
+          if (previousActiveProcess === undefined) delete scope.__bnhActiveProcess;
+          else scope.__bnhActiveProcess = previousActiveProcess;
           scope.process = previousProcess;
         }
       },
@@ -6283,9 +6286,15 @@ export function createRuntime({
       processOwner: processObject,
       runInProcessContext: (owner, callback) => {
         const previous = scope.process;
+        const previousActiveProcess = scope.__bnhActiveProcess;
         scope.process = owner;
+        scope.__bnhActiveProcess = owner;
         try { return callback(); }
-        finally { scope.process = previous; }
+        finally {
+          if (previousActiveProcess === undefined) delete scope.__bnhActiveProcess;
+          else scope.__bnhActiveProcess = previousActiveProcess;
+          scope.process = previous;
+        }
       },
     });
     const internalBindingContract = createBrowserInternalBindings({
@@ -7455,6 +7464,7 @@ export function createRuntime({
           const runInOwnerContext = (callback) => {
             const previous = {
               process: scope.process,
+              activeProcess: scope.__bnhActiveProcess,
               setTimeout: scope.setTimeout,
               clearTimeout: scope.clearTimeout,
               setInterval: scope.setInterval,
@@ -7464,16 +7474,20 @@ export function createRuntime({
               queueMicrotask: scope.queueMicrotask,
             };
             scope.process = ownerProcess;
+            scope.__bnhActiveProcess = ownerProcess;
             if (ownerProcess._bnhTimerContext) Object.assign(scope, ownerProcess._bnhTimerContext);
             try {
               return callback();
             } finally {
+              if (previous.activeProcess === undefined) delete scope.__bnhActiveProcess;
+              else scope.__bnhActiveProcess = previous.activeProcess;
               Object.assign(scope, previous);
             }
           };
           const runInChildContext = (callback) => {
             const previous = {
               process: scope.process,
+              activeProcess: scope.__bnhActiveProcess,
               setTimeout: scope.setTimeout,
               clearTimeout: scope.clearTimeout,
               setInterval: scope.setInterval,
@@ -7484,10 +7498,13 @@ export function createRuntime({
             };
             const childOwner = childProcess?.processObject || childProcess;
             scope.process = childOwner || scope.process;
+            if (childOwner) scope.__bnhActiveProcess = childOwner;
             if (childOwner?._bnhTimerContext) Object.assign(scope, childOwner._bnhTimerContext);
             try {
               return callback();
             } finally {
+              if (previous.activeProcess === undefined) delete scope.__bnhActiveProcess;
+              else scope.__bnhActiveProcess = previous.activeProcess;
               Object.assign(scope, previous);
             }
           };
@@ -8947,7 +8964,7 @@ export function createRuntime({
             // turn before its implicit beforeExit check. Node runs all
             // already-queued promise reactions before deciding that a
             // process is idle; checking from a microtask can otherwise close
-            // a child between two `await` continuations and lose its final
+            // a child between two await continuations and lose its final
             // stdout. Use the host timer surface so this check is not itself
             // registered as child work.
             const nativeSetTimeout = scope.__BNH_NATIVE_TIMERS__?.setTimeout
@@ -9057,15 +9074,43 @@ export function createRuntime({
               processOwner: childProc.processObject,
               runInProcessContext: (owner, callback) => {
                 const previousProcess = scope.process;
+                const previousActiveProcess = scope.__bnhActiveProcess;
                 scope.process = owner;
+                scope.__bnhActiveProcess = owner;
                 try { return callback(); }
-                finally { scope.process = previousProcess; }
+                finally {
+                  if (previousActiveProcess === undefined) delete scope.__bnhActiveProcess;
+                  else scope.__bnhActiveProcess = previousActiveProcess;
+                  scope.process = previousProcess;
+                }
               },
             });
             childProc.processObject._bnhHasPendingTasks = () => childTaskReleases.size > 0;
             childProc.processObject._bnhTryExit = () => tryExitChild();
+            let childContextResource = null;
+            const runInChildAsyncContext = (callback) => {
+              if (!childContextResource) {
+                const previousProcess = scope.process;
+                const previousActiveProcess = scope.__bnhActiveProcess;
+                scope.process = childProc.processObject;
+                scope.__bnhActiveProcess = childProc.processObject;
+                try {
+                  // A same-realm child is still a separate Node process for
+                  // async-context purposes. Use the runtime root as the
+                  // trigger so request-local stores are not borrowed from the
+                  // parent that happened to launch this child.
+                  childContextResource = new AsyncResource('PROCESSWRAP', { triggerAsyncId: 1 });
+                } finally {
+                  if (previousActiveProcess === undefined) delete scope.__bnhActiveProcess;
+                  else scope.__bnhActiveProcess = previousActiveProcess;
+                  scope.process = previousProcess;
+                }
+              }
+              return childContextResource.runInAsyncScope(callback, childProc.processObject);
+            };
             childProc.processObject._bnhRunInContext = (callback) => {
               const previousProcess = scope.process;
+              const previousActiveProcess = scope.__bnhActiveProcess;
               const previousConsole = scope.console;
               const previousTimers = {
                 setTimeout: scope.setTimeout,
@@ -9077,13 +9122,16 @@ export function createRuntime({
                 queueMicrotask: scope.queueMicrotask,
               };
               scope.process = childProc.processObject;
+              scope.__bnhActiveProcess = childProc.processObject;
               if (childProc.processObject._bnhConsole) scope.console = childProc.processObject._bnhConsole;
               if (childProc.processObject._bnhTimerContext) Object.assign(scope, childProc.processObject._bnhTimerContext);
               try {
-                return callback();
+                return runInChildAsyncContext(callback);
               } finally {
                 Object.assign(scope, previousTimers);
                 scope.console = previousConsole;
+                if (previousActiveProcess === undefined) delete scope.__bnhActiveProcess;
+                else scope.__bnhActiveProcess = previousActiveProcess;
                 scope.process = previousProcess;
               }
             };
@@ -9387,19 +9435,47 @@ export function createRuntime({
                 if (prepared.source === null) {
                   childProc.processObject.__bnhModuleIsPreloading = true;
                   try {
-                    for (const preload of prepared.preloads) {
-                      loadModuleSync(normalizePath(preload, cwd), entryPath, childProc.processObject, scope, Buffer, stderrArr, undefined, moduleState, false, compileCacheState, false, syncStreamWebApi);
-                    }
+                    runInChildAsyncContext(() => {
+                      for (const preload of prepared.preloads) {
+                        loadModuleSync(normalizePath(preload, cwd), entryPath, childProc.processObject, scope, Buffer, stderrArr, undefined, moduleState, false, compileCacheState, false, syncStreamWebApi);
+                      }
+                    });
                   } finally {
                     childProc.processObject.__bnhModuleIsPreloading = false;
                   }
                 }
                 const childSource = prepared.source === null ? undefined
                   : prepared.source.replace(/\bawait\s+(?:import|__bnhImport)\s*\(/g, 'require(');
-                loadModuleSync(entryPath, entryPath, childProc.processObject, scope, Buffer, stderrArr, childSource, moduleState, true, compileCacheState, false, syncStreamWebApi);
+                runInChildAsyncContext(() => loadModuleSync(
+                  entryPath,
+                  entryPath,
+                  childProc.processObject,
+                  scope,
+                  Buffer,
+                  stderrArr,
+                  childSource,
+                  moduleState,
+                  true,
+                  compileCacheState,
+                  false,
+                  syncStreamWebApi,
+                ));
                 if (prepared.executionArgv.some((value) => String(value) === '--test')) {
                   for (const extraPath of prepared.afterScript.filter((value) => String(value).endsWith('.js'))) {
-                    loadModuleSync(normalizePath(extraPath, prepared.cwd), entryPath, childProc.processObject, scope, Buffer, stderrArr, undefined, moduleState, true, compileCacheState, false, syncStreamWebApi);
+                    runInChildAsyncContext(() => loadModuleSync(
+                      normalizePath(extraPath, prepared.cwd),
+                      entryPath,
+                      childProc.processObject,
+                      scope,
+                      Buffer,
+                      stderrArr,
+                      undefined,
+                      moduleState,
+                      true,
+                      compileCacheState,
+                      false,
+                      syncStreamWebApi,
+                    ));
                   }
                 }
                 childProc.processObject.__bnhNodeTestSourceLoaded?.();

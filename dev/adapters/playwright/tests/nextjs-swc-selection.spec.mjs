@@ -361,7 +361,6 @@ test.describe('Next.js SWC package selection', () => {
         stderr: await child.stderrText(),
       };
     });
-
     expect(result.exitCode, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(result.stdout).toContain('NEXT_LIVE_WORKER_WASM:ok');
   });
@@ -755,9 +754,31 @@ test.describe('Next.js SWC package selection', () => {
           const { AsyncLocalStorage } = require('node:async_hooks');
           const React = require('next/dist/compiled/react');
           const ReactDOMServer = require('next/dist/compiled/react-dom/server.node');
+          const ReactDOMStatic = require('next/dist/compiled/react-dom/static.node');
+          const { workUnitAsyncStorage } = require('next/dist/server/app-render/work-unit-async-storage.external');
           const storage = new AsyncLocalStorage();
+          const microtaskStore = await new Promise((resolve) => storage.run(
+            'microtask',
+            () => queueMicrotask(() => resolve(storage.getStore())),
+          ));
+          assert.equal(microtaskStore, 'microtask');
+          const promiseStore = await storage.run('promise', async () => {
+            await Promise.resolve();
+            return storage.getStore();
+          });
+          assert.equal(promiseStore, 'promise');
+          const immediateStore = await new Promise((resolve) => storage.run(
+            'immediate',
+            () => setImmediate(() => resolve(storage.getStore())),
+          ));
+          assert.equal(immediateStore, 'immediate');
+          const rendered = Promise.resolve('hello');
+          function App() {
+            assert.strictEqual(storage.getStore(), 'request');
+            return React.createElement('h1', null, React.use(rendered));
+          }
           const streamPromise = storage.run('request', () => ReactDOMServer.renderToReadableStream(
-            React.createElement('h1', null, 'hello'),
+            React.createElement(App),
           ));
           const stream = await streamPromise;
           const reader = stream.getReader();
@@ -768,6 +789,34 @@ test.describe('Next.js SWC package selection', () => {
             chunks.push(new TextDecoder().decode(result.value));
           }
           assert.match(chunks.join(''), /hello/);
+          const prerenderPromise = storage.run('request', () => ReactDOMStatic.prerender(
+            React.createElement(App),
+          ));
+          const prerender = await prerenderPromise;
+          const preludeReader = prerender.prelude.getReader();
+          while (true) {
+            const result = await preludeReader.read();
+            if (result.done) break;
+          }
+          function NextLikeApp() {
+            assert.equal(workUnitAsyncStorage.getStore()?.type, 'request');
+            return React.createElement('h1', null, 'next-like');
+          }
+          async function renderNextLikeAfterYield() {
+            await Promise.resolve();
+            return ReactDOMStatic.prerender(
+              React.createElement(NextLikeApp),
+            );
+          }
+          const nextLike = await workUnitAsyncStorage.run(
+            { type: 'request' },
+            renderNextLikeAfterYield,
+          );
+          const nextLikeReader = nextLike.prelude.getReader();
+          while (true) {
+            const result = await nextLikeReader.read();
+            if (result.done) break;
+          }
         })().catch((error) => {
           console.error(error.stack || error);
           process.exitCode = 1;
@@ -779,7 +828,6 @@ test.describe('Next.js SWC package selection', () => {
         stderr: await child.stderrText(),
       };
     });
-
     expect(result.exitCode, `${result.stdout}\n${result.stderr}`).toBe(0);
   });
 

@@ -235,6 +235,25 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     expect(imported.answer()).toBe(42);
   });
 
+  test('module-loader uses the bounded VFS source seam for textual modules', async () => {
+    const vfs = createVfs({
+      mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }],
+    });
+    vfs.fs.writeFileSync('/node/index.mjs', 'export const answer = 42;');
+    const loader = createModuleLoader({
+      files: {
+        has: (pathname) => vfs.files.has(pathname),
+        get: () => { throw new Error('textual module read bypassed the VFS source seam'); },
+      },
+      readSource: (pathname) => vfs.readSource(pathname),
+      globalObject: globalThis,
+      builtins: {},
+    });
+    const imported = await loader.import('./index.mjs', '/node/entry.mjs');
+    expect(imported.answer).toBe(42);
+    expect(vfs.sourceCacheSize).toBe(1);
+  });
+
   test('creates ESM-compatible shims for ESM package bin entries', async () => {
     const encoder = new TextEncoder();
     const vfs = createVfs({

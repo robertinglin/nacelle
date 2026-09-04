@@ -11628,6 +11628,7 @@ export function createRuntime({
         has: (pathname) => vfs.files.has(pathname),
         get: (pathname) => vfs.read(pathname),
       },
+      readSource: (pathname) => vfs.readSource(pathname),
       builtins,
       globalObject: scope,
       evaluateCommonJS: (specifier, importer, processOverride) => loadModule(

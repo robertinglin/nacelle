@@ -34,6 +34,67 @@ test.describe('browser-native worker process boundary', () => {
     expect(result).toEqual({ raw: true, descriptor: true, artifact: true, sourceUnchanged: true });
   });
 
+  test('terminates a worker after ordered natural completion', async ({ page }) => {
+    await openRuntime(page);
+    const result = await page.evaluate(async () => {
+      const { createBrowserProcess } = await import('/runtime/process.js');
+      let terminationCount = 0;
+      let cleanupResolve;
+      const cleanup = new Promise((resolve) => { cleanupResolve = resolve; });
+      const fakeWorker = {
+        listeners: new Map(),
+        on(name, listener) {
+          const set = this.listeners.get(name) || [];
+          set.push(listener);
+          this.listeners.set(name, set);
+          return this;
+        },
+        postMessage(message) {
+          const frame = {
+            channel: 'bnh-process-control',
+            key: message.key,
+            runId: message.runId,
+            childId: message.childId,
+          };
+          queueMicrotask(() => message.controlPort.postMessage({ ...frame, type: 'ready' }));
+          queueMicrotask(() => message.controlPort.postMessage({
+            ...frame,
+            type: 'terminal',
+            status: 'exited',
+            kind: 'natural',
+            code: 0,
+            signal: null,
+            forced: false,
+            lastUserSequence: 0,
+          }));
+          message.controlPort.onmessage = (event) => {
+            if (event.data?.type !== 'cleanup') return;
+            message.controlPort.postMessage({ ...frame, type: 'worker-closed' });
+            cleanupResolve();
+          };
+          message.controlPort.start?.();
+        },
+        terminate() {
+          terminationCount += 1;
+          return true;
+        },
+      };
+      const child = createBrowserProcess({
+        scope: globalThis,
+        workerFactory: () => fakeWorker,
+        run: () => {},
+        argv: ['node', 'entry.js'],
+      });
+      const terminal = await child.wait();
+      await cleanup;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return { terminal, terminationCount };
+    });
+
+    expect(result.terminal).toMatchObject({ status: 'exited', kind: 'natural', code: 0 });
+    expect(result.terminationCount).toBe(1);
+  });
+
   test('keeps worker IPC/output FIFO and emits one terminal lifecycle', async ({ page }) => {
     await openRuntime(page);
     const result = await page.evaluate(async () => {

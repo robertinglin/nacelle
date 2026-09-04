@@ -521,7 +521,10 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       void child?.kill();
     }, timeout);
 
-    const installResult = await npm.install(`citgm@${citgmVersion}`, {
+    // Retain only the small install summary. The full result also contains
+    // the materialized file map; keeping it alive after mount would retain
+    // the pre-shared ArrayBuffers alongside the VFS's immutable file views.
+    const { packages, totalFiles } = await npm.install(`citgm@${citgmVersion}`, {
       cwd: '/node',
       // The materialized VFS is the authoritative package tree for this run.
       // Keep the cache focused on metadata/tarballs so it does not retain a
@@ -530,8 +533,8 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       onProgress: (event) => recordProgress(progress.bootstrap, event),
     });
     installStats = {
-      packages: installResult.packages,
-      totalFiles: installResult.totalFiles,
+      packages,
+      totalFiles,
     };
     await progressReporter.flush();
     report('setup', 'citgm-install-complete', { events: progress.bootstrap.events });

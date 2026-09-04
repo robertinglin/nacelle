@@ -12224,6 +12224,9 @@ export function createRuntime({
       const worker = proxyCapability.adapter && !workerIsolation
         ? createVirtualProcess({ ...processOptions, scope, forceFallback: true })
         : capabilities.process.create(processOptions);
+      // The worker boundary has consumed the snapshot. Keep the returned
+      // child/output listener from retaining the complete VFS descriptor map.
+      processOptions.vfs = undefined;
       const outputListener = (record) => {
         if (record.stream === 'stdout') processOptions.onStdout?.(record.bytes);
         else processOptions.onStderr?.(record.bytes);

@@ -4702,7 +4702,7 @@ export function createRuntime({
         const pkgJson = path.join(pkgDir, 'package.json');
         if (vfs.files.has(pkgJson)) {
           try {
-            const raw = vfs.read(pkgJson);
+            const raw = vfs.readSource(pkgJson);
             const config = JSON.parse(typeof raw === 'string' ? raw : new TextDecoder().decode(raw));
             if (subpath) {
               const subBase = path.join(pkgDir, subpath);
@@ -4741,7 +4741,7 @@ export function createRuntime({
       const packagePath = path.join(directory, 'package.json');
       if (vfs.files.has(packagePath)) {
         try {
-          const source = vfs.read(packagePath);
+          const source = vfs.readSource(packagePath);
           const text = typeof source === 'string' ? source : new TextDecoder().decode(source);
           const config = JSON.parse(text);
           return config.type === 'module' ? 'module' : 'commonjs';
@@ -10851,7 +10851,7 @@ export function createRuntime({
       trackTask,
       stdout,
       stderr,
-      (pathname) => vfs.read(pathname),
+      (pathname) => vfs.readSource(pathname),
       entry,
       runtimeFetchRef,
     );
@@ -11295,7 +11295,7 @@ export function createRuntime({
       seen.add(normalizedEntry);
       let source;
       try {
-        source = vfs.read(normalizedEntry);
+        source = vfs.readSource(normalizedEntry);
       } catch {
         return false;
       }
@@ -11509,7 +11509,7 @@ export function createRuntime({
         loaded = runModuleHook('load', resolvedURL, context, (url) => {
           const candidate = url.startsWith('file:') ? fileURLToPath(url) : url;
           if (candidate.endsWith('.node')) rejectNativeAddon(candidate, processObj);
-          const source = vfs.read(candidate);
+          const source = vfs.readSource(candidate);
           return {
             url,
             format: candidate.endsWith('.json') ? 'json' : isRuntimeEsmModule(candidate, processObj.execArgv) ? 'module' : 'commonjs',
@@ -11550,7 +11550,7 @@ export function createRuntime({
             }
             return cachedExports;
           }
-      const source = loaded?.source ?? vfs.read(resolved);
+      const source = loaded?.source ?? vfs.readSource(resolved);
       const text = typeof source === 'string' ? source : new TextDecoder().decode(source);
       const compileText = text;
           if (resolved.endsWith('.mjs')
@@ -11599,7 +11599,7 @@ export function createRuntime({
         for (const match of text.matchAll(/\bmodule\.exports\s*=\s*require\(\s*(['\"])(.*?)\1\s*\)/g)) {
           try {
             const child = esmLoader.resolve(match[2], resolved, ['node', 'require']);
-            const childSource = vfs.read(child);
+            const childSource = vfs.readSource(child);
             for (const name of cjsStaticExportNames(typeof childSource === 'string'
               ? childSource : new TextDecoder().decode(childSource))) exportNames.add(name);
             } catch { /* static metadata is best effort */ }
@@ -11608,7 +11608,7 @@ export function createRuntime({
           if (!text.includes(`Object.keys(${match[1]})`)) continue;
           try {
             const child = esmLoader.resolve(match[3], resolved, ['node', 'require']);
-            const childSource = vfs.read(child);
+            const childSource = vfs.readSource(child);
             for (const name of cjsStaticExportNames(typeof childSource === 'string'
               ? childSource : new TextDecoder().decode(childSource))) exportNames.add(name);
           } catch { /* static metadata is best effort */ }

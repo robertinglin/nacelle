@@ -7,6 +7,7 @@ const VM_CONSTANTS = Object.freeze(Object.assign(Object.create(null), {
 }));
 const GLOBAL_SHADOWS = Object.freeze(['process', 'Buffer']);
 const CONTEXT_REALMS = new WeakMap();
+let nextScriptDynamicImportId = 1;
 const TYPED_ARRAY_NAMES = Object.freeze([
   'Int8Array',
   'Uint8Array',
@@ -470,6 +471,112 @@ function splitModuleDeclaration(value) {
   return parts.filter(Boolean);
 }
 
+// vm.Script runs in a browser realm where a native import() would resolve
+// against the adapter page rather than Node's module loader. Preserve string,
+// comment, and template-literal contents while routing actual import
+// expressions through the script's per-context callback.
+function rewriteScriptDynamicImports(source, bindingName) {
+  const text = String(source);
+  let index = 0;
+  const isIdentifierPart = (character) => character !== undefined && /[$\w]/u.test(character);
+
+  const copyQuoted = (quote) => {
+    const start = index;
+    index += 1;
+    while (index < text.length) {
+      const character = text[index];
+      index += 1;
+      if (character === '\\') index += 1;
+      else if (character === quote) break;
+    }
+    return text.slice(start, index);
+  };
+
+  const copyComment = () => {
+    const start = index;
+    index += 2;
+    if (text[start + 1] === '/') {
+      while (index < text.length && text[index] !== '\n' && text[index] !== '\r') index += 1;
+    } else {
+      while (index < text.length && !(text[index] === '*' && text[index + 1] === '/')) index += 1;
+      if (index < text.length) index += 2;
+    }
+    return text.slice(start, index);
+  };
+
+  const scanTemplate = () => {
+    let result = '`';
+    index += 1;
+    while (index < text.length) {
+      const character = text[index];
+      if (character === '\\') {
+        result += text.slice(index, index + 2);
+        index += 2;
+      } else if (character === '`') {
+        result += character;
+        index += 1;
+        break;
+      } else if (character === '$' && text[index + 1] === '{') {
+        result += '${';
+        index += 2;
+        result += scanCode(true);
+      } else {
+        result += character;
+        index += 1;
+      }
+    }
+    return result;
+  };
+
+  const scanCode = (stopAtBrace = false) => {
+    let result = '';
+    let braceDepth = stopAtBrace ? 1 : 0;
+    while (index < text.length) {
+      const character = text[index];
+      const next = text[index + 1];
+      if (character === '\'' || character === '"') {
+        result += copyQuoted(character);
+        continue;
+      }
+      if (character === '/' && (next === '/' || next === '*')) {
+        result += copyComment();
+        continue;
+      }
+      if (character === '`') {
+        result += scanTemplate();
+        continue;
+      }
+      if (stopAtBrace) {
+        if (character === '{') braceDepth += 1;
+        if (character === '}') {
+          braceDepth -= 1;
+          result += character;
+          index += 1;
+          if (braceDepth === 0) return result;
+          continue;
+        }
+      }
+      if (text.startsWith('import', index)
+        && !isIdentifierPart(text[index - 1])
+        && text[index - 1] !== '.'
+        && !isIdentifierPart(text[index + 6])) {
+        let callIndex = index + 6;
+        while (/\s/u.test(text[callIndex] || '')) callIndex += 1;
+        if (text[callIndex] === '(') {
+          result += bindingName;
+          index += 6;
+          continue;
+        }
+      }
+      result += character;
+      index += 1;
+    }
+    return result;
+  };
+
+  return scanCode();
+}
+
 function transformModuleSource(source) {
   let transformed = String(source).replace(/\bimport\.meta\b/g, '__bnhImportMeta');
   transformed = transformed.replace(/\bimport\s*\(/g, '__bnhDynamicImport(');
@@ -766,9 +873,39 @@ export function createVmModule(scope = globalThis) {
     runInContext(contextifiedObject, options = {}) {
       validateContext(contextifiedObject, isContext);
       const runOptions = getRunInContextArgs(options);
-      const source = this.code;
+      const dynamicImportBinding = `__bnhVmDynamicImport${nextScriptDynamicImportId++}`;
+      const hasDynamicImport = /\bimport\s*\(/u.test(this.code);
+      const source = hasDynamicImport
+        ? rewriteScriptDynamicImports(this.code, dynamicImportBinding)
+        : this.code;
       if (runOptions.timeout > 0 && isObviouslyUnbounded(source)) throw timedOutScriptError(runOptions.timeout);
       const context = contextifiedObject;
+      if (hasDynamicImport) {
+        const dynamicImport = (specifier) => {
+          if (typeof this.options.importModuleDynamically === 'function') {
+            return Promise.resolve(this.options.importModuleDynamically(specifier, this));
+          }
+          const activeProcess = context.process || scope.process;
+          if (typeof activeProcess?.__bnhModuleImport === 'function') {
+            return Promise.resolve(activeProcess.__bnhModuleImport(
+              specifier,
+              this.options.filename,
+              undefined,
+              activeProcess,
+            ));
+          }
+          return Promise.reject(vmError(
+            'ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING',
+            'A dynamic import callback was not specified',
+          ));
+        };
+        Object.defineProperty(context, dynamicImportBinding, {
+          configurable: true,
+          enumerable: false,
+          value: dynamicImport,
+          writable: false,
+        });
+      }
       const realm = CONTEXT_REALMS.get(context);
       const previousFilename = scope.__bnhVmFilename;
       scope.__bnhVmFilename = this.options.filename;

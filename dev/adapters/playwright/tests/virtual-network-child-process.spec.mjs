@@ -145,6 +145,95 @@ test('ESM children route dynamic HTTP imports through the virtual network', asyn
   });
 });
 
+test('nested CommonJS eval importers use the virtual HTTP loader', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const { spawn } = require('node:child_process');
+    const http = require('node:http');
+    const server = http.createServer((_request, response) => {
+      response.setHeader('content-type', 'text/javascript');
+      response.end('export const answer = 42;');
+    });
+    server.listen(0, '127.0.0.1', () => {
+      const target = 'http://127.0.0.1:' + server.address().port + '/index.mjs';
+      const child = spawn(process.execPath, ['/node/eval-import-child.cjs'], {
+        env: { TARGET_URL: target },
+      });
+      let output = '';
+      let errorOutput = '';
+      child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+      child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+      child.once('close', (code, signal) => {
+        server.close(() => process.stdout.write(JSON.stringify({ code, signal, output, errorOutput })));
+      });
+    });
+  `, {
+    capabilities,
+    files: {
+      '/node/eval-import-child.cjs': `
+        const dynamicImport = eval('(url) => import(url)');
+        dynamicImport(process.env.TARGET_URL)
+          .then((module) => process.stdout.write(String(module.answer)))
+          .catch((error) => { console.error(error.stack); process.exitCode = 1; });
+      `,
+    },
+    env: { TARGET_URL: 'unused-by-parent' },
+  });
+
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.timedOut, JSON.stringify(result)).not.toBe(true);
+  expect(JSON.parse(result.stdout)).toEqual({
+    code: 0,
+    signal: null,
+    output: '42',
+    errorOutput: '',
+  });
+});
+
+test('VM scripts route dynamic imports through the virtual HTTP loader', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const { spawn } = require('node:child_process');
+    const http = require('node:http');
+    const server = http.createServer((_request, response) => {
+      response.setHeader('content-type', 'text/javascript');
+      response.end('export const answer = 43;');
+    });
+    server.listen(0, '127.0.0.1', () => {
+      const target = 'http://127.0.0.1:' + server.address().port + '/index.mjs';
+      const child = spawn(process.execPath, ['/node/vm-import-child.cjs'], {
+        env: { TARGET_URL: target },
+      });
+      let output = '';
+      let errorOutput = '';
+      child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+      child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+      child.once('close', (code, signal) => {
+        server.close(() => process.stdout.write(JSON.stringify({ code, signal, output, errorOutput })));
+      });
+    });
+  `, {
+    capabilities,
+    files: {
+      '/node/vm-import-child.cjs': `
+        const vm = require('node:vm');
+        const dynamicImport = vm.runInNewContext('(url) => import(url)', { process });
+        dynamicImport(process.env.TARGET_URL)
+          .then((module) => process.stdout.write(String(module.answer)))
+          .catch((error) => { console.error(error.stack); process.exitCode = 1; });
+      `,
+    },
+    env: { TARGET_URL: 'unused-by-parent' },
+  });
+
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.timedOut, JSON.stringify(result)).not.toBe(true);
+  expect(JSON.parse(result.stdout)).toEqual({
+    code: 0,
+    signal: null,
+    output: '43',
+    errorOutput: '',
+  });
+});
+
 test('CommonJS child processes keep their own HTTP server alive through a request', async ({ harnessPage }) => {
   const result = await harnessPage.run(`
     const { spawn } = require('node:child_process');

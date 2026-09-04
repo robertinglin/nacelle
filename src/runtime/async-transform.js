@@ -382,6 +382,25 @@ function awaitOperandEnd(tokens, awaitIndex) {
   const consumePrimary = () => {
     const token = tokens[index];
     if (!token) return index;
+    if (token.value === 'async' && tokens[index + 1]?.value === 'function') {
+      index += 1;
+      consumePrimary();
+      return index;
+    }
+    if (token.value === 'function') {
+      index += 1;
+      if (tokens[index]?.value === '*') index += 1;
+      if (isIdentifierStart(tokens[index]?.value?.[0])) index += 1;
+      if (tokens[index]?.value === '(') {
+        const parametersEnd = matchingToken(tokens, index, '(', ')');
+        index = parametersEnd < 0 ? tokens.length : parametersEnd + 1;
+      }
+      if (tokens[index]?.value === '{') {
+        const bodyEnd = matchingToken(tokens, index, '{', '}');
+        index = bodyEnd < 0 ? tokens.length : bodyEnd + 1;
+      }
+      return index;
+    }
     if (['!', '~', '+', '-'].includes(token.value)
       || ['typeof', 'void', 'delete', 'await', 'new'].includes(token.value)) {
       index += 1;

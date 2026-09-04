@@ -7855,6 +7855,12 @@ export function createRuntime({
                   code: childTerminal.error.code || null,
                 } : null,
               } : null;
+              // Preserve the worker's already-bounded terminal diagnostics in
+              // the complete child-output artifact.  The compact progress
+              // summary still selects only bounded fields, but dropping this
+              // state makes an ESM child that exits during bootstrap
+              // indistinguishable from a silent successful child.
+              activityRecord.runtimeState = childTerminal?.runtimeState || null;
               activityRecord.error = error ? {
                 name: String(error.name || 'Error').slice(0, 64),
                 code: error.code || null,

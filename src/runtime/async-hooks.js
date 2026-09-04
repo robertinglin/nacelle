@@ -111,6 +111,7 @@ const hostSetTimeout = typeof globalThis.setTimeout === 'function'
   ? globalThis.setTimeout.bind(globalThis)
   : null;
 let promisePatchInstalled = false;
+let trackedPromiseConstructor;
 let promiseRejectionObserver = null;
 const handledPromises = new WeakSet();
 // A destroy hook changes Node's promise-hook mode. Browsers do not expose
@@ -368,10 +369,18 @@ function withResourceProcess(asyncId, callback) {
   const resourceProcess = resources.get(asyncId)?.process;
   if (resourceProcess === undefined) return callback();
   const previousProcess = globalThis.process;
+  const previousActiveProcess = globalThis.__bnhActiveProcess;
   globalThis.process = resourceProcess;
+  // Async resources are created while this callback is active. Keep the
+  // logical owner paired with the process binding; otherwise a same-realm
+  // child callback can create a Promise recorded for the parent and lose the
+  // child's AsyncLocalStorage context on its next continuation.
+  globalThis.__bnhActiveProcess = resourceProcess;
   try {
     return callback();
   } finally {
+    if (previousActiveProcess === undefined) delete globalThis.__bnhActiveProcess;
+    else globalThis.__bnhActiveProcess = previousActiveProcess;
     globalThis.process = previousProcess;
   }
 }
@@ -701,6 +710,7 @@ function installPromiseHooks() {
     TrackedPromise.prototype = originalPromiseConstructor.prototype;
     Object.setPrototypeOf(TrackedPromise, originalPromiseConstructor);
     Object.defineProperty(TrackedPromise, 'name', { value: 'Promise' });
+    trackedPromiseConstructor = TrackedPromise;
     globalThis.Promise = TrackedPromise;
   }
 }
@@ -941,6 +951,7 @@ export function createAsyncHooksModule(scope = globalThis) {
     asyncWrapProviders: ASYNC_WRAP_PROVIDERS,
     _bnhRunWithErrorScope: runWithErrorScope,
     _bnhRunWithPromiseScope: runWithPromiseScope,
+    _bnhIsUserCodeActive: () => isUserCodeActive(),
     AsyncLocalStorage: createAsyncLocalStorage(scope),
     _bnhInstallTaskHooks: () => installTaskHooks(scope),
     internal: createInternalAsyncHooks(),
@@ -967,6 +978,16 @@ export function createAsyncHooksModule(scope = globalThis) {
         destroyed: false,
       });
       contexts.set(executionId, new Map());
+      // Promise hooks live on the shared browser realm, but their tracked
+      // constructor belongs to one virtual execution. Restore only the
+      // constructor at cleanup; the delegating prototype/static hooks must
+      // remain installed so already-created tracked Promise proxies stay
+      // awaitable after their owner exits.
+      if (globalThis.Promise === trackedPromiseConstructor) {
+        globalThis.Promise = originalPromiseConstructor;
+        trackedPromiseConstructor = undefined;
+        promisePatchInstalled = false;
+      }
     },
   };
 }

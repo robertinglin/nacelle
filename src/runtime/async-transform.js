@@ -41,6 +41,34 @@ function skipComment(source, index) {
   return end < 0 ? source.length : end + 2;
 }
 
+function skipTemplateExpression(source, index) {
+  let depth = 1;
+  while (index < source.length) {
+    const character = source[index];
+    const next = source[index + 1];
+    if (character === '\\') {
+      index += 2;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      index = skipQuoted(source, index, character);
+      continue;
+    }
+    if (character === '`') {
+      index = skipTemplate(source, index);
+      continue;
+    }
+    if (character === '/' && (next === '/' || next === '*')) {
+      index = skipComment(source, index);
+      continue;
+    }
+    if (character === '{') depth += 1;
+    else if (character === '}' && --depth === 0) return index + 1;
+    index += 1;
+  }
+  return source.length;
+}
+
 function skipTemplate(source, index) {
   index += 1;
   while (index < source.length) {
@@ -49,6 +77,10 @@ function skipTemplate(source, index) {
       continue;
     }
     if (source[index] === '`') return index + 1;
+    if (source[index] === '$' && source[index + 1] === '{') {
+      index = skipTemplateExpression(source, index + 2);
+      continue;
+    }
     index += 1;
   }
   return source.length;
@@ -391,6 +423,10 @@ function asyncFunctionCandidates(source) {
   return { candidates, unsupported };
 }
 
+function removeToken(source, start, end, tokenStart, tokenEnd) {
+  return `${source.slice(start, tokenStart)}${source.slice(tokenEnd, end)}`;
+}
+
 function awaitOperandEnd(tokens, awaitIndex) {
   let index = awaitIndex + 1;
   const consumePrimary = () => {
@@ -421,6 +457,20 @@ function awaitOperandEnd(tokens, awaitIndex) {
       consumePrimary();
       return index;
     }
+    if (token.value === 'function') {
+      index += 1;
+      if (tokens[index]?.value === '*') index += 1;
+      if (isIdentifierStart(tokens[index]?.value?.[0])) index += 1;
+      if (tokens[index]?.value === '(') {
+        const parametersEnd = matchingToken(tokens, index, '(', ')');
+        index = parametersEnd < 0 ? tokens.length : parametersEnd + 1;
+      }
+      if (tokens[index]?.value === '{') {
+        const bodyEnd = matchingToken(tokens, index, '{', '}');
+        index = bodyEnd < 0 ? tokens.length : bodyEnd + 1;
+      }
+      return index;
+    }
     if (token.value === '(' || token.value === '[' || token.value === '{') {
       const close = matchingToken(tokens, index, token.value, { '(': ')', '[': ']', '{': '}' }[token.value]);
       index = close < 0 ? tokens.length : close + 1;
@@ -432,11 +482,22 @@ function awaitOperandEnd(tokens, awaitIndex) {
   consumePrimary();
   while (index < tokens.length) {
     const value = tokens[index].value;
-    if (value === '.' || value === '?.') {
+    if (value === '.') {
       // Private fields are tokenized as '.', '#', and the field name.
       // Consume the whole member just like a normal dot property so an
       // awaited private-field access remains valid after rewriting.
       index += tokens[index + 1]?.value === '#' ? 3 : 2;
+      continue;
+    }
+    if (value === '?.') {
+      if (tokens[index + 1]?.value === '(' || tokens[index + 1]?.value === '[') {
+        const opening = tokens[index + 1].value;
+        const closing = opening === '(' ? ')' : ']';
+        const close = matchingToken(tokens, index + 1, opening, closing);
+        index = close < 0 ? tokens.length : close + 1;
+      } else {
+        index += 2;
+      }
       continue;
     }
     if (value === '[' || value === '(') {
@@ -584,10 +645,13 @@ function transformCandidates(source, candidates, bindingName) {
     const rawBody = source.slice(bodyStart, bodyEnd);
     const transformedNested = transformAsyncSource(rawBody, bindingName).source;
     const body = replaceAwaitExpressions(transformedNested);
-    // Keep the async marker on the generated function. The body still routes
-    // through the runtime generator bridge for task tracking, but callers must
-    // observe the standard AsyncFunction constructor/toString identity.
-    const header = source.slice(candidate.start, candidate.headerEnd);
+    // The generator bridge is the async function's implementation. Retaining
+    // the native async marker here would make the bridge's thenable pass
+    // through an additional intrinsic Promise assimilation boundary, so
+    // AsyncLocalStorage continuations would no longer follow the bridge's
+    // resource. The generated function must therefore be plain while the
+    // bridge provides the Promise-returning Node behavior.
+    const header = removeToken(source, candidate.start, candidate.headerEnd, candidate.start, candidate.asyncEnd);
     if (candidate.kind === 'function' || candidate.kind === 'method') {
       return {
         start: candidate.start,
@@ -599,7 +663,7 @@ function transformCandidates(source, candidates, bindingName) {
       return {
         start: candidate.start,
         end: candidate.bodyEnd,
-        value: `${header}{ return ${bindingName}(function* () {${body}}, this, arguments); }`,
+        value: `${header}${bindingName}(function* () {${body}}, this, arguments)`,
       };
     }
     return {

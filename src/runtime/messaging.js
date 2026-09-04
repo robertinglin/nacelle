@@ -763,6 +763,7 @@ export function createScopedIpcEndpoint(nativePort, {
   direction,
   scope = globalThis,
   onMessage,
+  onInternalMessage,
   onDisconnect,
 } = {}) {
   if (!runId || !childId || !direction) throw new TypeError('runId, childId, and direction are required');
@@ -826,8 +827,10 @@ export function createScopedIpcEndpoint(nativePort, {
   const receive = (frame) => {
     if (closed) return;
     if (frame?.channel !== 'bnh-user-ipc' || frame.runId !== runId || frame.childId !== childId || frame.direction !== incomingDirection) return;
-    if (!Number.isInteger(frame.sequence) || frame.sequence <= lastReceived) return;
-    lastReceived = frame.sequence;
+    if (frame.internal !== true) {
+      if (!Number.isInteger(frame.sequence) || frame.sequence <= lastReceived) return;
+      lastReceived = frame.sequence;
+    }
     if (frame.type === 'handle-request') {
       handleRequest(frame.payload);
       return;
@@ -841,6 +844,10 @@ export function createScopedIpcEndpoint(nativePort, {
     }
     if (frame.type === 'message') {
       const handle = frame.handle?.id ? handles.get(frame.handle.id)?.handle : undefined;
+      if (frame.internal === true) {
+        onInternalMessage?.(frame.payload, handle);
+        return;
+      }
       events.emit('message', frame.payload, handle);
       onMessage?.(frame.payload, handle);
     }
@@ -897,6 +904,23 @@ export function createScopedIpcEndpoint(nativePort, {
       }
       callback?.(null);
       return true;
+    },
+    sendInternal(payload) {
+      if (closed) return false;
+      try {
+        port.postMessage({
+          channel: 'bnh-user-ipc',
+          runId,
+          childId,
+          direction: outgoingDirection,
+          type: 'message',
+          internal: true,
+          payload,
+        });
+        return true;
+      } catch {
+        return false;
+      }
     },
     sendAsync(value, transferList) {
       return new Promise((resolve, reject) => {

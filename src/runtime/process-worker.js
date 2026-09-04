@@ -450,6 +450,17 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         throw error;
       }
     };
+    // Node exposes the IPC transport as process.channel in forked children.
+    // Keep the channel identity separate from the user-facing process
+    // emitter, while retaining the ref/unref controls used by child-process
+    // implementations to coordinate their liveness.
+    let channelRefed = true;
+    const channel = {
+      get connected() { return !disconnected; },
+      ref() { channelRefed = true; return channel; },
+      unref() { channelRefed = false; return channel; },
+      hasRef() { return channelRefed; },
+    };
     process.stdin = makeEmitter();
     process.stdin.readable = true;
     process.stdin.isTTY = false;
@@ -474,6 +485,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       env: { ...identity.env },
       argv: [...identity.argv],
       connected: true,
+      channel,
       exitCode: 0,
       __bnhProxyRequest: requestProxy,
       __bnhReportRuntimeState: sendRuntimeState,
@@ -520,6 +532,23 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         }
         callback?.(null);
         return true;
+      },
+      __bnhSendInternal(value) {
+        if (disconnected) return false;
+        try {
+          user.postMessage({
+            channel: USER,
+            runId: identity.runId,
+            childId: identity.childId,
+            direction: 'child-to-parent',
+            type: 'message',
+            internal: true,
+            payload: value,
+          });
+          return true;
+        } catch {
+          return false;
+        }
       },
       disconnect() {
         if (disconnected) return false;

@@ -176,34 +176,59 @@ function createBrowserProxyAdapter(loadCachedProject) {
   const loopbackConnections = new Map();
   return {
     async request(request = {}) {
-      if (request.__bnhNpmCache !== true) return null;
-      if (request.type === 'metadata' && request.name) {
-        const metadata = await npmCache.getMetadata(String(request.name));
-        return metadata ? { metadata } : null;
+      if (request.__bnhNpmCache === true) {
+        if (request.type === 'metadata' && request.name) {
+          const metadata = await npmCache.getMetadata(String(request.name));
+          return metadata ? { metadata } : null;
+        }
+        if (request.type === 'tarball' && request.key) {
+          const bytes = await npmCache.getTarball(String(request.key));
+          return bytes ? { bytes } : null;
+        }
+        if (request.type === 'package-entries' && request.name && request.version) {
+          const entries = npmCache.getUnpackedPackage(String(request.name), String(request.version));
+          return entries ? { entries } : null;
+        }
+        if (request.type === 'set-metadata' && request.name && request.metadata !== undefined) {
+          await npmCache.setMetadata(String(request.name), request.metadata);
+          return { stored: true };
+        }
+        if (request.type === 'set-tarball' && request.key && request.bytes) {
+          const bytes = request.bytes instanceof Uint8Array
+            ? request.bytes
+            : new Uint8Array(request.bytes);
+          await npmCache.setTarball(String(request.key), bytes, {
+            name: String(request.name || ''),
+            version: String(request.version || ''),
+          });
+          return { stored: true };
+        }
+        return null;
       }
-      if (request.type === 'tarball' && request.key) {
-        const bytes = await npmCache.getTarball(String(request.key));
-        return bytes ? { bytes } : null;
+
+      // A proxy capability serves both cache RPCs and ordinary Node HTTP
+      // requests. Returning null for a normal request makes the HTTP client
+      // interpret the response as a closed connection, which breaks archive
+      // downloads and any other live request after the cache is cold.
+      const target = String(request.url || request.target || '');
+      if (!target || !browserFetch) return null;
+      const cachedBody = String(request.method || 'GET').toUpperCase() === 'GET'
+        ? await loadCachedProject?.(target)
+        : null;
+      if (cachedBody) {
+        return {
+          status: 200,
+          headers: { 'content-length': String(cachedBody.byteLength) },
+          bodyBytes: cachedBody,
+        };
       }
-      if (request.type === 'package-entries' && request.name && request.version) {
-        const entries = npmCache.getUnpackedPackage(String(request.name), String(request.version));
-        return entries ? { entries } : null;
-      }
-      if (request.type === 'set-metadata' && request.name && request.metadata !== undefined) {
-        await npmCache.setMetadata(String(request.name), request.metadata);
-        return { stored: true };
-      }
-      if (request.type === 'set-tarball' && request.key && request.bytes) {
-        const bytes = request.bytes instanceof Uint8Array
-          ? request.bytes
-          : new Uint8Array(request.bytes);
-        await npmCache.setTarball(String(request.key), bytes, {
-          name: String(request.name || ''),
-          version: String(request.version || ''),
-        });
-        return { stored: true };
-      }
-      return null;
+      return browserFetch(target, {
+        method: request.method || 'GET',
+        headers: request.headers,
+        body: request.body,
+        signal: request.signal,
+        redirect: 'follow',
+      });
     },
     resolve() {
       // The transport uses the original hostname from client._connectOptions;

@@ -3395,6 +3395,19 @@ export function createVfs(options = {}) {
     return result;
   }
 
+  function shareFileBuffers(scope = globalThis) {
+    if (scope?.crossOriginIsolated !== true || typeof scope?.SharedArrayBuffer !== 'function') return 0;
+    let sharedCount = 0;
+    for (const [path, bytes] of files) {
+      if (!(bytes instanceof Uint8Array) || bytes.buffer instanceof scope.SharedArrayBuffer) continue;
+      const shared = new scope.SharedArrayBuffer(bytes.byteLength);
+      new Uint8Array(shared).set(bytes);
+      files.set(path, new Uint8Array(shared));
+      sharedCount += 1;
+    }
+    return sharedCount;
+  }
+
   function reset() {
     if (typeof backend.reset === 'function') backend.reset();
     else {
@@ -3973,6 +3986,7 @@ export function createVfs(options = {}) {
     reset,
     snapshot,
     exportArtifacts: snapshot,
+    shareFileBuffers,
     declareArtifact(pathValue) {
       const path = resolve(pathValue);
       const mountRecord = access(path, 'declareArtifact');

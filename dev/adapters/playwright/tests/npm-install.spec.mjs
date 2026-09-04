@@ -78,6 +78,19 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     expect(snapshot.artifacts.find(({ path }) => path === '/node/module.js')).toBeDefined();
   });
 
+  test('VFS promotes immutable file buffers once for worker snapshots', () => {
+    const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
+    vfs.fs.writeFileSync('/node/module.js', 'module.exports = 1;');
+    const sharedCount = vfs.shareFileBuffers({ crossOriginIsolated: true, SharedArrayBuffer });
+    expect(sharedCount).toBe(1);
+    const first = vfs.snapshot({ copy: false, includeFiles: false }).artifacts
+      .find(({ path }) => path === '/node/module.js').bytes;
+    expect(first.buffer instanceof SharedArrayBuffer).toBe(true);
+    expect(vfs.shareFileBuffers({ crossOriginIsolated: true, SharedArrayBuffer })).toBe(0);
+    vfs.fs.writeFileSync('/node/module.js', 'module.exports = 2;');
+    expect(new TextDecoder().decode(vfs.read('/node/module.js'))).toBe('module.exports = 2;');
+  });
+
   test('semver utilities parse and match version specs', () => {
     expect(parsePackageSpec('express@4.19.2')).toEqual({ name: 'express', range: '4.19.2' });
     expect(parsePackageSpec('@types/node@^20.0.0')).toEqual({ name: '@types/node', range: '^20.0.0' });

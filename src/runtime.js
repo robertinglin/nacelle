@@ -8936,6 +8936,7 @@ export function createRuntime({
           // live backend. Give that boundary a complete serializable snapshot
           // without first duplicating every immutable file buffer; the worker
           // boundary converts those buffers to shared storage when available.
+          vfs.shareFileBuffers?.(scope);
           const snapshot = options.ipc
             ? vfs.snapshot({ copy: false, includeFiles: false })
             : vfs.snapshot({ copy: false, includeBackend: true, includeFiles: false });
@@ -12143,6 +12144,7 @@ export function createRuntime({
       const stdout = capabilities.output.stdout;
       const stderr = capabilities.output.stderr;
       const workerSource = new URL('./runtime/process-entry.js', import.meta.url).href;
+      vfs.shareFileBuffers?.(scope);
       const snapshot = vfs.snapshot({ copy: false, includeFiles: false });
       const files = Object.fromEntries(
         snapshot.artifacts.map(({ path, bytes }) => [path, {

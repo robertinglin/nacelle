@@ -210,7 +210,7 @@ globalThis.__BROWSER_NODE_HARNESS__ = {
     let timedOut = false;
     let timeoutTimer;
 
-    const runtimeContext = { env, variant, metadata, signal: controller.signal };
+    const runtimeContext = { env, variant, metadata, signal: controller.signal, isolation: request.isolation };
     const runId = String(request.context?.run_id || request.metadata?.runId || `browser-${Date.now()}`);
     runtimeContext.runId = runId;
     runtimeContext.capabilities = request.capabilities;

@@ -413,6 +413,38 @@ test('VM Script dynamic import callbacks expose a module namespace', async ({ ha
   });
 });
 
+test('VM compileFunction routes comment-separated dynamic imports through its callback', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    (async () => {
+      const assert = require('node:assert');
+      const vm = require('node:vm');
+      const compiled = vm.compileFunction(
+        'return import(/* loader comment */ "./vm-compile-dependency.mjs");',
+        [],
+        {
+          filename: '/node/vm-compile-entry.cjs',
+          importModuleDynamically: (specifier) => process.__bnhModuleImport(
+            specifier,
+            '/node/vm-compile-entry.cjs',
+            undefined,
+            process,
+          ),
+        },
+      );
+      const namespace = await compiled();
+      assert.strictEqual(namespace.answer, 57);
+      process.stdout.write('vm compileFunction import completed');
+    })().catch((error) => { console.error(error); process.exitCode = 1; });
+  `, {
+    files: {
+      '/node/vm-compile-dependency.mjs': 'export const answer = 57;',
+    },
+  });
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.timedOut, JSON.stringify(result)).not.toBe(true);
+  expect(result.stdout).toContain('vm compileFunction import completed');
+});
+
 test('VM SourceTextModule routes comment-separated dynamic imports through the virtual HTTP loader', async ({ harnessPage }) => {
   const result = await harnessPage.run(`
     const { spawn } = require('node:child_process');

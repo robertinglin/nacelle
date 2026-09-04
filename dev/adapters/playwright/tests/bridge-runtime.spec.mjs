@@ -1949,4 +1949,40 @@ test.describe('browser runtime bridge and core primitives', () => {
     expect(result.globalsRestored).toBe(true);
   });
 
+  test('inherits the owning worker network for a same-realm nested child', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+      const assert = require('node:assert');
+      const http = require('node:http');
+      const { spawn } = require('node:child_process');
+      const server = http.createServer((_request, response) => response.end('worker-parent-visible'));
+      await new Promise((resolve, reject) => { server.once('error', reject); server.listen(43306, '127.0.0.1', resolve); });
+      const child = spawn(process.execPath, ['/node/worker-network-child.js']);
+      let output = '';
+      const errorOutput = [];
+      child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+      child.stderr.on('data', (chunk) => { errorOutput.push(chunk.toString()); });
+      const terminal = await new Promise((resolve) => child.once('close', (code, signal) => resolve({ code, signal })));
+      await new Promise((resolve) => server.close(resolve));
+      assert.deepStrictEqual(terminal, { code: 0, signal: null });
+      assert.strictEqual(output, 'worker-parent-visible');
+      assert.deepStrictEqual(errorOutput, []);
+      })().catch((error) => { console.error(error); process.exitCode = 1; });
+    `, {
+      isolation: 'worker',
+      files: {
+        '/node/worker-network-child.js': `
+          const http = require('node:http');
+          const request = http.get('http://localhost:43306', (response) => {
+            let body = '';
+            response.on('data', (chunk) => { body += chunk.toString(); });
+            response.on('end', () => process.stdout.write(body));
+          });
+          request.on('error', (error) => { process.stderr.write(error.stack + '\\n'); process.exitCode = 1; });
+        `,
+      },
+    });
+    await expectPass(expect, result);
+  });
+
 });

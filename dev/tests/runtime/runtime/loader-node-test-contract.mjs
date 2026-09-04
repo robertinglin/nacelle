@@ -57,6 +57,7 @@ test('aggregates async node:test suites, hooks, and subtests', async () => {
     });
   });
   nodeTest.skip('skipped', () => { throw new Error('skip callback ran'); });
+  nodeTest.__bnhSourceLoaded();
 
   await Promise.resolve();
   while (pending) await new Promise((resolve) => setTimeout(resolve, 0));

@@ -9662,7 +9662,7 @@ export function createRuntime({
                     ...packageJson?.devDependencies,
                     ...packageJson?.optionalDependencies,
                   }).map(([name, range]) => `${name}@${range}`);
-                await npm.install(installSpecs, { cwd, cacheUnpacked: false });
+                await npm.install(installSpecs, { cwd, cacheUnpacked: false, returnFiles: false });
                 return { code: 0 };
               },
               npmLink: (linkOptions) => runPackageLink({ ...linkOptions, cwd: linkOptions?.cwd || scriptCwd }),
@@ -9841,7 +9841,7 @@ export function createRuntime({
               ...packageJson?.devDependencies,
               ...packageJson?.optionalDependencies,
             }).map(([name, range]) => `${name}@${range}`);
-          const result = await npm.install(installSpecs, { cwd: prepared.cwd, cacheUnpacked: false });
+          const result = await npm.install(installSpecs, { cwd: prepared.cwd, cacheUnpacked: false, returnFiles: false });
           if (!noSave && specs.length > 0) {
             if (packageJson) {
               const section = saveDev ? 'devDependencies' : 'dependencies';

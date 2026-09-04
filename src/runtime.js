@@ -8234,7 +8234,7 @@ export function createRuntime({
               // downloading optional assets at runtime.
               if (packageSubpath) {
                 const packageTarget = path.join(packageBase, packageSubpath);
-                const packageCandidate = commonJsFileCandidates(packageTarget)
+                const packageCandidate = commonJsModuleCandidates(packageTarget)
                   .find((candidate) => vfs.files.has(candidate));
                 if (packageCandidate) return packageCandidate;
                 if (directory === '/' || directory === '.' || directory === '') break;

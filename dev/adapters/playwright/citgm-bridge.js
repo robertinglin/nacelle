@@ -528,29 +528,34 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     await progressReporter.flush();
     report('setup', 'citgm-install-complete', { events: progress.bootstrap.events });
 
-    const preloadVfs = createVfs({
-      mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }],
-    });
-    const preloadNpm = new BrowserNpm({
-      vfs: preloadVfs,
-      registry,
-      cache: npmCache,
-      globalObject: globalThis,
-      proxyUrl: null,
-      platform: 'browser',
-      arch: 'browser',
-      libc: 'browser',
-    });
     currentStage = 'candidate-dependency-preload';
     report('setup', 'candidate-dependency-preload-started');
-    preloadStats = await preloadNpm.install(module, {
-      cwd: '/node',
-      nodeModulesDir: '/node/node_modules',
-      includeDevDependencies: true,
-      materialize: false,
-      cacheUnpacked: true,
-      onProgress: (event) => recordProgress(progress.preload, event),
-    });
+    {
+      const preloadVfs = createVfs({
+        mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }],
+      });
+      const preloadNpm = new BrowserNpm({
+        vfs: preloadVfs,
+        registry,
+        cache: npmCache,
+        globalObject: globalThis,
+        proxyUrl: null,
+        platform: 'browser',
+        arch: 'browser',
+        libc: 'browser',
+      });
+      // This phase warms metadata and tarballs for the real child install.
+      // With no materialized VFS, retaining every unpacked entry would keep a
+      // second package tree alive for the duration of the browser run.
+      preloadStats = await preloadNpm.install(module, {
+        cwd: '/node',
+        nodeModulesDir: '/node/node_modules',
+        includeDevDependencies: true,
+        materialize: false,
+        cacheUnpacked: false,
+        onProgress: (event) => recordProgress(progress.preload, event),
+      });
+    }
     await progressReporter.flush();
     report('setup', 'candidate-dependency-preload-complete', { events: progress.preload.events });
     await runtime.mount({});

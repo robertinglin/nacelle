@@ -72,6 +72,8 @@ test.describe('browser runtime test contracts', () => {
     expect(citgm).toContain('processArgv');
     expect(citgm).toContain('networkEvents');
     expect(citgm).toContain('outputCounters');
+    expect(citgm).toContain('materialize: false');
+    expect(citgm).toContain('cacheUnpacked: false');
   });
 
   test('coalesces burst activity and delivers progress in report order', async () => {

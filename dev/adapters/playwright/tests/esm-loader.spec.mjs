@@ -205,6 +205,67 @@ test.describe('browser ESM loader', () => {
     expect(result.stdout).toContain('dynamic conditional ESM package completed');
   });
 
+  test('runs a forked unknown-extension entry through an async module.register loader hook', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { fork } = require('node:child_process');
+
+      const child = fork('/node/node_modules/loader-fixture/worker.ts', [], {
+        cwd: '/node',
+        env: { ...process.env, NODE_OPTIONS: '--import=loader-fixture/register' },
+        silent: true,
+      });
+      child.once('error', (error) => {
+        process.stderr.write(error.stack + '\\n');
+        process.exitCode = 1;
+      });
+      child.once('message', (message) => {
+        assert.deepStrictEqual(message, { answer: 42 });
+      });
+      child.once('close', (code, signal) => {
+        assert.strictEqual(code, 0);
+        assert.strictEqual(signal, null);
+        process.stdout.write('async loader fork contract passed');
+      });
+    `, {
+      files: {
+        '/node/package.json': JSON.stringify({ type: 'module' }),
+        '/node/node_modules/loader-fixture/package.json': JSON.stringify({
+          name: 'loader-fixture',
+          type: 'module',
+          exports: { './register': './register.mjs' },
+        }),
+        '/node/node_modules/loader-fixture/register.mjs': `
+          import { register } from 'node:module';
+          register('./hooks.mjs', import.meta.url);
+        `,
+        '/node/node_modules/loader-fixture/hooks.mjs': `
+          export async function resolve(specifier, context, nextResolve) {
+            return nextResolve(specifier, context);
+          }
+          export async function load(url, context, nextLoad) {
+            if (!url.endsWith('.ts')) return nextLoad(url, context);
+            const result = await nextLoad(url, { ...context, format: 'module' });
+            const source = typeof result.source === 'string'
+              ? result.source
+              : new TextDecoder().decode(result.source);
+            return { format: 'module', shortCircuit: true, source: source.replace(/: number\\b/g, '') };
+          }
+        `,
+        '/node/node_modules/loader-fixture/worker.ts': `
+          import assert from 'node:assert/strict';
+          const answer: number = 42;
+          assert.strictEqual(answer, 42);
+          process.send({ answer });
+          process.disconnect();
+        `,
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('async loader fork contract passed');
+  });
+
   test('loads a cyclic ESM graph without deadlocking URL materialization', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       import { value } from './cycle-a.mjs';

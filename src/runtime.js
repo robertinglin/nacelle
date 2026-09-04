@@ -2463,6 +2463,30 @@ function rewriteCommonJsDynamicImports(source) {
     while (index < text.length) {
       const character = text[index];
       const next = text[index + 1];
+      // A direct eval in a CommonJS module shares the module's lexical
+      // environment.  Rewrite literal eval bodies at the same source
+      // boundary as ordinary dynamic imports so import() keeps the owning
+      // Node loader and its lifecycle/task tracking.  This is deliberately
+      // limited to literal source; indirect/dynamic eval retains native
+      // semantics and cannot be safely associated with this module.
+      if (text.startsWith('eval', index)
+        && !isIdentifierPart(text[index - 1])
+        && !isIdentifierPart(text[index + 4])) {
+        let literalStart = index + 4;
+        while (/\s/u.test(text[literalStart] || '')) literalStart += 1;
+        if (text[literalStart] === '(') {
+          literalStart += 1;
+          while (/\s/u.test(text[literalStart] || '')) literalStart += 1;
+          if (text[literalStart] === '\'' || text[literalStart] === '"') {
+            result += text.slice(index, literalStart);
+            index = literalStart;
+            const quoted = copyQuoted(text[literalStart]);
+            const body = quoted.slice(1, -1);
+            result += quoted[0] + rewriteCommonJsDynamicImports(body) + quoted.slice(-1);
+            continue;
+          }
+        }
+      }
       if (character === '\'' || character === '"') {
         result += copyQuoted(character);
         continue;
@@ -11481,7 +11505,15 @@ export function createRuntime({
       if (ownerProcess._bnhNextWorkerThreadId === undefined) ownerProcess._bnhNextWorkerThreadId = 1;
       const threadId = ownerProcess._bnhNextWorkerThreadId++;
       const [source, workerOptions = {}] = args;
-      const worker = typeof source === 'string'
+      // Node's Worker constructor accepts either a path string or a file URL
+      // for a module entrypoint. Both forms identify a virtual VFS module in
+      // this runtime and must use the same isolated child process boundary;
+      // passing a file URL to the browser-native Worker would ask the browser
+      // to fetch an inaccessible host file instead of loading the mounted
+      // module.
+      const isVirtualEntrypoint = typeof source === 'string'
+        || (source && typeof source === 'object' && typeof source.href === 'string');
+      const worker = isVirtualEntrypoint
         ? createBrowserWorker(source, workerOptions, threadId, ownerProcess)
         : createRuntimeWorker(...args);
       if (worker.stdout === undefined) worker.stdout = new Readable({ read() {} });
@@ -12783,6 +12815,14 @@ export function createRuntime({
         has: (pathname) => vfs.files.has(pathname),
         get: (pathname) => vfs.read(pathname),
       },
+      // Loader hooks and remote ESM imports use the same live VFS/network
+      // seams as CommonJS and fetch. Keeping these callbacks on the owning
+      // runtime also lets isolated child loaders inherit the owner's bridge.
+      // VFS exposes raw module bytes through read(); keep the source opaque so
+      // loader hooks receive the same string/byte representations as Node's
+      // load pipeline rather than failing at an adapter-only method boundary.
+      readSource: (pathname) => vfs.read(pathname),
+      fetchModule: (url, init) => runtimeFetchRef.current(url, init),
       builtins,
       globalObject: scope,
       evaluateCommonJS: (specifier, importer, processOverride) => loadModule(

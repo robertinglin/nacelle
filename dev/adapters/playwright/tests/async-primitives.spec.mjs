@@ -203,4 +203,35 @@ test.describe('browser runtime async primitives', () => {
 
     await expectPass(expect, result);
   });
+
+  test('runs a virtual worker when its entrypoint is a file URL', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+      const assert = require('node:assert/strict');
+      const { Worker } = require('node:worker_threads');
+      const worker = new Worker(new URL('file:///node/url-worker-entry.mjs'), {
+        workerData: { value: 17 },
+      });
+      const message = await new Promise((resolve, reject) => {
+        worker.once('message', resolve);
+        worker.once('error', reject);
+      });
+      assert.deepStrictEqual(message, { isMainThread: false, value: 17 });
+      assert.strictEqual(await new Promise((resolve) => worker.once('exit', resolve)), 0);
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/url-worker-entry.mjs': [
+          "import { isMainThread, parentPort, workerData } from 'node:worker_threads';",
+          'parentPort.postMessage({ isMainThread, value: workerData.value });',
+          'parentPort.close();',
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
 });

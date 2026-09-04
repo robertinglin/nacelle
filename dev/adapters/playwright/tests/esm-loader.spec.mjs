@@ -266,6 +266,41 @@ test.describe('browser ESM loader', () => {
     expect(result.stdout).toContain('async loader fork contract passed');
   });
 
+  test('passes raw ESM hook source with Node Buffer string semantics', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { register } from 'node:module';
+
+      register('./source-shape-hooks.mjs', import.meta.url);
+      const loaded = await import('./source-shape-target.ts');
+      assert.strictEqual(loaded.value, 42);
+      process.stdout.write('raw source shape contract passed');
+    `, {
+      entryPath: '/node/source-shape-entry.mjs',
+      files: {
+        '/node/source-shape-hooks.mjs': `
+          export async function load(url, context, nextLoad) {
+            if (!url.endsWith('.ts')) return nextLoad(url, context);
+            const result = await nextLoad(url, { ...context, format: 'module' });
+            if (!(result.source instanceof Uint8Array)) throw new Error('load hook source must remain byte-backed');
+            if (result.source.toString() !== 'export const value: number = 42;') {
+              throw new Error('load hook source must use Node Buffer string semantics');
+            }
+            return {
+              format: 'module',
+              shortCircuit: true,
+              source: result.source.toString().replace(': number', ''),
+            };
+          }
+        `,
+        '/node/source-shape-target.ts': 'export const value: number = 42;',
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('raw source shape contract passed');
+  });
+
   test('loads a cyclic ESM graph without deadlocking URL materialization', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       import { value } from './cycle-a.mjs';

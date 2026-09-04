@@ -444,9 +444,19 @@ export function createModuleLoader({
     const value = resolved.endsWith('.wasm') || resolved.endsWith('.node')
       ? read(resolved, resolved).value
       : readTextFile(resolved);
+    // Node's default ESM loader exposes file source as a Buffer: it is still
+    // the raw byte source, but its standard toString() decodes UTF-8.  Keep
+    // that representation for load hooks.  A plain Uint8Array has different
+    // public behavior (comma-joined numeric output), which breaks otherwise
+    // Node-compatible hooks that consume result.source.toString().
+    const source = typeof value === 'string' || value === undefined || value === null
+      ? value
+      : builtins?.buffer?.Buffer?.from
+        ? builtins.buffer.Buffer.from(value)
+        : value;
     return {
       format: context?.format ?? (resolved.endsWith('.json') ? 'json' : moduleFormat(resolved)),
-      source: value,
+      source,
     };
   };
 

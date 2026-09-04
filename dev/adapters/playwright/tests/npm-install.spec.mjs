@@ -431,6 +431,18 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     expect(afterClearTarball).toBeNull();
   });
 
+  test('BrowserNpmCache can clear memory without deleting persistent cache records', async () => {
+    const { BrowserNpmCache } = await import('../runtime/npm.js');
+    const cache = new BrowserNpmCache({ dbName: 'test_bnh_npm_memory_cache' });
+
+    cache.memoryMeta.set('memory-pkg', { name: 'memory-pkg' });
+    cache.memoryTarballs.set('tarball:memory-pkg@1.0.0', new Uint8Array([1]));
+    cache.clearMemory();
+
+    expect(cache.memoryMeta.size).toBe(0);
+    expect(cache.memoryTarballs.size).toBe(0);
+  });
+
   test('BrowserNpm installs from custom/live registry and leverages BrowserNpmCache', async () => {
     const { BrowserNpm, BrowserNpmCache } = await import('../runtime/npm.js');
     const { createVfs } = await import('../runtime/vfs.js');

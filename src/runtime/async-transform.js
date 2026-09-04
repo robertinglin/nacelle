@@ -151,9 +151,8 @@ function matchingToken(tokens, index, opening, closing) {
   return -1;
 }
 
-function rewriteForAwaitLoops(source) {
-  const tokens = tokenize(source);
-  const asyncGeneratorBodies = [];
+function asyncGeneratorBodyRanges(tokens) {
+  const ranges = [];
   for (let index = 0; index < tokens.length - 2; index += 1) {
     const isFunctionGenerator = tokens[index].value === 'async'
       && tokens[index + 1].value === 'function'
@@ -164,8 +163,14 @@ function rewriteForAwaitLoops(source) {
     const bodyIndex = tokens.findIndex((token, tokenIndex) => tokenIndex > index && token.value === '{');
     if (bodyIndex < 0) continue;
     const bodyEnd = matchingToken(tokens, bodyIndex, '{', '}');
-    if (bodyEnd >= 0) asyncGeneratorBodies.push({ start: bodyIndex, end: bodyEnd });
+    if (bodyEnd >= 0) ranges.push({ start: bodyIndex, end: bodyEnd });
   }
+  return ranges;
+}
+
+function rewriteForAwaitLoops(source) {
+  const tokens = tokenize(source);
+  const asyncGeneratorBodies = asyncGeneratorBodyRanges(tokens);
   const names = new Set(tokens.filter((token) => token.value !== '<literal>').map((token) => token.value));
   const replacements = [];
   let sequence = 0;
@@ -361,11 +366,14 @@ function asyncFunctionCandidates(source) {
       });
     }
   }
+  const asyncGeneratorBodies = asyncGeneratorBodyRanges(tokens);
   const forAwaitPrefix = [0];
   const superPrefix = [0];
   for (let index = 0; index < tokens.length; index += 1) {
     forAwaitPrefix.push(forAwaitPrefix[index]
-      + (tokens[index].value === 'for' && tokens[index + 1]?.value === 'await' ? 1 : 0));
+      + (tokens[index].value === 'for'
+        && tokens[index + 1]?.value === 'await'
+        && !asyncGeneratorBodies.some(({ start, end }) => index > start && index < end) ? 1 : 0));
     superPrefix.push(superPrefix[index] + (tokens[index].value === 'super' ? 1 : 0));
   }
   for (const candidate of candidates) {
@@ -520,7 +528,7 @@ function replaceAwaitExpressions(source) {
     if (token.value !== 'await') continue;
     const previous = tokens[index - 1]?.value;
     const next = tokens[index + 1]?.value;
-    if (previous === '.' || previous === '?.' || next === ':') continue;
+    if (previous === '.' || previous === '?.' || previous === 'for' || next === ':') continue;
     spans.push({ start: token.start, end: awaitOperandEnd(tokens, index), token });
   }
   const outerSpans = spans.filter((span) => !spans.some((parent) => (

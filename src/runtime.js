@@ -12100,6 +12100,14 @@ export function createRuntime({
       const npmProxyUrl = npmProxyOrigin && isNpmRegistryRequest
         ? `${npmProxyOrigin}/__npm_proxy__/${encodeURIComponent(target)}`
         : null;
+      const hasGrantedProxy = proxyCapability?.mode === 'proxy'
+        && proxyCapability.enabled === true
+        && proxyCapability.capabilityGranted === true
+        && proxyCapability.adapter;
+      const networkGrant = capabilities?.manifest?.network;
+      const hasGrantedNativeNetwork = targetOrigin
+        && networkGrant?.origins?.includes(targetOrigin)
+        && networkGrant.methods.includes(method);
       const canCacheNpmRequest = method === 'GET' && npmRegistryOrigins.has(targetOrigin)
         && typeof scope.caches?.open === 'function';
       let npmCachePromise;
@@ -12138,7 +12146,7 @@ export function createRuntime({
       };
       const fetchNetwork = () => {
         if (httpClientFetch) return fetchWithTelemetry('browser-native', () => nativeFetch(input, init));
-        if (npmProxyUrl) {
+        if (npmProxyUrl && !hasGrantedProxy && !hasGrantedNativeNetwork) {
           // npm registry responses are cross-origin and many registry routes do
           // not opt into CORS. Use the same-origin download proxy when the
           // runtime is hosted in a browser, while keeping the guest URL in the
@@ -12153,9 +12161,7 @@ export function createRuntime({
         if (useEnvProxy && proxyUrl && /^https?:/i.test(target)) {
           return fetchWithTelemetry('http-proxy', () => virtualProxyFetch(input, init, proxyUrl));
         }
-        const networkGrant = capabilities?.manifest?.network;
-        if (targetOrigin && networkGrant?.origins?.includes(targetOrigin)
-          && networkGrant.methods.includes(method)) {
+        if (hasGrantedNativeNetwork) {
           // This is the browser-native egress route granted to the guest. It
           // is required by stock tools such as Next.js' own WASM downloader
           // and does not rewrite or intercept the guest request.

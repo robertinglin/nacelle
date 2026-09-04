@@ -78,6 +78,22 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     expect(snapshot.artifacts.find(({ path }) => path === '/node/module.js')).toBeDefined();
   });
 
+  test('VFS source cache is bounded and invalidates changed files', () => {
+    const vfs = createVfs({
+      sourceCacheBytes: 8,
+      mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }],
+    });
+    vfs.fs.writeFileSync('/node/first.js', '12345678');
+    vfs.fs.writeFileSync('/node/second.js', 'abcdefgh');
+    expect(vfs.readSource('/node/first.js')).toBe('12345678');
+    expect(vfs.readSource('/node/second.js')).toBe('abcdefgh');
+    expect(vfs.sourceCacheBytes).toBe(8);
+    expect(vfs.sourceCacheSize).toBe(1);
+    vfs.fs.writeFileSync('/node/second.js', 'updated');
+    expect(vfs.readSource('/node/second.js')).toBe('updated');
+    expect(vfs.sourceCacheBytes).toBeLessThanOrEqual(8);
+  });
+
   test('VFS promotes immutable file buffers once for worker snapshots', () => {
     const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
     vfs.fs.writeFileSync('/node/module.js', 'module.exports = 1;');

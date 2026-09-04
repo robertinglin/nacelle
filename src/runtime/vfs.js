@@ -743,6 +743,9 @@ export function createVfs(options = {}) {
   const descriptors = new Map();
   const hardLinks = new Map();
   const fileHandleRecords = new Set();
+  const sourceCache = new Map();
+  let sourceCacheBytes = 0;
+  const maxSourceCacheBytes = options.sourceCacheBytes ?? 64 * 1024 * 1024;
   let nextDescriptor = 100;
   let nextTemporaryDirectory = 0;
   let mutationQueue = Promise.resolve();
@@ -786,6 +789,45 @@ export function createVfs(options = {}) {
 
   function parentOf(path) {
     return path.slice(0, path.lastIndexOf('/')) || '/';
+  }
+
+  function invalidateSourceCache(path, recursive = false) {
+    for (const [cachedPath, cached] of sourceCache) {
+      if (cachedPath !== path && (!recursive || !isWithin(cachedPath, path))) continue;
+      sourceCache.delete(cachedPath);
+      sourceCacheBytes -= cached.bytes;
+    }
+  }
+
+  function cacheSource(path, text) {
+    const bytes = textEncoder.encode(text).byteLength;
+    if (!Number.isFinite(maxSourceCacheBytes) || maxSourceCacheBytes <= 0 || bytes > maxSourceCacheBytes) return text;
+    const previous = sourceCache.get(path);
+    if (previous) sourceCacheBytes -= previous.bytes;
+    sourceCache.delete(path);
+    sourceCache.set(path, { text, bytes });
+    sourceCacheBytes += bytes;
+    while (sourceCacheBytes > maxSourceCacheBytes && sourceCache.size) {
+      const oldestPath = sourceCache.keys().next().value;
+      const oldest = sourceCache.get(oldestPath);
+      sourceCache.delete(oldestPath);
+      sourceCacheBytes -= oldest?.bytes || 0;
+    }
+    return text;
+  }
+
+  function readSource(pathValue, operation = 'open') {
+    const path = resolve(pathValue);
+    if (path.endsWith('.node') && files.has(path)) unsupportedNativeAddon(path);
+    const cached = sourceCache.get(path);
+    if (cached) {
+      sourceCache.delete(path);
+      sourceCache.set(path, cached);
+      return cached.text;
+    }
+    const bytes = readBytes(path, operation);
+    const text = typeof bytes === 'string' ? bytes : new TextDecoder().decode(bytes);
+    return cacheSource(path, text);
   }
 
   function syncDirectoryIndex() {
@@ -914,6 +956,7 @@ export function createVfs(options = {}) {
   }
 
   function setFileBytes(path, bytes) {
+    invalidateSourceCache(path);
     const attributes = metadataFor(path);
     if (files.has(path)) {
       attributes.mtimeMs = Date.now();
@@ -933,6 +976,7 @@ export function createVfs(options = {}) {
   }
 
   function removeFileBytes(path) {
+    invalidateSourceCache(path, true);
     const group = hardLinks.get(path);
     if (!group) {
       files.delete(path);
@@ -958,6 +1002,8 @@ export function createVfs(options = {}) {
   }
 
   function moveFileNode(source, destination) {
+    invalidateSourceCache(source, true);
+    invalidateSourceCache(destination, true);
     const group = hardLinks.get(source);
     if (!group) {
       files.set(destination, files.get(source));
@@ -3273,6 +3319,7 @@ export function createVfs(options = {}) {
       }
     }
     if (files.has(path) && directories.has(path)) throw invalidPath();
+    invalidateSourceCache(path);
     files.set(path, decode(entryValue.data ?? entryValue.bytes ?? entryValue.content ?? entryValue));
     indexDirectPath(path, 'file');
     if (entryValue.mode !== undefined) metadataFor(path).mode = modeValue(entryValue.mode);
@@ -3420,6 +3467,8 @@ export function createVfs(options = {}) {
     hardLinks.clear();
     metadata.clear();
     descriptors.clear();
+    sourceCache.clear();
+    sourceCacheBytes = 0;
     for (const mountRecord of mounts.values()) directories.add(mountRecord.path);
     for (const list of watchers.values()) for (const watcher of list) watcher.close();
     watchers.clear();
@@ -4002,6 +4051,9 @@ export function createVfs(options = {}) {
       if (path.endsWith('.node') && files.has(path)) unsupportedNativeAddon(path);
       return readBytes(path);
     },
+    readSource,
+    get sourceCacheBytes() { return sourceCacheBytes; },
+    get sourceCacheSize() { return sourceCache.size; },
     readDescriptor: readDescriptorAsync,
     readFile,
     writeFile,

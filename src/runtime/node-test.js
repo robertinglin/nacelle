@@ -526,7 +526,12 @@ function createMockTracker(scope, timerModules, moduleOptions = {}) {
 export function createNodeTest({ scope, processObject, stdout, stderr, trackTask, assert, timers = {}, timerPromises = {}, sourcePath, execArgv = [] }) {
   normalizeProcessEnv(processObject);
   const schedule = typeof scope.queueMicrotask === 'function' ? scope.queueMicrotask.bind(scope) : (callback) => scope.setTimeout(callback, 0);
-  const root = { name: '<root>', fullName: '<root>', parent: null, before: [], after: [], beforeEach: [], afterEach: [], children: [], started: false, beforeReady: null, completion: null, runTail: Promise.resolve() };
+  const createRoot = () => ({ name: '<root>', fullName: '<root>', parent: null, before: [], after: [], beforeEach: [], afterEach: [], children: [], started: false, beforeReady: null, completion: null, runTail: Promise.resolve() });
+  // A node:test runner gives each discovered file its own top-level suite.
+  // Keep the initial root for ordinary `test()` calls, then replace it before
+  // each file loaded by run() so root hooks and child registration cannot leak
+  // between otherwise independent files.
+  let root = createRoot();
   const suiteStack = [root];
   let testTail = Promise.resolve();
   let testCount = 0;
@@ -699,6 +704,11 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
     suite.completion = (async () => { const beforeError = await suite.beforeReady; await Promise.all(suite.children); try { await runHooks([...suite.after].reverse(), { name: suite.name, signal: suite.signal }); } catch (error) { reportFailure(error); } if (beforeError) reportFailure(beforeError); })().finally(() => release?.()); return suite;
   }
   function hook(name, callback) { if (typeof callback !== 'function') throw invalidType(`${name} callback`, 'function', callback); suiteStack.at(-1)[name].push(callback); }
+  function beginFile() {
+    root = createRoot();
+    suiteStack.length = 0;
+    suiteStack.push(root);
+  }
   function hookChain(suite, name) { const chain = []; for (let current = suite; current; current = current.parent) chain.push(...current[name]); return name === 'afterEach' ? chain : chain.reverse(); }
   function createSuite(name, options, callback, parent) {
     const suite = { name: String(name ?? '(anonymous suite)'), fullName: parent === root ? String(name ?? '(anonymous suite)') : `${parent.fullName} > ${String(name ?? '(anonymous suite)')}`, parent, signal: options.signal, before: [], after: [], beforeEach: [], afterEach: [], children: [], started: false, beforeReady: null, completion: null, runTail: Promise.resolve() };
@@ -925,6 +935,7 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
         // event listeners before discovery and execution begin.
         await Promise.resolve();
         for (const file of files) {
+          beginFile();
           activeRun.file = String(file);
           runtimeState.files.push(activeRun.file);
           emitRunEvent('test:enqueue', {

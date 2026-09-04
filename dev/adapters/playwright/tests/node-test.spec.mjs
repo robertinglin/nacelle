@@ -503,4 +503,38 @@ test.describe('browser-native node:test builtin', () => {
     await expectPass(expect, result);
     expect(result.stdout).toContain('discovery gate completed');
   });
+
+  test('isolates root hooks between files discovered by node:test.run', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { run } from 'node:test';
+
+      const stream = run({ files: ['/node/first.test.js', '/node/second.test.js'] });
+      stream.resume();
+      await new Promise((resolve, reject) => {
+        stream.once('error', reject);
+        stream.once('end', resolve);
+      });
+      assert.strictEqual(process.exitCode, 0);
+      process.stdout.write('node:test file roots isolated\\n');
+    `, {
+      entryPath: '/node/multi-file-runner.mjs',
+      files: {
+        '/node/first.test.js': [
+          "const { beforeEach, test } = require('node:test');",
+          "globalThis.firstFileHookRuns = 0;",
+          "beforeEach(() => { globalThis.firstFileHookRuns += 1; });",
+          "test('first file', () => {});",
+        ].join('\n'),
+        '/node/second.test.js': [
+          "const { test } = require('node:test');",
+          "const assert = require('node:assert/strict');",
+          "test('second file has a fresh root', () => assert.strictEqual(globalThis.firstFileHookRuns, 1));",
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('node:test file roots isolated');
+  });
 });

@@ -83,6 +83,13 @@ async function resolveCommand(name, context) {
   if (BUILTINS.has(name)) return { type: 'builtin', name };
   if (name === 'node' || name === 'nodejs' || name === '/browser/node') return { type: 'node', name };
   if (name === 'npm' || name === 'npx') return { type: 'npm', name };
+  // Package-manager children are virtual browser commands. They do not need
+  // a materialized .bin shim because the runtime handles their registry and
+  // lifecycle operations directly, but shell lookup must still match Node's
+  // PATH-visible command contract.
+  if (name === 'yarn' || name === 'yarnpkg') {
+    return { type: 'external', path: `${String(context.cwd || '/node').replace(/\/$/, '')}/node_modules/.bin/${name}`, name };
+  }
   if (name === 'sh' || name === 'bash' || name === '/bin/sh' || name === '/bin/bash') return { type: 'shell', name };
 
   const candidates = [];

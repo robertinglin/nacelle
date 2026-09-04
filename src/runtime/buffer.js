@@ -1360,6 +1360,12 @@ export function createBufferClass(scope = globalThis) {
         ? new NodeBuffer(pooled.buffer, pooled.byteOffset, pooled.byteLength, internalBuffer)
         : new NodeBuffer(validatedSize, internalBuffer);
     }
+    // Node exposes allocUnsafeSlow as the explicitly unpooled allocation
+    // variant. Cache and archive implementations use it for buffers whose
+    // lifetime should not retain the shared slab.
+    static allocUnsafeSlow(size) {
+      return new NodeBuffer(validateBufferSize(size), internalBuffer);
+    }
     static isBuffer(value) {
       return Boolean(value && (value instanceof NodeBuffer || value._isBuffer === true || (value instanceof Uint8Array && (value.constructor?.name === 'Buffer' || value._isBuffer === true))));
     }

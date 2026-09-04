@@ -147,6 +147,10 @@ test.describe('Next.js SWC package selection', () => {
             resolve(message);
           });
         });
+        if (envProbe.connected) envProbe.disconnect();
+        if (envProbe.exitCode === null && envProbe.signalCode === null) {
+          await new Promise((resolve) => envProbe.once('exit', resolve));
+        }
         assert.strictEqual(envProbeValue.value, '1');
         assert.strictEqual(envProbeValue.imported, '1');
 
@@ -206,7 +210,7 @@ test.describe('Next.js SWC package selection', () => {
 
         const keepAlive = setInterval(() => {}, 1000);
         try {
-          await installBindings.installBindings();
+          await swc.loadBindings(true);
           assert.strictEqual(swc.getBindingsSync().isWasm, true);
           const wasmUrl = 'https://registry.npmjs.org/@next/swc-wasm-nodejs/-/swc-wasm-nodejs-16.3.3.tgz';
           assert.strictEqual(wasmRequests[0], wasmUrl);
@@ -266,6 +270,224 @@ test.describe('Next.js SWC package selection', () => {
         url: 'https://registry.npmjs.org/@next/swc-wasm-nodejs/-/swc-wasm-nodejs-16.3.3.tgz',
       }),
     ]));
+  });
+
+  test('runtime npm downloads remain visible to an existing worker thread', async ({ page }) => {
+    test.setTimeout(120000);
+    await page.goto(serverUrl);
+
+    const result = await page.evaluate(async () => {
+      const { Nacelle } = await import('/index.js');
+      const node = await Nacelle.create({
+        cwd: '/node',
+        globalObject: window,
+        isolation: 'worker',
+        gateway: false,
+        capabilities: {
+          network: {
+            origins: ['https://registry.npmjs.org'],
+            methods: ['GET', 'HEAD'],
+          },
+        },
+      });
+      await node.fs.writeFile('/node/package.json', JSON.stringify({
+        name: 'next-swc-live-worker-test',
+        private: true,
+      }));
+      await node.npm.install('next@16.3.3');
+      await node.fs.writeFile('/node/next-wasm-worker.js', `
+        const { parentPort } = require('node:worker_threads');
+        parentPort.postMessage({ type: 'ready' });
+        parentPort.once('message', async () => {
+          try {
+            const fs = require('node:fs');
+            parentPort.postMessage({
+              type: 'prepared',
+              wasmJs: fs.existsSync('/node/node_modules/next/wasm/@next/swc-wasm-nodejs/wasm.js'),
+              wasmBinary: fs.existsSync('/node/node_modules/next/wasm/@next/swc-wasm-nodejs/wasm_bg.wasm'),
+            });
+            const installBindings = require('next/dist/build/swc/install-bindings.js');
+            const swc = require('next/dist/build/swc/index.js');
+            await installBindings.installBindings();
+            parentPort.postMessage({ type: 'loaded', isWasm: swc.getBindingsSync().isWasm });
+          } catch (error) {
+            parentPort.postMessage({ type: 'error', error: String(error?.stack || error) });
+          }
+        });
+      `);
+      const child = await node.execute(`
+        (async () => {
+          const assert = require('node:assert/strict');
+          const { Worker } = require('node:worker_threads');
+          const installBindings = require('next/dist/build/swc/install-bindings.js');
+          const worker = new Worker('/node/next-wasm-worker.js');
+          const nextMessage = (type) => new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error('worker message timed out: ' + type)), 30000);
+            worker.on('message', (message) => {
+              if (message?.type === 'error') {
+                clearTimeout(timeout);
+                reject(new Error(message.error));
+              } else if (message?.type === type) {
+                clearTimeout(timeout);
+                resolve(message);
+              }
+            });
+            worker.once('error', (error) => {
+              clearTimeout(timeout);
+              reject(error);
+            });
+          });
+          try {
+            await nextMessage('ready');
+            await installBindings.installBindings();
+            worker.postMessage('load');
+            const prepared = await nextMessage('prepared');
+            assert.equal(prepared.wasmJs, true, 'worker package files: ' + JSON.stringify(prepared));
+            assert.equal(prepared.wasmBinary, true, 'worker package files: ' + JSON.stringify(prepared));
+            const loaded = await nextMessage('loaded');
+            assert.equal(loaded.isWasm, true);
+            process.stdout.write('NEXT_LIVE_WORKER_WASM:ok\\n');
+          } finally {
+            await worker.terminate();
+          }
+        })().catch((error) => {
+          console.error(error.stack || error);
+          process.exitCode = 1;
+        });
+      `);
+      return {
+        exitCode: await child.exit,
+        stdout: await child.stdoutText(),
+        stderr: await child.stderrText(),
+      };
+    });
+
+    expect(result.exitCode, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain('NEXT_LIVE_WORKER_WASM:ok');
+  });
+
+  test('runtime npm downloads remain visible to a package-script child process', async ({ page }) => {
+    test.setTimeout(120000);
+    await page.goto(serverUrl);
+
+    const result = await page.evaluate(async () => {
+      const { Nacelle } = await import('/index.js');
+      const node = await Nacelle.create({
+        cwd: '/node',
+        globalObject: window,
+        isolation: 'worker',
+        gateway: false,
+        capabilities: {
+          network: {
+            origins: ['https://registry.npmjs.org'],
+            methods: ['GET', 'HEAD'],
+          },
+        },
+      });
+      await node.fs.writeFile('/node/package.json', JSON.stringify({
+        name: 'next-swc-live-child-test',
+        private: true,
+        scripts: { probe: 'node probe.js' },
+      }));
+      await node.npm.install('next@16.3.3');
+      await node.fs.writeFile('/node/probe.js', `
+        const fs = require('node:fs');
+        (async () => {
+          const installBindings = require('next/dist/build/swc/install-bindings.js');
+          const swc = require('next/dist/build/swc/index.js');
+          await installBindings.installBindings();
+          if (!fs.existsSync('/node/node_modules/next/wasm/@next/swc-wasm-nodejs/wasm.js')) throw new Error('downloaded wasm.js is missing');
+          if (!fs.existsSync('/node/node_modules/next/wasm/@next/swc-wasm-nodejs/wasm_bg.wasm')) throw new Error('downloaded wasm binary is missing');
+          if (!swc.getBindingsSync().isWasm) throw new Error('downloaded SWC did not load as WASM');
+          process.stdout.write('NEXT_CHILD_WASM:ok\\n');
+        })().catch((error) => {
+          console.error(error.stack || error);
+          process.exitCode = 1;
+        });
+      `);
+      const child = await node.npm.run('probe');
+      return {
+        exitCode: await child.exit,
+        stdout: await child.stdoutText(),
+        stderr: await child.stderrText(),
+      };
+    });
+
+    expect(result.exitCode, `${result.stdout}\\n${result.stderr}`).toBe(0);
+    expect(result.stdout, `${result.stdout}\\n${result.stderr}`).toContain('NEXT_CHILD_WASM:ok');
+  });
+
+  test('runtime npm downloads remain visible to an IPC fork child process', async ({ page }) => {
+    test.setTimeout(120000);
+    await page.goto(serverUrl);
+
+    const result = await page.evaluate(async () => {
+      const { Nacelle } = await import('/index.js');
+      const node = await Nacelle.create({
+        cwd: '/node',
+        globalObject: window,
+        isolation: 'worker',
+        gateway: false,
+        capabilities: {
+          network: {
+            origins: ['https://registry.npmjs.org'],
+            methods: ['GET', 'HEAD'],
+          },
+        },
+      });
+      await node.fs.writeFile('/node/package.json', JSON.stringify({
+        name: 'next-swc-live-fork-test',
+        private: true,
+      }));
+      await node.npm.install('next@16.3.3');
+      await node.fs.writeFile('/node/probe.js', `
+        const fs = require('node:fs');
+        (async () => {
+          const installBindings = require('next/dist/build/swc/install-bindings.js');
+          const swc = require('next/dist/build/swc/index.js');
+          await installBindings.installBindings();
+          if (!fs.existsSync('/node/node_modules/next/wasm/@next/swc-wasm-nodejs/wasm.js')) throw new Error('downloaded wasm.js is missing');
+          if (!fs.existsSync('/node/node_modules/next/wasm/@next/swc-wasm-nodejs/wasm_bg.wasm')) throw new Error('downloaded wasm binary is missing');
+          if (!swc.getBindingsSync().isWasm) throw new Error('downloaded SWC did not load as WASM');
+          process.send({ type: 'ok' });
+        })().catch((error) => {
+          process.send({ type: 'error', error: String(error?.stack || error) });
+          process.exitCode = 1;
+        });
+      `);
+      const child = await node.execute(`
+        (async () => {
+          const assert = require('node:assert/strict');
+          const { fork } = require('node:child_process');
+          const worker = fork('/node/probe.js', [], { cwd: '/node' });
+          const message = await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error('forked SWC probe timed out')), 30000);
+            worker.once('error', (error) => { clearTimeout(timeout); reject(error); });
+            worker.on('message', (value) => {
+              if (value?.type === 'ok' || value?.type === 'error') { clearTimeout(timeout); resolve(value); }
+            });
+          });
+          assert.deepEqual(message, { type: 'ok' }, JSON.stringify(message));
+          await new Promise((resolve, reject) => {
+            worker.once('error', reject);
+            worker.once('exit', (code) => code === 0 ? resolve() : reject(new Error('fork exit: ' + code)));
+            worker.disconnect();
+          });
+          process.stdout.write('NEXT_FORK_WASM:ok\\n');
+        })().catch((error) => {
+          console.error(error.stack || error);
+          process.exitCode = 1;
+        });
+      `);
+      return {
+        exitCode: await child.exit,
+        stdout: await child.stdoutText(),
+        stderr: await child.stderrText(),
+      };
+    });
+
+    expect(result.exitCode, `${result.stdout}\\n${result.stderr}`).toBe(0);
+    expect(result.stdout, `${result.stdout}\\n${result.stderr}`).toContain('NEXT_FORK_WASM:ok');
   });
 
   test('fetched Web Streams complete through a VFS WriteStream', async ({ page }) => {

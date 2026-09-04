@@ -28,6 +28,16 @@ function isBrowserNativePackage(name, platform) {
     || /(?:^|-)\b(?:aix|android|darwin|freebsd|linux|openbsd|sunos|win32)\b(?:-|$)/i.test(packageName);
 }
 
+function isBrowserWasmPackage(name, platform) {
+  if (platform !== 'browser') return false;
+  return /(?:^|[-/])wasm(?:[-/]|$)/i.test(String(name));
+}
+
+function optionalPackageSupportsTarget(name, manifest, platform, arch, libc) {
+  return packageSupportsPlatform(manifest, platform, arch, libc)
+    || isBrowserWasmPackage(name, platform);
+}
+
 function base64(bytes) {
   let text = '';
   for (let index = 0; index < bytes.length; index += 0x8000) {
@@ -87,24 +97,42 @@ export function compareSemver(a, b) {
   return 0;
 }
 
+function wildcardComparator(v, value) {
+  const match = String(value).match(/^(>=|<=|>|<|=|~|\^)?(\d+|[xX*])(?:\.(\d+|[xX*]))?(?:\.(\d+|[xX*]))?$/);
+  if (!match || ![match[2], match[3], match[4]].some((part) => part && /[xX*]/.test(part))) return undefined;
+  const operator = match[1] || '';
+  const majorPart = match[2];
+  if (/[xX*]/.test(majorPart)) return operator === '' || operator === '=';
+  const major = Number(majorPart);
+  const minorPart = match[3];
+  const patchPart = match[4];
+  const wildcardAt = /[xX*]/.test(minorPart || '') ? 'minor' : /[xX*]/.test(patchPart || '') ? 'patch' : null;
+  if (!wildcardAt) return undefined;
+  const lower = {
+    major,
+    minor: minorPart && wildcardAt !== 'minor' ? Number(minorPart) : 0,
+    patch: patchPart && wildcardAt !== 'patch' ? Number(patchPart) : 0,
+    prerelease: null,
+  };
+  const upper = wildcardAt === 'minor'
+    ? { major: major + 1, minor: 0, patch: 0, prerelease: null }
+    : { major, minor: lower.minor + 1, patch: 0, prerelease: null };
+  const lowerComparison = compareSemver(v, lower);
+  const upperComparison = compareSemver(v, upper);
+  if (operator === '>') return upperComparison >= 0;
+  if (operator === '>=') return lowerComparison >= 0;
+  if (operator === '<') return lowerComparison < 0;
+  if (operator === '<=') return upperComparison < 0;
+  return lowerComparison >= 0 && upperComparison < 0;
+}
+
 function satisfiesComparator(v, comp) {
   const c = comp.trim();
   if (!c || c === '*' || c === 'x' || c === 'X' || c === 'latest') return true;
 
   // normalize x-ranges like 1.x, 1.2.x, 1.*
-  if (c.includes('x') || c.includes('X') || c.includes('*')) {
-    const parts = c.split('.');
-    if (parts[0] === '*' || parts[0] === 'x' || parts[0] === 'X') return true;
-    if (parts[1] === '*' || parts[1] === 'x' || parts[1] === 'X') {
-      const maj = parseInt(parts[0], 10);
-      return v.major === maj;
-    }
-    if (parts[2] === '*' || parts[2] === 'x' || parts[2] === 'X') {
-      const maj = parseInt(parts[0], 10);
-      const min = parseInt(parts[1], 10);
-      return v.major === maj && v.minor === min;
-    }
-  }
+  const wildcardResult = wildcardComparator(v, c);
+  if (wildcardResult !== undefined) return wildcardResult;
 
   // Caret ^1.2.3
   if (c.startsWith('^')) {
@@ -714,7 +742,7 @@ export class BrowserNpm {
         const resolved = this.resolveVersion(metadata, resolutionRange);
         version = resolved.version;
         versionDoc = resolved.doc;
-        if (optional && !packageSupportsPlatform(versionDoc, this.platform, this.arch, this.libc)) {
+        if (optional && !optionalPackageSupportsTarget(resolutionName, versionDoc, this.platform, this.arch, this.libc)) {
           onProgress?.({ phase: 'optional-skipped', name, range, reason: 'platform-mismatch' });
           return;
         }
@@ -752,7 +780,7 @@ export class BrowserNpm {
         }
       }
 
-      if (optional && !packageSupportsPlatform(parsedPkgJson, this.platform, this.arch, this.libc)) {
+      if (optional && !optionalPackageSupportsTarget(resolutionName, parsedPkgJson, this.platform, this.arch, this.libc)) {
         onProgress?.({ phase: 'optional-skipped', name, range, reason: 'platform-mismatch' });
         return;
       }

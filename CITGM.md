@@ -11,6 +11,13 @@ fixtures, stub behavior only for one dependency, or add any other CITGM
 workaround. A package-specific symptom may identify a missing general runtime
 contract, but the implementation must address that contract for all callers.
 
+Nacelle must support resolving, installing, and downloading packages from
+`registry.npmjs.org` at any point during a run, including after workers or
+child processes have started. Precached metadata, tarballs, or dependencies
+may improve performance, but they must never be required to make an otherwise
+valid on-demand npm operation work and must not be used to hide a runtime
+visibility or lifecycle defect.
+
 It is acceptable to improve the CITGM harness when the improvement is
 general-purpose, preserves the upstream test's meaning, and applies equally to
 all candidate packages. Harness changes must still execute the real candidate

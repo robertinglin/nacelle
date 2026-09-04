@@ -1039,11 +1039,13 @@ export function createBrowserProcess(options = {}) {
       userPort: userChannel.raw.port2,
     };
     if (options.networkPort) initialData.networkPort = options.networkPort;
+    if (options.vfsUpdatePort) initialData.vfsUpdatePort = options.vfsUpdatePort;
     if (options.vfs !== undefined) initialData.vfs = prepareWorkerVfs(options.vfs, scope);
     const transferList = [
       controlChannel.raw.port2,
       userChannel.raw.port2,
       ...(options.networkPort ? [options.networkPort] : []),
+      ...(options.vfsUpdatePort ? [options.vfsUpdatePort] : []),
       ...(options.workerDataTransferList || []),
     ];
     worker.postMessage(initialData, transferList);

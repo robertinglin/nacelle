@@ -195,4 +195,198 @@ test.describe('browser-native worker process boundary', () => {
     expect(result.stdout).toContain('worker node:test complete');
     expect(result.stderr).toBe('');
   });
+
+  test('streams an async piped HTTP response through a runtime worker before it ends', async ({ page }) => {
+    await openRuntime(page);
+    const result = await page.evaluate(async () => {
+      const { createRuntime } = await import('/runtime.js');
+      const capabilities = {
+        vfs: { mounts: [{ path: '/node', mode: 'read-write' }] },
+        workers: { entryModules: ['*'], maxChildren: 2 },
+        ipc: { enabled: true },
+        signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
+        output: { maxBytes: 1024 * 1024, stdoutBytes: 1024 * 1024, stderrBytes: 1024 * 1024 },
+        envVars: { allowed: [] },
+      };
+      const runtime = createRuntime({ globalObject: globalThis });
+      const source = `
+        (async () => {
+        const assert = require('node:assert');
+        const { finished, Readable } = require('node:stream');
+        const http = require('node:http');
+        const server = http.createServer(async (_request, response) => {
+          const stream = new Readable();
+          stream._read = () => {};
+          response.setHeader('content-type', 'text/plain');
+          response.setHeader('transfer-encoding', 'chunked');
+          finished(stream, { readable: true, writable: false }, () => {});
+          finished(response, () => {});
+          stream.push('first');
+          stream.pipe(response);
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          stream.push('late');
+          stream.push(null);
+        });
+        await new Promise((resolve, reject) => { server.once('error', reject); server.listen(43306, '127.0.0.1', resolve); });
+        await new Promise((resolve, reject) => {
+          let request;
+          request = http.get('http://localhost:43306/abort', (response) => {
+            response.once('data', (chunk) => {
+              assert.strictEqual(chunk.toString(), 'first');
+              request.destroy();
+              resolve();
+            });
+            response.once('error', reject);
+          });
+          request.once('error', (error) => {
+            if (error.code !== 'ECONNRESET') reject(error);
+          });
+        });
+        const response = await new Promise((resolve, reject) => {
+          const request = http.get('http://localhost:43306/next', resolve);
+          request.once('error', reject);
+        });
+        let body = '';
+        response.setEncoding('utf8');
+        response.on('data', (chunk) => { body += chunk; });
+        await new Promise((resolve, reject) => { response.once('end', resolve); response.once('error', reject); });
+        assert.strictEqual(body, 'firstlate');
+        await new Promise((resolve) => server.close(resolve));
+        })().catch((error) => { console.error(error); process.exitCode = 1; });
+      `;
+      const stdout = [];
+      const stderr = [];
+      await runtime.reset({ runId: 'worker-http-stream-regression', capabilities, isolation: 'worker' });
+      await runtime.mount({ '/node/runner.js': new TextEncoder().encode(source) });
+      const code = await runtime.executeEntry('/node/runner.js', {
+        cwd: '/node',
+        env: {},
+        processArgv: ['node', '/node/runner.js'],
+      }, (value) => stdout.push(String(value)), (value) => stderr.push(String(value)));
+      return { code, stdout: stdout.join(''), stderr: stderr.join('') };
+    });
+
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stderr).toBe('');
+  });
+
+  test('preserves async piped response delivery through a nested virtual child', async ({ page }) => {
+    await openRuntime(page);
+    const result = await page.evaluate(async () => {
+      const { createRuntime } = await import('/runtime.js');
+      const capabilities = {
+        vfs: { mounts: [{ path: '/node', mode: 'read-write' }] },
+        workers: { entryModules: ['*'], maxChildren: 4 },
+        ipc: { enabled: true },
+        signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
+        output: { maxBytes: 1024 * 1024, stdoutBytes: 1024 * 1024, stderrBytes: 1024 * 1024 },
+        envVars: { allowed: [] },
+        proxy: { mode: 'proxy', enabled: true, capability: true },
+      };
+      const encode = (source) => new TextEncoder().encode(source);
+      const runtime = createRuntime({ globalObject: globalThis });
+      const childSource = `
+        const assert = require('node:assert');
+        const { finished, Readable } = require('node:stream');
+        const http = require('node:http');
+        const server = http.createServer(async (_request, response) => {
+          const stream = new Readable();
+          stream._read = () => {};
+          const reply = {
+            raw: response,
+            get sent() { return response.writableEnded === true; },
+            then(fulfilled, rejected) {
+              if (this.sent) {
+                fulfilled();
+                return;
+              }
+              finished(this.raw, (error) => {
+                if (error && error.code !== 'ERR_STREAM_PREMATURE_CLOSE') {
+                  rejected?.(error);
+                  return;
+                }
+                fulfilled();
+              });
+            },
+          };
+          response.setHeader('content-type', 'text/plain');
+          response.setHeader('transfer-encoding', 'chunked');
+          finished(stream, { readable: true, writable: false }, () => {});
+          finished(response, () => {});
+          stream.push('first');
+          stream.pipe(response);
+          await new Promise((resolve) => {
+            const timer = setTimeout(resolve, 10);
+            timer.unref?.();
+          });
+          stream.push('late');
+          stream.push(null);
+          await new Promise((resolve, reject) => reply.then(resolve, reject));
+          return reply;
+        });
+        (async () => {
+          await new Promise((resolve, reject) => { server.once('error', reject); server.listen(43307, '127.0.0.1', resolve); });
+          await new Promise((resolve, reject) => {
+            let request;
+            request = http.get('http://localhost:43307/abort', (response) => {
+              response.once('data', (chunk) => {
+                assert.strictEqual(chunk.toString(), 'first');
+                request.destroy();
+                resolve();
+              });
+              response.once('error', reject);
+            });
+            request.once('error', (error) => {
+              if (error.code !== 'ECONNRESET') reject(error);
+            });
+          });
+          const response = await new Promise((resolve, reject) => {
+            const request = http.get('http://localhost:43307/next', resolve);
+            request.once('error', reject);
+          });
+          let body = '';
+          response.setEncoding('utf8');
+          response.on('data', (chunk) => { body += chunk; });
+          await new Promise((resolve, reject) => { response.once('end', resolve); response.once('error', reject); });
+          assert.strictEqual(body, 'firstlate');
+          await new Promise((resolve) => server.close(resolve));
+        })().catch((error) => { console.error(error); process.exitCode = 1; });
+      `;
+      const parentSource = `
+        const { spawn } = require('node:child_process');
+        const child = spawn(process.execPath, ['/node/http-child.js'], { stdio: ['ignore', 'pipe', 'pipe'] });
+        child.stdout.pipe(process.stdout);
+        child.stderr.pipe(process.stderr);
+        child.once('error', () => process.exit(1));
+        child.once('close', (code) => process.exit(code || 0));
+        setTimeout(() => { child.kill('SIGKILL'); process.exit(1); }, 3000).unref();
+      `;
+      const stdout = [];
+      const stderr = [];
+      await runtime.reset({
+        runId: 'nested-http-stream-regression',
+        capabilities,
+        isolation: 'worker',
+        proxy: {
+          mode: 'proxy',
+          enabled: true,
+          capability: true,
+          adapter: { connect() { throw new Error('unexpected external connection'); } },
+        },
+      });
+      await runtime.mount({
+        '/node/runner.js': encode(parentSource),
+        '/node/http-child.js': encode(childSource),
+      });
+      const code = await runtime.executeEntry('/node/runner.js', {
+        cwd: '/node',
+        env: {},
+        processArgv: ['node', '/node/runner.js'],
+      }, (value) => stdout.push(String(value)), (value) => stderr.push(String(value)));
+      return { code, stdout: stdout.join(''), stderr: stderr.join('') };
+    });
+
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stderr).toBe('');
+  });
 });

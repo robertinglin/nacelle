@@ -58,7 +58,110 @@ function timeoutMsFor(request) {
   return Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 120_000;
 }
 
-function failureResult(runId, phase, error, outcome = 'failed') {
+function compactRuntimeState(value) {
+  if (!value || typeof value !== 'object') return null;
+  const nodeTest = value.nodeTest && typeof value.nodeTest === 'object' ? value.nodeTest : value;
+  const list = (items) => Array.isArray(items)
+    ? { count: items.length, first: items[0] == null ? null : String(items[0]), last: items.at(-1) == null ? null : String(items.at(-1)) }
+    : null;
+  const childRecord = (record) => record && typeof record === 'object' ? {
+    command: String(record.command || record.entry || '').split('/').pop().slice(0, 80),
+    argumentCount: Number(record.argumentCount) || 0,
+    code: record.code ?? null,
+    signal: record.signal ?? record.terminal?.signal ?? null,
+    pending: Boolean(record.pending),
+    stdoutBytes: Number(record.stdoutBytes) || 0,
+    stderrBytes: Number(record.stderrBytes) || 0,
+    stdoutExcerpt: record.stdoutExcerpt == null ? '' : String(record.stdoutExcerpt).slice(0, 512),
+    stderrExcerpt: record.stderrExcerpt == null ? '' : String(record.stderrExcerpt).slice(0, 512),
+  } : null;
+  return {
+    exitCode: value.exitCode ?? null,
+    runtimeCode: value.runtimeCode ?? null,
+    phase: value.phase == null ? null : String(value.phase).slice(0, 64),
+    nodeTest: {
+      registered: Number(nodeTest.registered) || 0,
+      completed: Number(nodeTest.completed) || 0,
+      requestedFiles: list(nodeTest.requestedFiles),
+      files: list(nodeTest.files),
+      streamEvents: list(nodeTest.streamEvents),
+      streamError: nodeTest.streamError ? {
+        name: String(nodeTest.streamError.name || 'Error'),
+        message: String(nodeTest.streamError.message || nodeTest.streamError).slice(0, 512),
+      } : null,
+      streamTerminal: nodeTest.streamTerminal == null ? null : String(nodeTest.streamTerminal),
+    },
+    childActivity: value.childActivity && typeof value.childActivity === 'object' ? {
+      launched: Number(value.childActivity.launched) || 0,
+      completed: Number(value.childActivity.completed) || 0,
+      failed: Number(value.childActivity.failed) || 0,
+      firstCommand: value.childActivity.firstCommand == null ? null : String(value.childActivity.firstCommand).slice(0, 80),
+      lastCommand: value.childActivity.lastCommand == null ? null : String(value.childActivity.lastCommand).slice(0, 80),
+      recent: Array.isArray(value.childActivity.recent) ? {
+        count: value.childActivity.recent.length,
+        first: childRecord(value.childActivity.recent[0]),
+        last: childRecord(value.childActivity.recent.at(-1)),
+      } : null,
+    } : null,
+    lifecycle: value.lifecycle && typeof value.lifecycle === 'object' ? {
+      pending: Number(value.lifecycle.pending) || 0,
+      tasks: Array.isArray(value.lifecycle.tasks) ? {
+        count: value.lifecycle.tasks.length,
+        first: value.lifecycle.tasks[0] ? {
+          id: Number(value.lifecycle.tasks[0].id) || 0,
+          label: value.lifecycle.tasks[0].label == null ? null : String(value.lifecycle.tasks[0].label).slice(0, 128),
+          stack: value.lifecycle.tasks[0].stack == null ? null : String(value.lifecycle.tasks[0].stack).slice(0, 160),
+        } : null,
+        last: value.lifecycle.tasks.at(-1) ? {
+          id: Number(value.lifecycle.tasks.at(-1).id) || 0,
+          label: value.lifecycle.tasks.at(-1).label == null ? null : String(value.lifecycle.tasks.at(-1).label).slice(0, 128),
+          stack: value.lifecycle.tasks.at(-1).stack == null ? null : String(value.lifecycle.tasks.at(-1).stack).slice(0, 160),
+        } : null,
+      } : null,
+    } : null,
+  };
+}
+
+function childLifecycleDiagnostics(child) {
+  if (!child) return null;
+  const worker = child._worker || child;
+  const processObject = worker.process || worker.processObject;
+  const records = typeof child.output?.records === 'function' ? child.output.records() : [];
+  const bytes = (value) => value?.byteLength ?? (ArrayBuffer.isView(value) ? value.byteLength : 0);
+  const terminal = worker.terminalRecord || worker.terminal;
+  const compactTerminal = terminal ? {
+    state: terminal.state || null,
+    status: terminal.status || null,
+    kind: terminal.kind || null,
+    code: terminal.code ?? null,
+    signal: terminal.signal ?? null,
+    forced: Boolean(terminal.forced),
+    error: terminal.error ? {
+      name: String(terminal.error.name || 'Error'),
+      code: terminal.error.code || null,
+      message: String(terminal.error.message || terminal.error).slice(0, 512),
+    } : null,
+  } : null;
+  return {
+    state: worker.state || null,
+    stateHistory: Array.isArray(worker.stateHistory)
+      ? { count: worker.stateHistory.length, first: worker.stateHistory[0] || null, last: worker.stateHistory.at(-1) || null }
+      : null,
+    terminal: compactTerminal,
+    output: {
+      recordCount: records.length,
+      stdoutBytes: bytes(child.output?.stdoutBytes),
+      stderrBytes: bytes(child.output?.stderrBytes),
+      firstStream: records[0]?.stream || null,
+      lastStream: records.at(-1)?.stream || null,
+    },
+    runtimeState: compactRuntimeState(
+      worker.runtimeState || worker.__bnhRuntimeState || processObject?.__bnhNodeTestState || processObject?.__bnhChildActivity,
+    ),
+  };
+}
+
+function failureResult(runId, phase, error, outcome = 'failed', details = null) {
   return {
     runId,
     outcome,
@@ -68,7 +171,7 @@ function failureResult(runId, phase, error, outcome = 'failed') {
       code: error.code || 'ERR_BROWSER_RUNTIME',
       name: error.name || 'Error',
       message: String(error.message || error),
-      details: error.details || null,
+      details: error.details || details,
     } : null,
     stdout: new Uint8Array(0),
     stderr: new Uint8Array(0),
@@ -152,13 +255,15 @@ globalThis.__BROWSER_NODE_HARNESS__ = {
         const partial = child
           ? await readChild(child, 250)
           : { exitCode: null, stdout: '', stderr: '' };
+        const childDiagnostics = childLifecycleDiagnostics(child);
+        const timeoutDetails = { child: childDiagnostics };
         return {
           exitCode: null,
           stdout: partial.stdout,
           stderr: partial.stderr,
           timedOut: true,
-          runResult: failureResult(runId, 'shutdown', Object.assign(new Error('browser run timed out'), { code: 'ERR_RUN_TIMEOUT' }), 'timed_out'),
-              details: { runtimeVersion: runtime ? runtime.version : null, variant, metadata, tty_supported: false },
+          runResult: failureResult(runId, 'shutdown', Object.assign(new Error('browser run timed out'), { code: 'ERR_RUN_TIMEOUT' }), 'timed_out', timeoutDetails),
+          details: { runtimeVersion: runtime ? runtime.version : null, variant, metadata, tty_supported: false, ...timeoutDetails },
         };
       }
       const runResult = result.structuredResult || failureResult(runId, 'running', new Error('browser runtime returned no structured result'));

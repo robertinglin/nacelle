@@ -1,5 +1,6 @@
 import { expect } from 'playwright/test';
 import { browserRuntimeURL, expectPass, test } from './harness-test-helpers.mjs';
+import { runShellScript } from '../../../../src/runtime/shell.js';
 
 test.skip(!browserRuntimeURL, 'set BNH_TEST_URL to a browser runtime harness page');
 
@@ -21,6 +22,79 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
     expect(result.stdout).toContain('browser stdout');
     expect(result.stderr).toContain('browser stderr');
+  });
+
+  test('preserves Node events.on argument tuples for async iteration', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert/strict');
+        const { EventEmitter, on } = require('node:events');
+        const { on: streamOn } = require('node:stream');
+
+        const emitter = new EventEmitter();
+        const iterator = on(emitter, 'data');
+        const first = { value: 1 };
+        emitter.emit('data', first);
+        assert.deepStrictEqual((await iterator.next()).value, [first]);
+        await iterator.return();
+
+        const streamIterator = streamOn(emitter, 'data');
+        const second = { value: 2 };
+        emitter.emit('data', second);
+        assert.deepStrictEqual((await streamIterator.next()).value, [second]);
+        await streamIterator.return();
+        process.stdout.write('events.on tuple contract completed');
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `);
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('events.on tuple contract completed');
+  });
+
+  test('drains buffered object-mode transforms through stream.on async iteration', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert/strict');
+        const { Transform, on } = require('node:stream');
+        const { StringDecoder } = require('node:string_decoder');
+        const decoder = new StringDecoder('utf8');
+        let remainder = '';
+        const transformed = new Transform({
+          readableObjectMode: true,
+          transform(chunk, encoding, callback) {
+            remainder += decoder.write(chunk);
+            const lines = remainder.split(/\\r?\\n/);
+            remainder = lines.pop();
+            for (const line of lines) this.push({ line });
+            callback();
+          },
+          flush(callback) {
+            remainder += decoder.end();
+            if (remainder) this.push({ line: remainder });
+            callback();
+          },
+        });
+
+        transformed.write('{"line":"buffered line"}\\n');
+        const values = [];
+        for await (const [value] of on(transformed, 'data')) {
+          values.push(JSON.parse(value.line));
+          if (values.length === 1) break;
+        }
+        assert.deepStrictEqual(values, [{ line: 'buffered line' }]);
+        transformed.destroy();
+        process.stdout.write('buffered transform iteration completed');
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `);
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('buffered transform iteration completed');
   });
 
   test('keeps Buffer arrays and assert predicates Node-compatible', async ({ harnessPage }) => {
@@ -310,6 +384,21 @@ test.describe('browser runtime bridge and core primitives', () => {
     expect(result.stdout).toContain('legacy stream finished contract completed');
   });
 
+  test('serializes ordinary Map values through the v8 structured clone contract', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const v8 = require('node:v8');
+      const original = new Map([['stats', { count: 2 }]]);
+      const restored = v8.deserialize(v8.serialize(original));
+      assert.strictEqual(restored instanceof Map, true);
+      assert.deepStrictEqual([...restored.entries()], [['stats', { count: 2 }]]);
+      process.stdout.write('map serialization completed');
+    `);
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('map serialization completed');
+  });
+
   test('keeps response sent state visible through socket-backed stream completion', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       (async () => {
@@ -544,7 +633,7 @@ test.describe('browser runtime bridge and core primitives', () => {
           scripts: { test: "node -e \"process.stdout.write('npm entrypoint ran\\\\n')\"" },
         }),
         '/node/node_modules/.bin/node': '#!/usr/bin/env node\\n',
-        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\\n',
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\n',
       },
     });
 
@@ -834,6 +923,54 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('runs an ESM node:test reporter launcher through an npm script', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/npm', ['test'], { cwd: '/node' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(output, 'esm reporter saw launcher test\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/package.json': JSON.stringify({
+          name: 'esm-node-test-launcher-fixture',
+          version: '1.0.0',
+          scripts: { test: 'node ./launcher.mjs' },
+        }),
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\\n',
+        '/node/launcher.mjs': [
+          "import { run } from 'node:test';",
+          "import { finished } from 'node:stream/promises';",
+          "const stream = run({ files: ['/node/launcher-test.mjs'] });",
+          "const report = stream.compose(async function* reporter(source) {",
+          "  for await (const event of source) {",
+          "    if (event.type === 'test:pass') yield 'esm reporter saw ' + event.data.name + '\\n';",
+          '  }',
+          '});',
+          'report.pipe(process.stdout);',
+          'await finished(stream);',
+        ].join('\n'),
+        '/node/launcher-test.mjs': "import { test } from 'node:test'; test('launcher test', () => {});",
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
   test('preserves npm dispatch when Node is resolved by name', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert');
@@ -1068,9 +1205,9 @@ test.describe('browser runtime bridge and core primitives', () => {
       });
     `, {
       files: {
-        '/node/node_modules/.bin/esm-async-bin': "#!/usr/bin/env node\\nimport('/node/node_modules/esm-async-bin/bin.js').catch((error) => { console.error(error); process.exitCode = 1; });\\n",
+        '/node/node_modules/.bin/esm-async-bin': "#!/usr/bin/env node\nimport('/node/node_modules/esm-async-bin/bin.js').catch((error) => { console.error(error); process.exitCode = 1; });\n",
         '/node/node_modules/esm-async-bin/package.json': JSON.stringify({ name: 'esm-async-bin', version: '1.0.0', type: 'module', bin: { 'esm-async-bin': 'bin.js' } }),
-        '/node/node_modules/esm-async-bin/bin.js': "#!/usr/bin/env node\\nawait new Promise((resolve) => setTimeout(resolve, 0));\\nprocess.stdout.write('async esm bin ran\\n');\\n",
+        '/node/node_modules/esm-async-bin/bin.js': "#!/usr/bin/env node\nawait new Promise((resolve) => setTimeout(resolve, 0));\nprocess.stdout.write('async esm bin ran\\n');\n",
       },
     });
 
@@ -1304,7 +1441,7 @@ test.describe('browser runtime bridge and core primitives', () => {
         '/node/node_modules/.bin/tool': [
           '#!/usr/bin/env node',
           "setTimeout(() => process.stdout.write('async inherited child\\n'), 1);",
-        ].join('\\n'),
+        ].join('\n'),
       },
     });
 
@@ -1337,9 +1474,9 @@ test.describe('browser runtime bridge and core primitives', () => {
           "const { spawn } = require('node:child_process');",
           "const child = spawn(process.execPath, ['--require', '/node/preload.js', '/node/inner.js'], { stdio: 'inherit' });",
           "child.once('exit', (code, signal) => { if (signal) process.kill(process.pid, signal); else process.exit(code); });",
-        ].join('\\n'),
+        ].join('\n'),
         '/node/preload.js': "process.stdout.write('preloaded\\n');",
-        '/node/inner.js': "const assert = require('node:assert'); assert.strictEqual(require.main, module); setTimeout(() => process.stdout.write('inner child\\n'), 1);",
+        '/node/inner.js': "const assert = require('node:assert'); assert.strictEqual(require.main, module); assert.strictEqual(require.cache['/node/inner.js'], module); setTimeout(() => process.stdout.write('inner child\\n'), 1);",
       },
     });
 
@@ -1501,6 +1638,23 @@ test.describe('browser runtime bridge and core primitives', () => {
     `);
 
     await expectPass(expect, result);
+  });
+
+  test('forwards returned npm child output when no stream callback delivered bytes', async () => {
+    const forwarded = [];
+    const outcome = await runShellScript('npm test', {
+      cwd: '/node',
+      env: { PATH: '' },
+      fs: { stat: async () => ({ isFile: () => false, isDirectory: () => false }) },
+      npmRun: async () => ({
+        code: 0,
+        stdoutText: async () => 'returned child output\n',
+        stderrText: async () => '',
+      }),
+      onStdout: (chunk) => forwarded.push(String(chunk)),
+    });
+    expect(outcome.code).toBe(0);
+    expect(forwarded).toEqual(['returned child output\n']);
   });
 
   test('kills a timed-out child through the bridge lifecycle', async ({ harnessPage }) => {

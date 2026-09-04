@@ -1459,11 +1459,14 @@ export function createModuleLoader({
         const resolved = hookURLToSpecifier((await runResolveHooksAsync(specifier, importer)).url);
         const url = await moduleURLAsync(resolved, processOverride, importer, ancestors);
         nativeSpecifierHints.set(url, specifier);
-        if (exportAware && requestedExportName(prefix) && resolved.endsWith('.json')) {
+        const exportName = exportAware ? requestedExportName(prefix) : undefined;
+        // JSON modules expose one ESM binding: default. Preserve a default
+        // import while retaining the native-style failure for named imports.
+        if (exportName && exportName !== 'default' && resolved.endsWith('.json')) {
           replacements.push({
             start: match.index + quoteOffset,
             end: match.index + quoteOffset + specifier.length + 2,
-            replacement: quote(invalidCjsModuleURL(specifier, requestedExportName(prefix))),
+            replacement: quote(invalidCjsModuleURL(specifier, exportName)),
             exportAware,
             prefix,
           });

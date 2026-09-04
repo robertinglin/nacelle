@@ -1,6 +1,6 @@
 import { expect, test } from 'playwright/test';
 import { createHttpCompatibility } from '../runtime/http.js';
-import { Writable } from '../runtime/streams.js';
+import { Readable, Writable } from '../runtime/streams.js';
 
 function listen(server, ...args) {
   return new Promise((resolve, reject) => {
@@ -315,6 +315,65 @@ test.describe('browser-native virtual HTTP compatibility', () => {
     await close(server);
   });
 
+  test('closes an async piped response when its client request is destroyed', async () => {
+    const { http } = createHttpCompatibility(globalThis);
+    const { finished } = await import('../../../../src/runtime/compat.js');
+    let requestNumber = 0;
+    const server = http.createServer(async (_request, response) => {
+      const source = new Readable();
+      source._read = () => {};
+      requestNumber += 1;
+      response.setHeader('content-type', 'text/plain');
+      response.setHeader('transfer-encoding', 'chunked');
+      finished(source, { readable: true, writable: false }, () => {});
+      finished(response, () => {});
+      source.push('first');
+      source.pipe(response);
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 100);
+        timer.unref?.();
+      });
+      source.push(requestNumber === 1 ? 'late' : 'second');
+      source.push(null);
+    });
+    await listen(server, 0, '127.0.0.1');
+
+    const firstData = new Promise((resolve, reject) => {
+      let request;
+      request = http.get({
+        host: 'localhost',
+        port: server.address().port,
+        path: '/abort-async-pipe',
+      }, (response) => {
+        response.once('data', (chunk) => {
+          expect(chunk.toString()).toBe('first');
+          request.destroy();
+          resolve();
+        });
+        response.once('error', reject);
+      });
+      request.once('error', (error) => {
+        if (error.code !== 'ECONNRESET') reject(error);
+      });
+      request.once('close', () => {});
+    });
+    await Promise.race([
+      firstData,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('async piped response did not stream')), 50)),
+    ]);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const second = await get(http, {
+      host: 'localhost',
+      port: server.address().port,
+      path: '/after-async-pipe-abort',
+    });
+    await expect(responseText(second)).resolves.toBe('firstsecond');
+    expect(requestNumber).toBe(2);
+    await close(server);
+  });
+
   test('finishes a response destroyed before a pending drain', async () => {
     const { http } = createHttpCompatibility(globalThis);
     const { finished } = await import('../../../../src/runtime/compat.js');
@@ -448,6 +507,89 @@ test.describe('browser-native virtual HTTP compatibility', () => {
     ]);
     expect(cancelCalled).toBe(true);
     await close(server);
+  });
+
+  test('forwards a byte web stream through a legacy ServerResponse adapter', async () => {
+    const { http } = createHttpCompatibility(globalThis);
+    const { ReadableStream } = await import('node:stream/web');
+    const { Writable } = await import('node:stream');
+    const util = await import('node:util');
+
+    function Response(req) {
+      http.ServerResponse.call(this, req);
+      this._lightMyRequest = { headers: null, trailers: {}, payloadChunks: [] };
+      this.assignSocket(new Writable({ write(_chunk, _encoding, callback) { queueMicrotask(callback); } }));
+    }
+    util.inherits(Response, http.ServerResponse);
+    Response.prototype.write = function write(data, encoding, callback) {
+      http.ServerResponse.prototype.write.call(this, data, encoding, callback);
+      this._lightMyRequest.payloadChunks.push(Buffer.from(data, encoding));
+      return true;
+    };
+    Response.prototype.end = function end(data, encoding, callback) {
+      if (data) this.write(data, encoding);
+      http.ServerResponse.prototype.end.call(this, callback);
+      this.emit('finish');
+      this.destroy();
+    };
+    Response.prototype.destroy = function destroy() {
+      if (this.destroyed) return;
+      this.destroyed = true;
+      queueMicrotask(() => this.emit('close'));
+    };
+
+    const raw = new Response({ method: 'GET', socket: null, connection: null });
+    const payload = new ReadableStream({
+      start(controller) { controller.enqueue(new Uint8Array(Buffer.from('web '))); },
+      pull(controller) {
+        controller.enqueue(new Uint8Array(Buffer.from('response')));
+        controller.close();
+      },
+      type: 'bytes',
+    });
+    const reader = payload.getReader();
+    let sourceOpen = true;
+    const onRead = ({ value, done }) => {
+      if (done) {
+        sourceOpen = false;
+        raw.end(null, null, null);
+        return;
+      }
+      raw.write(value);
+      reader.read().then(onRead, (error) => { sourceOpen = false; raw.destroy(error); });
+    };
+    raw.once('close', () => {
+      if (sourceOpen) reader.cancel().catch(() => {});
+    });
+    reader.read().then(onRead);
+    await new Promise((resolve) => raw.once('finish', resolve));
+
+    expect(raw.statusCode).toBe(200);
+    expect(raw._lightMyRequest.payloadChunks.map((chunk) => chunk.toString())).toEqual(['web ', 'response']);
+  });
+
+  test('keeps an async-iterated Node body readable through a byte web stream', async () => {
+    const { Readable } = await import('node:stream');
+    const { ReadableStream } = await import('node:stream/web');
+    const source = new Readable({ read() {} });
+    const iterator = source[Symbol.asyncIterator]();
+    const body = new ReadableStream({
+      async pull(controller) {
+        const { value, done } = await iterator.next();
+        if (done) controller.close();
+        else controller.enqueue(new Uint8Array(value));
+      },
+      cancel() { source.destroy(); },
+      type: 'bytes',
+    });
+    const reader = body.getReader();
+    const first = reader.read();
+    source.push(new Uint8Array(Buffer.from('async ')));
+    source.push(new Uint8Array(Buffer.from('body')));
+    source.push(null);
+    expect((await first).value).toEqual(new Uint8Array(Buffer.from('async ')));
+    expect((await reader.read()).value).toEqual(new Uint8Array(Buffer.from('body')));
+    expect((await reader.read()).done).toBe(true);
   });
 
   test('uses a proxy only when explicitly enabled and capability-granted', async () => {

@@ -2093,6 +2093,11 @@ class VirtualServerResponse extends Writable {
 
   end(...args) {
     if (!this.headersSent) this._implicitHeader();
+    // ServerResponse.end() sends implicit headers before its final body
+    // chunk. Raw virtual sockets install their writer at flush time; without
+    // this step that writer could put the body on the wire before the status
+    // line, which breaks any standards-compliant HTTP client.
+    if (!this._headersFlushed) this.flushHeaders();
     this.headersSent = true;
     // `writableEnded` describes the end request, not completion of the final
     // write.  A legacy ServerResponse adapter may emit `finish` immediately
@@ -2186,9 +2191,32 @@ function appendBytes(previous, next) {
   return result;
 }
 
-function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diagnostics, performanceRecord) {
+function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diagnostics, performanceRecord, ownerProcess) {
   const bindings = [];
   let nextPort = 46000;
+
+  const recordNetworkLifecycle = (phase, request, response, fields = {}) => {
+    try {
+      // A virtual HTTP network can be shared by several logical child
+      // processes. Prefer the process active at the event boundary so raw
+      // socket callbacks retain the child that owns the server; fall back to
+      // the process captured when the network was created for direct calls.
+      const telemetryProcess = typeof scope.process?.__bnhNetworkEvent === 'function'
+        ? scope.process
+        : ownerProcess;
+      telemetryProcess?.__bnhNetworkEvent?.({
+        source: 'guest-http',
+        method: String(request?.method || 'GET'),
+        url: String(request?.url || request?.path || ''),
+        phase,
+        transport: 'virtual-network',
+        status: Number(response?.statusCode || 0) || undefined,
+        ...fields,
+      });
+    } catch {
+      // Telemetry is observational and must not affect HTTP delivery.
+    }
+  };
 
   const recordHttpEntry = (name, startTime, request, response) => {
     if (typeof performanceRecord !== 'function') return;
@@ -2429,6 +2457,12 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
             socket.once?.('close', onSocketClose);
             const complete = (result) => {
               socket.off?.('close', onSocketClose);
+              recordNetworkLifecycle('server-response-finish', request, response, {
+                route: 'raw-socket',
+                bodyBytes: Number(result?.body?.byteLength || 0),
+                responseDestroyed: Boolean(response?.destroyed),
+                requestAborted: Boolean(request?.aborted),
+              });
               try {
                 if (!headersFlushed) writeRawResponse(socket, result);
                 else if (result.body?.byteLength) writeRawChunk(socket, result.body, responseChunked);
@@ -2444,9 +2478,21 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
             }, (result) => {
               headersFlushed = true;
               responseChunked = hasChunkedEncoding(result.headers);
+              recordNetworkLifecycle('server-response-headers', request, response, {
+                route: 'raw-socket',
+                headers: true,
+                responseDestroyed: Boolean(response?.destroyed),
+                requestAborted: Boolean(request?.aborted),
+              });
               writeRawHeaders(socket, result, true);
             }, (chunk, callback) => {
               try {
+                recordNetworkLifecycle('server-response-write', request, response, {
+                  route: 'raw-socket',
+                  bodyBytes: Number(chunk?.byteLength || 0),
+                  responseDestroyed: Boolean(response?.destroyed),
+                  requestAborted: Boolean(request?.aborted),
+                });
                 writeRawChunk(socket, chunk, responseChunked);
                 schedule(scope, () => callback());
               } catch (error) {
@@ -2454,6 +2500,10 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
               }
             });
             activeResponse = response;
+            recordNetworkLifecycle('server-request', request, response, {
+              route: 'raw-socket',
+              requestAborted: Boolean(request?.aborted),
+            });
             schedule(scope, () => {
               try {
                 const beginFn = request.begin || VirtualServerRequest.prototype.begin;
@@ -2622,6 +2672,11 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
       let responseDelivered = false;
       let responseBody;
       const finishResponse = (result) => {
+        recordNetworkLifecycle('server-response-finish', request, response, {
+          bodyBytes: Number(result?.body?.byteLength || 0),
+          responseDestroyed: Boolean(response?.destroyed),
+          requestAborted: Boolean(request?.aborted),
+        });
         if (!request.__bnhHttpPerformanceRecorded) {
           request.__bnhHttpPerformanceRecorded = true;
           recordHttpEntry(
@@ -2658,6 +2713,11 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
         finishResponse,
         (result) => {
           if (responseDelivered) return;
+          recordNetworkLifecycle('server-response-headers', request, response, {
+            headers: true,
+            responseDestroyed: Boolean(response?.destroyed),
+            requestAborted: Boolean(request?.aborted),
+          });
           responseBody = createDeferredBody();
           responseDelivered = true;
           resolve(responseFromBytes(
@@ -2670,6 +2730,24 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
             responseBody,
           ));
           return responseBody;
+        },
+        (chunk, callback) => {
+          try {
+            // Once headers are flushed, response.write() is a live stream.
+            // Deliver each accepted chunk to the deferred fetch body instead
+            // of retaining it until end(), which would hide data events from
+            // clients and make abort/reconnect lifecycles impossible to
+            // observe.
+            recordNetworkLifecycle('server-response-write', request, response, {
+              bodyBytes: Number(chunk?.byteLength || 0),
+              responseDestroyed: Boolean(response?.destroyed),
+              requestAborted: Boolean(request?.aborted),
+            });
+            responseBody?.enqueue(toBytes(chunk, scope));
+            schedule(scope, () => callback());
+          } catch (error) {
+            schedule(scope, () => callback(error));
+          }
         },
       );
       // A response can be destroyed before it has flushed headers (for
@@ -2742,6 +2820,9 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
           publishDiagnostic(diagnostics, 'http.server.response.created', { request, response });
           response.socket = request.socket;
           response.connection = request.connection;
+          recordNetworkLifecycle('server-request', request, response, {
+            requestAborted: Boolean(request.aborted),
+          });
           // The request callback is a user-visible async boundary. Enter the
           // incoming-message resource before dispatching it so
           // executionAsyncResource() and continuation-local state survive
@@ -3534,6 +3615,9 @@ class IncomingMessage extends Readable {
         while (!this.destroyed) {
           const item = await this._bodyReader.read();
           if (item.done) break;
+          this._owner?._recordNetworkLifecycle?.('client-body-chunk', {
+            bodyBytes: Number(item.value?.byteLength || 0),
+          });
           this._runInAsyncScope(() => this.push(
             nodeChunk(toBytes(item.value, this._scope), this._scope, this._BufferClass),
           ));
@@ -3541,6 +3625,9 @@ class IncomingMessage extends Readable {
       } else if (body && body[Symbol.asyncIterator]) {
         for await (const chunk of body) {
           if (this.destroyed) break;
+          this._owner?._recordNetworkLifecycle?.('client-body-chunk', {
+            bodyBytes: Number(chunk?.byteLength || 0),
+          });
           this._runInAsyncScope(() => this.push(
             nodeChunk(toBytes(chunk, this._scope), this._scope, this._BufferClass),
           ));
@@ -3548,6 +3635,9 @@ class IncomingMessage extends Readable {
       } else if (body && body[Symbol.iterator] && typeof body !== 'string') {
         for (const chunk of body) {
           if (this.destroyed) break;
+          this._owner?._recordNetworkLifecycle?.('client-body-chunk', {
+            bodyBytes: Number(chunk?.byteLength || 0),
+          });
           this._runInAsyncScope(() => this.push(
             nodeChunk(toBytes(chunk, this._scope), this._scope, this._BufferClass),
           ));
@@ -3562,12 +3652,18 @@ class IncomingMessage extends Readable {
       this.complete = true;
       this.readableComplete = true;
       this.clearTimeout();
+      this._owner?._recordNetworkLifecycle?.('client-body-end', {
+        destroyed: Boolean(this.destroyed),
+      });
       this._runInAsyncScope(() => this._owner?._responseComplete());
       this._closeAfterEnd();
       this._runInAsyncScope(() => this.push(null));
     } catch (error) {
       if (this.destroyed) return;
       this.aborted = true;
+      this._owner?._recordNetworkLifecycle?.('client-body-error', {
+        error: { name: String(error?.name || 'Error'), code: error?.code || null },
+      });
       super.destroy(error);
       this._owner?._responseFailed(error);
     } finally {
@@ -3998,6 +4094,21 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       if (options.timeout !== undefined) this.setTimeout(options.timeout);
     }
 
+    _recordNetworkLifecycle(phase, fields = {}) {
+      try {
+        this._ownerProcess?.__bnhNetworkEvent?.({
+          source: 'guest-http',
+          method: String(this.method || 'GET'),
+          url: String(this._url || this.path || ''),
+          phase,
+          transport: 'virtual-network',
+          ...fields,
+        });
+      } catch {
+        // Telemetry is observational and must not affect HTTP delivery.
+      }
+    }
+
     _runInAsyncScope(callback) {
       return this._resource?.runInAsyncScope
         ? this._resource.runInAsyncScope(callback, this)
@@ -4021,10 +4132,16 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       if (socket && !error) {
         socket._httpMessage = this;
         socket.on?.('error', (socketError) => this.destroy(socketError));
-        socket.on?.('data', (chunk) => this._handleRawResponseData(chunk));
+        socket.on?.('data', (chunk) => {
+          this._recordNetworkLifecycle('client-raw-data', {
+            bodyBytes: Number(chunk?.byteLength || 0),
+          });
+          this._handleRawResponseData(chunk);
+        });
         socket.on?.('close', () => {
           if (this._rawResponseBody && !this._rawResponseDone) {
             this._rawResponseDone = true;
+            this._recordNetworkLifecycle('client-raw-body-end', { reason: 'socket-close' });
             this._rawResponseBody.close();
           }
           // A peer can close before HTTP response headers exist (for
@@ -4095,6 +4212,10 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
             this.socket,
             this._rawResponseBody,
           ));
+          this._recordNetworkLifecycle('client-response-headers', {
+            status: Number(statusMatch[1]),
+            streaming: true,
+          });
           this._consumeRawResponseBody();
           return;
         }
@@ -4111,6 +4232,11 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
             this.socket,
             this._rawResponseBody,
           ));
+          this._recordNetworkLifecycle('client-response-headers', {
+            status: Number(statusMatch[1]),
+            streaming: true,
+            chunked: true,
+          });
           this._consumeRawResponseBody();
           return;
         }
@@ -4156,6 +4282,7 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
           if (this._rawResponseBuffer.byteLength < dataStart + 2) return;
           this._rawResponseBuffer = this._rawResponseBuffer.slice(dataStart + 2);
           this._rawResponseDone = true;
+          this._recordNetworkLifecycle('client-raw-body-end', { reason: 'chunked-end' });
           this._rawResponseBody.close();
           return;
         }
@@ -4166,6 +4293,7 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
           throw new Error('invalid chunked HTTP response terminator');
         }
         this._rawResponseBuffer = this._rawResponseBuffer.slice(trailerEnd + 2);
+        this._recordNetworkLifecycle('client-raw-body-chunk', { bodyBytes: body.byteLength, chunked: true });
         this._rawResponseBody.enqueue(body);
       }
     }
@@ -4974,7 +5102,7 @@ export function createHttpCompatibility(scope = globalThis, {
   installEventTargetInspectHook(scope);
   const net = configuredNet || createBrowserNet({ BufferClass, trackTask });
   const virtualNetwork = configuredHttpNetwork
-    || createVirtualHttpNetwork(scope, BufferClass, net, trackTask, diagnostics, performanceRecord);
+    || createVirtualHttpNetwork(scope, BufferClass, net, trackTask, diagnostics, performanceRecord, ownerProcess);
   const proxy = configuredProxy
     ? (typeof configuredProxy.request === 'function' && configuredProxy.mode
       ? configuredProxy

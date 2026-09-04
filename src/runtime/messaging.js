@@ -798,7 +798,6 @@ export function createScopedIpcEndpoint(nativePort, {
     if (closed) return;
     port.postMessage({ channel: 'bnh-user-ipc', runId, childId, direction: outgoingDirection, sequence: ++sequence, type, payload });
   };
-
   const handleRequest = (payload) => {
     const record = handles.get(payload?.handleId);
     if (!record) return;

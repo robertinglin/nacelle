@@ -530,6 +530,7 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       // Keep the cache focused on metadata/tarballs so it does not retain a
       // second unpacked copy of every installed package.
       cacheUnpacked: false,
+      returnFiles: false,
       onProgress: (event) => recordProgress(progress.bootstrap, event),
     });
     installStats = {

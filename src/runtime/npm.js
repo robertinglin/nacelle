@@ -758,6 +758,7 @@ export class BrowserNpm {
     includeDevDependencies = false,
     materialize = true,
     cacheUnpacked = true,
+    returnFiles = true,
   } = {}) {
     let rawSpecs = packageSpecs;
     if (!rawSpecs || (Array.isArray(rawSpecs) && rawSpecs.length === 0)) {
@@ -1031,7 +1032,7 @@ export class BrowserNpm {
     return {
       packages: results,
       totalFiles: Object.keys(filesToMount).length,
-      files: filesToMount,
+      files: returnFiles ? filesToMount : {},
     };
   }
 }

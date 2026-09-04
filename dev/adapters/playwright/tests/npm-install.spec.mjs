@@ -152,9 +152,10 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     cache.set('pkg-tarball:mini-express@1.0.0', miniExpressTarball);
 
     const npm = new BrowserNpm({ vfs, cache });
-    const result = await npm.install(['mini-express@1.0.0'], { cwd: '/node', cacheUnpacked: false });
+    const result = await npm.install(['mini-express@1.0.0'], { cwd: '/node', cacheUnpacked: false, returnFiles: false });
 
     expect(result.packages.length).toBe(1);
+    expect(Object.keys(result.files)).toHaveLength(0);
     expect(result.packages[0].name).toBe('mini-express');
     expect(vfs.files.has('/node/node_modules/mini-express/package.json')).toBe(true);
     expect(vfs.files.has('/node/node_modules/mini-express/lib/index.js')).toBe(true);

@@ -170,6 +170,21 @@ async function main() {
           await queueTrace(item?.runId, `${stream}.log`, String(item?.text || ''));
         }
       });
+      await page.exposeBinding('__bnhFetchExternal', async (_source, request = {}) => {
+        const response = await fetch(String(request.url || ''), {
+          method: String(request.method || 'GET'),
+          headers: request.headers || {},
+          body: request.body === undefined ? undefined : Uint8Array.from(request.body),
+          redirect: 'follow',
+        });
+        return {
+          url: response.url,
+          status: response.status,
+          statusText: response.statusText,
+          headers: Object.fromEntries(response.headers.entries()),
+          bodyBytes: [...new Uint8Array(await response.arrayBuffer())],
+        };
+      });
       page.on('crash', () => { browserDiagnostics.push({ event: 'page-crash' }); });
       if (options.browserName === 'chromium') {
         try {

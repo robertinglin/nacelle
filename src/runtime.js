@@ -9641,7 +9641,6 @@ export function createRuntime({
           // child's module evaluation and terminal frame.
           const workerIsolation = Boolean(
             options.ipc
-            || options.asyncLifecycle
             || esmExecutionDepth > 0
             || processObject.__bnhEsmNested,
           );

@@ -32,6 +32,59 @@ function headerEnd(bytes) {
   return -1;
 }
 
+function byteView(value) {
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  if (Array.isArray(value)) return Uint8Array.from(value);
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value).filter((key) => /^\d+$/.test(key)).sort((left, right) => Number(left) - Number(right));
+    if (keys.length) return Uint8Array.from(keys.map((key) => Number(value[key])));
+  }
+  return new Uint8Array();
+}
+
+function headerObject(value) {
+  if (!value) return {};
+  if (typeof value.entries === 'function') return Object.fromEntries(value.entries());
+  if (Array.isArray(value)) return Object.fromEntries(value);
+  return { ...value };
+}
+
+async function responseBytes(response) {
+  if (response?.bodyBytes !== undefined) return byteView(response.bodyBytes);
+  if (typeof response?.arrayBuffer === 'function') return new Uint8Array(await response.arrayBuffer());
+  return new Uint8Array();
+}
+
+async function fetchProxyTarget(url, init = {}) {
+  // The CITGM page cannot read arbitrary registry or source-host responses
+  // through browser CORS. The host bridge is an explicit network capability,
+  // so use it when the runner supplies one; this remains available after the
+  // runtime and any child workers have already started.
+  if (typeof globalThis.__bnhFetchExternal === 'function') {
+    const body = init.body === undefined || init.body === null
+      ? undefined
+      : [...byteView(init.body)];
+    const result = await globalThis.__bnhFetchExternal({
+      url: String(url),
+      method: init.method || 'GET',
+      headers: headerObject(init.headers),
+      body,
+    });
+    if (!result || !Number.isInteger(result.status)) throw new Error('external fetch returned an invalid response');
+    return {
+      url: result.url || String(url),
+      status: result.status,
+      statusText: result.statusText || '',
+      headers: headerObject(result.headers),
+      bodyBytes: byteView(result.bodyBytes),
+    };
+  }
+  if (!browserFetch) throw new Error('browser fetch is unavailable');
+  return browserFetch(url, init);
+}
+
 function createFetchTransport(host, port, loadCachedProject) {
   const listeners = new Map();
   const requestChunks = [];
@@ -109,10 +162,6 @@ function createFetchTransport(host, port, loadCachedProject) {
       dispatched = false;
       return;
     }
-    if (!browserFetch) {
-      transport.destroy(new Error('browser fetch is unavailable'));
-      return;
-    }
     try {
       const end = requestEnd;
       const headerText = requestHeaderText;
@@ -142,19 +191,20 @@ function createFetchTransport(host, port, loadCachedProject) {
             headers: new Headers({ 'content-length': String(cachedBody.byteLength) }),
             async arrayBuffer() { return cachedBody.slice().buffer; },
           }
-        : await browserFetch(url, {
+        : await fetchProxyTarget(url, {
             method,
             headers,
             body: body?.byteLength ? body : undefined,
             signal: controller.signal,
             redirect: 'follow',
           });
-      const responseBody = new Uint8Array(await response.arrayBuffer());
+      if (closed) return;
+      const responseBody = await responseBytes(response);
       const responseHeaders = [`HTTP/1.1 ${response.status} ${response.statusText || ''}`.trim()];
-      for (const [name, value] of response.headers) {
+      for (const [name, value] of Object.entries(headerObject(response.headers))) {
         if (name.toLowerCase() !== 'connection') responseHeaders.push(`${name}: ${value}`);
       }
-      if (!response.headers.has('content-length')) responseHeaders.push(`content-length: ${responseBody.byteLength}`);
+      if (!Object.hasOwn(headerObject(response.headers), 'content-length')) responseHeaders.push(`content-length: ${responseBody.byteLength}`);
       responseHeaders.push('connection: close', '', '');
       transport.emit('data', concatBytes([encoder.encode(responseHeaders.join('\r\n')), responseBody]));
       transport.emit('end');
@@ -222,15 +272,14 @@ function createBrowserProxyAdapter(loadCachedProject) {
           bodyBytes: cachedBody,
         };
       }
-      const response = await browserFetch(target, {
+      const response = await fetchProxyTarget(target, {
         method: request.method || 'GET',
         headers: request.headers,
         body: request.body,
         signal: request.signal,
         redirect: 'follow',
       });
-      const headers = {};
-      for (const [name, value] of response.headers || []) headers[name] = value;
+      const headers = headerObject(response.headers);
       // Proxy calls can cross an isolated child boundary. Do not return a
       // live Response/stream object that cannot survive structured clone;
       // materialize the normal HTTP response as its serializable wire shape.
@@ -239,7 +288,7 @@ function createBrowserProxyAdapter(loadCachedProject) {
         status: response.status,
         statusText: response.statusText || '',
         headers,
-        bodyBytes: new Uint8Array(await response.arrayBuffer()),
+        bodyBytes: await responseBytes(response),
       };
     },
     resolve() {

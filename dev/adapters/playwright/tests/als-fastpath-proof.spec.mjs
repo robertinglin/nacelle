@@ -39,3 +39,29 @@ test('keeps ALS store for eval-defined native async fn awaiting native fn promis
   const result = await harnessPage.run(guestSource, { timeoutMs: 30000 });
   await expectPass(expect, result);
 });
+
+// Bundlers emit the eval'd module with escaped newlines and quotes; the
+// transform must decode, rewrite, and re-encode rather than tokenize the
+// escaped text (which silently skipped every real bundle module).
+test('keeps ALS store for webpack-style escaped eval module strings', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const { AsyncLocalStorage } = require('node:async_hooks');
+    const als = new AsyncLocalStorage();
+    const factory = eval("(function (alsRef) {\\n  async function leaf() {\\n    await new Promise((resolve) => setTimeout(resolve, 20));\\n    return 'leaf-ok';\\n  }\\n  async function mid() {\\n    const v = await leaf();\\n    return [v, alsRef.getStore() && alsRef.getStore().v];\\n  }\\n  return mid;\\n})");
+    (async () => {
+      const out = als.run({ v: 7 }, () => factory(als)());
+      for (let i = 0; i < 5; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        await Promise.resolve().then(() => {});
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      const value = await out;
+      console.log('escaped value=' + value[0] + ' store=' + (value[1] === undefined ? 'LOST' : value[1]));
+      if (value[0] !== 'leaf-ok' || value[1] !== 7) process.exitCode = 1;
+    })().catch((error) => {
+      console.error('escaped run failed', error && error.stack || error);
+      process.exitCode = 1;
+    });
+  `, { timeoutMs: 30000 });
+  await expectPass(expect, result);
+});

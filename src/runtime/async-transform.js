@@ -420,6 +420,14 @@ function asyncFunctionCandidates(source) {
       - forAwaitPrefix[candidate.bodyTokenStart] > 0
       || superPrefix[candidate.bodyTokenEnd + 1] - superPrefix[candidate.bodyTokenStart] > 0;
   }
+  for (const candidate of candidates) {
+    // Only lower async functions whose body actually contains an await. A
+    // native async function with no suspension point already works in the
+    // CommonJS wrapper; lowering it would change its observable constructor
+    // and Object.prototype.toString identity for no runtime benefit.
+    candidate.containsAwait = tokenize(source.slice(candidate.bodyStart, candidate.bodyEnd))
+      .some((token) => token.value === 'await');
+  }
   return { candidates, unsupported };
 }
 
@@ -627,7 +635,9 @@ function applyReplacements(source, replacements) {
 }
 
 function transformCandidates(source, candidates, bindingName) {
-  const transformableCandidates = candidates.filter((candidate) => !candidate.containsUnsupportedSyntax);
+  const transformableCandidates = candidates.filter((candidate) => (
+    !candidate.containsUnsupportedSyntax && candidate.containsAwait
+  ));
   const outerCandidates = [];
   const active = [];
   for (const candidate of [...transformableCandidates].sort((left, right) => (
@@ -681,7 +691,7 @@ export function transformAsyncSource(source, preferredBinding = '__bnhAsync') {
   let bindingName = preferredBinding;
   while (names.has(bindingName)) bindingName = `${preferredBinding}$`;
   const { candidates } = asyncFunctionCandidates(text);
-  if (!candidates.some((candidate) => !candidate.containsUnsupportedSyntax)) {
+  if (!candidates.some((candidate) => !candidate.containsUnsupportedSyntax && candidate.containsAwait)) {
     return { source: text, transformed: false, bindingName };
   }
   return {

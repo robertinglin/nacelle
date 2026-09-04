@@ -10013,11 +10013,17 @@ export function createRuntime({
                   const terminalError = result.process?.terminalRecord?.error
                     || result.process?.terminal?.error
                     || result.process?.__bnhUncaughtException;
-                  const detail = terminalError?.stack || terminalError?.message
-                    || `child exited with code ${finalCode} (runtime exitCode=${result.process?.exitCode ?? 'unknown'})`;
-                  const message = `${detail}\n`;
-                  stderr.push(message);
-                  onStderr?.(message);
+                  // A non-zero exitCode is observable through the child
+                  // status; Node does not synthesize a stderr diagnostic for
+                  // a script that intentionally sets process.exitCode.
+                  if (terminalError) {
+                    const detail = terminalError.stack || terminalError.message || String(terminalError);
+                    const message = `${detail}\n`;
+                    if (!stderr.join('').includes(message)) {
+                      stderr.push(message);
+                      onStderr?.(message);
+                    }
+                  }
                 }
                 return {
                   code: finalCode,
@@ -10107,12 +10113,16 @@ export function createRuntime({
                   const terminalError = result.process?.terminalRecord?.error
                     || result.process?.terminal?.error
                     || result.process?.__bnhUncaughtException;
-                  const detail = terminalError?.stack || terminalError?.message
-                    || `child exited with code ${finalCode} (runtime exitCode=${result.process?.exitCode ?? 'unknown'})`;
-                  const message = `${detail}\n`;
-                  if (!stderr.join('').includes(message)) {
-                    stderr.push(message);
-                    onStderr?.(message);
+                  // A non-zero exitCode is observable through the child
+                  // status; Node does not synthesize a stderr diagnostic for
+                  // a script that intentionally sets process.exitCode.
+                  if (terminalError) {
+                    const detail = terminalError.stack || terminalError.message || String(terminalError);
+                    const message = `${detail}\n`;
+                    if (!stderr.join('').includes(message)) {
+                      stderr.push(message);
+                      onStderr?.(message);
+                    }
                   }
                 }
                 return {
@@ -13325,6 +13335,10 @@ export function createRuntime({
         capabilities.output.off('data', outputListener);
         stdout.end();
         stderr.end();
+        // The control-port terminal frame carries the bounded runtime
+        // summary. Prefer it over the optional user IPC snapshot, which may
+        // contain the internal mutable activity records.
+        const finalRuntimeState = terminal.runtimeState || runtimeState || null;
         child.structuredResult = {
           runId: runSpec.runId,
           outcome: terminal.status === 'exited' && terminal.code === 0
@@ -13345,7 +13359,8 @@ export function createRuntime({
             // boundary. The runtime-state IPC message is retained for
             // compatibility, but may arrive after terminal on independent
             // MessagePorts.
-            runtime_state: runtimeState || terminal.runtimeState || null,
+            runtime_state: finalRuntimeState,
+            childActivity: finalRuntimeState?.childActivity || null,
             child_outputs: worker.childOutputs || [],
           },
           artifacts,

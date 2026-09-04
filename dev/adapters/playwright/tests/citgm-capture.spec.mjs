@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createSerializedCaptureQueue } from '../citgm-capture.mjs';
+import { npmCacheSnapshot } from '../citgm-cache.mjs';
 
 test('serializes complete capture binding payloads and isolates binding errors', async () => {
   const order = [];
@@ -25,4 +26,25 @@ test('serializes complete capture binding payloads and isolates binding errors',
   assert.equal(maximum, 1);
   assert.equal(calls, 32);
   assert.deepEqual(order, Array.from({ length: 32 }, (_, index) => index));
+});
+
+test('keeps worker npm cache descriptors fetchable without cloning package contents', () => {
+  const cache = {
+    memoryMeta: new Map([['large-package', { versions: { '1.0.0': { name: 'large-package' } } }]]),
+    memoryTarballs: new Map([['pkg-tarball:large-package@1.0.0', new Uint8Array(1024 * 1024)]]),
+    artifactManifest: {
+      metadata: { 'large-package': 'metadata/large.json' },
+      tarballs: { 'pkg-tarball:large-package@1.0.0': 'tarballs/large.tgz' },
+    },
+    artifactBaseUrl: new URL('https://example.test/cache/'),
+  };
+
+  const snapshot = npmCacheSnapshot(cache);
+  assert.deepEqual(snapshot.metadata, {});
+  assert.deepEqual(snapshot.tarballs, {});
+  assert.deepEqual(snapshot.artifact, {
+    baseUrl: 'https://example.test/cache/',
+    metadata: { 'large-package': 'metadata/large.json' },
+    tarballs: { 'pkg-tarball:large-package@1.0.0': 'tarballs/large.tgz' },
+  });
 });

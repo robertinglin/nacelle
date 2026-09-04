@@ -8842,6 +8842,14 @@ export function createRuntime({
             if (prepared.reportOnSignal) childProc.processObject.report.reportOnSignal = true;
             if (prepared.reportOnUncaughtException) childProc.processObject.report.reportOnUncaughtException = true;
             const childTaskReleases = new Set();
+            const childTaskRecords = new Map();
+            let childTaskSequence = 0;
+            const publishChildLifecycle = () => {
+              childProc.processObject.__bnhRuntimeLifecycle = {
+                pending: childTaskReleases.size,
+                tasks: [...childTaskRecords.values()].slice(-8),
+              };
+            };
             const nativeQueueMicrotask = runtimeQueueMicrotask;
             // A same-realm child has to drain the current Promise/microtask
             // turn before its implicit beforeExit check. Node runs all
@@ -8877,15 +8885,24 @@ export function createRuntime({
             };
             const childTrackTask = (label = null) => {
               const release = trackTask(label);
+              const taskId = ++childTaskSequence;
+              childTaskRecords.set(taskId, {
+                id: taskId,
+                label: label == null ? null : String(label).slice(0, 128),
+                stack: String(new Error().stack || '').split('\n')[2]?.trim().slice(0, 160) || null,
+              });
               let released = false;
               const releaseChildTask = () => {
                 if (released) return;
                 released = true;
                 childTaskReleases.delete(releaseChildTask);
+                childTaskRecords.delete(taskId);
                 release();
+                publishChildLifecycle();
                 if (childTaskReleases.size === 0) tryExitChild();
               };
               childTaskReleases.add(releaseChildTask);
+              publishChildLifecycle();
               return releaseChildTask;
             };
             // VFS promise helpers are shared by the runtime and same-realm
@@ -9293,6 +9310,7 @@ export function createRuntime({
                     loadModuleSync(normalizePath(extraPath, prepared.cwd), entryPath, childProc.processObject, scope, Buffer, stderrArr, undefined, moduleState, true, compileCacheState, false, syncStreamWebApi);
                   }
                 }
+                childProc.processObject.__bnhNodeTestSourceLoaded?.();
                 if (prepared.buildSnapshot && prepared.snapshotBlobPath) {
                   fs.writeFileSync(
                     prepared.snapshotBlobPath,

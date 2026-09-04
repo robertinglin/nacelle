@@ -1009,6 +1009,14 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
       resolveSourceEvaluation = null;
     },
   });
+  // Same-realm virtual children do not pass through executeEntry(), which is
+  // where the top-level runtime normally marks source evaluation complete.
+  // Expose the marker on the logical process so the child launcher can settle
+  // this instance after its synchronous entry (and any --test extras) load.
+  Object.defineProperty(processObject, '__bnhNodeTestSourceLoaded', {
+    configurable: true,
+    value: () => test.__bnhSourceLoaded(),
+  });
   Object.defineProperty(test, 'snapshot', { configurable: true, enumerable: true, value: snapshotApi });
   Object.defineProperty(test, 'assert', { configurable: true, enumerable: true, value: assertionApi });
   const summaryRelease = trackTask();

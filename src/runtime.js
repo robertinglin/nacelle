@@ -33,7 +33,7 @@ import {
   runAsyncGenerator,
   setPromiseRejectionObserver,
 } from './runtime/async-hooks.js';
-import { transformAsyncSource } from './runtime/async-transform.js';
+import { transformAsyncSource, transformEvalLiterals } from './runtime/async-transform.js';
 import { EventEmitter, addAbortListener, getEventListeners, getMaxListeners, once } from './runtime/events.js';
 import { createVfs, fileURLToPath, pathToFileURL } from './runtime/vfs.js';
 import { path } from './runtime/path.js';
@@ -2490,11 +2490,13 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
   // npm bin shims are executable text files and commonly start with a
   // shebang, which JavaScript's Function constructor cannot parse.
   const transformedAsyncSource = transformAsyncSource(rewriteCommonJsDynamicImports(source));
-  const sourceText = `${transformedAsyncSource.source
+  const evalAsync = transformEvalLiterals(transformedAsyncSource.source, transformedAsyncSource.bindingName);
+  const transformedText = evalAsync.transformed ? evalAsync.source : transformedAsyncSource.source;
+  const sourceText = `${transformedText
     .replace(/^#![^\r\n]*(?:\r\n|\n|$)/, (shebang) => shebang.endsWith('\n') ? '\n' : '')
   }\n//# sourceURL=${sourceURL}`;
   const bindProcess = processOverride && !hasTopLevelCommonJsProcessBinding(sourceText);
-  const bindAsync = transformedAsyncSource.transformed;
+  const bindAsync = transformedAsyncSource.transformed || evalAsync.transformed;
   const asyncRunner = bindAsync
     ? (generatorFunction, thisArg, args) => runAsyncGenerator(
       generatorFunction,

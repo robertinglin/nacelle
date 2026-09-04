@@ -8166,18 +8166,20 @@ export function createRuntime({
                   processHandle.on('message', (value, handle) => {
                     if (value?.type === 'bnh-artifacts') return;
                     activityRecord.ipcMessageCount += 1;
-                    const messageType = value?.type == null ? null : String(value.type).slice(0, 96);
-                    if (messageType && !activityRecord.ipcMessageTypes.includes(messageType)
+                    const messageType = value?.type ?? value?.ava?.type;
+                    const boundedMessageType = messageType == null ? null : String(messageType).slice(0, 96);
+                    if (boundedMessageType && !activityRecord.ipcMessageTypes.includes(boundedMessageType)
                       && activityRecord.ipcMessageTypes.length < 8) {
-                      activityRecord.ipcMessageTypes.push(messageType);
+                      activityRecord.ipcMessageTypes.push(boundedMessageType);
                     }
-                    if (messageType && /error|exception|failed/i.test(messageType) && value?.err) {
+                    const messageError = value?.err ?? value?.ava?.err;
+                    if (boundedMessageType && /error|exception|failed/i.test(boundedMessageType) && messageError) {
                       activityRecord.ipcError = {
-                        type: messageType,
-                        name: String(value.err.name || 'Error').slice(0, 64),
-                        message: String(value.err.message || value.err).slice(0, 512),
-                        stack: String(value.err.stack || '').slice(0, 1024),
-                        code: value.err.code == null ? null : String(value.err.code).slice(0, 64),
+                        type: boundedMessageType,
+                        name: String(messageError.name || 'Error').slice(0, 64),
+                        message: String(messageError.message || messageError).slice(0, 512),
+                        stack: String(messageError.stack || '').slice(0, 1024),
+                        code: messageError.code == null ? null : String(messageError.code).slice(0, 64),
                       };
                     }
                     emitChildMessage(value, handle);

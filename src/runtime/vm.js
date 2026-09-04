@@ -534,6 +534,24 @@ function rewriteScriptDynamicImports(source, bindingName) {
     while (index < text.length) {
       const character = text[index];
       const next = text[index + 1];
+      if (text.startsWith('eval', index)
+        && !isIdentifierPart(text[index - 1])
+        && !isIdentifierPart(text[index + 4])) {
+        let open = index + 4;
+        while (/\s/u.test(text[open] || '')) open += 1;
+        if (text[open] === '(') {
+          let literalStart = open + 1;
+          while (/\s/u.test(text[literalStart] || '')) literalStart += 1;
+          if (text[literalStart] === '\'' || text[literalStart] === '"') {
+            result += text.slice(index, literalStart);
+            index = literalStart;
+            const quoted = copyQuoted(text[literalStart]);
+            const body = quoted.slice(1, -1);
+            result += quoted[0] + rewriteScriptDynamicImports(body, bindingName) + quoted.slice(-1);
+            continue;
+          }
+        }
+      }
       if (character === '\'' || character === '"') {
         result += copyQuoted(character);
         continue;

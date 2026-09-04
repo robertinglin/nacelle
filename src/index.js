@@ -32,6 +32,47 @@ const NPM_SCRIPT_ENV_KEYS = Object.freeze([
   'npm_package_version',
 ]);
 
+function concatenateResponseBytes(chunks) {
+  const total = chunks.reduce((length, chunk) => length + chunk.byteLength, 0);
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
+}
+
+function decodeChunkedHttpBody(bytes) {
+  const chunks = [];
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    let lineEnd = -1;
+    for (let index = offset; index + 1 < bytes.byteLength; index += 1) {
+      if (bytes[index] === 13 && bytes[index + 1] === 10) {
+        lineEnd = index;
+        break;
+      }
+    }
+    if (lineEnd < 0) throw new TypeError('invalid chunked HTTP response');
+    const line = new TextDecoder().decode(bytes.slice(offset, lineEnd));
+    const sizeText = line.split(';', 1)[0].trim();
+    const size = Number.parseInt(sizeText, 16);
+    if (!/^[\da-f]+$/i.test(sizeText) || !Number.isSafeInteger(size) || size < 0) {
+      throw new TypeError('invalid chunked HTTP response');
+    }
+    offset = lineEnd + 2;
+    if (size === 0) return concatenateResponseBytes(chunks);
+    if (offset + size + 2 > bytes.byteLength
+      || bytes[offset + size] !== 13 || bytes[offset + size + 1] !== 10) {
+      throw new TypeError('invalid chunked HTTP response');
+    }
+    chunks.push(bytes.slice(offset, offset + size));
+    offset += size + 2;
+  }
+  throw new TypeError('invalid chunked HTTP response');
+}
+
 export {
   createRuntime,
   defaultRuntime as runtime,
@@ -658,8 +699,13 @@ export class Nacelle {
             resHeaders.append(lines[i].slice(0, colon).trim(), lines[i].slice(colon + 1).trim());
           }
         }
+        const responseBody = /(?:^|\W)chunked(?:$|\W)/i.test(
+          resHeaders.get('transfer-encoding') || '',
+        )
+          ? decodeChunkedHttpBody(rawBody)
+          : rawBody;
         const ResponseClass = globalThis.Response || this._globalObject.Response;
-        const res = new ResponseClass(rawBody, {
+        const res = new ResponseClass(responseBody, {
           status,
           statusText,
           headers: resHeaders,

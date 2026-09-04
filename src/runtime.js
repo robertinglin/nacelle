@@ -12055,7 +12055,7 @@ export function createRuntime({
       };
       const holdForResponseBody = (response) => {
         const body = response?.body;
-        if (!body || typeof body.pipeTo !== 'function') {
+        if (!body) {
           releaseFetch();
           return response;
         }
@@ -12066,23 +12066,114 @@ export function createRuntime({
           restored = true;
           try { body.pipeTo = originalPipeTo; } catch { /* host streams may be sealed */ }
         };
-        try {
-          body.pipeTo = (...args) => {
-            let result;
-            try {
-              result = originalPipeTo.apply(body, args);
-            } catch (error) {
-              releaseFetch();
-              restorePipeTo();
-              throw error;
-            }
-            return Promise.resolve(result).finally(() => {
-              releaseFetch();
-              restorePipeTo();
+        if (typeof originalPipeTo === 'function') {
+          try {
+            body.pipeTo = (...args) => {
+              let result;
+              try {
+                result = originalPipeTo.apply(body, args);
+              } catch (error) {
+                releaseFetch();
+                restorePipeTo();
+                throw error;
+              }
+              return Promise.resolve(result).finally(() => {
+                releaseFetch();
+                restorePipeTo();
+              });
+            };
+          } catch {
+            // Some host streams expose a read-only pipeTo; reader and
+            // convenience-method hooks below still provide terminal release.
+          }
+        }
+        // Node's HTTP adapter consumes a fetch response with a reader rather
+        // than pipeTo(). Keep the process referenced until the standard
+        // ReadableStream reader reaches EOF, errors, or is cancelled. The
+        // task tracker is intentionally settled at the body terminal event;
+        // releasing it when headers arrive lets a live child exit while its
+        // response is still being delivered.
+        const originalGetReader = body.getReader;
+        if (typeof originalGetReader === 'function') {
+          try {
+            Object.defineProperty(body, 'getReader', {
+              configurable: true,
+              value(...args) {
+                let reader;
+                try {
+                  reader = originalGetReader.apply(this, args);
+                } catch (error) {
+                  releaseFetch();
+                  throw error;
+                }
+                const originalRead = reader?.read;
+                if (typeof originalRead === 'function') {
+                  reader.read = (...readArgs) => {
+                    let result;
+                    try {
+                      result = originalRead.apply(reader, readArgs);
+                    } catch (error) {
+                      releaseFetch();
+                      throw error;
+                    }
+                    return Promise.resolve(result).then((item) => {
+                      if (item?.done) releaseFetch();
+                      return item;
+                    }, (error) => {
+                      releaseFetch();
+                      throw error;
+                    });
+                  };
+                }
+                const originalCancel = reader?.cancel;
+                if (typeof originalCancel === 'function') {
+                  reader.cancel = (...cancelArgs) => {
+                    let result;
+                    try {
+                      result = originalCancel.apply(reader, cancelArgs);
+                    } catch (error) {
+                      releaseFetch();
+                      throw error;
+                    }
+                    return Promise.resolve(result).finally(() => releaseFetch());
+                  };
+                }
+                return reader;
+              },
             });
-          };
-        } catch {
-          releaseFetch();
+          } catch {
+            // Host stream methods can be non-configurable. pipeTo and the
+            // convenience-method hooks above remain valid fallbacks.
+          }
+        }
+        // Native Response convenience methods consume the body without
+        // going through the public ReadableStream#pipeTo hook. Release the
+        // process fetch task after those standard consumption paths settle;
+        // otherwise a normal response.text()/json() leaves the virtual child
+        // referenced forever even though the body has been fully consumed.
+        for (const name of ['arrayBuffer', 'blob', 'formData', 'json', 'text']) {
+          const method = response?.[name];
+          if (typeof method !== 'function') continue;
+          try {
+            Object.defineProperty(response, name, {
+              configurable: true,
+              value(...args) {
+                let result;
+                try {
+                  result = method.apply(this, args);
+                } catch (error) {
+                  releaseFetch();
+                  throw error;
+                }
+                return Promise.resolve(result).finally(() => {
+                  releaseFetch();
+                });
+              },
+            });
+          } catch {
+            // Some host Response implementations expose non-configurable
+            // methods; the stream hook above remains the fallback there.
+          }
         }
         return response;
       };

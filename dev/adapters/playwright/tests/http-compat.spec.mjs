@@ -99,9 +99,81 @@ test.describe('browser-native http compatibility', () => {
           socket.once('close', () => resolve(output));
         });
         assert.match(wire, /^HTTP\\/1\\.1 200 /);
-        assert.match(wire, /\\r\\n\\r\\nraw-body$/);
+        assert.match(wire, /\\r\\n\\r\\n(?:raw-body|8\\r\\nraw-body\\r\\n0\\r\\n\\r\\n)$/);
       } finally {
         await new Promise((resolve) => server.close(resolve));
+      }
+    `);
+  });
+
+  test('keeps pipelined raw HTTP requests on a reusable connection', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'raw-net-http-keep-alive', `
+      const assert = require('node:assert');
+      const http = require('node:http');
+      const net = require('node:net');
+
+      let requests = 0;
+      const server = http.createServer((_request, response) => {
+        requests += 1;
+        response.end('response-' + requests);
+      });
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+
+      try {
+        const wire = await new Promise((resolve, reject) => {
+          const socket = net.connect(server.address().port, '127.0.0.1');
+          let output = '';
+          socket.setEncoding('utf8');
+          socket.on('data', (chunk) => { output += chunk; });
+          socket.once('connect', () => {
+            socket.write('GET /one HTTP/1.1\\r\\nHost: localhost\\r\\n\\r\\n');
+            socket.write('GET /two HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n');
+          });
+          socket.once('error', reject);
+          socket.once('close', () => resolve(output));
+        });
+        assert.strictEqual(requests, 2);
+        assert.strictEqual((wire.match(/HTTP\\/1\\.1 200 OK/g) || []).length, 2);
+        assert.ok(wire.includes('response-1'));
+        assert.ok(wire.includes('response-2'));
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    `);
+  });
+
+  test('routes IPv6 loopback fetches to the virtual HTTP server', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'ipv6-loopback-http', `
+      const assert = require('node:assert');
+      const http = require('node:http');
+
+      const server = http.createServer((_request, response) => response.end('ipv6-ok'));
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '::1', resolve);
+      });
+
+      try {
+        const response = await fetch('http://[::1]:' + server.address().port + '/');
+        assert.strictEqual(response.status, 200);
+        assert.strictEqual(await response.text(), 'ipv6-ok');
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    `);
+  });
+
+  test('uses Node socket port errors for invalid HTTP listen ports', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'invalid-http-listen-port', `
+      const assert = require('node:assert');
+      const http = require('node:http');
+
+      for (const port of ['hello-world', '1234hello']) {
+        const server = http.createServer();
+        assert.throws(() => server.listen({ port }), (error) => error.code === 'ERR_SOCKET_BAD_PORT');
       }
     `);
   });

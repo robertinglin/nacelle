@@ -11083,6 +11083,12 @@ export function createRuntime({
           let injectedExitEventEmitted = false;
           processObject.exit = (code) => {
             processObject.exitCode = Number(code) || 0;
+            const exitRequest = {
+              code: processObject.exitCode,
+              stack: String(new Error().stack || '').split('\n').slice(1, 6).join('\n').slice(0, 1024),
+            };
+            processObject.__bnhExitRequest = exitRequest;
+            if (injectedProcess) injectedProcess.__bnhExitRequest = exitRequest;
             if (injectedExitEventEmitted) return;
             injectedExitEventEmitted = true;
             processObject.emit('exit', processObject.exitCode);

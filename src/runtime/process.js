@@ -693,6 +693,10 @@ export function createProcess({
     if (exited) return;
     exitCode = Number(code) || 0;
     exitRequested = true;
+    process.__bnhExitRequest = {
+      code: exitCode,
+      stack: String(new Error().stack || '').split('\n').slice(1, 6).join('\n').slice(0, 1024),
+    };
     process.exitCode = exitCode;
     process.emit('exit', exitCode);
     exited = true;

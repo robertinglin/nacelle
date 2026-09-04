@@ -106,6 +106,37 @@ test.describe('browser-native http compatibility', () => {
     `);
   });
 
+  test('rejects a missing HTTP/1.1 Host header before dispatching the request', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'raw-net-http-host', `
+      const assert = require('node:assert');
+      const http = require('node:http');
+      const net = require('node:net');
+
+      const server = http.createServer(() => {
+        assert.fail('a request without Host must not reach the handler');
+      });
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+
+      try {
+        const wire = await new Promise((resolve, reject) => {
+          const socket = net.connect(server.address().port, '127.0.0.1');
+          let output = '';
+          socket.setEncoding('utf8');
+          socket.on('data', (chunk) => { output += chunk; });
+          socket.once('connect', () => socket.end('GET / HTTP/1.1\\r\\nConnection: close\\r\\n\\r\\n'));
+          socket.once('error', reject);
+          socket.once('close', () => resolve(output));
+        });
+        assert.match(wire, /^HTTP\\/1\\.1 400 Bad Request/);
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    `);
+  });
+
   test('preserves numeric fetch status and streamed response bodies', async ({ harnessPage }) => {
     await runContract(expect, harnessPage, 'fetch/stream-status', `
       const assert = require('node:assert');

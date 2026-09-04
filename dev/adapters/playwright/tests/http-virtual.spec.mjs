@@ -261,6 +261,48 @@ test.describe('browser-native virtual HTTP compatibility', () => {
     await close(server);
   });
 
+  test('propagates a readable-listener response destroy to the active server response', async () => {
+    const { http } = createHttpCompatibility(globalThis);
+    let resolveServerClosed;
+    const serverClosed = new Promise((resolve) => { resolveServerClosed = resolve; });
+    const server = http.createServer((_request, response) => {
+      response.once('close', resolveServerClosed);
+      response.writeHead(200, { 'content-type': 'text/plain' });
+      response.write('partial');
+    });
+    await listen(server, 0, '127.0.0.1');
+
+    let readableSeen = false;
+    const responseReady = new Promise((resolve, reject) => {
+      const request = http.get({
+        host: 'localhost',
+        port: server.address().port,
+        path: '/readable-abort',
+      }, (response) => {
+        response.once('readable', () => {
+          readableSeen = true;
+          response.destroy();
+          resolve();
+        });
+        response.once('error', reject);
+      });
+      request.once('error', (error) => {
+        if (error.code !== 'ECONNRESET') reject(error);
+      });
+    });
+
+    await Promise.race([
+      responseReady,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('readable response did not arrive')), 1000)),
+    ]);
+    expect(readableSeen).toBe(true);
+    await Promise.race([
+      serverClosed,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('server response did not close')), 1000)),
+    ]);
+    await close(server);
+  });
+
   test('reports ECONNRESET when a client request is destroyed before headers', async () => {
     const { http } = createHttpCompatibility(globalThis);
     const server = http.createServer((_request, response) => {

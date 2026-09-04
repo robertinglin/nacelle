@@ -638,10 +638,6 @@ test.describe('Next.js SWC package selection', () => {
           const provider = new DevAppPageRouteMatcherProvider('/node/app', ['js', 'jsx', 'ts', 'tsx'], reader, false);
           const files = await reader.read('/node/app');
           const matchers = await provider.matchers();
-          process.stdout.write('NEXT_APP_ROUTE_MATCHER_DEBUG:' + JSON.stringify({
-            files,
-            matchers: matchers.map((matcher) => matcher.definition),
-          }) + '\\n');
           const root = matchers.find((matcher) => matcher.definition.pathname === '/');
           assert.ok(root, 'Next did not discover app/page.tsx');
           assert.equal(root.definition.filename, '/node/app/page.tsx');

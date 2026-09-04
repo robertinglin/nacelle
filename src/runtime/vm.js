@@ -863,7 +863,7 @@ export function createVmModule(scope = globalThis) {
         throw vmInvalidArgType(`options.contextExtensions[${index}]`, 'object', extension);
       }
     }
-    const source = String(code).replace(/\bimport\s*\(/g, '__bnhDynamicImport(');
+    const source = rewriteScriptDynamicImports(String(code), '__bnhDynamicImport');
     const compiled = FunctionConstructor('__bnhDynamicImport', ...effectiveParams, source);
     let functionObject;
     functionObject = (...args) => {

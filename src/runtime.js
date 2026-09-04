@@ -12957,6 +12957,14 @@ export function createRuntime({
           entry,
           execArgv: childExecArgv,
           proxy: spawnProxy,
+          // Same-realm children must inherit the owning process' network
+          // registry, including a registry that is itself bridged to the
+          // parent browser realm. A structured-cloned worker cannot carry
+          // that live object, so worker children keep the shared marker and
+          // establish their own remote bridge in process-entry.
+          virtualNetwork: !workerIsolation && proxyCapability.adapter
+            ? { shared: true, network: virtualNetwork }
+            : { shared: true },
           networkTelemetry: typeof options.onNetwork === 'function',
         },
         stdout: capabilities.output.stdout,

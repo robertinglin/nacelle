@@ -243,11 +243,13 @@ test.describe('browser-native worker process boundary', () => {
     });
 
     expect(terminal).toMatchObject({ status: 'exited', kind: 'exit', code: 0 });
-    expect(terminal.runtimeState).toEqual({
-      requestedFiles: ['/node/example.test.js'],
-      files: ['/node/example.test.js'],
-      registered: 1,
-      completed: 1,
+    expect(terminal.runtimeState).toMatchObject({
+      nodeTest: {
+        requestedFiles: { count: 1, first: '/node/example.test.js', last: '/node/example.test.js' },
+        files: { count: 1, first: '/node/example.test.js', last: '/node/example.test.js' },
+        registered: 1,
+        completed: 1,
+      },
     });
   });
 

@@ -9436,7 +9436,12 @@ export function createRuntime({
             || esmExecutionDepth > 0
             || processObject.__bnhEsmNested,
           );
-          const snapshot = vfs.snapshot();
+          // The child process boundary owns the transferred/shared bytes. A
+          // copied snapshot here needlessly duplicates the complete virtual
+          // filesystem before prepareWorkerVfs can share it with the child
+          // realm. Keep the snapshot as a view of the current VFS, matching
+          // runtime.spawn() and worker_threads.Worker().
+          const snapshot = vfs.snapshot({ copy: false });
           const files = Object.fromEntries(
             snapshot.artifacts.map(({ path, bytes }) => [path, bytes]),
           );

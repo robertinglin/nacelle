@@ -357,6 +357,14 @@ export class BrowserNpmCache {
     this.unpackedBytes = 0;
   }
 
+  clearMemory() {
+    this.memoryMeta.clear();
+    this.memoryMetaBytes = 0;
+    this.memoryTarballs.clear();
+    this.memoryTarballBytes = 0;
+    this.clearUnpackedPackages();
+  }
+
   async _getDb() {
     if (this.dbPromise) return this.dbPromise;
     const indexedDB = this.globalObject.indexedDB;
@@ -493,11 +501,7 @@ export class BrowserNpmCache {
   }
 
   async clear() {
-    this.memoryMeta.clear();
-    this.memoryMetaBytes = 0;
-    this.memoryTarballs.clear();
-    this.memoryTarballBytes = 0;
-    this.clearUnpackedPackages();
+    this.clearMemory();
     const db = await this._getDb();
     if (!db) return;
     try {

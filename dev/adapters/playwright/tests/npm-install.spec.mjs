@@ -326,6 +326,11 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     const stats = await cache.getStats();
     expect(stats.count).toBeGreaterThanOrEqual(1);
 
+    cache.clearMemory();
+    expect(cache.memoryMeta.size).toBe(0);
+    expect(cache.memoryTarballs.size).toBe(0);
+    expect(cache.unpackedPackages.size).toBe(0);
+
     // Test clear
     await cache.clear();
     const afterClearMeta = await cache.getMetadata('test-pkg');

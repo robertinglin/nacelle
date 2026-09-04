@@ -541,6 +541,49 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     const boundedText = (value, limit = 256) => value == null ? null : String(value).slice(0, limit);
     const nodeTest = runtimeState?.nodeTest;
     const activity = runtimeState?.childActivity;
+    const compactNestedState = (record) => {
+      const handle = record?.processHandle;
+      const state = handle?.runtimeState || handle?.terminalRecord?.runtimeState || handle?.__bnhRuntimeState;
+      const nestedNodeTest = state?.nodeTest || handle?.__bnhNodeTestState;
+      const lifecycle = state?.lifecycle || handle?.__bnhRuntimeLifecycle;
+      if (!handle && !state && !nestedNodeTest && !lifecycle) return null;
+      return {
+        state: boundedText(handle?.state, 32),
+        runtimePhase: boundedText(handle?.__bnhRuntimePhase || state?.phase, 64),
+        nodeTest: nestedNodeTest ? {
+          registered: Number(nestedNodeTest.registered) || 0,
+          completed: Number(nestedNodeTest.completed) || 0,
+          activeRun: Boolean(nestedNodeTest.activeRun),
+          activeTest: nestedNodeTest.activeTest ? {
+            name: boundedText(nestedNodeTest.activeTest.name, 160),
+            fullName: boundedText(nestedNodeTest.activeTest.fullName, 240),
+            file: boundedText(nestedNodeTest.activeTest.file, 256),
+            state: boundedText(nestedNodeTest.activeTest.state, 32),
+          } : null,
+          streamTerminal: boundedText(nestedNodeTest.streamTerminal, 32),
+          streamError: nestedNodeTest.streamError ? {
+            name: boundedText(nestedNodeTest.streamError.name, 64),
+            message: boundedText(nestedNodeTest.streamError.message || nestedNodeTest.streamError, 512),
+          } : null,
+        } : null,
+        lifecycle: lifecycle ? {
+          pending: Number(lifecycle.pending) || 0,
+          tasks: Array.isArray(lifecycle.tasks) ? {
+            count: lifecycle.tasks.length,
+            first: lifecycle.tasks[0] ? {
+              id: Number(lifecycle.tasks[0].id) || 0,
+              label: boundedText(lifecycle.tasks[0].label, 128),
+              stack: boundedText(lifecycle.tasks[0].stack, 160),
+            } : null,
+            last: lifecycle.tasks.at(-1) ? {
+              id: Number(lifecycle.tasks.at(-1).id) || 0,
+              label: boundedText(lifecycle.tasks.at(-1).label, 128),
+              stack: boundedText(lifecycle.tasks.at(-1).stack, 160),
+            } : null,
+          } : null,
+        } : null,
+      };
+    };
     return {
       state: boundedText(child?.state || worker?.state, 32),
       lifecycle: Array.isArray(child?.stateHistory || worker?.stateHistory)
@@ -577,25 +620,7 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
           stderrBytes: Number(record.stderrBytes) || 0,
           stdoutExcerpt: boundedText(record.stdoutExcerpt, 512) || '',
           stderrExcerpt: boundedText(record.stderrExcerpt, 512) || '',
-          nestedState: record.nestedState ? {
-            state: boundedText(record.nestedState.state, 32),
-            runtimePhase: boundedText(record.nestedState.runtimePhase, 64),
-            nodeTest: record.nestedState.nodeTest ? {
-              registered: Number(record.nestedState.nodeTest.registered) || 0,
-              completed: Number(record.nestedState.nodeTest.completed) || 0,
-              activeRun: Boolean(record.nestedState.nodeTest.activeRun),
-              activeTest: record.nestedState.nodeTest.activeTest ? {
-                name: boundedText(record.nestedState.nodeTest.activeTest.name, 160),
-                fullName: boundedText(record.nestedState.nodeTest.activeTest.fullName, 240),
-                file: boundedText(record.nestedState.nodeTest.activeTest.file, 256),
-              } : null,
-              streamTerminal: boundedText(record.nestedState.nodeTest.streamTerminal, 32),
-              streamError: record.nestedState.nodeTest.streamError ? {
-                name: boundedText(record.nestedState.nodeTest.streamError.name, 64),
-                message: boundedText(record.nestedState.nodeTest.streamError.message, 512),
-              } : null,
-            } : null,
-          } : null,
+          nestedState: record.nestedState || compactNestedState(record),
         })) : [],
       } : null,
       terminal: child?.terminal || worker?.terminal ? {

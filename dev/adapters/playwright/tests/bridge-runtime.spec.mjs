@@ -1199,6 +1199,39 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('settles a same-realm node:test child after its entry is loaded', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn(process.execPath, ['/node/child-test.js'], { stdio: ['ignore', 'pipe', 'pipe'] });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.match(output, /child node:test passed/);
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/child-test.js': [
+          "const { test } = require('node:test');",
+          "test('child node:test', () => process.stdout.write('child node:test passed\\n'));",
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
   test('preserves npm dispatch when Node is resolved by name', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert');

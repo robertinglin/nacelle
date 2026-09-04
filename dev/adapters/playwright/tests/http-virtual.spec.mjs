@@ -108,6 +108,39 @@ test.describe('browser-native virtual HTTP compatibility', () => {
     await close(server);
   });
 
+  test('allows a server handler to complete a loopback client request before its response', async () => {
+    const { http } = createHttpCompatibility(globalThis);
+    const server = http.createServer((request, response) => {
+      if (request.url === '/fetch') {
+        response.end(JSON.stringify({ ok: true }));
+        return;
+      }
+      const nested = http.get({
+        host: 'localhost',
+        port: server.address().port,
+        path: '/fetch',
+      }, (nestedResponse) => {
+        const chunks = [];
+        nestedResponse.on('data', (chunk) => chunks.push(chunk));
+        nestedResponse.once('end', () => {
+          response.statusCode = nestedResponse.statusCode;
+          response.end(Buffer.concat(chunks).toString());
+        });
+      });
+      nested.once('error', (error) => response.destroy(error));
+    });
+    await listen(server, 0, '127.0.0.1');
+
+    const response = await get(http, {
+      host: 'localhost',
+      port: server.address().port,
+      path: '/',
+    });
+    expect(response.statusCode).toBe(200);
+    await expect(responseText(response)).resolves.toBe('{"ok":true}');
+    await close(server);
+  });
+
   test('supports https-shaped virtual servers and preserves fetch fallback by default', async () => {
     const fetchCalls = [];
     const scope = Object.create(globalThis);

@@ -939,7 +939,8 @@ export function createVmModule(scope = globalThis) {
       if (hasDynamicImport) {
         const dynamicImport = (specifier) => {
           if (typeof this.options.importModuleDynamically === 'function') {
-            return Promise.resolve(this.options.importModuleDynamically(specifier, this));
+            return Promise.resolve(this.options.importModuleDynamically(specifier, this))
+              .then((module) => module?.namespace || module);
           }
           const activeProcess = context.process || scope.process;
           if (typeof activeProcess?.__bnhModuleImport === 'function') {
@@ -997,7 +998,8 @@ export function createVmModule(scope = globalThis) {
       if (hasDynamicImport) {
         const dynamicImport = (specifier) => {
           if (typeof this.options.importModuleDynamically === 'function') {
-            return Promise.resolve(this.options.importModuleDynamically(specifier, this));
+            return Promise.resolve(this.options.importModuleDynamically(specifier, this))
+              .then((module) => module?.namespace || module);
           }
           const activeProcess = scope.process;
           if (typeof activeProcess?.__bnhModuleImport === 'function') {

@@ -376,6 +376,19 @@ export function createModuleLoader({
 
   const defaultResolve = (specifier, importer, conditions = ['node', 'import']) => {
     const resolved = resolve(specifier, importer, conditions);
+    // Node's default ESM resolver rejects a missing file before the load
+    // phase and exposes the file URL on ERR_MODULE_NOT_FOUND. A resolve hook
+    // can use that error to map a source spelling such as `./entry.js` to an
+    // existing TypeScript file; returning the missing path would skip that
+    // hook opportunity and turn the later load into an opaque VFS ENOENT.
+    if (resolved.startsWith('/') && !hasFile(resolved)) {
+      const error = packageError(
+        'ERR_MODULE_NOT_FOUND',
+        `Cannot find module '${resolved}' imported from '${importer}'`,
+      );
+      error.url = fileURL(resolved);
+      throw error;
+    }
     return {
       url: isBuiltinSpecifier(resolved) || resolved.startsWith('node:')
         ? `node:${builtinName(resolved)}`

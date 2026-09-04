@@ -2922,6 +2922,22 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
           publishDiagnostic(diagnostics, 'http.server.response.created', { request, response });
           response.socket = request.socket;
           response.connection = request.connection;
+          const onSocketClose = () => {
+            // A client can destroy an IncomingMessage while a virtual server
+            // response is still streaming. Propagate that terminal socket
+            // state back to the server-side response so Web Stream readers,
+            // pipeline users, and the server's lifecycle all settle instead
+            // of retaining a deferred body forever.
+            if (!response._completedResponse && !response.destroyed) {
+              // The peer close is a premature response close, rather than an
+              // error emitted by ServerResponse. Leave the response
+              // unerrored so stream.finished() reports
+              // ERR_STREAM_PREMATURE_CLOSE, as Node does for HTTP aborts.
+              response.destroy();
+            }
+          };
+          request.socket.once?.('close', onSocketClose);
+          response.once('close', () => request.socket?.off?.('close', onSocketClose));
           recordNetworkLifecycle('server-request', request, response, {
             requestAborted: Boolean(request.aborted),
           });

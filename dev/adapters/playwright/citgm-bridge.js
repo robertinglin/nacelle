@@ -566,6 +566,9 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     }
     await progressReporter.flush();
     report('setup', 'candidate-dependency-preload-complete', { events: progress.preload.events });
+    // Precache has warmed persistent artifacts; do not retain the warm
+    // in-memory layers while the materializing install builds the VFS.
+    npmCache.clearMemory();
     await runtime.mount({});
 
     const processArgv = createCitgmProcessArgv(CITGM_ENTRY, module, args);

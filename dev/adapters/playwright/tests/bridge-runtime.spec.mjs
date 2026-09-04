@@ -1006,6 +1006,26 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
     expect(result.stdout).toBe('42');
   });
+  test('leaves for-await loops in async generators intact while transforming callers', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        async function* values() {
+          yield 7;
+          yield 8;
+        }
+        async function* doubled() {
+          for await (const value of values()) {
+            yield value * 2;
+          }
+        }
+        void doubled;
+        process.stdout.write('async generator parsed');
+      })();
+    `);
+
+    await expectPass(expect, result);
+    expect(result.stdout).toBe('async generator parsed');
+  });
   test('forwards nested output before a package-manager child exits nonzero', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert');

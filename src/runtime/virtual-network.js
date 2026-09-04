@@ -172,6 +172,7 @@ export function createVirtualNetwork({ transport } = {}) {
   const udpBindings = new Map();
   const pipeBindings = new Map();
   const remoteTcpBindings = new Map();
+  const tcpRegistrations = new Map();
   let nextUdpBindingId = 1;
   let nextTcpPort = 41000;
   let nextUdpPort = 51000;
@@ -541,11 +542,40 @@ export function createVirtualNetwork({ transport } = {}) {
     const result = bind(tcpBindings, owner, address, port, 'tcp');
     const bindingKey = endpointKey(result.address, result.port);
     if (typeof transport?.bindTcp === 'function') {
+      const deliverConnection = (connection = {}) => {
+        const binding = tcpBindings.get(bindingKey);
+        if (!binding) {
+          connection.client?.destroy?.();
+          return null;
+        }
+        const serverSocket = connection.serverSocket || binding.owner._createAcceptedSocket?.(connection);
+        if (!serverSocket) {
+          connection.client?.destroy?.();
+          return null;
+        }
+        binding.owner._acceptConnection({ ...connection, serverSocket });
+        return serverSocket;
+      };
+      const reportBindError = (error) => {
+        const binding = tcpBindings.get(bindingKey);
+        if (!binding) return;
+        if (binding.owner._runWithOwner) binding.owner._runWithOwner(() => binding.owner.emit?.('error', error));
+        else binding.owner.emit?.('error', error);
+      };
       const ownerBindings = remoteTcpBindings.get(owner) || new Set();
       ownerBindings.add(bindingKey);
       remoteTcpBindings.set(owner, ownerBindings);
       try {
-        transport.bindTcp({ bindingKey, address: result.address, port: result.port });
+        const registration = transport.bindTcp({
+          bindingKey,
+          address: result.address,
+          port: result.port,
+          onConnection: deliverConnection,
+          onError: reportBindError,
+        });
+        if (registration && typeof registration.close === 'function') {
+          tcpRegistrations.set(bindingKey, registration);
+        }
       } catch (error) {
         unbind(tcpBindings, owner);
         remoteTcpBindings.delete(owner);
@@ -557,6 +587,8 @@ export function createVirtualNetwork({ transport } = {}) {
   const unbindTcp = (owner) => {
     for (const bindingKey of remoteTcpBindings.get(owner) || []) {
       transport?.unbindTcp?.({ bindingKey });
+      tcpRegistrations.get(bindingKey)?.close?.();
+      tcpRegistrations.delete(bindingKey);
     }
     remoteTcpBindings.delete(owner);
     unbind(tcpBindings, owner);
@@ -625,7 +657,7 @@ function postMessagePort(port, message) {
 }
 
 /** Connect a worker-owned virtual network to its parent's network registry. */
-export function createRemoteVirtualNetwork({ port } = {}) {
+export function createRemoteVirtualNetwork({ port, transport: proxyTransport } = {}) {
   if (!port?.postMessage) throw new TypeError('network bridge requires a MessagePort');
   let nextConnectionId = 1;
   let closed = false;
@@ -668,6 +700,9 @@ export function createRemoteVirtualNetwork({ port } = {}) {
       connections.set(connectionId, { socket: serverSocket, peer });
       return { client: peer, serverSocket };
     },
+    ...(typeof proxyTransport?.connect === 'function'
+      ? { connect: (request) => proxyTransport.connect(request) }
+      : {}),
   };
   const network = createVirtualNetwork({ transport });
   const receive = (message) => {

@@ -12792,12 +12792,23 @@ export function createRuntime({
         ? {
             connect: (request) => proxyCapability.connect(request),
             send: (request) => proxyCapability.send(request),
+            bindTcp: typeof proxyCapability.adapter.bindTcp === 'function'
+              ? (request) => proxyCapability.adapter.bindTcp(request)
+              : undefined,
+            unbindTcp: typeof proxyCapability.adapter.unbindTcp === 'function'
+              ? (request) => proxyCapability.adapter.unbindTcp(request)
+              : undefined,
           }
         : undefined;
       const preserveSharedNetwork = context.virtualNetwork?.shared === true;
       const inheritedNetwork = context.virtualNetwork?.network;
-      if (proxyTransport) virtualNetwork = createVirtualNetwork({ transport: proxyTransport });
-      else if (preserveSharedNetwork) virtualNetwork = inheritedNetwork || getSharedVirtualNetwork(scope);
+      // An inherited network owns the process-local listener registry. Keep
+      // it when crossing an IPC child boundary so bind/accept traffic can
+      // return through the parent bridge; its transport also carries any
+      // outbound proxy hooks supplied by that boundary.
+      if (preserveSharedNetwork && inheritedNetwork) virtualNetwork = inheritedNetwork;
+      else if (proxyTransport) virtualNetwork = createVirtualNetwork({ transport: proxyTransport });
+      else if (preserveSharedNetwork) virtualNetwork = getSharedVirtualNetwork(scope);
       else virtualNetwork = replaceSharedVirtualNetwork(scope);
       dnsModule = createBrowserDns({ proxy: proxyCapability, network: virtualNetwork });
       scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ = 0;

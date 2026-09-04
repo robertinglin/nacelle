@@ -120,6 +120,12 @@ async function main() {
   const progressEvents = [];
   server.stderr.setEncoding('utf8');
   server.stderr.on('data', (chunk) => { serverError += chunk; });
+  let artifactWriterPromise = null;
+  let lastProgressEvent = null;
+  const loopbackServers = new Map();
+  const loopbackSockets = new Map();
+  let nextLoopbackId = 1;
+  let nextLoopbackSocketId = 1;
 
   try {
     const url = `http://127.0.0.1:${port}/citgm.html`;
@@ -177,6 +183,64 @@ async function main() {
         });
       });
       browser.on('disconnected', () => { browserDiagnostics.push({ event: 'browser-disconnected' }); });
+      const deliverLoopback = (id, event, value) => page.evaluate(({ id: targetId, event: targetEvent, value: targetValue }) => {
+        return globalThis.__BNH_EXTERNAL_TCP_DELIVER__?.(targetId, targetEvent, targetValue) || false;
+      }, { id: String(id), event, value });
+      await page.exposeBinding('__bnhOpenLoopback', async (_source, request = {}) => {
+        const id = String(nextLoopbackId++);
+        const server = net.createServer((socket) => {
+          const socketId = `${id}:${nextLoopbackSocketId++}`;
+          loopbackSockets.set(socketId, socket);
+          let delivery = deliverLoopback(id, 'connect', {
+            listenerId: id,
+            socketId,
+            remoteAddress: socket.remoteAddress,
+            remotePort: socket.remotePort,
+            localAddress: socket.localAddress,
+            localPort: socket.localPort,
+          });
+          socket.on('data', (chunk) => {
+            delivery = Promise.resolve(delivery).then(() => deliverLoopback(socketId, 'data', [...chunk]));
+          });
+          socket.on('end', () => {
+            delivery = Promise.resolve(delivery).then(() => deliverLoopback(socketId, 'end'));
+          });
+          socket.on('close', () => {
+            loopbackSockets.delete(socketId);
+            delivery = Promise.resolve(delivery).then(() => deliverLoopback(socketId, 'close'));
+          });
+          socket.on('error', () => {});
+        });
+        await new Promise((resolve, reject) => {
+          server.once('error', reject);
+          server.listen(Number(request.port), String(request.address || '127.0.0.1'), resolve);
+        });
+        loopbackServers.set(id, server);
+        return { id };
+      });
+      await page.exposeBinding('__bnhWriteLoopback', async (_source, request = {}) => {
+        const socket = loopbackSockets.get(String(request.id));
+        if (!socket) return false;
+        if (request.operation === 'data') {
+          socket.write(Uint8Array.from(request.bytes || []));
+        } else if (request.operation === 'end') {
+          socket.end();
+        } else if (request.operation === 'close') {
+          socket.destroy();
+        }
+        return true;
+      });
+      await page.exposeBinding('__bnhCloseLoopback', async (_source, request = {}) => {
+        const id = String(request.id);
+        loopbackServers.get(id)?.close();
+        loopbackServers.delete(id);
+        for (const [socketId, socket] of loopbackSockets) {
+          if (socketId.startsWith(`${id}:`)) {
+            socket.destroy();
+            loopbackSockets.delete(socketId);
+          }
+        }
+      });
       process.stdout.write('Starting browser-side CITGM execution...\n');
       let result;
       try {
@@ -322,6 +386,8 @@ async function main() {
       process.stdout.write(`${JSON.stringify(primary)}\n`);
       process.exitCode = result.exitCode === null ? 1 : result.exitCode;
     } finally {
+      for (const socket of loopbackSockets.values()) socket.destroy();
+      for (const server of loopbackServers.values()) server.close();
       await browser.close();
     }
   } finally {

@@ -101,20 +101,34 @@ function shareFileBytes(bytes, scope) {
   return new Uint8Array(shared);
 }
 
+function shareFileValue(value, scope) {
+  if (value instanceof Uint8Array || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
+    return shareFileBytes(value instanceof Uint8Array ? value : new Uint8Array(value), scope);
+  }
+  if (value && typeof value === 'object') {
+    for (const key of ['data', 'bytes', 'content']) {
+      if (!Object.hasOwn(value, key)) continue;
+      return { ...value, [key]: shareFileValue(value[key], scope) };
+    }
+  }
+  return value;
+}
+
+function shareFileDescriptor(value, scope) {
+  if (value && typeof value === 'object' && !ArrayBuffer.isView(value) && !(value instanceof ArrayBuffer)) {
+    for (const key of ['data', 'bytes', 'content']) {
+      if (!Object.hasOwn(value, key)) continue;
+      return { ...value, [key]: shareFileBytes(value[key], scope) };
+    }
+  }
+  return shareFileBytes(value, scope);
+}
+
 export function prepareWorkerVfs(vfs, scope) {
   if (!vfs?.files || scope.crossOriginIsolated !== true
     || typeof scope.SharedArrayBuffer !== 'function') return vfs;
-  const shareFileValue = (value) => {
-    if (value instanceof Uint8Array || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
-      return shareFileBytes(value instanceof Uint8Array ? value : new Uint8Array(value), scope);
-    }
-    if (value && typeof value === 'object' && value.data !== undefined) {
-      return { ...value, data: shareFileValue(value.data) };
-    }
-    return value;
-  };
   const files = Object.fromEntries(
-    Object.entries(vfs.files).map(([path, value]) => [path, shareFileValue(value)]),
+    Object.entries(vfs.files).map(([path, value]) => [path, shareFileDescriptor(value, scope)]),
   );
   const artifacts = Array.isArray(vfs.artifacts)
     ? vfs.artifacts.map((artifact) => ({ ...artifact, bytes: shareFileBytes(artifact.bytes, scope) }))

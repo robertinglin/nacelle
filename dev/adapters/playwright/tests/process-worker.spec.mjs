@@ -147,6 +147,25 @@ test.describe('browser-native worker process boundary', () => {
     expect(result.terminal).toMatchObject({ status: 'exited', kind: 'exit', code: 7, signal: null, forced: false });
   });
 
+  test('shares nested VFS file descriptors across worker boundaries', async ({ page }) => {
+    await openRuntime(page);
+    const result = await page.evaluate(async () => {
+      const { prepareWorkerVfs } = await import('/runtime/process.js');
+      const source = new Uint8Array([1, 2, 3]);
+      const descriptor = prepareWorkerVfs({
+        files: { '/node/example.js': { data: source, mode: 0o755 } },
+        artifacts: [{ path: '/node/example.js', bytes: source }],
+      }, globalThis);
+      return {
+        sharedFile: descriptor.files['/node/example.js'].data.buffer instanceof SharedArrayBuffer,
+        sharedArtifact: descriptor.artifacts[0].bytes.buffer instanceof SharedArrayBuffer,
+        mode: descriptor.files['/node/example.js'].mode,
+        bytes: [...descriptor.files['/node/example.js'].data],
+      };
+    });
+    expect(result).toEqual({ sharedFile: true, sharedArtifact: true, mode: 0o755, bytes: [1, 2, 3] });
+  });
+
   test('handles cooperative signals, abort cancellation, and forced termination', async ({ page }) => {
     await openRuntime(page);
     const result = await page.evaluate(async () => {

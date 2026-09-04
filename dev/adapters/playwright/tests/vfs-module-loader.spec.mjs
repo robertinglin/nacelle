@@ -131,6 +131,27 @@ test.describe('browser-native VFS and module loading', () => {
     expect(result.stdout).toContain('CommonJS package main resolution completed');
   });
 
+  test('resolves CommonJS package subpaths through directory index files', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (() => {
+        const assert = require('node:assert/strict');
+        const value = require('subpath-package/dir');
+        assert.strictEqual(value, 'subpath-index');
+        process.stdout.write('CommonJS package subpath resolution completed');
+      })();
+    `, {
+      entryPath: '/node/subpath-app/main.cjs',
+      files: {
+        '/node/subpath-app/node_modules/subpath-package/package.json': JSON.stringify({ main: 'index.js' }),
+        '/node/subpath-app/node_modules/subpath-package/index.js': 'module.exports = require("./dir");\n',
+        '/node/subpath-app/node_modules/subpath-package/dir/index.js': 'module.exports = "subpath-index";\n',
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('CommonJS package subpath resolution completed');
+  });
+
   test('publishes directory renames as exact VFS deltas', () => {
     const source = createVfs({ mounts: [{ path: '/node', mode: 'read-write' }] });
     source.mount({

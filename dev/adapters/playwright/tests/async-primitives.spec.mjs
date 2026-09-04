@@ -216,7 +216,12 @@ test.describe('browser runtime async primitives', () => {
         worker.once('message', resolve);
         worker.once('error', reject);
       });
-      assert.deepStrictEqual(message, { isMainThread: false, value: 17 });
+      assert.deepStrictEqual(message, {
+        isMainThread: false,
+        value: 17,
+        processSend: 'undefined',
+        processChannel: 'undefined',
+      });
       assert.strictEqual(await new Promise((resolve) => worker.once('exit', resolve)), 0);
       })().catch((error) => {
         console.error(error);
@@ -225,8 +230,9 @@ test.describe('browser runtime async primitives', () => {
     `, {
       files: {
         '/node/url-worker-entry.mjs': [
+          "import process from 'node:process';",
           "import { isMainThread, parentPort, workerData } from 'node:worker_threads';",
-          'parentPort.postMessage({ isMainThread, value: workerData.value });',
+          'parentPort.postMessage({ isMainThread, value: workerData.value, processSend: typeof process.send, processChannel: typeof process.channel });',
           'parentPort.close();',
         ].join('\n'),
       },

@@ -1,4 +1,5 @@
 import { expect } from 'playwright/test';
+import { createVfs } from '../runtime/vfs.js';
 import { browserRuntimeURL, expectPass, test } from './harness-test-helpers.mjs';
 
 test.skip(!browserRuntimeURL, 'set BNH_TEST_URL to a browser runtime harness page');
@@ -128,6 +129,38 @@ test.describe('browser-native VFS and module loading', () => {
 
     await expectPass(expect, result);
     expect(result.stdout).toContain('CommonJS package main resolution completed');
+  });
+
+  test('publishes directory renames as exact VFS deltas', () => {
+    const source = createVfs({ mounts: [{ path: '/node', mode: 'read-write' }] });
+    source.mount({
+      '/node/keep.txt': 'keep',
+      '/node/tree/child.txt': 'child',
+    });
+    const updates = [];
+    source.subscribeMutations((update) => updates.push(update));
+    source.fs.renameSync('/node/tree', '/node/moved');
+    const update = updates.at(-1);
+
+    expect(update).toMatchObject({
+      action: 'change-set',
+      removed: ['/node/tree', '/node/tree/child.txt'],
+      changes: [
+        { path: '/node/moved', type: 'directory' },
+        { path: '/node/moved/child.txt', type: 'file', bytes: new Uint8Array([99, 104, 105, 108, 100]) },
+      ],
+    });
+    expect(update.changes.some(({ path }) => path === '/node/keep.txt')).toBe(false);
+
+    const receiver = createVfs({ mounts: [{ path: '/node', mode: 'read-write' }] });
+    receiver.mount({
+      '/node/keep.txt': 'keep',
+      '/node/tree/child.txt': 'child',
+    });
+    receiver.applyUpdate(update);
+    expect(receiver.fs.existsSync('/node/tree')).toBe(false);
+    expect(receiver.fs.readFileSync('/node/moved/child.txt', 'utf8')).toBe('child');
+    expect(receiver.fs.readFileSync('/node/keep.txt', 'utf8')).toBe('keep');
   });
 
   test('invokes overridden CommonJS extension handlers and preserves module require hooks', async ({ harnessPage }) => {

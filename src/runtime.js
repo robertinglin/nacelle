@@ -4676,23 +4676,40 @@ export function createRuntime({
   // case or requiring a pre-populated cache.
   function createVfsUpdateBridge() {
     const channel = createMessageChannel(scope);
-    const pendingPaths = new Set();
+    const pendingBatches = [];
     let fullSyncPending = false;
     let flushScheduled = false;
+    const queuePathBatch = (paths) => {
+      const previous = pendingBatches.at(-1);
+      if (previous?.kind === 'paths') {
+        for (const pathValue of paths) previous.paths.add(pathValue);
+        return;
+      }
+      pendingBatches.push({ kind: 'paths', paths: new Set(paths) });
+    };
     const flush = () => {
       flushScheduled = false;
       if (fullSyncPending) {
         fullSyncPending = false;
-        pendingPaths.clear();
+        pendingBatches.length = 0;
         channel.port1.postMessage({ action: 'sync', state: vfs.exportState?.() });
         return;
       }
-      const changes = [];
-      for (const pathValue of pendingPaths) {
-        changes.push(vfs.describe?.(pathValue) || { path: pathValue, type: 'remove' });
+      for (const batch of pendingBatches.splice(0)) {
+        if (batch.kind === 'delta') {
+          channel.port1.postMessage({
+            action: 'delta',
+            removed: batch.removed,
+            changes: batch.changes,
+          });
+          continue;
+        }
+        const changes = [];
+        for (const pathValue of batch.paths) {
+          changes.push(vfs.describe?.(pathValue) || { path: pathValue, type: 'remove' });
+        }
+        if (changes.length) channel.port1.postMessage({ action: 'delta', changes });
       }
-      pendingPaths.clear();
-      if (changes.length) channel.port1.postMessage({ action: 'delta', changes });
     };
     const schedule = () => {
       if (flushScheduled) return;
@@ -4702,12 +4719,22 @@ export function createRuntime({
     const unsubscribe = vfs.subscribeMutations?.((update) => {
       if (update.action === 'sync') {
         fullSyncPending = true;
-        pendingPaths.clear();
+        pendingBatches.length = 0;
         schedule();
         return;
       }
-      for (const pathValue of update.paths || []) pendingPaths.add(pathValue);
-      if (update.path) pendingPaths.add(update.path);
+      if (update.action === 'change-set') {
+        pendingBatches.push({
+          kind: 'delta',
+          removed: Array.isArray(update.removed) ? update.removed : [],
+          changes: Array.isArray(update.changes) ? update.changes : [],
+        });
+        schedule();
+        return;
+      }
+      const paths = [...(update.paths || [])];
+      if (update.path) paths.push(update.path);
+      if (paths.length) queuePathBatch(paths);
       schedule();
     });
     return {

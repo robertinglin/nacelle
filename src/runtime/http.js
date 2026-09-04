@@ -2391,22 +2391,51 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
       && String(value).toLowerCase().split(',').some((item) => item.trim() === 'chunked'));
   }
 
-  function writeRawChunk(socket, chunk, chunked = false) {
+  function writeRawChunk(socket, chunk, chunked = false, callback = undefined) {
     const bytes = chunk instanceof Uint8Array ? chunk : toBytes(chunk, scope);
-    if (!bytes.byteLength) return;
+    if (!bytes.byteLength) {
+      if (callback) schedule(scope, callback);
+      return;
+    }
     if (!chunked) {
-      socket.write(bytes);
+      socket.write(bytes, callback);
       return;
     }
     const encoder = scope.TextEncoder || TextEncoder;
     const prefix = new encoder().encode(`${bytes.byteLength.toString(16)}\r\n`);
     const suffix = new encoder().encode('\r\n');
-    socket.write(appendBytes(appendBytes(prefix, bytes), suffix));
+    socket.write(appendBytes(appendBytes(prefix, bytes), suffix), callback);
   }
 
   function endRawChunkedResponse(socket) {
     const encoder = scope.TextEncoder || TextEncoder;
     socket.write(new encoder().encode('0\r\n\r\n'));
+  }
+
+  function closeRawSocketAfterWrites(socket) {
+    if (!socket || socket.destroyed) return;
+    const close = () => {
+      if (socket.destroyed) return;
+      // The preceding zero-length write is a transport barrier: once its
+      // callback runs, every response byte has been handed to the peer. Close
+      // the virtual connection immediately after the half-close so the peer
+      // observes the same terminal event as a real Connection: close socket.
+      socket.end?.();
+      socket.destroy?.();
+    };
+    // Socket writes are asynchronous in both the local and worker-backed
+    // virtual transports. Queue a zero-length write as a drain barrier so a
+    // response's body/framing bytes reach the peer before Connection: close
+    // terminates the stream.
+    try {
+      if (socket.writable && typeof socket.write === 'function') {
+        socket.write(new Uint8Array(), close);
+      } else {
+        close();
+      }
+    } catch {
+      close();
+    }
   }
 
   function attachRawSocket(binding, socket) {
@@ -2537,7 +2566,7 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
                   // bytes have flushed. A half-close alone leaves a default
                   // client waiting on `close` indefinitely when the server
                   // has selected Connection: close.
-                  socket.end?.(() => socket.destroy?.());
+                  closeRawSocketAfterWrites(socket);
                 }
                 resolve();
               } catch (error) {
@@ -2564,8 +2593,7 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
                   responseDestroyed: Boolean(response?.destroyed),
                   requestAborted: Boolean(request?.aborted),
                 });
-                writeRawChunk(socket, chunk, responseChunked);
-                schedule(scope, () => callback());
+                writeRawChunk(socket, chunk, responseChunked, callback);
               } catch (error) {
                 callback(error);
               }
@@ -3630,6 +3658,13 @@ class IncomingMessage extends Readable {
     if (this._bodyReader && typeof this._bodyReader.cancel === 'function') {
       Promise.resolve(this._bodyReader.cancel(error)).catch(() => {});
     }
+    // IncomingMessage.destroy() terminates the response and its underlying
+    // connection. Keeping the socket alive here leaves the agent's current
+    // request attached to a half-consumed response, so a subsequent request
+    // cannot establish the normal fresh-connection lifecycle.
+    if (this.socket && !this.socket.destroyed && (!this.complete || error)) {
+      this.socket.destroy(error);
+    }
     return super.destroy(error);
   }
 
@@ -3794,7 +3829,7 @@ function incomingMessageError(self, error, callback) {
 }
 
 IncomingMessage.prototype._destroy = function _destroy(error, callback) {
-  if (!this.readableEnded || !this.complete) {
+  if (error || !this.complete) {
     this.aborted = true;
     this.emit('aborted');
   }

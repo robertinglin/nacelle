@@ -275,6 +275,58 @@ test.describe('browser-native http compatibility', () => {
     `);
   });
 
+  test('destroys the response socket before starting a replacement request', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'request-destroy-reconnect', `
+      const assert = require('node:assert');
+      const http = require('node:http');
+
+      let requests = 0;
+      const server = http.createServer((_request, response) => {
+        requests += 1;
+        response.setHeader('transfer-encoding', 'chunked');
+        response.write('first');
+        if (requests === 1) {
+          setTimeout(() => {
+            if (!response.destroyed) response.end('late');
+          }, 25);
+        } else {
+          response.end('second');
+        }
+      });
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+
+      try {
+        await new Promise((resolve, reject) => {
+          const request = http.get('http://localhost:' + server.address().port, (response) => {
+            response.once('error', () => {});
+            response.once('data', () => {
+              request.destroy();
+              resolve();
+            });
+          });
+          request.once('error', reject);
+        });
+        const body = await new Promise((resolve, reject) => {
+          const request = http.get('http://localhost:' + server.address().port, (response) => {
+            let output = '';
+            response.setEncoding('utf8');
+            response.on('data', (chunk) => { output += chunk; });
+            response.once('end', () => resolve(output));
+            response.once('error', reject);
+          });
+          request.once('error', reject);
+        });
+        assert.strictEqual(requests, 2);
+        assert.strictEqual(body, 'firstsecond');
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    `);
+  });
+
   test('preserves status for an object-mode transform piped as a response', async ({ harnessPage }) => {
     await runContract(expect, harnessPage, 'fetch/object-mode-transform-status', `
       const assert = require('node:assert');

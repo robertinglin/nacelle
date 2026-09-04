@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { createSerializedCaptureQueue } from '../citgm-capture.mjs';
 import { npmCacheSnapshot } from '../citgm-cache.mjs';
 
-test('serializes complete capture binding payloads and isolates binding errors', async () => {
+test('batches complete capture payloads, preserves order, and isolates binding errors', async () => {
   const order = [];
   let active = 0;
   let maximum = 0;
@@ -15,8 +15,9 @@ test('serializes complete capture binding payloads and isolates binding errors',
       await new Promise((resolve) => setTimeout(resolve, 1));
       active -= 1;
       calls += 1;
-      order.push(payload.index);
-      if (payload.index === 2) throw new Error('consumer failed');
+      const payloads = Array.isArray(payload?.events) ? payload.events : [payload];
+      order.push(...payloads.map((item) => item.index));
+      if (payloads.some((item) => item.index === 2)) throw new Error('consumer failed');
     },
   });
 
@@ -24,7 +25,7 @@ test('serializes complete capture binding payloads and isolates binding errors',
   await queue.flush();
 
   assert.equal(maximum, 1);
-  assert.equal(calls, 32);
+  assert.equal(calls, 1);
   assert.deepEqual(order, Array.from({ length: 32 }, (_, index) => index));
 });
 

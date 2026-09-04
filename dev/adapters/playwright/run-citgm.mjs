@@ -13,6 +13,7 @@ import {
   persistCitgmArtifacts,
   persistTerminalSummary,
 } from './citgm-artifacts.mjs';
+import { launchBrowser } from './adapter-core.mjs';
 import { formatProgressLine } from './progress-protocol.mjs';
 
 const adapterRoot = path.dirname(new URL(import.meta.url).pathname);
@@ -117,7 +118,8 @@ async function main() {
   try {
     const url = `http://127.0.0.1:${port}/citgm.html`;
   await waitForServer(url, server);
-  const browser = await browserTypes[options.browserName].launch({ headless: true });
+  const browser = await launchBrowser(browserTypes[options.browserName], options.browserName);
+  let browserCdp = null;
   try {
     const page = await browser.newPage();
       page.setDefaultTimeout(0);
@@ -138,6 +140,7 @@ async function main() {
           await mkdir(path.dirname(file), { recursive: true });
           await appendFile(file, value, 'utf8');
         }).catch(() => {});
+        return traceWrites;
       };
       const latestTraceSources = (runId) => {
         const source = traceSources.get(String(runId)) || {};
@@ -150,18 +153,52 @@ async function main() {
       };
       await page.exposeBinding('__bnhReportProgress', async (_source, event) => {
         progressEvents.push(event);
-        queueTrace(event?.runId, 'progress.jsonl', `${JSON.stringify(event)}\n`);
+        await queueTrace(event?.runId, 'progress.jsonl', `${JSON.stringify(event)}\n`);
         try { process.stderr.write(formatProgressLine(event)); } catch { /* diagnostics cannot affect the run */ }
       });
       await page.exposeBinding('__bnhReportNetwork', async (_source, payload) => {
-        networkEventCount += 1;
-        queueTrace(payload?.runId, 'network.jsonl', `${JSON.stringify(payload?.event || payload)}\n`);
+        const events = Array.isArray(payload?.events) ? payload.events : [payload];
+        for (const item of events) {
+          networkEventCount += 1;
+          await queueTrace(item?.runId, 'network.jsonl', `${JSON.stringify(item?.event || item)}\n`);
+        }
       });
       await page.exposeBinding('__bnhReportOutput', async (_source, payload) => {
-        const stream = payload?.stream === 'stderr' ? 'stderr' : 'stdout';
-        queueTrace(payload?.runId, `${stream}.log`, String(payload?.text || ''));
+        const events = Array.isArray(payload?.events) ? payload.events : [payload];
+        for (const item of events) {
+          const stream = item?.stream === 'stderr' ? 'stderr' : 'stdout';
+          await queueTrace(item?.runId, `${stream}.log`, String(item?.text || ''));
+        }
       });
       page.on('crash', () => { browserDiagnostics.push({ event: 'page-crash' }); });
+      if (options.browserName === 'chromium') {
+        try {
+          browserCdp = await browser.newBrowserCDPSession();
+          await browserCdp.send('Target.setDiscoverTargets', { discover: true });
+          browserCdp.on('Target.targetCrashed', (payload) => {
+            browserDiagnostics.push({
+              event: 'browser-target-crashed',
+              targetId: String(payload?.targetId || '').slice(0, 128) || null,
+              status: String(payload?.status || '').slice(0, 64) || null,
+              errorCode: Number.isInteger(payload?.errorCode) ? payload.errorCode : null,
+            });
+          });
+        } catch {
+          // Browser-level CDP diagnostics are optional and must not affect the run.
+        }
+        try {
+          const cdp = await page.context().newCDPSession(page);
+          cdp.on('Target.targetCrashed', (payload) => {
+            browserDiagnostics.push({
+              event: 'target-crashed',
+              status: String(payload?.status || '').slice(0, 64) || null,
+              errorCode: Number.isInteger(payload?.errorCode) ? payload.errorCode : null,
+            });
+          });
+        } catch {
+          // CDP diagnostics are optional and must not affect the run.
+        }
+      }
       page.on('pageerror', (error) => {
         browserDiagnostics.push({
           event: 'page-error',
@@ -372,11 +409,12 @@ async function main() {
       if (stderr) process.stderr.write(stderr);
       process.stdout.write(`${JSON.stringify(primary)}\n`);
       process.exitCode = result.exitCode === null ? 1 : result.exitCode;
-    } finally {
+      } finally {
+      await browserCdp?.detach?.().catch?.(() => {});
       for (const socket of loopbackSockets.values()) socket.destroy();
       for (const server of loopbackServers.values()) server.close();
       await browser.close();
-    }
+      }
   } finally {
     server.kill('SIGTERM');
     if (serverError && server.exitCode !== 0) process.stderr.write(serverError);

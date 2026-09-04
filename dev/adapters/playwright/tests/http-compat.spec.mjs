@@ -80,7 +80,11 @@ test.describe('browser-native http compatibility', () => {
       const http = require('node:http');
       const net = require('node:net');
 
-      const server = http.createServer((_request, response) => response.end('raw-body'));
+      const server = http.createServer((_request, response) => {
+        response.setHeader('transfer-encoding', 'chunked');
+        response.write('raw-body');
+        response.end();
+      });
       await new Promise((resolve, reject) => {
         server.once('error', reject);
         server.listen(0, '127.0.0.1', resolve);
@@ -99,7 +103,7 @@ test.describe('browser-native http compatibility', () => {
           socket.once('close', () => resolve(output));
         });
         assert.match(wire, /^HTTP\\/1\\.1 200 /);
-        assert.match(wire, /\\r\\n\\r\\n(?:raw-body|8\\r\\nraw-body\\r\\n0\\r\\n\\r\\n)$/);
+        assert.match(wire, /\\r\\n\\r\\n8\\r\\nraw-body\\r\\n0\\r\\n\\r\\n$/);
       } finally {
         await new Promise((resolve) => server.close(resolve));
       }
@@ -564,6 +568,111 @@ test.describe('browser-native http compatibility', () => {
         assert.ok(result.error.name === 'TimeoutError' || result.error.code === 'ETIMEDOUT');
       } finally {
         globalThis.fetch = originalFetch;
+      }
+    `);
+  });
+
+  test('aborting an async piped response permits a replacement request', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'async-piped-request-destroy-reconnect', `
+      const assert = require('node:assert');
+      const http = require('node:http');
+      const { Readable, finished } = require('node:stream');
+
+      const sendStream = (source, response) => {
+        let sourceOpen = true;
+        finished(source, { readable: true, writable: false }, () => { sourceOpen = false; });
+        finished(response, (error) => {
+          if (sourceOpen && error) source.destroy();
+        });
+        source.pipe(response);
+      };
+
+      let requests = 0;
+      const server = http.createServer(async (_request, response) => {
+        requests += 1;
+        const source = new Readable({ read() {} });
+        const reply = {
+          raw: response,
+          sent: false,
+          send(payload) {
+            this.sent = true;
+            sendStream(payload, this.raw);
+            return this;
+          },
+          then(fulfilled, rejected) {
+            if (this.sent) {
+              fulfilled();
+              return;
+            }
+            finished(this.raw, (error) => error ? rejected?.(error) : fulfilled());
+          },
+        };
+        response.setHeader('transfer-encoding', 'chunked');
+        source.push('first');
+        reply.send(source);
+        if (requests === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          source.push('late');
+          source.push(null);
+        } else {
+          source.push('second');
+          source.push(null);
+        }
+        return reply;
+      });
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+
+      try {
+        const port = server.address().port;
+        const warmup = http.createServer((_request, response) => {
+          setTimeout(() => response.end('late'), 25);
+        });
+        await new Promise((resolve, reject) => {
+          warmup.once('error', reject);
+          warmup.listen(0, '127.0.0.1', resolve);
+        });
+        try {
+          await new Promise((resolve, reject) => {
+            const request = http.get('http://localhost:' + warmup.address().port);
+            request.once('error', (error) => {
+              assert.strictEqual(error.code, 'ECONNRESET');
+              resolve();
+            });
+            setTimeout(() => request.destroy(), 1);
+          });
+        } finally {
+          await new Promise((resolve) => warmup.close(resolve));
+        }
+        await new Promise((resolve, reject) => {
+          const request = http.get('http://localhost:' + port, (response) => {
+            response.once('error', () => {});
+            response.once('data', (chunk) => {
+              assert.strictEqual(chunk.toString(), 'first');
+              setTimeout(() => {
+                request.destroy();
+                resolve();
+              }, 1);
+            });
+          });
+          request.once('error', reject);
+        });
+        const body = await new Promise((resolve, reject) => {
+          const request = http.get('http://localhost:' + port, (response) => {
+            let output = '';
+            response.setEncoding('utf8');
+            response.on('data', (chunk) => { output += chunk; });
+            response.once('end', () => resolve(output));
+            response.once('error', reject);
+          });
+          request.once('error', reject);
+        });
+        assert.strictEqual(requests, 2);
+        assert.strictEqual(body, 'firstsecond');
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
       }
     `);
   });

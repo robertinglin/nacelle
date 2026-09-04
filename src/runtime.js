@@ -8828,6 +8828,14 @@ export function createRuntime({
                   options.onStderr?.(value);
                 }, () => () => {});
             childProc.processObject._bnhVirtualChild = true;
+            // A same-realm child has no worker control port to carry network
+            // telemetry. When the caller requested it, forward the child's
+            // bounded network lifecycle events through the same sink used by
+            // worker-backed children. This is observational only and never
+            // participates in child completion.
+            if (typeof options.onNetwork === 'function') {
+              childProc.processObject.__bnhNetworkEvent = options.onNetwork;
+            }
             childProc.processObject.__bnhModuleApiFactory = () => createModuleApi(childProc.processObject);
             // Keep Module._load inside a synchronous virtual child on the
             // child's moduleState cache. The normal runtime loader has a
@@ -9775,7 +9783,7 @@ export function createRuntime({
             recent: [],
           };
           childActivity.recent ||= [];
-          const runVirtualCommandInternal = ({ entry, argv, cwd, commandEnv, stdin, signal, timeout, onStdout, onStderr }) => {
+          const runVirtualCommandInternal = ({ entry, argv, cwd, commandEnv, stdin, signal, timeout, onNetwork, onStdout, onStderr }) => {
             const isNodeExecutable = (pathname) => /(?:^|\/)node(?:js)?$/.test(String(pathname));
             const commandName = String(entry).split('/').pop();
             if (['npm', 'yarn', 'yarnpkg'].includes(commandName)) {
@@ -9792,6 +9800,7 @@ export function createRuntime({
                   signal,
                   timeout,
                   stdin: stdin,
+                  onNetwork,
                   onStdout: (value) => {
                     streamedOutput = true;
                     onStdout?.(value);
@@ -9874,6 +9883,7 @@ export function createRuntime({
               const result = runPreparedSync(prepared, {
                 asyncLifecycle: true,
                 encoding: 'utf8',
+                onNetwork,
                 onStdout: (value) => {
                   const chunk = normalizeOutputChunk(value);
                   stdout.push(chunk);
@@ -10221,6 +10231,7 @@ export function createRuntime({
                 stdin: nodeOptions.input,
                 signal: nodeOptions.signal,
                 timeout: nodeOptions.timeout,
+                onNetwork: nodeOptions.onNetwork,
                 onStdout: nodeOptions.onStdout,
                 onStderr: nodeOptions.onStderr,
               });
@@ -10325,6 +10336,7 @@ export function createRuntime({
                 stdin: commandOptions.stdin,
                 signal: commandOptions.signal,
                 timeout: commandOptions.timeout,
+                onNetwork: commandOptions.onNetwork || scriptOptions.onNetwork,
                 onStdout: commandOptions.onStdout,
                 onStderr: commandOptions.onStderr,
               }),

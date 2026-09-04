@@ -2499,6 +2499,28 @@ function hasTopLevelCommonJsProcessBinding(source) {
     || /(?:^|[;\n])\s*(?:const|let|var)\s*[({[][^;\n}]*\bprocess\b/m.test(masked);
 }
 
+function createGuestFunctionConstructor(NativeFunction, processOverride, sourceURL) {
+  const GuestFunction = function guestFunctionConstructor(...args) {
+    const body = args.length ? String(args.at(-1)) : '';
+    if (!/\bimport\s*\(/u.test(body)) return Reflect.construct(NativeFunction, args);
+    const parameters = args.slice(0, -1);
+    const rewritten = rewriteCommonJsDynamicImports(body);
+    const compiled = Reflect.construct(NativeFunction, ['__bnhImport', ...parameters, rewritten]);
+    const importModule = (specifier, options) => processOverride.__bnhModuleImport(
+      specifier,
+      sourceURL,
+      options,
+      processOverride,
+    );
+    return function guestFunction(...values) {
+      return compiled.call(this, importModule, ...values);
+    };
+  };
+  Object.setPrototypeOf(GuestFunction, NativeFunction);
+  GuestFunction.prototype = NativeFunction.prototype;
+  return GuestFunction;
+}
+
 function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = null, processOverride = null) {
   // npm bin shims are executable text files and commonly start with a
   // shebang, which JavaScript's Function constructor cannot parse.
@@ -2550,9 +2572,9 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
     try {
       return wrapped(...values);
     } finally {
+      globalThis.Function = previousFunction;
       if (previousActiveProcess === undefined) delete globalThis.__bnhActiveProcess;
       else globalThis.__bnhActiveProcess = previousActiveProcess;
-      globalThis.Function = previousFunction;
       if (previousUserCode === undefined) delete globalThis.__bnhUserCode;
       else globalThis.__bnhUserCode = previousUserCode;
     }
@@ -2581,9 +2603,9 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
     if (bindAsync) values.push(asyncRunner);
     return wrapped(...values);
   } finally {
+    globalThis.Function = previousFunction;
     if (previousActiveProcess === undefined) delete globalThis.__bnhActiveProcess;
     else globalThis.__bnhActiveProcess = previousActiveProcess;
-    globalThis.Function = previousFunction;
     if (previousUserCode === undefined) delete globalThis.__bnhUserCode;
     else globalThis.__bnhUserCode = previousUserCode;
   }

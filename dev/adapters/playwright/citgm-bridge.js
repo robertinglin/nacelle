@@ -336,7 +336,7 @@ function npmCacheSnapshot(cache) {
   return snapshot;
 }
 
-async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 1000, citgmVersion = DEFAULT_CITGM_VERSION, browser = 'unknown', progress: progressConfig = null }) {
+async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 1000, citgmVersion = DEFAULT_CITGM_VERSION, browser = 'unknown', progress: progressConfig = null, capture: captureConfig = null }) {
   if (running) throw new Error('a CITGM run is already active in this browser page');
   if (!module || typeof module !== 'string') throw new TypeError('module is required');
   running = true;
@@ -356,22 +356,27 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
   const controller = new AbortController();
   const timeout = Number(timeoutMs) > 0 ? Number(timeoutMs) : 15 * 60 * 1000;
   const runId = `citgm-${Date.now()}`;
-  const progressTrace = [];
+  const retainProgressTrace = captureConfig?.progressBinding === undefined;
+  const progressTrace = retainProgressTrace ? [] : null;
   const progressReporter = createProgressReporter({
     binding: progressConfig?.binding,
     runId,
-    onEvent: (event) => progressTrace.push(event),
+    onEvent: (event) => progressTrace?.push(event),
   });
   const progress = {
     bootstrap: { events: 0, phases: {}, last: null },
     preload: { events: 0, phases: {}, last: null },
   };
-  const networkEvents = [];
+  const retainNetworkTrace = typeof captureConfig?.networkBinding !== 'string';
+  const networkEvents = retainNetworkTrace ? [] : null;
+  let networkEventCount = 0;
   const outputCounters = {
     stdout: { bytes: 0, chunks: 0 },
     stderr: { bytes: 0, chunks: 0 },
   };
-  const outputChunks = { stdout: [], stderr: [] };
+  const retainOutputChunks = typeof captureConfig?.outputBinding !== 'string';
+  const outputChunks = retainOutputChunks ? { stdout: [], stderr: [] } : null;
+  const capturePromises = new Set();
   let installStats = null;
   let preloadStats = null;
   let child = null;
@@ -383,6 +388,76 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     const state = child?.state || child?._worker?.state;
     return state === 'starting' || state === 'running';
   };
+  const childRuntimeState = () => {
+    const worker = child?._worker;
+    const runtimeState = worker?.runtimeState || child?.runtimeState;
+    const boundedText = (value, limit = 256) => value == null ? null : String(value).slice(0, limit);
+    const nodeTest = runtimeState?.nodeTest;
+    const activity = runtimeState?.childActivity;
+    return {
+      state: boundedText(child?.state || worker?.state, 32),
+      lifecycle: Array.isArray(child?.stateHistory || worker?.stateHistory)
+        ? (child?.stateHistory || worker?.stateHistory).slice(-6).map((value) => boundedText(value, 32))
+        : [],
+      runtimePhase: boundedText(runtimeState?.phase, 64),
+      nodeTest: nodeTest ? {
+        registered: Number(nodeTest.registered) || 0,
+        completed: Number(nodeTest.completed) || 0,
+        activeRun: Boolean(nodeTest.activeRun),
+        activeTest: nodeTest.activeTest ? {
+          name: boundedText(nodeTest.activeTest.name, 160),
+          fullName: boundedText(nodeTest.activeTest.fullName, 240),
+          file: boundedText(nodeTest.activeTest.file, 256),
+          state: boundedText(nodeTest.activeTest.state, 32),
+        } : null,
+        streamTerminal: boundedText(nodeTest.streamTerminal, 32),
+        streamError: nodeTest.streamError ? {
+          name: boundedText(nodeTest.streamError.name, 64),
+          message: boundedText(nodeTest.streamError.message || nodeTest.streamError, 512),
+        } : null,
+      } : null,
+      childActivity: activity ? {
+        launched: Number(activity.launched) || 0,
+        completed: Number(activity.completed) || 0,
+        failed: Number(activity.failed) || 0,
+        recent: Array.isArray(activity.recent) ? activity.recent.slice(-4).map((record) => ({
+          entry: boundedText(record.entry || record.command, 256),
+          argumentCount: Number(record.argumentCount) || 0,
+          code: record.code ?? null,
+          signal: record.signal ?? null,
+          pending: Boolean(record.pending),
+          stdoutBytes: Number(record.stdoutBytes) || 0,
+          stderrBytes: Number(record.stderrBytes) || 0,
+          stdoutExcerpt: boundedText(record.stdoutExcerpt, 512) || '',
+          stderrExcerpt: boundedText(record.stderrExcerpt, 512) || '',
+          nestedState: record.nestedState ? {
+            state: boundedText(record.nestedState.state, 32),
+            runtimePhase: boundedText(record.nestedState.runtimePhase, 64),
+            nodeTest: record.nestedState.nodeTest ? {
+              registered: Number(record.nestedState.nodeTest.registered) || 0,
+              completed: Number(record.nestedState.nodeTest.completed) || 0,
+              activeRun: Boolean(record.nestedState.nodeTest.activeRun),
+              activeTest: record.nestedState.nodeTest.activeTest ? {
+                name: boundedText(record.nestedState.nodeTest.activeTest.name, 160),
+                fullName: boundedText(record.nestedState.nodeTest.activeTest.fullName, 240),
+                file: boundedText(record.nestedState.nodeTest.activeTest.file, 256),
+              } : null,
+              streamTerminal: boundedText(record.nestedState.nodeTest.streamTerminal, 32),
+              streamError: record.nestedState.nodeTest.streamError ? {
+                name: boundedText(record.nestedState.nodeTest.streamError.name, 64),
+                message: boundedText(record.nestedState.nodeTest.streamError.message, 512),
+              } : null,
+            } : null,
+          } : null,
+        })) : [],
+      } : null,
+      terminal: child?.terminal || worker?.terminal ? {
+        code: child?.terminal?.code ?? worker?.terminal?.code ?? null,
+        signal: child?.terminal?.signal ?? worker?.terminal?.signal ?? null,
+        kind: boundedText(child?.terminal?.kind || worker?.terminal?.kind, 32),
+      } : null,
+    };
+  };
   const counters = () => ({
     npm: {
       citgmInstallEvents: progress.bootstrap.events,
@@ -392,7 +467,7 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       candidatePreloadPackages: preloadStats?.packages?.length || 0,
       candidatePreloadFiles: preloadStats?.totalFiles || 0,
     },
-    networkEvents: networkEvents.length,
+    networkEvents: networkEventCount || networkEvents?.length || 0,
     output: {
       stdoutBytes: outputCounters.stdout.bytes,
       stdoutChunks: outputCounters.stdout.chunks,
@@ -407,6 +482,8 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       stage: currentStage,
       childActive: childActive(),
       counters: counters(),
+      ...(event === 'child-running' || event === 'child-started' || event === 'upstream-test-started'
+        ? { childState: childRuntimeState() } : {}),
       ...fields,
     });
   };
@@ -417,7 +494,18 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       : ArrayBuffer.isView(value)
         ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice()
         : encoder.encode(text(value));
-    outputChunks[stream].push(bytes);
+    outputChunks?.[stream].push(bytes);
+    if (typeof captureConfig?.outputBinding === 'string') {
+      try {
+        const pending = Promise.resolve(globalThis[captureConfig.outputBinding]?.({
+          runId,
+          stream,
+          text: text(value),
+        })).catch(() => {});
+        capturePromises.add(pending);
+        void pending.finally(() => capturePromises.delete(pending));
+      } catch { /* capture is observational */ }
+    }
     target.bytes += byteLength(value);
     target.chunks += 1;
     progressReporter.output(stream, value, {
@@ -528,8 +616,16 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
         npmCache: npmCacheSnapshot(npmCache),
         processArgv,
         onNetwork: (event) => {
-          networkEvents.push(event);
-          report('execution', 'network-activity', { events: networkEvents.length });
+          networkEventCount += 1;
+          networkEvents?.push(event);
+          if (typeof captureConfig?.networkBinding === 'string') {
+            try {
+              const pending = Promise.resolve(globalThis[captureConfig.networkBinding]?.({ runId, event })).catch(() => {});
+              capturePromises.add(pending);
+              void pending.finally(() => capturePromises.delete(pending));
+            } catch { /* capture is observational */ }
+          }
+          report('execution', 'network-activity', { events: networkEventCount });
         },
         onStdout: (value) => recordOutput('stdout', value),
         onStderr: (value) => recordOutput('stderr', value),
@@ -561,8 +657,9 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     report('lifecycle', 'completed', { code: exitCode ?? null, childActive: false });
     await Promise.resolve();
     const [stdout, stderr] = await Promise.all([child.stdoutText(), child.stderrText()]);
-    const stdoutBytes = concatBytes(outputChunks.stdout);
-    const stderrBytes = concatBytes(outputChunks.stderr);
+    await Promise.all([...capturePromises]);
+    const stdoutBytes = outputChunks ? concatBytes(outputChunks.stdout) : new Uint8Array();
+    const stderrBytes = outputChunks ? concatBytes(outputChunks.stderr) : new Uint8Array();
     return {
       module,
       citgmVersion,
@@ -586,7 +683,7 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       preload: { packages: preloadStats?.packages?.length || 0, files: preloadStats?.totalFiles || 0 },
       progress,
       progressTrace,
-      networkEvents,
+      networkEvents: networkEvents || [],
     };
   } catch (error) {
     report('lifecycle', 'failed', { code: error?.code || 'ERR_CITGM_RUN' });
@@ -597,8 +694,8 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       timedOut: controller.signal.aborted,
       stdout: '',
       stderr: '',
-      stdoutBytes: concatBytes(outputChunks.stdout),
-      stderrBytes: concatBytes(outputChunks.stderr),
+      stdoutBytes: outputChunks ? concatBytes(outputChunks.stdout) : new Uint8Array(),
+      stderrBytes: outputChunks ? concatBytes(outputChunks.stderr) : new Uint8Array(),
       outputCounters: {
         stdout: { ...outputCounters.stdout },
         stderr: { ...outputCounters.stderr },
@@ -608,12 +705,13 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       precache: { used: Boolean(npmCache.artifactManifest), packages: npmCache.artifactManifest?.packageCount || 0 },
       progress,
       progressTrace,
-      networkEvents,
+      networkEvents: networkEvents || [],
     };
   } finally {
     clearTimeout(timer);
     clearInterval(livenessTimer);
     await progressReporter.flush();
+    await Promise.all([...capturePromises]);
     running = false;
   }
 }

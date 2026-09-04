@@ -1,6 +1,6 @@
 import { expect, test } from 'playwright/test';
 import { packTar, unpackTar, packTarGz, unpackTarGz } from '../runtime/tar.js';
-import { BrowserNpm, satisfiesSemver, parsePackageSpec } from '../runtime/npm.js';
+import { BrowserNpm, satisfiesSemver, parseNpmAlias, parsePackageSpec } from '../runtime/npm.js';
 import { createVfs } from '../runtime/vfs.js';
 import { createModuleLoader } from '../runtime/module-loader.js';
 import { EventEmitter } from '../runtime/events.js';
@@ -108,6 +108,60 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     await npm.fetchPackageMetadata('@scope/package');
 
     expect(requests).toEqual(['https://registry.test/@scope/package']);
+  });
+
+  test('BrowserNpm resolves npm aliases using the target metadata while preserving the alias location', async () => {
+    const encoder = new TextEncoder();
+    const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
+    const archive = await packTarGz([
+      {
+        path: 'package/package.json',
+        data: encoder.encode(JSON.stringify({ name: 'target-package', version: '1.2.3', main: 'index.js' })),
+      },
+      { path: 'package/index.js', data: encoder.encode('module.exports = { aliased: true };') },
+    ]);
+    const requests = [];
+    const npm = new BrowserNpm({
+      vfs,
+      registry: 'https://registry.test',
+      proxyUrl: null,
+      fetchFn: async (url) => {
+        requests.push(url);
+        if (url === 'https://registry.test/target-package') {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              name: 'target-package',
+              'dist-tags': { latest: '1.2.3' },
+              versions: {
+                '1.2.3': {
+                  name: 'target-package',
+                  version: '1.2.3',
+                  dist: { tarball: 'https://registry.test/target-package/-/target-package-1.2.3.tgz' },
+                },
+              },
+            }),
+          };
+        }
+        if (url === 'https://registry.test/target-package/-/target-package-1.2.3.tgz') {
+          return { ok: true, status: 200, arrayBuffer: async () => archive.buffer };
+        }
+        return { ok: false, status: 404 };
+      },
+    });
+
+    expect(parseNpmAlias('npm:target-package@^1.2.0')).toEqual({ name: 'target-package', range: '^1.2.0' });
+    const result = await npm.install('target-alias@npm:target-package@1.2.3', { cwd: '/node' });
+
+    expect(result.packages).toHaveLength(1);
+    expect(result.packages[0].name).toBe('target-alias');
+    expect(vfs.files.has('/node/node_modules/target-alias/index.js')).toBe(true);
+    expect(vfs.files.has('/node/node_modules/target-package/index.js')).toBe(false);
+    expect(requests).toEqual([
+      'https://registry.test/target-package',
+      'https://registry.test/target-package/-/target-package-1.2.3.tgz',
+    ]);
   });
 
   test('BrowserNpm installs packages into VFS and module-loader requires them', async () => {

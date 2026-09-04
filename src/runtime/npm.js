@@ -215,6 +215,15 @@ export function parsePackageSpec(spec) {
   return { name, range: range || 'latest' };
 }
 
+// npm aliases use the public package name as the dependency key while
+// resolving metadata and tarballs for the aliased package. Keep this parser
+// shared by the browser installer and host-side precache graph builder.
+export function parseNpmAlias(range) {
+  const trimmed = String(range || '').trim();
+  if (!trimmed.startsWith('npm:')) return null;
+  return parsePackageSpec(trimmed.slice(4));
+}
+
 /**
  * Persistent IndexedDB and in-memory cache for NPM package metadata and tarball archives.
  */
@@ -642,12 +651,13 @@ export class BrowserNpm {
     };
 
     const dependencyLocation = (name, range, currentNodeModulesDir, currentPackageDir) => {
+      const resolutionRange = parseNpmAlias(range)?.range || range;
       let directory = currentNodeModulesDir;
       let conflict = false;
       while (directory) {
         const installedVersion = this.installedLocations.get(`${directory}/${name}`);
         if (installedVersion) {
-          if (satisfiesSemver(installedVersion, range)) return null;
+          if (satisfiesSemver(installedVersion, resolutionRange)) return null;
           conflict = true;
         }
         directory = parentNodeModulesDir(directory);
@@ -662,21 +672,28 @@ export class BrowserNpm {
       nodeModulesDir: requestedNodeModulesDir = targetNodeModules,
       parentPackageDir = null,
     }) => {
+      const alias = parseNpmAlias(range);
+      // npm aliases keep the dependency key and install location under the
+      // requested name, but resolve metadata and tarballs using the target
+      // package name/range. This is a package-manager contract, not a
+      // candidate-specific exception.
+      const resolutionName = alias?.name || name;
+      const resolutionRange = alias?.range || range;
       let itemNodeModulesDir = requestedNodeModulesDir;
       let locationKey = `${itemNodeModulesDir}/${name}`;
       let installedVersion = this.installedLocations.get(locationKey);
-      if (installedVersion && !satisfiesSemver(installedVersion, range) && parentPackageDir) {
+      if (installedVersion && !satisfiesSemver(installedVersion, resolutionRange) && parentPackageDir) {
         itemNodeModulesDir = `${parentPackageDir}/node_modules`;
         locationKey = `${itemNodeModulesDir}/${name}`;
         installedVersion = this.installedLocations.get(locationKey);
       }
       const visitKey = `${itemNodeModulesDir}:${name}@${range}`;
-      if (visited.has(visitKey) || (installedVersion && satisfiesSemver(installedVersion, range))) return;
+      if (visited.has(visitKey) || (installedVersion && satisfiesSemver(installedVersion, resolutionRange))) return;
       visited.add(visitKey);
       // Platform-specific optional packages are native delivery variants in
       // the npm graph. Skip them before metadata/tarball work; Next.js will
       // select and, when needed, download its own WASM package at runtime.
-      if (isBrowserNativePackage(name, this.platform)) {
+      if (isBrowserNativePackage(resolutionName, this.platform)) {
         onProgress?.({ phase: 'optional-skipped', name, range, reason: 'browser-native-addon' });
         return;
       }
@@ -686,15 +703,15 @@ export class BrowserNpm {
       let tarballBytes = null;
 
       // Check direct tarball cache by spec
-      const directTarballKey = `pkg-tarball:${name}@${range}`;
+      const directTarballKey = `pkg-tarball:${resolutionName}@${resolutionRange}`;
       const cachedDirect = await this.cache.getTarball(directTarballKey);
       if (cachedDirect) {
         tarballBytes = cachedDirect;
-        version = range === 'latest' ? '1.0.0' : range;
+        version = resolutionRange === 'latest' ? '1.0.0' : resolutionRange;
         onProgress?.({ phase: 'cache-hit-tarball', name, version, bytes: tarballBytes.byteLength });
       } else {
-        const metadata = await this.fetchPackageMetadata(name, { onProgress });
-        const resolved = this.resolveVersion(metadata, range);
+        const metadata = await this.fetchPackageMetadata(resolutionName, { onProgress });
+        const resolved = this.resolveVersion(metadata, resolutionRange);
         version = resolved.version;
         versionDoc = resolved.doc;
         if (optional && !packageSupportsPlatform(versionDoc, this.platform, this.arch, this.libc)) {
@@ -754,9 +771,22 @@ export class BrowserNpm {
             throw npmSecurityError('ERR_NPM_PACKAGE_PATH', `package bin escapes its package directory: ${binRel}`);
           }
           const targetFile = `${pkgDir}/${cleanRel}`;
+          // npm places .bin launchers beside the package directory. Keep the
+          // launcher specifier relative to that directory so Node's ESM
+          // resolver can determine the package scope from the target file,
+          // rather than from the generated launcher itself.
+          const targetSpecifier = `..${targetFile.slice(itemNodeModulesDir.length)}`;
+          const isEsmBin = cleanRel.endsWith('.mjs')
+            || (parsedPkgJson.type === 'module' && !cleanRel.endsWith('.cjs'));
+          const launcher = isEsmBin
+            // The generated .bin file itself has no module extension and is
+            // therefore CommonJS when loaded directly. Keep the await inside
+            // an async wrapper while retaining a relative ESM target.
+            ? `(async () => { await import(${JSON.stringify(targetSpecifier)}); })().catch((error) => { process.stderr.write(String(error?.stack || error) + "\\n"); process.exitCode = 1; });`
+            : `require(${JSON.stringify(targetFile)});`;
           filesToMount[binPath] = {
             data: new TextEncoder().encode(
-              `#!/usr/bin/env node\nimport(${JSON.stringify(targetFile)}).catch((error) => { process.stderr.write(String(error?.stack || error) + "\\n"); process.exitCode = 1; });\n`,
+              `#!/usr/bin/env node\n${launcher}\n`,
             ),
             mode: 0o755,
           };

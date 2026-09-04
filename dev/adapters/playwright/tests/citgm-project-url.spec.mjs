@@ -22,6 +22,18 @@ test('resolves the upstream project archive from lookup precedence', () => {
   );
 });
 
+test('uses selected version gitHead metadata when resolving an archive', () => {
+  assert.equal(resolveCitgmProjectUrl({
+    moduleSpec: 'project@latest',
+    metadata: {
+      repository: { type: 'git', url: 'git+https://github.com/example/project.git' },
+      'dist-tags': { latest: '1.2.3' },
+    },
+    versionMetadata: { version: '1.2.3', gitHead: 'selected-commit' },
+    lookup: { prefix: 'v' },
+  }), 'https://github.com/example/project/archive/selected-commit.tar.gz');
+});
+
 test('does not turn npm-managed projects or non-GitHub repositories into archives', () => {
   const metadata = { repository: 'https://gitlab.com/example/project.git' };
   assert.equal(resolveCitgmProjectUrl({ moduleSpec: 'project', metadata, lookup: {} }), null);

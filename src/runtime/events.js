@@ -771,8 +771,8 @@ EventEmitter.on = function on(emitter, name, options = {}) {
   const waiters = [];
   let finished = false;
   // readline's Interface async iterator asks events.on() to yield only its
-  // first event argument. Keep the normal Node contract (one value for one
-  // argument, an array for multiple arguments) for every other caller. The
+  // first event argument. Keep the normal Node contract (an argument tuple)
+  // for every other caller. The
   // marker is owned by Node's internal/events/symbols module, so identify it
   // by its stable description instead of creating a second, incompatible
   // symbol in this shared browser shim.
@@ -792,7 +792,7 @@ EventEmitter.on = function on(emitter, name, options = {}) {
       if (queue.length >= highWaterMark) emitter.pause?.();
     }
   };
-  const onEvent = (...args) => settle(firstEventParam ? args[0] : args.length === 1 ? args[0] : args);
+  const onEvent = (...args) => settle(firstEventParam ? args[0] : args);
   const onClose = () => {
     if (finished) return;
     finished = true;

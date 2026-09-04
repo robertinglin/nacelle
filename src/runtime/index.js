@@ -210,12 +210,17 @@ export function validateCapabilityManifest(manifest) {
 }
 
 /** Assemble the existing browser-native primitives for one validated run. */
-export function assembleBrowserCapabilities(runSpec, { globalObject = globalThis, transport } = {}) {
+export function assembleBrowserCapabilities(runSpec, { globalObject = globalThis, transport, vfsBackend } = {}) {
   if (!isRecord(runSpec) || typeof runSpec.runId !== 'string' || !runSpec.runId) {
     throw capabilityError('ERR_INVALID_CAPABILITY', 'runSpec.runId is required', { key: 'runId' });
   }
   const manifest = validateCapabilityManifest(runSpec.capabilities);
-  const vfs = createVfs({ mounts: manifest.vfs.mounts, fixtures: runSpec.fixtures, watchQuota: manifest.budgets?.watchers });
+  const vfs = createVfs({
+    backend: vfsBackend,
+    mounts: manifest.vfs.mounts,
+    fixtures: runSpec.fixtures,
+    watchQuota: manifest.budgets?.watchers,
+  });
   const output = createOutputCollector({
     transport,
     highWaterMark: manifest.output.highWaterMark,

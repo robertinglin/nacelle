@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 export const CITGM_ARTIFACT_SCHEMA_VERSION = 1;
@@ -114,10 +114,12 @@ function compactValue(value, key, artifacts, counts, traceKind = null) {
   const keyText = String(key).toLowerCase();
   const childTraceKind = keyText.includes('network') ? 'network'
     : keyText.includes('progress') || keyText.includes('trace') ? 'progress' : traceKind;
+  const outputTraceKind = keyText.includes('child') && keyText.includes('output')
+    ? 'childOutput' : childTraceKind;
   if (typeof value === 'string') return compactString(value);
   if (value instanceof Uint8Array || value instanceof ArrayBuffer) return { bytes: value.byteLength };
   if (value && typeof value === 'object' && ArrayBuffer.isView(value)) return { bytes: value.byteLength };
-  if (Array.isArray(value)) return compactArray(value, key, artifacts, childTraceKind);
+  if (Array.isArray(value)) return compactArray(value, key, artifacts, outputTraceKind);
   if (value && typeof value === 'object') {
     if (value instanceof Error || /(?:error|exception|failure)/i.test(String(key))) {
       return compactError(value, artifacts, counts, childTraceKind);
@@ -126,9 +128,14 @@ function compactValue(value, key, artifacts, counts, traceKind = null) {
     for (const [childKey, childValue] of Object.entries(value)) {
       if (/^(?:stdout|stderr)$/i.test(childKey)) {
         const stream = childKey.toLowerCase();
-        result[childKey] = { bytes: counts[stream].bytes, chunks: counts[stream].chunks, artifact: artifacts[stream] };
+        const artifact = outputTraceKind === 'childOutput' ? artifacts.childOutput : artifacts[stream];
+        result[childKey] = {
+          bytes: outputTraceKind === 'childOutput' ? byteCount(childValue) : counts[stream].bytes,
+          chunks: outputTraceKind === 'childOutput' ? (childValue ? 1 : 0) : counts[stream].chunks,
+          artifact,
+        };
       } else {
-        result[childKey] = compactValue(childValue, childKey, artifacts, counts, childTraceKind);
+        result[childKey] = compactValue(childValue, childKey, artifacts, counts, outputTraceKind);
       }
     }
     return result;
@@ -157,6 +164,8 @@ export function createTerminalSummary({
   artifacts,
   progressEvents = [],
   networkEvents = [],
+  networkEventCount = networkEvents.length,
+  childOutputs = [],
   outputCounts,
 }) {
   const stdout = asText(result?.stdout);
@@ -165,6 +174,11 @@ export function createTerminalSummary({
     stdout: { bytes: byteCount(stdout), chunks: stdout ? 1 : 0 },
     stderr: { bytes: byteCount(stderr), chunks: stderr ? 1 : 0 },
   };
+  const childOutputRecords = Array.isArray(childOutputs) ? childOutputs : [];
+  const childStdoutBytes = childOutputRecords.reduce((total, record) => total + byteCount(record?.stdout), 0);
+  const childStderrBytes = childOutputRecords.reduce((total, record) => total + byteCount(record?.stderr), 0);
+  const childStdout = childOutputRecords.map((record) => asText(record?.stdout)).join('');
+  const childStderr = childOutputRecords.map((record) => asText(record?.stderr)).join('');
   const exit = result?.runResult?.exit || {
     code: result?.exitCode ?? null,
     signal: null,
@@ -180,7 +194,11 @@ export function createTerminalSummary({
       reason: exit.reason || (result?.timedOut ? 'timeout' : 'exit'),
     },
     timedOut: Boolean(result?.timedOut),
-    error: result?.error || result?.runResult?.error || null,
+    error: result?.error
+      ? compactValue(result.error, 'error', artifacts, counts)
+      : result?.runResult?.error
+        ? compactValue(result.runResult.error, 'error', artifacts, counts)
+        : null,
     stage: String(stage || 'unknown'),
     output: {
       stdoutBytes: counts.stdout.bytes,
@@ -189,13 +207,16 @@ export function createTerminalSummary({
       stderrChunks: counts.stderr.chunks,
       totalBytes: counts.stdout.bytes + counts.stderr.bytes,
       totalChunks: counts.stdout.chunks + counts.stderr.chunks,
+      childStdoutBytes,
+      childStderrBytes,
+      childOutputChunks: childOutputRecords.length,
     },
     progressEvents: progressEvents.length,
-    networkEvents: networkEvents.length,
+    networkEvents: Number(networkEventCount) || 0,
     artifacts,
     failureExcerpts: {
-      stdout: extractFailureExcerpts(stdout),
-      stderr: extractFailureExcerpts(stderr),
+      stdout: [...extractFailureExcerpts(stdout), ...extractFailureExcerpts(childStdout)].slice(0, 12),
+      stderr: [...extractFailureExcerpts(stderr), ...extractFailureExcerpts(childStderr)].slice(0, 12),
     },
   };
 }
@@ -213,8 +234,10 @@ export async function persistCitgmArtifacts({
   stderr = '',
   progressEvents = [],
   networkEvents = [],
+  childOutputs = [],
   runResult = null,
   metadata = {},
+  traceSources = {},
 }) {
   const directory = path.resolve(root, String(runId));
   await mkdir(directory, { recursive: true });
@@ -224,15 +247,39 @@ export async function persistCitgmArtifacts({
     stderr: path.join(directory, 'stderr.log'),
     progress: path.join(directory, 'progress.jsonl'),
     network: path.join(directory, 'network.jsonl'),
+    childOutput: path.join(directory, 'child-output.jsonl'),
     runResult: path.join(directory, 'run-result.json'),
     metadata: path.join(directory, 'metadata.json'),
     terminalSummary: path.join(directory, 'terminal-summary.json'),
   };
+  const copyTrace = async (source, target, fallback) => {
+    if (source && path.resolve(source) !== path.resolve(target)) {
+      try {
+        await copyFile(source, target);
+        return;
+      } catch {
+        // A capture may have started after a stream had no events. Keep the
+        // artifact contract by creating the empty file below.
+      }
+    } else if (source && path.resolve(source) === path.resolve(target)) {
+      try {
+        // The streaming capture path writes directly to the final artifact.
+        // Preserve that file when it has data, but create an empty artifact
+        // when a stream produced no events at all.
+        await access(target);
+        return;
+      } catch {
+        // Fall through to the empty fallback below.
+      }
+    }
+    await writeFile(target, fallback, 'utf8');
+  };
   await Promise.all([
-    writeFile(artifacts.stdout, asText(stdout), 'utf8'),
-    writeFile(artifacts.stderr, asText(stderr), 'utf8'),
-    writeFile(artifacts.progress, progressEvents.map(jsonLine).join(''), 'utf8'),
-    writeFile(artifacts.network, networkEvents.map(jsonLine).join(''), 'utf8'),
+    copyTrace(traceSources.stdout, artifacts.stdout, asText(stdout)),
+    copyTrace(traceSources.stderr, artifacts.stderr, asText(stderr)),
+    copyTrace(traceSources.progress, artifacts.progress, progressEvents.map(jsonLine).join('')),
+    copyTrace(traceSources.network, artifacts.network, networkEvents.map(jsonLine).join('')),
+    writeFile(artifacts.childOutput, childOutputs.map(jsonLine).join(''), 'utf8'),
     writeFile(artifacts.runResult, jsonText(runResult || null), 'utf8'),
     writeFile(artifacts.metadata, jsonText({
       schemaVersion: CITGM_ARTIFACT_SCHEMA_VERSION,

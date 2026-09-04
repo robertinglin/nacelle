@@ -269,9 +269,14 @@ async function main() {
     process.stdout.write(`Fetching metadata for ${metadata.size} packages...\n`);
 
     const projectPaths = {};
+    const targetMetadata = metadata.get(targetName);
+    const targetVersionMetadata = targetPackage?.version
+      ? targetMetadata?.versions?.[targetPackage.version]
+      : null;
     const projectUrl = resolveCitgmProjectUrl({
       moduleSpec: options.module,
-      metadata: metadata.get(targetName),
+      metadata: targetMetadata,
+      versionMetadata: targetVersionMetadata,
       lookup: citgmLookup?.[targetName],
     });
     let projectArchive = null;

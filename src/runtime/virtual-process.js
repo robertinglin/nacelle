@@ -379,8 +379,14 @@ function createInMemoryProcess(options) {
         childProcess._markExited();
         return;
       }
-      Promise.resolve(runResult).then(() => {
-        if (!terminal) childProcess._markExited();
+      Promise.resolve(runResult).then((result) => {
+        if (terminal) return;
+        // Runtime entrypoints return their logical process exit status. Carry
+        // it across the in-memory child boundary before the process terminal
+        // is emitted; otherwise a child failure can be masked by the
+        // bootstrap process's default exit code of zero.
+        if (Number.isInteger(result)) childProcess.exitCode = result;
+        childProcess._markExited();
       }, (error) => {
         if (terminal) return;
         pendingFailure = error;

@@ -2,6 +2,7 @@
 import net from 'node:net';
 import path from 'node:path';
 import process from 'node:process';
+import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { firefox, chromium } from 'playwright';
 import {
@@ -122,26 +123,132 @@ async function main() {
 
   try {
     const url = `http://127.0.0.1:${port}/citgm.html`;
-    await waitForServer(url, server);
-    const browser = await browserTypes[options.browserName].launch({ headless: true });
-    try {
-      const page = await browser.newPage();
+  await waitForServer(url, server);
+  const browser = await browserTypes[options.browserName].launch({ headless: true });
+  try {
+    const page = await browser.newPage();
       page.setDefaultTimeout(0);
       await page.goto(url, { waitUntil: 'domcontentloaded' });
       await page.waitForFunction(() => typeof globalThis.__NACELLE_CITGM__?.run === 'function');
+      const artifactRoot = path.resolve(process.env.NACELLE_CITGM_ARTIFACT_DIR || CITGM_ARTIFACT_ROOT);
+      const traceSources = new Map();
+      let traceWrites = Promise.resolve();
+      let networkEventCount = 0;
+      const browserDiagnostics = [];
+      const queueTrace = (runId, filename, value) => {
+        const id = String(runId || `browser-${Date.now()}`);
+        const file = path.join(artifactRoot, id, filename);
+        const source = traceSources.get(id) || {};
+        source[filename] = file;
+        traceSources.set(id, source);
+        traceWrites = traceWrites.then(async () => {
+          await mkdir(path.dirname(file), { recursive: true });
+          await appendFile(file, value, 'utf8');
+        }).catch(() => {});
+      };
+      const latestTraceSources = (runId) => {
+        const source = traceSources.get(String(runId)) || {};
+        return {
+          stdout: source['stdout.log'],
+          stderr: source['stderr.log'],
+          progress: source['progress.jsonl'],
+          network: source['network.jsonl'],
+        };
+      };
       await page.exposeBinding('__bnhReportProgress', async (_source, event) => {
         progressEvents.push(event);
+        queueTrace(event?.runId, 'progress.jsonl', `${JSON.stringify(event)}\n`);
         try { process.stderr.write(formatProgressLine(event)); } catch { /* diagnostics cannot affect the run */ }
       });
-      process.stdout.write('Starting browser-side CITGM execution...\n');
-      const result = await page.evaluate((request) => globalThis.__NACELLE_CITGM__.run(request), {
-        module: options.module,
-        args: options.citgmArgs,
-        timeoutMs: options.timeoutMs,
-        citgmVersion: options.citgmVersion,
-        browser: options.browserName,
-        progress: { binding: '__bnhReportProgress' },
+      await page.exposeBinding('__bnhReportNetwork', async (_source, payload) => {
+        networkEventCount += 1;
+        queueTrace(payload?.runId, 'network.jsonl', `${JSON.stringify(payload?.event || payload)}\n`);
       });
+      await page.exposeBinding('__bnhReportOutput', async (_source, payload) => {
+        const stream = payload?.stream === 'stderr' ? 'stderr' : 'stdout';
+        queueTrace(payload?.runId, `${stream}.log`, String(payload?.text || ''));
+      });
+      page.on('crash', () => { browserDiagnostics.push({ event: 'page-crash' }); });
+      page.on('pageerror', (error) => {
+        browserDiagnostics.push({
+          event: 'page-error',
+          name: String(error?.name || 'Error').slice(0, 64),
+          message: String(error?.message || error).slice(0, 512),
+        });
+      });
+      browser.on('disconnected', () => { browserDiagnostics.push({ event: 'browser-disconnected' }); });
+      process.stdout.write('Starting browser-side CITGM execution...\n');
+      let result;
+      try {
+        result = await page.evaluate((request) => globalThis.__NACELLE_CITGM__.run(request), {
+          module: options.module,
+          args: options.citgmArgs,
+          timeoutMs: options.timeoutMs,
+          citgmVersion: options.citgmVersion,
+          browser: options.browserName,
+          progress: { binding: '__bnhReportProgress' },
+          capture: {
+            progressBinding: '__bnhReportProgress',
+            networkBinding: '__bnhReportNetwork',
+            outputBinding: '__bnhReportOutput',
+          },
+        });
+      } catch (error) {
+        await traceWrites;
+        const runId = progressEvents.find((event) => event?.runId)?.runId
+          || `citgm-browser-failure-${Date.now()}`;
+        const sources = latestTraceSources(runId);
+        const stdout = sources.stdout ? await readFile(sources.stdout, 'utf8').catch(() => '') : '';
+        const stderr = sources.stderr ? await readFile(sources.stderr, 'utf8').catch(() => '') : '';
+        const failure = {
+          module: options.module,
+          citgmVersion: options.citgmVersion,
+          exitCode: 1,
+          timedOut: false,
+          error: {
+            name: error?.name || 'Error',
+            message: String(error?.message || error),
+            code: error?.code || 'ERR_BROWSER_RUNTIME',
+          },
+          stdout,
+          stderr,
+          runResult: null,
+        };
+        const outputCounts = outputCountsFromProgress(progressEvents, stdout, stderr);
+        const artifacts = await persistCitgmArtifacts({
+          root: artifactRoot,
+          runId,
+          stdout,
+          stderr,
+          progressEvents,
+          networkEvents: [],
+          runResult: null,
+          traceSources: sources,
+          metadata: {
+            module: options.module,
+            citgmVersion: options.citgmVersion,
+            browser: options.browserName,
+            timeoutMs: options.timeoutMs,
+            browserFailure: true,
+            browserDiagnostics,
+          },
+        });
+        const terminal = createTerminalSummary({
+          runId,
+          result: failure,
+          stage: progressEvents.at(-1)?.stage || 'browser-failure',
+          artifacts,
+          progressEvents,
+          networkEventCount,
+          outputCounts,
+        });
+        await persistTerminalSummary(artifacts, terminal);
+        process.stdout.write(`BNH_CITGM_TERMINAL ${JSON.stringify(terminal)}\n`);
+        process.stderr.write(`${error?.stack || error}\n`);
+        process.exitCode = 1;
+        return;
+      }
+      await traceWrites;
       const completeProgress = Array.isArray(result.progressTrace) && result.progressTrace.length
         ? result.progressTrace : progressEvents;
       const stdout = result.stdout || '';
@@ -151,6 +258,9 @@ async function main() {
       // nested runId, while the progress trace is emitted by this invocation.
       const runId = completeProgress.find((event) => event?.runId)?.runId
         || result.runResult?.runId || `citgm-host-${Date.now()}`;
+      const childOutputs = Array.isArray(result.runResult?.details?.child_outputs)
+        ? result.runResult.details.child_outputs
+        : Array.isArray(result.runResult?.childOutputs) ? result.runResult.childOutputs : [];
       const artifacts = await persistCitgmArtifacts({
         root: process.env.NACELLE_CITGM_ARTIFACT_DIR || CITGM_ARTIFACT_ROOT,
         runId,
@@ -158,6 +268,8 @@ async function main() {
         stderr,
         progressEvents: completeProgress,
         networkEvents: result.networkEvents || [],
+        traceSources: latestTraceSources(runId),
+        childOutputs,
         runResult: result.runResult || null,
         metadata: {
           module: result.module,
@@ -167,6 +279,7 @@ async function main() {
           precache: result.precache || null,
           install: result.install || null,
           preload: result.preload || null,
+          browserDiagnostics,
         },
       });
       const terminal = createTerminalSummary({
@@ -176,6 +289,8 @@ async function main() {
         artifacts,
         progressEvents: completeProgress,
         networkEvents: result.networkEvents || [],
+        networkEventCount,
+        childOutputs,
         outputCounts,
       });
       await persistTerminalSummary(artifacts, terminal);
@@ -188,13 +303,13 @@ async function main() {
         error: result.error || result.runResult?.error || null,
         runResult: compactRunResult(result.runResult, artifacts, outputCounts, {
           progress: completeProgress.length,
-          network: result.networkEvents?.length || 0,
+          network: networkEventCount || result.networkEvents?.length || 0,
         }),
         precache: result.precache || null,
         install: result.install || null,
         preload: result.preload || null,
         progress: result.progress || null,
-        network: { count: result.networkEvents?.length || 0, artifact: artifacts.network },
+        network: { count: networkEventCount || result.networkEvents?.length || 0, artifact: artifacts.network },
         artifacts,
         terminal,
       };

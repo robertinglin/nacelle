@@ -159,6 +159,45 @@ test.describe('browser-native node:test builtin', () => {
     expect(result.stdout).toContain('node:test runner stream completed');
   });
 
+  test('enforces the node:test run timeout and closes its result stream', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { run } = require('node:test');
+
+      (async () => {
+        const failures = [];
+        globalThis.aborted = false;
+        const stream = run({ files: ['/node/hanging-test.js'], timeout: 20 });
+        stream.on('test:fail', (event) => failures.push(event));
+        stream.resume();
+        await new Promise((resolve, reject) => {
+          stream.once('error', reject);
+          stream.once('end', resolve);
+        });
+        assert.strictEqual(failures.length, 1);
+        assert.strictEqual(globalThis.aborted, true);
+        assert.match(failures[0].details.error.cause.message, /timed out after 20ms/);
+        // A failed node:test run correctly sets the hosting process exitCode;
+        // this oracle has inspected that failure and is itself successful.
+        process.exitCode = 0;
+        process.stdout.write('node:test timeout completed\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/hanging-test.js': [
+          "const { test } = require('node:test');",
+          'test(\'hangs\', async (context) => new Promise((resolve, reject) => context.signal.addEventListener(\'abort\', () => { globalThis.aborted = true; reject(context.signal.reason); })));',
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('node:test timeout completed');
+  });
+
   test('pipes an async-generator node:test reporter into process stdout', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert');
@@ -251,6 +290,51 @@ test.describe('browser-native node:test builtin', () => {
 
     await expectPass(expect, result);
     expect(result.stdout).toContain('web stream finished callback completed');
+  });
+
+  test('preserves non-consuming finished semantics in a nested Node child', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn(process.execPath, ['/node/web-stream-finished-child.js']);
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(output, 'nested web stream finished completed\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/web-stream-finished-child.js': [
+          "const assert = require('node:assert');",
+          "const { finished } = require('node:stream');",
+          "const stream = new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array([9])); controller.close(); } });",
+          "const terminal = new Promise((resolve, reject) => finished(stream, (error) => error ? reject(error) : resolve()));",
+          "assert.strictEqual(stream.locked, false);",
+          "(async () => {",
+          "  const reader = stream.getReader();",
+          "  assert.deepStrictEqual(await reader.read(), { value: new Uint8Array([9]), done: false });",
+          "  assert.deepStrictEqual(await reader.read(), { value: undefined, done: true });",
+          "  reader.releaseLock();",
+          "  await terminal;",
+          "  assert.strictEqual(stream.locked, false);",
+          "  process.stdout.write('nested web stream finished completed\\n');",
+          "})().catch((error) => { console.error(error); process.exitCode = 1; });",
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
   });
 
   test('shares node:test state across an ESM runner and imported ESM test files', async ({ harnessPage }) => {

@@ -249,7 +249,10 @@ test.describe('browser-native VFS and module loading', () => {
         await import('./missing.node');
         assert.fail('missing native addon unexpectedly resolved');
       } catch (error) {
-        assert.strictEqual(error.code, 'MODULE_NOT_FOUND');
+        // Dynamic ESM import reports the standard public module-resolution
+        // code, while an existing addon remains the explicit unsupported
+        // native boundary checked above.
+        assert.strictEqual(error.code, 'ERR_MODULE_NOT_FOUND');
       }
       assert.strictEqual(native[0], 0);
       process.stdout.write('native addon boundary completed');

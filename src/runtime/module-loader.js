@@ -265,7 +265,27 @@ export function createModuleLoader({
   let moduleSequence = 0;
   const registryName = `__bnhEsmRegistry_${Date.now()}_${nextLoaderId++}_${moduleSequence++}`;
   const registry = Object.create(null);
+  const generatedObjectURLs = new Set();
   globalObject[registryName] = registry;
+
+  const generatedModuleURL = (source, fragment) => {
+    const URLClass = globalObject?.URL;
+    const BlobClass = globalObject?.Blob;
+    const browserLocation = globalObject?.location;
+    const browserRuntime = typeof browserLocation?.href === 'string'
+      && /^(?:https?:|blob:)/i.test(browserLocation.href);
+    if (browserRuntime && typeof URLClass?.createObjectURL === 'function' && typeof BlobClass === 'function') {
+      try {
+        const objectURL = URLClass.createObjectURL(new BlobClass([source], { type: 'text/javascript' }));
+        generatedObjectURLs.add(objectURL);
+        return `${objectURL}#${fragment}`;
+      } catch {
+        // Some embedders expose URL but not a Blob implementation accepted by
+        // createObjectURL. Preserve the portable data-URL fallback there.
+      }
+    }
+    return `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${fragment}`;
+  };
 
   const hasFile = (path) => {
     // A package pattern keeps repeated separators in its substituted target.
@@ -1009,7 +1029,10 @@ export function createModuleLoader({
     const key = cacheKey(resolved, processOverride);
     if (cycleModuleURLs.has(key)) return cycleModuleURLs.get(key);
     const source = cycleModuleSource(resolved, importer, processOverride);
-    const url = `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}_cycle_${moduleSequence++}${processKey(processOverride)}`;
+    const url = generatedModuleURL(
+      source,
+      `${registryName}_cycle_${moduleSequence++}${processKey(processOverride)}`,
+    );
     cycleModuleURLs.set(key, url);
     return url;
   };
@@ -1017,7 +1040,7 @@ export function createModuleLoader({
   const invalidCjsModuleURL = (specifier, exportName) => {
     const message = `The requested module '${specifier}' does not provide an export named '${exportName}'`;
     const source = `export default undefined;\nthrow new SyntaxError(${quote(message)});`;
-    return `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}_${moduleSequence++}`;
+    return generatedModuleURL(source, `${registryName}_${moduleSequence++}`);
   };
 
   const cjsHasEsmSyntax = (resolved) => {
@@ -1354,7 +1377,7 @@ export function createModuleLoader({
     // Native ESM caches by URL for the lifetime of the browser realm. Give
     // each runtime loader a private fragment so a second virtual child using
     // the same VFS path executes its own module instance.
-    const url = `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}${processKey(processOverride)}`;
+    const url = generatedModuleURL(source, `${registryName}${processKey(processOverride)}`);
     moduleURLs.set(key, url);
     return url;
   }
@@ -1490,7 +1513,7 @@ export function createModuleLoader({
         throw packageError('ERR_UNSUPPORTED_ESM_URL_SCHEME', `No loader is registered for ${resolved}`);
       }
       const source = await rewriteRemoteImports(sourceText(loaded.source), resolved);
-      const url = `data:text/javascript;charset=utf-8,${encodeModuleSource(source)}#${registryName}_${moduleSequence++}`;
+      const url = generatedModuleURL(source, `${registryName}_${moduleSequence++}`);
       return url;
     })();
     remoteImportCache.set(resolved, promise);
@@ -1664,7 +1687,10 @@ export function createModuleLoader({
         }).filter(Boolean).concat(registration.defaultBinding ? [`default: ${registration.defaultBinding}`] : []).join(',')}});` : ''}`
         : source;
       const finalSource = publishedSource;
-      const url = `data:text/javascript;charset=utf-8,${encodeModuleSource(finalSource)}#${registryName}_${moduleSequence++}${processKey(processOverride)}`;
+      const url = generatedModuleURL(
+        finalSource,
+        `${registryName}_${moduleSequence++}${processKey(processOverride)}`,
+      );
       moduleURLs.set(key, url);
       return url;
     })();
@@ -1819,6 +1845,15 @@ export function createModuleLoader({
     syncBuiltinESMExports,
     normalize,
     moduleURL,
-    dispose: () => { delete globalObject[registryName]; },
+    dispose: () => {
+      delete globalObject[registryName];
+      for (const objectURL of generatedObjectURLs) {
+        try { globalObject.URL.revokeObjectURL(objectURL); } catch { /* already revoked */ }
+      }
+      generatedObjectURLs.clear();
+      for (const collection of [moduleURLs, importCache, nativeSpecifierHints, cycleModuleURLs,
+        cycleRegistrations, remoteImportCache, asyncModuleURLs]) collection.clear();
+      for (const key of Object.keys(cache)) delete cache[key];
+    },
   };
 }

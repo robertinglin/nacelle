@@ -10560,9 +10560,13 @@ export function createRuntime({
             const spec = positionalArguments()[0];
             if (!spec) return { code: 1, stdout: '', stderr: 'npm error package name is required\n' };
             const resolved = await resolvePackage(spec);
+            const manifest = await resolved.npm.fetchPackageVersionMetadata(
+              resolved.parsed.name,
+              resolved.version,
+            );
             const document = {
-              ...(resolved.doc || {}),
-              name: resolved.doc?.name || resolved.parsed.name,
+              ...manifest,
+              name: manifest?.name || resolved.parsed.name,
               version: resolved.version,
               ...(resolved.metadata['dist-tags'] ? { 'dist-tags': resolved.metadata['dist-tags'] } : {}),
             };

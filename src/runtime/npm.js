@@ -532,6 +532,35 @@ export class BrowserNpm {
     return data;
   }
 
+  // The registry's install-v1 response intentionally contains compact
+  // version records. Commands such as `npm view --json` need the complete
+  // package.json manifest, so fetch the selected version endpoint instead of
+  // treating the compact install index as the public view result.
+  async fetchPackageVersionMetadata(packageName, version, { onProgress = null } = {}) {
+    if (!this.fetchFn) throw new Error('No fetch implementation available for npm registry');
+    const encodedName = packageName.startsWith('@')
+      ? `@${packageName.slice(1).split('/').map(encodeURIComponent).join('/')}`
+      : encodeURIComponent(packageName);
+    const directUrl = `${this.registry}/${encodedName}/${encodeURIComponent(version)}`;
+    const requestUrl = this.proxyUrl ? `${this.proxyUrl}${directUrl}` : directUrl;
+    onProgress?.({ phase: 'fetching-version-meta', name: packageName, version, url: directUrl });
+
+    let response;
+    try {
+      response = await this.fetchFn(requestUrl, {
+        headers: { accept: 'application/json, */*;q=0.8' },
+      });
+    } catch (proxyErr) {
+      if (this.proxyUrl) response = await this.fetchFn(directUrl);
+      else throw proxyErr;
+    }
+    if (!response.ok && this.proxyUrl) response = await this.fetchFn(directUrl);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch package manifest for ${packageName}@${version}: HTTP ${response.status}`);
+    }
+    return response.json();
+  }
+
   resolveVersion(metadata, range) {
     if (range === 'latest' && metadata['dist-tags']?.latest) {
       const latest = metadata['dist-tags'].latest;

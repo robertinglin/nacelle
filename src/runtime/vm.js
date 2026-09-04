@@ -595,6 +595,34 @@ function rewriteScriptDynamicImports(source, bindingName) {
   return scanCode();
 }
 
+let nextFunctionDynamicImportId = 1;
+
+function createVmFunctionConstructor(NativeFunction, processObject, filename) {
+  const GuestFunction = function guestFunctionConstructor(...args) {
+    const body = args.length ? String(args.at(-1)) : '';
+    if (!/\bimport\s*\(/u.test(body)) return Reflect.construct(NativeFunction, args);
+    const parameters = args.slice(0, -1);
+    const bindingName = `__bnhVmFunctionImport${nextFunctionDynamicImportId++}`;
+    const source = rewriteScriptDynamicImports(body, bindingName);
+    const compiled = Reflect.construct(NativeFunction, [bindingName, ...parameters, source]);
+    const importer = typeof filename === 'string' && filename.startsWith('/')
+      ? filename
+      : `/node/${filename}`;
+    const dynamicImport = (specifier) => processObject.__bnhModuleImport(
+      specifier,
+      importer,
+      undefined,
+      processObject,
+    );
+    return function guestFunction(...values) {
+      return compiled.call(this, dynamicImport, ...values);
+    };
+  };
+  Object.setPrototypeOf(GuestFunction, NativeFunction);
+  GuestFunction.prototype = NativeFunction.prototype;
+  return GuestFunction;
+}
+
 function transformModuleSource(source) {
   let transformed = String(source).replace(/\bimport\.meta\b/g, '__bnhImportMeta');
   transformed = transformed.replace(/\bimport\s*\(/g, '__bnhDynamicImport(');
@@ -898,6 +926,16 @@ export function createVmModule(scope = globalThis) {
         : this.code;
       if (runOptions.timeout > 0 && isObviouslyUnbounded(source)) throw timedOutScriptError(runOptions.timeout);
       const context = contextifiedObject;
+      const activeProcess = context.process || scope.process;
+      const previousFunction = context.Function;
+      if (typeof activeProcess?.__bnhModuleImport === 'function') {
+        Object.defineProperty(context, 'Function', {
+          configurable: true,
+          enumerable: false,
+          value: createVmFunctionConstructor(FunctionConstructor, activeProcess, this.options.filename),
+          writable: true,
+        });
+      }
       if (hasDynamicImport) {
         const dynamicImport = (specifier) => {
           if (typeof this.options.importModuleDynamically === 'function') {
@@ -939,6 +977,8 @@ export function createVmModule(scope = globalThis) {
         if (previousFilename === undefined) delete scope.__bnhVmFilename;
         else scope.__bnhVmFilename = previousFilename;
         if (realm) copyRealmToContext(context, realm.global, realm.nativeKeys, realm.managedKeys);
+        if (previousFunction === undefined) delete context.Function;
+        else context.Function = previousFunction;
       }
     }
 
@@ -984,7 +1024,16 @@ export function createVmModule(scope = globalThis) {
           writable: false,
         });
       }
-      return (scope.eval || eval)(source);
+      const activeProcess = scope.process;
+      const previousFunction = scope.Function;
+      if (typeof activeProcess?.__bnhModuleImport === 'function') {
+        scope.Function = createVmFunctionConstructor(FunctionConstructor, activeProcess, this.options.filename);
+      }
+      try {
+        return (scope.eval || eval)(source);
+      } finally {
+        scope.Function = previousFunction;
+      }
     }
   }
 

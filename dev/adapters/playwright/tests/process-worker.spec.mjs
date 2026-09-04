@@ -476,4 +476,102 @@ test.describe('browser-native worker process boundary', () => {
     expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(result.stderr).toBe('');
   });
+
+  test('propagates a readable response abort through a nested virtual child', async ({ page }) => {
+    await openRuntime(page);
+    const result = await page.evaluate(async () => {
+      const { createRuntime } = await import('/runtime.js');
+      const encode = (source) => new TextEncoder().encode(source);
+      const capabilities = {
+        vfs: { mounts: [{ path: '/node', mode: 'read-write' }] },
+        workers: { entryModules: ['*'], maxChildren: 4 },
+        ipc: { enabled: true },
+        signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
+        output: { maxBytes: 1024 * 1024, stdoutBytes: 1024 * 1024, stderrBytes: 1024 * 1024 },
+        envVars: { allowed: [] },
+      };
+      const runtime = createRuntime({ globalObject: globalThis });
+      const parentSource = `
+        const { spawn } = require('node:child_process');
+        const child = spawn(process.execPath, ['/node/readable-abort-child.js'], { stdio: ['ignore', 'pipe', 'pipe'] });
+        child.stdout.pipe(process.stdout);
+        child.stderr.pipe(process.stderr);
+        child.once('error', () => process.exit(1));
+        child.once('close', (code, signal) => process.exit(signal ? 1 : (code || 0)));
+      `;
+      const childSource = `
+        const assert = require('node:assert');
+        const { finished, Readable } = require('node:stream');
+        const http = require('node:http');
+        let serverClosed;
+        const serverClosedPromise = new Promise((resolve) => { serverClosed = resolve; });
+        let sourceClosed;
+        const sourceClosedPromise = new Promise((resolve) => { sourceClosed = resolve; });
+        let responsePremature = false;
+        let sourcePremature = false;
+        const server = http.createServer((_request, response) => {
+          const source = new Readable({ read() {} });
+          source.once('close', () => {
+            sourceClosed();
+          });
+          finished(source, { readable: true, writable: false }, (error) => {
+            sourcePremature = error?.code === 'ERR_STREAM_PREMATURE_CLOSE';
+          });
+          finished(response, (error) => {
+            responsePremature = error?.code === 'ERR_STREAM_PREMATURE_CLOSE';
+            if (error && !source.destroyed) source.destroy(error);
+          });
+          response.once('close', serverClosed);
+          response.writeHead(200, { 'content-type': 'text/plain' });
+          source.pipe(response);
+          source.push('partial');
+        });
+        (async () => {
+          await new Promise((resolve, reject) => { server.once('error', reject); server.listen(43308, '127.0.0.1', resolve); });
+          await new Promise((resolve, reject) => {
+            const request = http.get('http://localhost:43308/readable-abort', (response) => {
+              response.once('readable', () => {
+                process.stdout.write('readable-abort-seen\\n');
+                response.destroy();
+                resolve();
+              });
+              response.once('error', reject);
+            });
+            request.once('error', (error) => { if (error.code !== 'ECONNRESET') reject(error); });
+          });
+          await Promise.race([
+            serverClosedPromise,
+            new Promise((_, reject) => setTimeout(() => reject(new Error('server response did not close')), 1000)),
+          ]);
+          await Promise.race([
+            sourceClosedPromise,
+            new Promise((_, reject) => setTimeout(() => reject(new Error('response source did not close')), 1000)),
+          ]);
+          assert.ok(responsePremature);
+          assert.ok(sourcePremature);
+          assert.ok(true);
+          await new Promise((resolve) => server.close(resolve));
+          process.exit(0);
+        })().catch((error) => { console.error(error); process.exit(1); });
+      `;
+      const stdout = [];
+      const stderr = [];
+      const decode = (value) => typeof value === 'string' ? value : new TextDecoder().decode(value);
+      await runtime.reset({ runId: 'nested-readable-abort-regression', capabilities, isolation: 'worker' });
+      await runtime.mount({
+        '/node/runner.js': encode(parentSource),
+        '/node/readable-abort-child.js': encode(childSource),
+      });
+      const code = await runtime.executeEntry('/node/runner.js', {
+        cwd: '/node',
+        env: {},
+        processArgv: ['node', '/node/runner.js'],
+      }, (value) => stdout.push(decode(value)), (value) => stderr.push(decode(value)));
+      return { code, stdout: stdout.join(''), stderr: stderr.join('') };
+    });
+
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain('readable-abort-seen');
+    expect(result.stderr).toBe('');
+  });
 });

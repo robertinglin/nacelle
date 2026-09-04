@@ -1263,7 +1263,7 @@ class VirtualServerRequest extends Readable {
     super({ preserveStrings: true });
     const parsed = new scope.URL(url);
     const headers = createHeaderStore(init.headers);
-    if (!headers.has('host')) headers.set('host', parsed.host);
+    if (!headers.has('host') && init.__bnhPreserveMissingHost !== true) headers.set('host', parsed.host);
     this.method = String(init.method || 'GET').toUpperCase();
     this.url = init.requestTarget || `${parsed.pathname}${parsed.search}`;
     this.headers = headersObject(headers);
@@ -2263,7 +2263,10 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
     const decoder = scope.TextDecoder || TextDecoder;
     const headerText = new decoder().decode(bytes.slice(0, headerEnd));
     const lines = headerText.split('\r\n');
-    const [method = 'GET', path = '/'] = lines.shift().split(' ');
+    const [method = 'GET', path = '/', version = 'HTTP/1.1'] = lines.shift().split(' ');
+    const versionMatch = version.match(/^HTTP\/(\d+)\.(\d+)$/);
+    const versionMajor = Number(versionMatch?.[1] || 1);
+    const versionMinor = Number(versionMatch?.[2] || 1);
     const normalizedMethod = method.toUpperCase();
     const headers = {};
     for (const line of lines) {
@@ -2301,8 +2304,16 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
       url,
       method: normalizedMethod,
       target: path,
+      httpVersionMajor: versionMajor,
+      httpVersionMinor: versionMinor,
+      missingHostHeader: versionMajor === 1 && versionMinor === 1 && !Object.hasOwn(headers, 'host'),
       connect: isConnect,
-      init: { method: normalizedMethod, headers, body },
+      init: {
+        method: normalizedMethod,
+        headers,
+        body,
+        __bnhPreserveMissingHost: !Object.hasOwn(headers, 'host'),
+      },
     };
   }
 
@@ -2441,6 +2452,14 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
                 socket.destroy(error);
               }
             });
+            continue;
+          }
+          // Node's HTTP/1.1 parser rejects a missing Host header by default
+          // before dispatching the request. An explicitly empty Host header
+          // remains valid; `requireHostHeader: false` opts into HTTP/1.1's
+          // host-less request behavior.
+          if (requestData.missingHostHeader && binding.server.options?.requireHostHeader !== false) {
+            socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n', () => socket.destroy());
             continue;
           }
           await new Promise((resolve, reject) => {

@@ -3,6 +3,7 @@ import { createRuntime } from './runtime.js';
 import { createProgressReporter } from './progress-protocol.mjs';
 import { createCitgmProcessArgv } from './citgm-argv.mjs';
 import { createSerializedCaptureQueue } from './citgm-capture.mjs';
+import { npmCacheSnapshot } from './citgm-cache.mjs';
 
 const DEFAULT_CITGM_VERSION = '10.0.2';
 const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
@@ -463,24 +464,6 @@ function structuredCitgmStage(value) {
     }
   }
   return null;
-}
-
-function npmCacheSnapshot(cache) {
-  const snapshot = {
-    metadata: Object.fromEntries(cache.memoryMeta),
-    tarballs: Object.fromEntries([...cache.memoryTarballs.entries()].map(([key, bytes]) => [
-      key,
-      bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes),
-    ])),
-  };
-  if (cache.artifactManifest && cache.artifactBaseUrl) {
-    snapshot.artifact = {
-      baseUrl: cache.artifactBaseUrl.href,
-      metadata: cache.artifactManifest.metadata || {},
-      tarballs: cache.artifactManifest.tarballs || {},
-    };
-  }
-  return snapshot;
 }
 
 async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 1000, citgmVersion = DEFAULT_CITGM_VERSION, browser = 'unknown', progress: progressConfig = null, capture: captureConfig = null }) {

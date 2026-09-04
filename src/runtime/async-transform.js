@@ -686,11 +686,24 @@ function transformCandidates(source, candidates, bindingName) {
 }
 
 export function transformAsyncSource(source, preferredBinding = '__bnhAsync') {
-  const text = rewriteForAwaitLoops(String(source));
+  const originalText = String(source);
+  // `rewriteForAwaitLoops()` lowers `for await` to a generator protocol. The
+  // lowered source no longer contains the original `await` token, but its
+  // enclosing async function still needs lowering. Keep the pre-rewrite
+  // candidate metadata so the async-identity optimization does not leave a
+  // native async function containing the generated `yield` expressions.
+  const originalCandidates = asyncFunctionCandidates(originalText).candidates;
+  const text = rewriteForAwaitLoops(originalText);
   const names = new Set(text.match(/\b[$A-Z_a-z][$\w]*\b/gu) || []);
   let bindingName = preferredBinding;
   while (names.has(bindingName)) bindingName = `${preferredBinding}$`;
   const { candidates } = asyncFunctionCandidates(text);
+  for (let index = 0; index < candidates.length; index += 1) {
+    const original = originalCandidates[index];
+    candidates[index].containsAwait = original
+      ? tokenize(originalText.slice(original.bodyStart, original.bodyEnd)).some((token) => token.value === 'await')
+      : tokenize(text.slice(candidates[index].bodyStart, candidates[index].bodyEnd)).some((token) => token.value === 'await');
+  }
   if (!candidates.some((candidate) => !candidate.containsUnsupportedSyntax && candidate.containsAwait)) {
     return { source: text, transformed: false, bindingName };
   }

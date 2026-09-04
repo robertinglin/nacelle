@@ -75,25 +75,15 @@ test.describe('browser ESM loader', () => {
     expect(result.stdout).toContain('dynamic builtin completed');
   });
 
-  test('routes dynamic imports created by eval through the virtual module loader', async ({ harnessPage }) => {
+  test('routes global ESM console errors to the child stderr stream', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
-      const assert = require('node:assert/strict');
-      (async () => {
-        const dynamicImport = eval('(url) => import(url)');
-        const loaded = await dynamicImport('./loaded.mjs');
-        assert.strictEqual(loaded.answer, 42);
-        process.stdout.write('eval dynamic import completed');
-      })().catch((error) => {
-        console.error(error);
-        process.exitCode = 1;
-      });
-    `, {
-      entryPath: '/node/esm/eval-dynamic-import.cjs',
-      files: { '/node/esm/loaded.mjs': 'export const answer = 42;' },
-    });
+      console.error('esm child diagnostic');
+      process.exitCode = 1;
+    `, { entryPath: '/node/esm/console-error.mjs' });
 
-    await expectPass(expect, result);
-    expect(result.stdout).toContain('eval dynamic import completed');
+    expect(result.timedOut).toBe(false);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('esm child diagnostic');
   });
 
   test('rewrites minified static imports with no whitespace around from', async ({ harnessPage }) => {
@@ -237,82 +227,5 @@ test.describe('browser ESM loader', () => {
 
     await expectPass(expect, result);
     expect(result.stdout).toContain('hashbang esm completed');
-  });
-
-  test('defers unknown extensions to a registered ESM loader hook', async ({ harnessPage }) => {
-    const result = await harnessPage.run(`
-      import assert from 'node:assert/strict';
-      import { registerHooks } from 'node:module';
-
-      const registration = registerHooks({
-        resolve(specifier, context, nextResolve) {
-          if (specifier === './virtual.ts') {
-            return { url: 'file:///node/esm/virtual.ts', format: 'module', shortCircuit: true };
-          }
-          return nextResolve(specifier, context);
-        },
-        load(url, context, nextLoad) {
-          if (url === 'file:///node/esm/virtual.ts') {
-            return { format: 'module', source: 'export const marker = "hooked ts";', shortCircuit: true };
-          }
-          return nextLoad(url, context);
-        },
-      });
-
-      const module = await import('./virtual.ts');
-      assert.strictEqual(module.marker, 'hooked ts');
-      registration.deregister();
-      await assert.rejects(import('./unhandled.ts'), { code: 'ERR_UNKNOWN_FILE_EXTENSION' });
-      process.stdout.write('unknown extension hook completed');
-    `, {
-      entryPath: '/node/esm/loader-hook-entry.mjs',
-      files: { '/node/esm/unhandled.ts': 'export const marker = "not handled";' },
-    });
-
-    await expectPass(expect, result);
-    expect(result.stdout).toContain('unknown extension hook completed');
-  });
-
-  test('lets an async module.register load hook transform an unknown extension', async ({ harnessPage }) => {
-    const result = await harnessPage.run(`
-      import assert from 'node:assert/strict';
-      import { register } from 'node:module';
-
-      register('/node/unknown-extension-loader.mjs', import.meta.url);
-      const loaded = await import('./typed-source.ts');
-      assert.strictEqual(loaded.answer, 42);
-      process.stdout.write('unknown extension async loader completed');
-    `, {
-      entryPath: '/node/unknown-extension-entry.mjs',
-      files: {
-        '/node/unknown-extension-loader.mjs': `
-          export async function resolve(specifier, context, nextResolve) {
-            return nextResolve(specifier, context);
-          }
-          export async function load(url, context, nextLoad) {
-            if (!url.endsWith('/typed-source.ts')) return nextLoad(url, context);
-            const loaded = await nextLoad(url, { ...context, format: 'module' });
-            // Node permits nextLoad() to return either text or a byte buffer;
-            // the harness VFS intentionally exposes raw file bytes. A loader
-            // must accept both representations before transforming source.
-            const source = typeof loaded.source === 'string'
-              ? loaded.source
-              : new TextDecoder().decode(loaded.source);
-            return {
-              format: 'module',
-              shortCircuit: true,
-              source: source.replace(
-              'export const answer: number = 42',
-              'export const answer = 42',
-            ),
-            };
-          }
-        `,
-        '/node/typed-source.ts': 'export const answer: number = 42;',
-      },
-    });
-
-    await expectPass(expect, result);
-    expect(result.stdout).toContain('unknown extension async loader completed');
   });
 });

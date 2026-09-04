@@ -59,7 +59,11 @@ const kOutgoingHighWaterMark = Symbol('outgoingHighWaterMark');
 const outgoingMessageState = new WeakMap();
 
 const METHODS = Object.freeze([
-  'GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'CONNECT', 'TRACE',
+  'ACL', 'BIND', 'CHECKOUT', 'CONNECT', 'COPY', 'DELETE', 'GET', 'HEAD',
+  'LINK', 'LOCK', 'M-SEARCH', 'MERGE', 'MKACTIVITY', 'MKCALENDAR', 'MKCOL',
+  'MOVE', 'NOTIFY', 'OPTIONS', 'PATCH', 'POST', 'PROPFIND', 'PROPPATCH',
+  'PURGE', 'PUT', 'QUERY', 'REBIND', 'REPORT', 'SEARCH', 'SOURCE', 'SUBSCRIBE',
+  'TRACE', 'UNBIND', 'UNLINK', 'UNLOCK', 'UNSUBSCRIBE',
 ]);
 
 const HTTP_PARSER_REQUEST = 0;
@@ -1190,6 +1194,18 @@ function socketHangUpError() {
   return error;
 }
 
+function initializeVirtualPeer(socket, init = {}) {
+  if (!socket || typeof socket !== 'object') return;
+  const address = typeof init.remoteAddress === 'string' && init.remoteAddress
+    ? init.remoteAddress
+    : '127.0.0.1';
+  socket._peername = {
+    address,
+    port: Number.isInteger(init.remotePort) ? init.remotePort : 0,
+    family: address.includes(':') ? 'IPv6' : 'IPv4',
+  };
+}
+
 function proxyBypassesTarget(proxyEnv, target, scope) {
   const parsed = new scope.URL(target);
   return matchesNoProxy(
@@ -1901,39 +1917,53 @@ OutgoingMessage.prototype.addTrailers = function addTrailers(headers) {
   }
 };
 
+function virtualServerResponseWritableOptions(scope) {
+    return {
+    write(chunk, _encoding, callback) {
+      if (typeof this._writeResponseChunk === 'function') {
+        this._writeResponseChunk(chunk, callback);
+        return;
+      }
+      this._chunks.push(new Uint8Array(chunk));
+      const responseSocket = this.connection || this.socket;
+      if (responseSocket && typeof responseSocket._bytesWritten === 'number') {
+        responseSocket._bytesWritten += chunk.byteLength;
+      }
+      schedule(scope, () => {
+        callback();
+      });
+    },
+    final(callback) {
+      this._finalizeResponse(callback);
+    },
+  };
+}
+
+function initializeVirtualServerResponse(target, request, scope, BufferClass, complete, flush) {
+  initializeOutgoingMessageState(target);
+  target.headersSent = false;
+  target.finished = false;
+  target._scope = scope;
+  target._BufferClass = BufferClass;
+  target._request = request;
+  target.req = request;
+  target.socket = request.socket;
+  target.connection = request.connection;
+  target._chunks = [];
+  // Use the same header store as OutgoingMessage so middleware that calls
+  // http.OutgoingMessage.prototype.setHeader() updates this response too.
+  target[kOutgoingHeaders] = new Map();
+  target._completeResponse = complete;
+  target._flushResponse = flush;
+  target._headersFlushed = false;
+  target._completedResponse = false;
+}
+
 class VirtualServerResponse extends Writable {
-  constructor(request, scope, BufferClass, complete, flush) {
-    super({
-      write(chunk, _encoding, callback) {
-        this._chunks.push(new Uint8Array(chunk));
-        const responseSocket = this.connection || this.socket;
-        if (responseSocket && typeof responseSocket._bytesWritten === 'number') {
-          responseSocket._bytesWritten += chunk.byteLength;
-        }
-        schedule(scope, () => {
-          callback();
-        });
-      },
-      final(callback) {
-        this._finalizeResponse(callback);
-      },
-    });
-    this.headersSent = false;
-    this.finished = false;
-    this._scope = scope;
-    this._BufferClass = BufferClass;
-    this._request = request;
-    this.req = request;
-    this.socket = request.socket;
-    this.connection = request.connection;
-    this._chunks = [];
-    // Use the same header store as OutgoingMessage so middleware that calls
-    // http.OutgoingMessage.prototype.setHeader() updates this response too.
-    this[kOutgoingHeaders] = new Map();
-    this._completeResponse = complete;
-    this._flushResponse = flush;
-    this._headersFlushed = false;
-    this._completedResponse = false;
+  constructor(request, scope, BufferClass, complete, flush, writeResponseChunk) {
+    super(virtualServerResponseWritableOptions(scope));
+    initializeVirtualServerResponse(this, request, scope, BufferClass, complete, flush);
+    this._writeResponseChunk = writeResponseChunk;
   }
 
   setHeader(name, value) {
@@ -2063,17 +2093,37 @@ class VirtualServerResponse extends Writable {
 
   end(...args) {
     if (!this.headersSent) this._implicitHeader();
+    // ServerResponse.end() sends implicit headers before its final body
+    // chunk. Raw virtual sockets install their writer at flush time; without
+    // this step that writer could put the body on the wire before the status
+    // line, which breaks any standards-compliant HTTP client.
+    if (!this._headersFlushed) this.flushHeaders();
     this.headersSent = true;
+    // `writableEnded` describes the end request, not completion of the final
+    // write.  A legacy ServerResponse adapter may emit `finish` immediately
+    // after delegating to this method, while a prior write is still queued.
+    // Keep that Node lifecycle state observable before Writable finishes.
+    this._writableEnded = true;
     return Writable.prototype.end.apply(this, args);
   }
 
   destroy(error) {
     if (this._responseBody) this._responseBody._bnhTerminated = true;
     this._responseBody?.close();
-    // VirtualServerResponse presents the OutgoingMessage prototype for the
-    // HTTP response surface, but completing the response stream must not use
-    // OutgoingMessage.destroy(): that method destroys the shared connection.
-    return Writable.prototype.destroy.call(this, error);
+    // A ServerResponse destroy terminates the underlying connection.  The
+    // virtual response is also a Writable, but destroying only that stream
+    // leaves raw HTTP clients waiting forever after a post-header failure.
+    const socket = this.connection || this.socket;
+    const result = Writable.prototype.destroy.call(this, error);
+    if (socket && !socket.destroyed) {
+      // Socket writes are dispatched on microtasks. Give writes already
+      // accepted by ServerResponse one turn to reach the client before
+      // closing a failed response connection.
+      schedule(this._scope, () => schedule(this._scope, () => {
+        if (!socket.destroyed) socket.destroy(error);
+      }));
+    }
+    return result;
   }
 
   _finalizeResponse(callback) {
@@ -2141,9 +2191,32 @@ function appendBytes(previous, next) {
   return result;
 }
 
-function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diagnostics, performanceRecord) {
+function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diagnostics, performanceRecord, ownerProcess) {
   const bindings = [];
   let nextPort = 46000;
+
+  const recordNetworkLifecycle = (phase, request, response, fields = {}) => {
+    try {
+      // A virtual HTTP network can be shared by several logical child
+      // processes. Prefer the process active at the event boundary so raw
+      // socket callbacks retain the child that owns the server; fall back to
+      // the process captured when the network was created for direct calls.
+      const telemetryProcess = typeof scope.process?.__bnhNetworkEvent === 'function'
+        ? scope.process
+        : ownerProcess;
+      telemetryProcess?.__bnhNetworkEvent?.({
+        source: 'guest-http',
+        method: String(request?.method || 'GET'),
+        url: String(request?.url || request?.path || ''),
+        phase,
+        transport: 'virtual-network',
+        status: Number(response?.statusCode || 0) || undefined,
+        ...fields,
+      });
+    } catch {
+      // Telemetry is observational and must not affect HTTP delivery.
+    }
+  };
 
   const recordHttpEntry = (name, startTime, request, response) => {
     if (typeof performanceRecord !== 'function') return;
@@ -2233,9 +2306,16 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
     };
   }
 
-  function writeRawResponse(socket, result) {
+  function writeRawHeaders(socket, result, streaming = false) {
     const headers = { ...result.headers };
-    if (!Object.keys(headers).some((name) => name.toLowerCase() === 'content-length')) {
+    const hasLength = Object.keys(headers).some((name) => name.toLowerCase() === 'content-length');
+    const hasTransferEncoding = Object.keys(headers).some((name) => name.toLowerCase() === 'transfer-encoding');
+    if (streaming && !hasLength && !hasTransferEncoding) {
+      // The browser gateway forwards the virtual socket bytes directly, so
+      // it must not receive HTTP/1 chunk framing as response content. A
+      // close-delimited response preserves streaming and its terminal signal.
+      headers.connection ||= 'close';
+    } else if (!hasLength && !hasTransferEncoding) {
       headers['content-length'] = String(result.body?.byteLength || 0);
     }
     const statusMessage = result.statusMessage || STATUS_CODES[result.statusCode] || '';
@@ -2252,8 +2332,39 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
       + '\r\n';
     const encoder = scope.TextEncoder || TextEncoder;
     const headerBytes = new encoder().encode(headerText);
+    socket.write(headerBytes);
+  }
+
+  function writeRawResponse(socket, result) {
+    writeRawHeaders(socket, result);
     const body = result.body || new Uint8Array();
-    socket.write(appendBytes(headerBytes, body));
+    const chunked = hasChunkedEncoding(result.headers);
+    writeRawChunk(socket, body, chunked);
+    if (chunked) endRawChunkedResponse(socket);
+  }
+
+  function hasChunkedEncoding(headers = {}) {
+    return Object.entries(headers).some(([name, value]) =>
+      name.toLowerCase() === 'transfer-encoding'
+      && String(value).toLowerCase().split(',').some((item) => item.trim() === 'chunked'));
+  }
+
+  function writeRawChunk(socket, chunk, chunked = false) {
+    const bytes = chunk instanceof Uint8Array ? chunk : toBytes(chunk, scope);
+    if (!bytes.byteLength) return;
+    if (!chunked) {
+      socket.write(bytes);
+      return;
+    }
+    const encoder = scope.TextEncoder || TextEncoder;
+    const prefix = new encoder().encode(`${bytes.byteLength.toString(16)}\r\n`);
+    const suffix = new encoder().encode('\r\n');
+    socket.write(appendBytes(appendBytes(prefix, bytes), suffix));
+  }
+
+  function endRawChunkedResponse(socket) {
+    const encoder = scope.TextEncoder || TextEncoder;
+    socket.write(new encoder().encode('0\r\n\r\n'));
   }
 
   function attachRawSocket(binding, socket) {
@@ -2267,11 +2378,13 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
     let endedByPeer = false;
     let tunnelStarted = false;
     let processing = false;
+    let activeResponse = null;
     let releaseConnection = trackTask?.() || null;
     const queue = [];
     const finishConnection = () => {
       releaseConnection?.();
       releaseConnection = null;
+      if (activeResponse && !activeResponse.destroyed) activeResponse.destroy();
     };
     socket.once?.('close', finishConnection);
 
@@ -2286,6 +2399,10 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
             request.url = requestData.target;
             request.socket = socket;
             request.connection = socket;
+            initializeVirtualPeer(socket, {
+              remoteAddress: socket?.remoteAddress,
+              remotePort: socket?.remotePort,
+            });
             tunnelStarted = true;
             schedule(scope, () => {
               try {
@@ -2306,6 +2423,10 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
             const request = new VirtualServerRequest(requestData.url, requestData.init, scope, BufferClass);
             request.socket = socket;
             request.connection = socket;
+            initializeVirtualPeer(socket, {
+              remoteAddress: socket?.remoteAddress,
+              remotePort: socket?.remotePort,
+            });
             tunnelStarted = true;
             schedule(scope, () => {
               try {
@@ -2326,13 +2447,62 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
             const request = new VirtualServerRequest(requestData.url, requestData.init, scope, BufferClass);
             request.socket = socket;
             request.connection = socket;
-            const response = new VirtualServerResponse(request, scope, BufferClass, (result) => {
+            initializeVirtualPeer(socket, {
+              remoteAddress: socket?.remoteAddress,
+              remotePort: socket?.remotePort,
+            });
+            let headersFlushed = false;
+            let responseChunked = false;
+            const onSocketClose = () => reject(socketHangUpError());
+            socket.once?.('close', onSocketClose);
+            const complete = (result) => {
+              socket.off?.('close', onSocketClose);
+              recordNetworkLifecycle('server-response-finish', request, response, {
+                route: 'raw-socket',
+                bodyBytes: Number(result?.body?.byteLength || 0),
+                responseDestroyed: Boolean(response?.destroyed),
+                requestAborted: Boolean(request?.aborted),
+              });
               try {
-                writeRawResponse(socket, result);
+                if (!headersFlushed) writeRawResponse(socket, result);
+                else if (result.body?.byteLength) writeRawChunk(socket, result.body, responseChunked);
+                if (headersFlushed && responseChunked) endRawChunkedResponse(socket);
+                socket.end?.();
                 resolve();
               } catch (error) {
                 reject(error);
               }
+            };
+            const response = new VirtualServerResponse(request, scope, BufferClass, (result) => {
+              complete(result);
+            }, (result) => {
+              headersFlushed = true;
+              responseChunked = hasChunkedEncoding(result.headers);
+              recordNetworkLifecycle('server-response-headers', request, response, {
+                route: 'raw-socket',
+                headers: true,
+                responseDestroyed: Boolean(response?.destroyed),
+                requestAborted: Boolean(request?.aborted),
+              });
+              writeRawHeaders(socket, result, true);
+            }, (chunk, callback) => {
+              try {
+                recordNetworkLifecycle('server-response-write', request, response, {
+                  route: 'raw-socket',
+                  bodyBytes: Number(chunk?.byteLength || 0),
+                  responseDestroyed: Boolean(response?.destroyed),
+                  requestAborted: Boolean(request?.aborted),
+                });
+                writeRawChunk(socket, chunk, responseChunked);
+                schedule(scope, () => callback());
+              } catch (error) {
+                callback(error);
+              }
+            });
+            activeResponse = response;
+            recordNetworkLifecycle('server-request', request, response, {
+              route: 'raw-socket',
+              requestAborted: Boolean(request?.aborted),
             });
             schedule(scope, () => {
               try {
@@ -2347,6 +2517,7 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
               }
             });
           });
+          if (activeResponse?.socket === socket && activeResponse.finished) activeResponse = null;
         }
       } catch (error) {
         globalThis.__bnhGatewayLogs?.push?.({ type: 'drain-catch-error', message: error?.message, stack: error?.stack });
@@ -2501,6 +2672,11 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
       let responseDelivered = false;
       let responseBody;
       const finishResponse = (result) => {
+        recordNetworkLifecycle('server-response-finish', request, response, {
+          bodyBytes: Number(result?.body?.byteLength || 0),
+          responseDestroyed: Boolean(response?.destroyed),
+          requestAborted: Boolean(request?.aborted),
+        });
         if (!request.__bnhHttpPerformanceRecorded) {
           request.__bnhHttpPerformanceRecorded = true;
           recordHttpEntry(
@@ -2537,6 +2713,11 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
         finishResponse,
         (result) => {
           if (responseDelivered) return;
+          recordNetworkLifecycle('server-response-headers', request, response, {
+            headers: true,
+            responseDestroyed: Boolean(response?.destroyed),
+            requestAborted: Boolean(request?.aborted),
+          });
           responseBody = createDeferredBody();
           responseDelivered = true;
           resolve(responseFromBytes(
@@ -2550,7 +2731,35 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
           ));
           return responseBody;
         },
+        (chunk, callback) => {
+          try {
+            // Once headers are flushed, response.write() is a live stream.
+            // Deliver each accepted chunk to the deferred fetch body instead
+            // of retaining it until end(), which would hide data events from
+            // clients and make abort/reconnect lifecycles impossible to
+            // observe.
+            recordNetworkLifecycle('server-response-write', request, response, {
+              bodyBytes: Number(chunk?.byteLength || 0),
+              responseDestroyed: Boolean(response?.destroyed),
+              requestAborted: Boolean(request?.aborted),
+            });
+            responseBody?.enqueue(toBytes(chunk, scope));
+            schedule(scope, () => callback());
+          } catch (error) {
+            schedule(scope, () => callback(error));
+          }
+        },
       );
+      // A response can be destroyed before it has flushed headers (for
+      // example, a caller may temporarily replace write() while probing
+      // backpressure). In that state there is no response body for the
+      // client to observe, so propagate the terminal socket condition to the
+      // virtual request instead of leaving its dispatch promise pending.
+      response.once('close', () => {
+        if (!response._completedResponse && !responseDelivered) {
+          reject(socketHangUpError());
+        }
+      });
       request.once('close', () => {
         // Readable auto-destroy closes a fully consumed request before the
         // server has necessarily finished writing its response. Treat that
@@ -2563,6 +2772,9 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
       schedule(scope, () => {
         try {
           request.socket = new netModule.Socket();
+          // A browser-local request still has a Node-visible peer. Keep the
+          // socket identity populated even though no host TCP handle exists.
+          initializeVirtualPeer(request.socket, init);
           request.socket._httpsServer = binding.server;
           request.socket._httpsSessionGeneration = binding.server._ticketKeyGeneration || 0;
           request.socket._httpsClientOptions = init.__bnhHttpsOptions;
@@ -2608,6 +2820,9 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
           publishDiagnostic(diagnostics, 'http.server.response.created', { request, response });
           response.socket = request.socket;
           response.connection = request.connection;
+          recordNetworkLifecycle('server-request', request, response, {
+            requestAborted: Boolean(request.aborted),
+          });
           // The request callback is a user-visible async boundary. Enter the
           // incoming-message resource before dispatching it so
           // executionAsyncResource() and continuation-local state survive
@@ -3400,6 +3615,9 @@ class IncomingMessage extends Readable {
         while (!this.destroyed) {
           const item = await this._bodyReader.read();
           if (item.done) break;
+          this._owner?._recordNetworkLifecycle?.('client-body-chunk', {
+            bodyBytes: Number(item.value?.byteLength || 0),
+          });
           this._runInAsyncScope(() => this.push(
             nodeChunk(toBytes(item.value, this._scope), this._scope, this._BufferClass),
           ));
@@ -3407,6 +3625,9 @@ class IncomingMessage extends Readable {
       } else if (body && body[Symbol.asyncIterator]) {
         for await (const chunk of body) {
           if (this.destroyed) break;
+          this._owner?._recordNetworkLifecycle?.('client-body-chunk', {
+            bodyBytes: Number(chunk?.byteLength || 0),
+          });
           this._runInAsyncScope(() => this.push(
             nodeChunk(toBytes(chunk, this._scope), this._scope, this._BufferClass),
           ));
@@ -3414,6 +3635,9 @@ class IncomingMessage extends Readable {
       } else if (body && body[Symbol.iterator] && typeof body !== 'string') {
         for (const chunk of body) {
           if (this.destroyed) break;
+          this._owner?._recordNetworkLifecycle?.('client-body-chunk', {
+            bodyBytes: Number(chunk?.byteLength || 0),
+          });
           this._runInAsyncScope(() => this.push(
             nodeChunk(toBytes(chunk, this._scope), this._scope, this._BufferClass),
           ));
@@ -3428,12 +3652,18 @@ class IncomingMessage extends Readable {
       this.complete = true;
       this.readableComplete = true;
       this.clearTimeout();
+      this._owner?._recordNetworkLifecycle?.('client-body-end', {
+        destroyed: Boolean(this.destroyed),
+      });
       this._runInAsyncScope(() => this._owner?._responseComplete());
       this._closeAfterEnd();
       this._runInAsyncScope(() => this.push(null));
     } catch (error) {
       if (this.destroyed) return;
       this.aborted = true;
+      this._owner?._recordNetworkLifecycle?.('client-body-error', {
+        error: { name: String(error?.name || 'Error'), code: error?.code || null },
+      });
       super.destroy(error);
       this._owner?._responseFailed(error);
     } finally {
@@ -3851,6 +4081,8 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       this._externalSignal = options.signal;
       this._rawResponseBuffer = new Uint8Array();
       this._rawResponseDone = false;
+      this._rawResponseHeadersParsed = false;
+      this._rawResponseBody = null;
 
       publishDiagnostic(diagnostics, 'http.client.request.created', { request: this });
 
@@ -3860,6 +4092,21 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       }
       this._bindAbortSignal();
       if (options.timeout !== undefined) this.setTimeout(options.timeout);
+    }
+
+    _recordNetworkLifecycle(phase, fields = {}) {
+      try {
+        this._ownerProcess?.__bnhNetworkEvent?.({
+          source: 'guest-http',
+          method: String(this.method || 'GET'),
+          url: String(this._url || this.path || ''),
+          phase,
+          transport: 'virtual-network',
+          ...fields,
+        });
+      } catch {
+        // Telemetry is observational and must not affect HTTP delivery.
+      }
     }
 
     _runInAsyncScope(callback) {
@@ -3885,7 +4132,24 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       if (socket && !error) {
         socket._httpMessage = this;
         socket.on?.('error', (socketError) => this.destroy(socketError));
-        socket.on?.('data', (chunk) => this._handleRawResponseData(chunk));
+        socket.on?.('data', (chunk) => {
+          this._recordNetworkLifecycle('client-raw-data', {
+            bodyBytes: Number(chunk?.byteLength || 0),
+          });
+          this._handleRawResponseData(chunk);
+        });
+        socket.on?.('close', () => {
+          if (this._rawResponseBody && !this._rawResponseDone) {
+            this._rawResponseDone = true;
+            this._recordNetworkLifecycle('client-raw-body-end', { reason: 'socket-close' });
+            this._rawResponseBody.close();
+          }
+          // A peer can close before HTTP response headers exist (for
+          // example, when ServerResponse.destroy() races a pending drain).
+          // Node reports that terminal condition as a client request error;
+          // silently closing here leaves callers awaiting a response forever.
+          if (!this.response && !this.destroyed) this.destroy(socketHangUpError());
+        });
       }
       schedule(scope, () => {
         if (this.destroyed || error) {
@@ -3904,6 +4168,10 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       if (this.destroyed || this._rawResponseDone) return;
       try {
         this._rawResponseBuffer = appendBytes(this._rawResponseBuffer, toBytes(chunk, scope));
+        if (this._rawResponseHeadersParsed) {
+          this._consumeRawResponseBody();
+          return;
+        }
         const separator = '\r\n\r\n';
         const decoder = scope.TextDecoder || TextDecoder;
         const headerText = new decoder().decode(this._rawResponseBuffer);
@@ -3926,8 +4194,52 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
             headers[name] = value;
           }
         }
-        const contentLength = Number(headers['content-length'] || 0);
         const bodyStart = headerEnd + separator.length;
+        const transferEncoding = String(headers['transfer-encoding'] || '').toLowerCase();
+        const isChunked = transferEncoding.split(',').some((value) => value.trim() === 'chunked');
+        const hasContentLength = Object.hasOwn(headers, 'content-length');
+        const contentLength = hasContentLength ? Number(headers['content-length']) : 0;
+        if (!isChunked && !hasContentLength) {
+          this._rawResponseBuffer = this._rawResponseBuffer.slice(bodyStart);
+          this._rawResponseHeadersParsed = true;
+          this._rawResponseBody = createDeferredBody();
+          this._handleResponse(responseFromBytes(
+            this._url,
+            Number(statusMatch[1]),
+            headers,
+            new Uint8Array(),
+            scope,
+            this.socket,
+            this._rawResponseBody,
+          ));
+          this._recordNetworkLifecycle('client-response-headers', {
+            status: Number(statusMatch[1]),
+            streaming: true,
+          });
+          this._consumeRawResponseBody();
+          return;
+        }
+        if (isChunked) {
+          this._rawResponseBuffer = this._rawResponseBuffer.slice(bodyStart);
+          this._rawResponseHeadersParsed = true;
+          this._rawResponseBody = createDeferredBody();
+          this._handleResponse(responseFromBytes(
+            this._url,
+            Number(statusMatch[1]),
+            headers,
+            new Uint8Array(),
+            scope,
+            this.socket,
+            this._rawResponseBody,
+          ));
+          this._recordNetworkLifecycle('client-response-headers', {
+            status: Number(statusMatch[1]),
+            streaming: true,
+            chunked: true,
+          });
+          this._consumeRawResponseBody();
+          return;
+        }
         if (!Number.isInteger(contentLength) || contentLength < 0
           || this._rawResponseBuffer.byteLength < bodyStart + contentLength) return;
         const body = this._rawResponseBuffer.slice(bodyStart, bodyStart + contentLength);
@@ -3943,6 +4255,46 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
         this.response?.once?.('end', () => this.socket?.destroy?.());
       } catch (error) {
         this.destroy(error);
+      }
+    }
+
+    _consumeRawResponseBody() {
+      if (!this._rawResponseBody) return;
+      const transferEncoding = String(this.response?._response?.headers?.['transfer-encoding'] || '').toLowerCase();
+      const isChunked = transferEncoding.split(',').some((value) => value.trim() === 'chunked');
+      if (!isChunked) {
+        if (this._rawResponseBuffer.byteLength) {
+          this._rawResponseBody.enqueue(this._rawResponseBuffer);
+          this._rawResponseBuffer = new Uint8Array();
+        }
+        return;
+      }
+      const decoder = scope.TextDecoder || TextDecoder;
+      while (this._rawResponseBuffer.byteLength) {
+        const text = new decoder().decode(this._rawResponseBuffer);
+        const lineEnd = text.indexOf('\r\n');
+        if (lineEnd < 0) return;
+        const sizeText = text.slice(0, lineEnd).split(';', 1)[0].trim();
+        const size = Number.parseInt(sizeText, 16);
+        if (!Number.isFinite(size) || size < 0) throw new Error('invalid chunked HTTP response');
+        const dataStart = lineEnd + 2;
+        if (size === 0) {
+          if (this._rawResponseBuffer.byteLength < dataStart + 2) return;
+          this._rawResponseBuffer = this._rawResponseBuffer.slice(dataStart + 2);
+          this._rawResponseDone = true;
+          this._recordNetworkLifecycle('client-raw-body-end', { reason: 'chunked-end' });
+          this._rawResponseBody.close();
+          return;
+        }
+        if (this._rawResponseBuffer.byteLength < dataStart + size + 2) return;
+        const body = this._rawResponseBuffer.slice(dataStart, dataStart + size);
+        const trailerEnd = dataStart + size;
+        if (this._rawResponseBuffer[trailerEnd] !== 13 || this._rawResponseBuffer[trailerEnd + 1] !== 10) {
+          throw new Error('invalid chunked HTTP response terminator');
+        }
+        this._rawResponseBuffer = this._rawResponseBuffer.slice(trailerEnd + 2);
+        this._recordNetworkLifecycle('client-raw-body-chunk', { bodyBytes: body.byteLength, chunked: true });
+        this._rawResponseBody.enqueue(body);
       }
     }
 
@@ -4161,6 +4513,11 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
 
     destroy(error = undefined) {
       if (this.destroyed) return this;
+      // Node reports an abort before response headers as ECONNRESET even when
+      // ClientRequest.destroy() is called without an explicit error. Without
+      // this terminal error, callers waiting for the request's error event
+      // can remain pending forever after a client-side cancellation.
+      if (!error && !this.response) error = socketHangUpError();
       this.destroyed = true;
       setOutgoingMessageErrored(this, error);
       this.aborted ||= !this.response;
@@ -4450,6 +4807,41 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
 
     _handleResponse(response) {
       if (this.destroyed) return;
+      try {
+        this._ownerProcess?.__bnhNetworkEvent?.({
+          source: 'guest-http',
+          method: String(this.method || 'GET'),
+          url: String(this._url || this.path || ''),
+          phase: 'response',
+          transport: 'virtual-network',
+          status: Number(response?.status ?? response?.statusCode ?? 0),
+          statusType: typeof (response?.status ?? response?.statusCode),
+          statusValue: String(response?.status ?? response?.statusCode ?? ''),
+        });
+        // The in-memory virtual network returns a fetch-compatible response
+        // whose arrayBuffer() is a non-consuming copy. Capture a bounded
+        // diagnostic body for that path too; the raw response remains in the
+        // normal network artifact and response delivery is not coupled to
+        // observability.
+        if (response?.scope === scope && typeof response?.arrayBuffer === 'function') {
+          void Promise.resolve(response.arrayBuffer()).then((value) => {
+            const bytes = new Uint8Array(value || 0);
+            const decoder = scope.TextDecoder || TextDecoder;
+            this._ownerProcess?.__bnhNetworkEvent?.({
+              source: 'guest-http',
+              method: String(this.method || 'GET'),
+              url: String(this._url || this.path || ''),
+              phase: 'body',
+              transport: 'virtual-network',
+              status: Number(response?.status ?? response?.statusCode ?? 0),
+              bodyBytes: bytes.byteLength,
+              bodyExcerpt: new decoder().decode(bytes).slice(0, 512),
+            });
+          }).catch(() => {});
+        }
+      } catch {
+        // Network diagnostics must never change HTTP response delivery.
+      }
       this._runInAsyncScope(() => this._runInOwnerContext(() => {
         const socket = response?.socket || this.socket;
         if (socket && this.protocol === DEFAULT_HTTPS_PROTOCOL) {
@@ -4612,7 +5004,7 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
   return ClientRequest;
 }
 
-function createProtocolModule(protocol, ClientRequest, Server, Agent, scope, netModule, allowCrossProtocol) {
+function createProtocolModule(protocol, ClientRequest, Server, Agent, scope, BufferClass, netModule, allowCrossProtocol) {
   let protocolModule;
   const request = (input, options, callback) => {
     const parsed = parseArguments(input, options, callback, scope);
@@ -4639,13 +5031,22 @@ function createProtocolModule(protocol, ClientRequest, Server, Agent, scope, net
     return clientRequest;
   };
   const globalAgent = new Agent({ protocol, keepAlive: true, scheduling: 'lifo', timeout: 5000 });
+  // Node's ServerResponse is a legacy-callable constructor. Packages such as
+  // light-my-request invoke it with ServerResponse.call(this, request), so
+  // expose the same initialization contract in addition to new.
+  const ServerResponse = function ServerResponse(request) {
+    Writable.call(this, virtualServerResponseWritableOptions(scope));
+    initializeVirtualServerResponse(this, request, scope, BufferClass, () => {}, () => {});
+    return this;
+  };
+  ServerResponse.prototype = VirtualServerResponse.prototype;
   protocolModule = {
     request,
     get,
     ClientRequest,
     IncomingMessage,
     OutgoingMessage,
-    ServerResponse: VirtualServerResponse,
+    ServerResponse,
     METHODS,
     STATUS_CODES,
     Agent,
@@ -4701,7 +5102,7 @@ export function createHttpCompatibility(scope = globalThis, {
   installEventTargetInspectHook(scope);
   const net = configuredNet || createBrowserNet({ BufferClass, trackTask });
   const virtualNetwork = configuredHttpNetwork
-    || createVirtualHttpNetwork(scope, BufferClass, net, trackTask, diagnostics, performanceRecord);
+    || createVirtualHttpNetwork(scope, BufferClass, net, trackTask, diagnostics, performanceRecord, ownerProcess);
   const proxy = configuredProxy
     ? (typeof configuredProxy.request === 'function' && configuredProxy.mode
       ? configuredProxy
@@ -4860,6 +5261,7 @@ export function createHttpCompatibility(scope = globalThis, {
     HttpServer,
     HttpAgent,
     scope,
+    BufferClass,
     net,
     allowCrossProtocol,
   );
@@ -4869,6 +5271,7 @@ export function createHttpCompatibility(scope = globalThis, {
     HttpsServer,
     HttpsAgent,
     scope,
+    BufferClass,
     net,
     allowCrossProtocol,
   );

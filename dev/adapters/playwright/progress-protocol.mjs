@@ -18,7 +18,7 @@ function safeInteger(value, fallback = 0) {
  * Report bounded, machine-readable activity without putting candidate output
  * or a guessed completion percentage on the protocol.
  */
-export function createProgressReporter({ binding, runId, maxPending = DEFAULT_MAX_PENDING } = {}) {
+export function createProgressReporter({ binding, runId, maxPending = DEFAULT_MAX_PENDING, onEvent } = {}) {
   const bindingName = typeof binding === 'string' ? binding : '';
   const limit = Math.max(1, safeInteger(maxPending, DEFAULT_MAX_PENDING));
   const queue = [];
@@ -50,6 +50,7 @@ export function createProgressReporter({ binding, runId, maxPending = DEFAULT_MA
   }
 
   function push(payload) {
+    try { onEvent?.(payload); } catch { /* trace capture must not affect execution */ }
     const previous = queue.at(-1);
     if (payload.counters) payload.counters = monotonicCounters(payload.counters);
     payload.sequence = ++sequence;
@@ -141,14 +142,10 @@ export function createProgressReporter({ binding, runId, maxPending = DEFAULT_MA
       });
     },
     async flush() {
-      // Flushing is part of the terminal handoff. Do not make a caller wait
-      // for the coalescing window: publish the bounded aggregate immediately
-      // and let any already-queued timer become a no-op. Progress observation
-      // must never race a caller's execution deadline.
-      activityTimers.clear();
-      for (const pending of pendingActivity.values()) push(pending);
-      pendingActivity.clear();
-      if (draining) await draining;
+      while (activityTimers.size || pendingActivity.size || draining) {
+        if (activityTimers.size) await new Promise((resolve) => setTimeout(resolve, 110));
+        if (draining) await draining;
+      }
     },
   };
 }

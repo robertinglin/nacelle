@@ -31,23 +31,28 @@ function normalizeRepository(repository) {
  * Precache must cover that archive when the npm package does not contain the
  * candidate's test dependencies or its published metadata has no gitHead.
  */
-export function resolveCitgmProjectUrl({ moduleSpec, metadata, lookup = {} } = {}) {
+export function resolveCitgmProjectUrl({ moduleSpec, metadata, versionMetadata = null, lookup = {} } = {}) {
   if (lookup?.npm) return null;
-  const { range } = parseModuleSpec(moduleSpec);
-  const publishedVersion = metadata?.['dist-tags']?.[range] || range;
-  const published = metadata?.versions?.[publishedVersion] || {};
+  // CITGM resolves the candidate first and then uses that version's
+  // package.json metadata (especially gitHead). The registry index has the
+  // repository and dist-tags, but need not carry the selected gitHead at its
+  // top level. Accept both documents so callers can preserve that distinction.
+  const selected = versionMetadata || metadata || {};
   const repository = normalizeRepository(
-    typeof (published.repository || metadata?.repository) === 'string'
-      ? (published.repository || metadata.repository)
-      : (published.repository || metadata?.repository)?.url,
+    typeof (selected.repository || metadata?.repository) === 'string'
+      ? (selected.repository || metadata.repository)
+      : (selected.repository || metadata?.repository)?.url,
   );
   if (!repository) return null;
 
+  const { range } = parseModuleSpec(moduleSpec);
   let archiveRef;
   if (lookup.head) archiveRef = 'HEAD';
-  else if (lookup.sha || published.gitHead || metadata.gitHead) {
-    archiveRef = lookup.sha || published.gitHead || metadata.gitHead;
+  else if (lookup.sha || selected.gitHead || metadata?.gitHead) {
+    archiveRef = lookup.sha || selected.gitHead || metadata.gitHead;
+  } else {
+    archiveRef = `${lookup.prefix || ''}${metadata?.['dist-tags']?.[range]
+      || selected['dist-tags']?.[range] || range}`;
   }
-  else archiveRef = `${lookup.prefix || ''}${metadata['dist-tags']?.[range] || range}`;
   return `${repository}/archive/${encodeURIComponent(archiveRef)}.tar.gz`;
 }

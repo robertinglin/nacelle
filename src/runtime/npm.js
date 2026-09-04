@@ -91,32 +91,6 @@ function satisfiesComparator(v, comp) {
   const c = comp.trim();
   if (!c || c === '*' || c === 'x' || c === 'X' || c === 'latest') return true;
 
-  // Wildcards may follow a comparator, for example the upper bound in
-  // `5.1.6 - 6.0.x`. Parse the operator before the wildcard components so
-  // forms such as `<=6.0.x` are compared by their declared precision.
-  const wildcard = c.match(/^(<=|>=|>|<|=)?\s*(\d+)(?:\.(\d+|x|X|\*))?(?:\.(\d+|x|X|\*))?$/);
-  if (wildcard && (wildcard[3] === undefined || /[xX*]/.test(wildcard[3])
-    || wildcard[4] === undefined || /[xX*]/.test(wildcard[4]))) {
-    const operator = wildcard[1] || '=';
-    const major = parseInt(wildcard[2], 10);
-    const minor = wildcard[3] === undefined || /[xX*]/.test(wildcard[3]) ? null : parseInt(wildcard[3], 10);
-    const patch = wildcard[4] === undefined || /[xX*]/.test(wildcard[4]) ? null : parseInt(wildcard[4], 10);
-    if (minor === null) {
-      if (operator === '<') return v.major < major;
-      if (operator === '<=') return v.major <= major;
-      if (operator === '>') return v.major > major;
-      if (operator === '>=') return v.major >= major;
-      return v.major === major;
-    }
-    if (patch === null) {
-      if (operator === '<') return v.major < major || (v.major === major && v.minor < minor);
-      if (operator === '<=') return v.major < major || (v.major === major && v.minor <= minor);
-      if (operator === '>') return v.major > major || (v.major === major && v.minor > minor);
-      if (operator === '>=') return v.major > major || (v.major === major && v.minor >= minor);
-      return v.major === major && v.minor === minor;
-    }
-  }
-
   // normalize x-ranges like 1.x, 1.2.x, 1.*
   if (c.includes('x') || c.includes('X') || c.includes('*')) {
     const parts = c.split('.');
@@ -241,6 +215,9 @@ export function parsePackageSpec(spec) {
   return { name, range: range || 'latest' };
 }
 
+// npm aliases use the public package name as the dependency key while
+// resolving metadata and tarballs for the aliased package. Keep this parser
+// shared by the browser installer and host-side precache graph builder.
 export function parseNpmAlias(range) {
   const trimmed = String(range || '').trim();
   if (!trimmed.startsWith('npm:')) return null;
@@ -251,118 +228,12 @@ export function parseNpmAlias(range) {
  * Persistent IndexedDB and in-memory cache for NPM package metadata and tarball archives.
  */
 export class BrowserNpmCache {
-  constructor({
-    dbName = 'bnh_npm_cache',
-    globalObject = globalThis,
-    maxMetadataBytes = 256 * 1024 * 1024,
-    maxTarballBytes = 512 * 1024 * 1024,
-    maxUnpackedBytes = 768 * 1024 * 1024,
-  } = {}) {
+  constructor({ dbName = 'bnh_npm_cache', globalObject = globalThis } = {}) {
     this.dbName = dbName;
     this.globalObject = globalObject;
-    this.maxMetadataBytes = maxMetadataBytes;
-    this.maxTarballBytes = maxTarballBytes;
-    this.maxUnpackedBytes = maxUnpackedBytes;
     this.memoryMeta = new Map();
-    this.memoryMetaBytes = 0;
     this.memoryTarballs = new Map();
-    this.memoryTarballBytes = 0;
-    this.unpackedPackages = new Map();
-    this.unpackedBytes = 0;
     this.dbPromise = null;
-  }
-
-  metadataSize(value) {
-    try { return new TextEncoder().encode(JSON.stringify(value)).byteLength; } catch { return 0; }
-  }
-
-  getMemoryMetadata(packageName) {
-    const value = this.memoryMeta.get(packageName);
-    if (value === undefined) return undefined;
-    this.memoryMeta.delete(packageName);
-    this.memoryMeta.set(packageName, value);
-    return value;
-  }
-
-  setMemoryMetadata(packageName, value) {
-    const bytes = this.metadataSize(value);
-    const previous = this.memoryMeta.get(packageName);
-    if (previous !== undefined) this.memoryMetaBytes -= this.metadataSize(previous);
-    this.memoryMeta.delete(packageName);
-    if (!Number.isFinite(this.maxMetadataBytes) || this.maxMetadataBytes <= 0 || bytes > this.maxMetadataBytes) return;
-    this.memoryMeta.set(packageName, value);
-    this.memoryMetaBytes += bytes;
-    while (this.memoryMetaBytes > this.maxMetadataBytes && this.memoryMeta.size) {
-      const oldestKey = this.memoryMeta.keys().next().value;
-      const oldest = this.memoryMeta.get(oldestKey);
-      this.memoryMeta.delete(oldestKey);
-      this.memoryMetaBytes -= this.metadataSize(oldest);
-    }
-  }
-
-  getMemoryTarball(key) {
-    const value = this.memoryTarballs.get(key);
-    if (!value) return undefined;
-    this.memoryTarballs.delete(key);
-    this.memoryTarballs.set(key, value);
-    return value;
-  }
-
-  setMemoryTarball(key, value) {
-    const bytes = value?.byteLength || 0;
-    const previous = this.memoryTarballs.get(key);
-    if (previous) this.memoryTarballBytes -= previous.byteLength || 0;
-    this.memoryTarballs.delete(key);
-    if (!Number.isFinite(this.maxTarballBytes) || this.maxTarballBytes <= 0 || bytes > this.maxTarballBytes) return;
-    this.memoryTarballs.set(key, value);
-    this.memoryTarballBytes += bytes;
-    while (this.memoryTarballBytes > this.maxTarballBytes && this.memoryTarballs.size) {
-      const oldestKey = this.memoryTarballs.keys().next().value;
-      const oldest = this.memoryTarballs.get(oldestKey);
-      this.memoryTarballs.delete(oldestKey);
-      this.memoryTarballBytes -= oldest?.byteLength || 0;
-    }
-  }
-
-  getUnpackedPackage(name, version) {
-    const key = `${name}@${version}`;
-    const record = this.unpackedPackages.get(key);
-    if (!record) return null;
-    // Keep frequently reused package contents hot while retaining a bounded
-    // per-run cache. The entries are immutable for the lifetime of a cache.
-    this.unpackedPackages.delete(key);
-    this.unpackedPackages.set(key, record);
-    return record.entries;
-  }
-
-  setUnpackedPackage(name, version, entries) {
-    const key = `${name}@${version}`;
-    const bytes = entries.reduce((total, entry) => total + (entry.data?.byteLength || 0), 0);
-    if (!Number.isFinite(this.maxUnpackedBytes) || this.maxUnpackedBytes <= 0 || bytes > this.maxUnpackedBytes) return;
-    const previous = this.unpackedPackages.get(key);
-    if (previous) this.unpackedBytes -= previous.bytes;
-    this.unpackedPackages.delete(key);
-    this.unpackedPackages.set(key, { entries, bytes });
-    this.unpackedBytes += bytes;
-    while (this.unpackedBytes > this.maxUnpackedBytes && this.unpackedPackages.size) {
-      const oldestKey = this.unpackedPackages.keys().next().value;
-      const oldest = this.unpackedPackages.get(oldestKey);
-      this.unpackedPackages.delete(oldestKey);
-      this.unpackedBytes -= oldest.bytes;
-    }
-  }
-
-  clearUnpackedPackages() {
-    this.unpackedPackages.clear();
-    this.unpackedBytes = 0;
-  }
-
-  clearMemory() {
-    this.memoryMeta.clear();
-    this.memoryMetaBytes = 0;
-    this.memoryTarballs.clear();
-    this.memoryTarballBytes = 0;
-    this.clearUnpackedPackages();
   }
 
   async _getDb() {
@@ -392,8 +263,7 @@ export class BrowserNpmCache {
   }
 
   async getMetadata(packageName) {
-    const memoryValue = this.getMemoryMetadata(packageName);
-    if (memoryValue !== undefined) return memoryValue;
+    if (this.memoryMeta.has(packageName)) return this.memoryMeta.get(packageName);
     const db = await this._getDb();
     if (!db) return null;
     return new Promise((resolve) => {
@@ -404,7 +274,7 @@ export class BrowserNpmCache {
         req.onsuccess = () => {
           const record = req.result;
           if (record && record.data) {
-            this.setMemoryMetadata(packageName, record.data);
+            this.memoryMeta.set(packageName, record.data);
             resolve(record.data);
           } else {
             resolve(null);
@@ -418,7 +288,7 @@ export class BrowserNpmCache {
   }
 
   async setMetadata(packageName, data) {
-    this.setMemoryMetadata(packageName, data);
+    this.memoryMeta.set(packageName, data);
     const db = await this._getDb();
     if (!db) return;
     try {
@@ -433,8 +303,7 @@ export class BrowserNpmCache {
     const rawKey = key.replace(/^(?:pkg-tarball:|tarball:|pkg:)/, '');
     const candidateKeys = [key, rawKey, `tarball:${rawKey}`, `pkg-tarball:${rawKey}`, `pkg:${rawKey}`];
     for (const k of candidateKeys) {
-      const memoryValue = this.getMemoryTarball(k);
-      if (memoryValue) return memoryValue;
+      if (this.memoryTarballs.has(k)) return this.memoryTarballs.get(k);
     }
     const db = await this._getDb();
     if (!db) return null;
@@ -447,7 +316,7 @@ export class BrowserNpmCache {
           const record = req.result;
           if (record && record.bytes) {
             const bytes = record.bytes instanceof Uint8Array ? record.bytes : new Uint8Array(record.bytes);
-            this.setMemoryTarball(key, bytes);
+            this.memoryTarballs.set(key, bytes);
             resolve(bytes);
           } else {
             resolve(null);
@@ -462,7 +331,7 @@ export class BrowserNpmCache {
 
   async setTarball(key, bytes, meta = {}) {
     const uint8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-    this.setMemoryTarball(key, uint8);
+    this.memoryTarballs.set(key, uint8);
     const db = await this._getDb();
     if (!db) return;
     try {
@@ -501,7 +370,8 @@ export class BrowserNpmCache {
   }
 
   async clear() {
-    this.clearMemory();
+    this.memoryMeta.clear();
+    this.memoryTarballs.clear();
     const db = await this._getDb();
     if (!db) return;
     try {
@@ -554,11 +424,11 @@ export class BrowserNpm {
     if (cache instanceof Map) {
       for (const [k, v] of cache.entries()) {
         if (k.startsWith('pkg-tarball:') || k.startsWith('tarball:')) {
-          this.cache.setMemoryTarball(k, v);
+          this.cache.memoryTarballs.set(k, v);
         } else if (k.startsWith('meta:')) {
-          this.cache.setMemoryMetadata(k.slice(5), v);
+          this.cache.memoryMeta.set(k.slice(5), v);
         } else {
-          this.cache.setMemoryTarball(k, v);
+          this.cache.memoryTarballs.set(k, v);
         }
       }
     }
@@ -587,7 +457,7 @@ export class BrowserNpm {
     if (!this.fetchFn) throw new Error('No fetch implementation available for npm registry');
 
     const encodedName = packageName.startsWith('@')
-      ? `@${encodeURIComponent(packageName.slice(1))}`
+      ? `@${packageName.slice(1).split('/').map(encodeURIComponent).join('/')}`
       : encodeURIComponent(packageName);
     const directUrl = `${this.registry}/${encodedName}`;
     const requestUrl = this.proxyUrl ? `${this.proxyUrl}${directUrl}` : directUrl;
@@ -756,9 +626,6 @@ export class BrowserNpm {
     lifecycleScripts = this.lifecycleScripts,
     limits = this.limits,
     includeDevDependencies = false,
-    materialize = true,
-    cacheUnpacked = true,
-    returnFiles = true,
   } = {}) {
     let rawSpecs = packageSpecs;
     if (!rawSpecs || (Array.isArray(rawSpecs) && rawSpecs.length === 0)) {
@@ -784,13 +651,13 @@ export class BrowserNpm {
     };
 
     const dependencyLocation = (name, range, currentNodeModulesDir, currentPackageDir) => {
-      const effectiveRange = parseNpmAlias(range)?.range || range;
+      const resolutionRange = parseNpmAlias(range)?.range || range;
       let directory = currentNodeModulesDir;
       let conflict = false;
       while (directory) {
         const installedVersion = this.installedLocations.get(`${directory}/${name}`);
         if (installedVersion) {
-          if (satisfiesSemver(installedVersion, effectiveRange)) return null;
+          if (satisfiesSemver(installedVersion, resolutionRange)) return null;
           conflict = true;
         }
         directory = parentNodeModulesDir(directory);
@@ -806,32 +673,28 @@ export class BrowserNpm {
       parentPackageDir = null,
     }) => {
       const alias = parseNpmAlias(range);
-      const packageName = alias?.name || name;
-      const packageRange = alias?.range || range;
+      // npm aliases keep the dependency key and install location under the
+      // requested name, but resolve metadata and tarballs using the target
+      // package name/range. This is a package-manager contract, not a
+      // candidate-specific exception.
+      const resolutionName = alias?.name || name;
+      const resolutionRange = alias?.range || range;
       let itemNodeModulesDir = requestedNodeModulesDir;
       let locationKey = `${itemNodeModulesDir}/${name}`;
       let installedVersion = this.installedLocations.get(locationKey);
-      if (installedVersion && !satisfiesSemver(installedVersion, packageRange) && parentPackageDir) {
+      if (installedVersion && !satisfiesSemver(installedVersion, resolutionRange) && parentPackageDir) {
         itemNodeModulesDir = `${parentPackageDir}/node_modules`;
         locationKey = `${itemNodeModulesDir}/${name}`;
         installedVersion = this.installedLocations.get(locationKey);
       }
-      if (!installedVersion) {
-        const installedPackage = await this.readPackageJson(locationKey);
-        if (installedPackage?.version && satisfiesSemver(installedPackage.version, packageRange)) {
-          installedVersion = installedPackage.version;
-          this.installedLocations.set(locationKey, installedVersion);
-          this.installed.set(name, installedVersion);
-        }
-      }
-      const visitKey = `${itemNodeModulesDir}:${name}@${packageName}@${packageRange}`;
-      if (visited.has(visitKey) || (installedVersion && satisfiesSemver(installedVersion, packageRange))) return;
+      const visitKey = `${itemNodeModulesDir}:${name}@${range}`;
+      if (visited.has(visitKey) || (installedVersion && satisfiesSemver(installedVersion, resolutionRange))) return;
       visited.add(visitKey);
       // Platform-specific optional packages are native delivery variants in
       // the npm graph. Skip them before metadata/tarball work; Next.js will
       // select and, when needed, download its own WASM package at runtime.
-      if (isBrowserNativePackage(packageName, this.platform)) {
-        onProgress?.({ phase: 'optional-skipped', name, range: packageRange, reason: 'browser-native-addon' });
+      if (isBrowserNativePackage(resolutionName, this.platform)) {
+        onProgress?.({ phase: 'optional-skipped', name, range, reason: 'browser-native-addon' });
         return;
       }
 
@@ -840,57 +703,43 @@ export class BrowserNpm {
       let tarballBytes = null;
 
       // Check direct tarball cache by spec
-      const directTarballKey = `pkg-tarball:${packageName}@${packageRange}`;
+      const directTarballKey = `pkg-tarball:${resolutionName}@${resolutionRange}`;
       const cachedDirect = await this.cache.getTarball(directTarballKey);
       if (cachedDirect) {
         tarballBytes = cachedDirect;
-        version = packageRange === 'latest' ? '1.0.0' : packageRange;
+        version = resolutionRange === 'latest' ? '1.0.0' : resolutionRange;
         onProgress?.({ phase: 'cache-hit-tarball', name, version, bytes: tarballBytes.byteLength });
       } else {
-        const metadata = await this.fetchPackageMetadata(packageName, { onProgress });
-        const resolved = this.resolveVersion(metadata, packageRange);
+        const metadata = await this.fetchPackageMetadata(resolutionName, { onProgress });
+        const resolved = this.resolveVersion(metadata, resolutionRange);
         version = resolved.version;
         versionDoc = resolved.doc;
         if (optional && !packageSupportsPlatform(versionDoc, this.platform, this.arch, this.libc)) {
-          onProgress?.({ phase: 'optional-skipped', name, range: packageRange, reason: 'platform-mismatch' });
+          onProgress?.({ phase: 'optional-skipped', name, range, reason: 'platform-mismatch' });
           return;
         }
         const tarballUrl = versionDoc?.dist?.tarball;
-        if (!tarballUrl) throw new Error(`Missing tarball URL for ${packageName}@${version}`);
-        tarballBytes = await this.fetchTarball(tarballUrl, { name: packageName, version, integrity: versionDoc?.dist?.integrity, onProgress });
+        if (!tarballUrl) throw new Error(`Missing tarball URL for ${name}@${version}`);
+        tarballBytes = await this.fetchTarball(tarballUrl, { name, version, integrity: versionDoc?.dist?.integrity, onProgress });
       }
 
+      onProgress?.({ phase: 'unpacking', name, version });
       const pkgDir = `${itemNodeModulesDir}/${name}`;
-      let entries = await this.cache.getUnpackedPackage(packageName, version);
-      if (entries) {
-        entries = entries.map((entry) => ({
-          ...entry,
-          path: `${pkgDir}/${entry.name}`,
-        }));
-        onProgress?.({ phase: 'cache-hit-unpacked', name, version });
-      } else {
-        onProgress?.({ phase: 'unpacking', name, version });
-        entries = await unpackTarGz(tarballBytes, {
-          stripPrefix: 'package/',
-          targetDir: pkgDir,
-          ...limits,
-        }, this.globalObject);
-        if (cacheUnpacked) {
-          this.cache.setUnpackedPackage(packageName, version, entries.map((entry) => ({
-            ...entry,
-          })));
-        }
-      }
+      const entries = await unpackTarGz(tarballBytes, {
+        stripPrefix: 'package/',
+        targetDir: pkgDir,
+        ...limits,
+      }, this.globalObject);
 
       let pkgFilesCount = 0;
       let pkgTotalBytes = 0;
       let parsedPkgJson = null;
-      const packageFiles = materialize ? {} : null;
+      const packageFiles = {};
 
       for (const entry of entries) {
         if (entry.type === 'file' && entry.data) {
           const fileData = entry.data;
-          if (packageFiles) packageFiles[entry.path] = { data: fileData, mode: entry.mode };
+          packageFiles[entry.path] = { data: fileData, mode: entry.mode };
           pkgFilesCount += 1;
           pkgTotalBytes += fileData.byteLength;
 
@@ -907,10 +756,10 @@ export class BrowserNpm {
         onProgress?.({ phase: 'optional-skipped', name, range, reason: 'platform-mismatch' });
         return;
       }
-      if (packageFiles) Object.assign(filesToMount, packageFiles);
+      Object.assign(filesToMount, packageFiles);
 
       // Link package "bin" scripts into node_modules/.bin/
-      if (materialize && parsedPkgJson && parsedPkgJson.bin) {
+      if (parsedPkgJson && parsedPkgJson.bin) {
         const binEntries = typeof parsedPkgJson.bin === 'string'
           ? [[parsedPkgJson.name || name, parsedPkgJson.bin]]
           : Object.entries(parsedPkgJson.bin);
@@ -922,14 +771,23 @@ export class BrowserNpm {
             throw npmSecurityError('ERR_NPM_PACKAGE_PATH', `package bin escapes its package directory: ${binRel}`);
           }
           const targetFile = `${pkgDir}/${cleanRel}`;
-          const targetSpecifier = `../${name}/${cleanRel}`;
+          // npm places .bin launchers beside the package directory. Keep the
+          // launcher specifier relative to that directory so Node's ESM
+          // resolver can determine the package scope from the target file,
+          // rather than from the generated launcher itself.
+          const targetSpecifier = `..${targetFile.slice(itemNodeModulesDir.length)}`;
           const isEsmBin = cleanRel.endsWith('.mjs')
             || (parsedPkgJson.type === 'module' && !cleanRel.endsWith('.cjs'));
           const launcher = isEsmBin
-            ? `await import(${JSON.stringify(targetSpecifier)});`
+            // The generated .bin file itself has no module extension and is
+            // therefore CommonJS when loaded directly. Keep the await inside
+            // an async wrapper while retaining a relative ESM target.
+            ? `(async () => { await import(${JSON.stringify(targetSpecifier)}); })().catch((error) => { process.stderr.write(String(error?.stack || error) + "\\n"); process.exitCode = 1; });`
             : `require(${JSON.stringify(targetFile)});`;
           filesToMount[binPath] = {
-            data: new TextEncoder().encode(`#!/usr/bin/env node\n${launcher}\n`),
+            data: new TextEncoder().encode(
+              `#!/usr/bin/env node\n${launcher}\n`,
+            ),
             mode: 0o755,
           };
         }
@@ -1032,7 +890,7 @@ export class BrowserNpm {
     return {
       packages: results,
       totalFiles: Object.keys(filesToMount).length,
-      files: returnFiles ? filesToMount : {},
+      files: filesToMount,
     };
   }
 }

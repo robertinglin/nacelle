@@ -786,6 +786,7 @@ export function createBrowserProcess(options = {}) {
   let completionResolve;
   let completionReject;
   const completion = new Promise((resolve, reject) => { completionResolve = resolve; completionReject = reject; });
+  const childOutputs = [];
   const child = {
     on(name, listener) { events.on(name, listener); return child; },
     once(name, listener) { events.once(name, listener); return child; },
@@ -796,8 +797,9 @@ export function createBrowserProcess(options = {}) {
     listenerCount(name) { return events.listenerCount(name); },
     pid: identity.pid, ppid: identity.ppid, argv: [...identity.argv], env: { ...identity.env }, cwd: () => identity.cwd,
     get state() { return state; }, get stateHistory() { return [...history]; }, get connected() { return ipc?.connected || false; },
-    exitCode: null, signalCode: null, terminal: null,
+    exitCode: null, signalCode: null, terminal: null, runtimeState: null,
     get terminalRecord() { return terminalRecord; },
+    get childOutputs() { return childOutputs; },
     stdout: options.stdout || options.output?.stdout, stderr: options.stderr || options.output?.stderr,
     send(value, transferList, callback) {
       if (!ipc) {
@@ -907,6 +909,11 @@ export function createBrowserProcess(options = {}) {
     }
     if (frame.type === 'child-disconnect') { emitDisconnect(); ipc?.close(); return; }
     if (frame.type === 'signal-result') return;
+    if (frame.type === 'runtime-state') { child.runtimeState = frame.runtimeState || null; return; }
+    if (frame.type === 'child-output') {
+      if (frame.record && typeof frame.record === 'object') childOutputs.push(frame.record);
+      return;
+    }
     if (frame.type === 'output') { outputWrite(frame.stream === 'stderr' ? child.stderr : child.stdout, frame.value); return; }
     if (frame.type === 'network') { events.emit('network', frame.event); return; }
     if (frame.type === 'child-signal-request') { try { child.kill(frame.signal); } catch (error) { events.emit('error', error); } return; }

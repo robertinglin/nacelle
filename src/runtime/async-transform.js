@@ -41,38 +41,6 @@ function skipComment(source, index) {
   return end < 0 ? source.length : end + 2;
 }
 
-function skipTemplateExpression(source, index) {
-  let depth = 1;
-  while (index < source.length) {
-    const character = source[index];
-    const next = source[index + 1];
-    if (character === '\\') {
-      index += 2;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      index = skipQuoted(source, index, character);
-      continue;
-    }
-    if (character === '`') {
-      index = skipTemplate(source, index);
-      continue;
-    }
-    if (character === '/' && (next === '/' || next === '*')) {
-      index = skipComment(source, index);
-      continue;
-    }
-    if (character === '{') {
-      depth += 1;
-    } else if (character === '}') {
-      depth -= 1;
-      if (depth === 0) return index + 1;
-    }
-    index += 1;
-  }
-  return source.length;
-}
-
 function skipTemplate(source, index) {
   index += 1;
   while (index < source.length) {
@@ -81,10 +49,6 @@ function skipTemplate(source, index) {
       continue;
     }
     if (source[index] === '`') return index + 1;
-    if (source[index] === '$' && source[index + 1] === '{') {
-      index = skipTemplateExpression(source, index + 2);
-      continue;
-    }
     index += 1;
   }
   return source.length;
@@ -189,11 +153,25 @@ function matchingToken(tokens, index, opening, closing) {
 
 function rewriteForAwaitLoops(source) {
   const tokens = tokenize(source);
+  const asyncGeneratorBodies = [];
+  for (let index = 0; index < tokens.length - 2; index += 1) {
+    const isFunctionGenerator = tokens[index].value === 'async'
+      && tokens[index + 1].value === 'function'
+      && tokens[index + 2].value === '*';
+    const isMethodGenerator = tokens[index].value === 'async'
+      && tokens[index + 1].value === '*';
+    if (!isFunctionGenerator && !isMethodGenerator) continue;
+    const bodyIndex = tokens.findIndex((token, tokenIndex) => tokenIndex > index && token.value === '{');
+    if (bodyIndex < 0) continue;
+    const bodyEnd = matchingToken(tokens, bodyIndex, '{', '}');
+    if (bodyEnd >= 0) asyncGeneratorBodies.push({ start: bodyIndex, end: bodyEnd });
+  }
   const names = new Set(tokens.filter((token) => token.value !== '<literal>').map((token) => token.value));
   const replacements = [];
   let sequence = 0;
   for (let index = 0; index < tokens.length - 2; index += 1) {
     if (tokens[index].value !== 'for' || tokens[index + 1].value !== 'await') continue;
+    if (asyncGeneratorBodies.some(({ start, end }) => index > start && index < end)) continue;
     const openIndex = index + 2;
     if (tokens[openIndex]?.value !== '(') continue;
     const closeIndex = matchingToken(tokens, openIndex, '(', ')');
@@ -399,10 +377,6 @@ function asyncFunctionCandidates(source) {
   return { candidates, unsupported };
 }
 
-function removeToken(source, start, end, tokenStart, tokenEnd) {
-  return `${source.slice(start, tokenStart)}${source.slice(tokenEnd, end)}`;
-}
-
 function awaitOperandEnd(tokens, awaitIndex) {
   let index = awaitIndex + 1;
   const consumePrimary = () => {
@@ -426,7 +400,10 @@ function awaitOperandEnd(tokens, awaitIndex) {
   while (index < tokens.length) {
     const value = tokens[index].value;
     if (value === '.' || value === '?.') {
-      index += 2;
+      // Private fields are tokenized as '.', '#', and the field name.
+      // Consume the whole member just like a normal dot property so an
+      // awaited private-field access remains valid after rewriting.
+      index += tokens[index + 1]?.value === '#' ? 3 : 2;
       continue;
     }
     if (value === '[' || value === '(') {
@@ -533,7 +510,17 @@ function replaceAwaitExpressions(source) {
   return applyReplacements(templateExpanded, outerSpans.map((span) => ({
     start: span.start,
     end: span.end,
-    value: `(yield ${replaceAwaitExpressions(templateExpanded.slice(span.token.end, span.end))})`,
+    value: `${(() => {
+      const previous = tokens[tokens.indexOf(span.token) - 1];
+      const hasLineBreak = previous
+        && /\r?\n/u.test(templateExpanded.slice(previous.end, span.token.start));
+      const continuation = new Set([
+        '(', '[', '{', ',', '.', '?.', ':', '?', '=', '=>',
+        '!', '~', '+', '-', '*', '/', '%', '&', '|', '^', '&&', '||', '??',
+        'return', 'throw', 'case', 'delete', 'void', 'typeof', 'instanceof', 'in', 'of',
+      ]);
+      return hasLineBreak && !continuation.has(previous.value) ? ';' : '';
+    })()}(yield ${replaceAwaitExpressions(templateExpanded.slice(span.token.end, span.end))})`,
   })));
 }
 
@@ -564,7 +551,10 @@ function transformCandidates(source, candidates, bindingName) {
     const rawBody = source.slice(bodyStart, bodyEnd);
     const transformedNested = transformAsyncSource(rawBody, bindingName).source;
     const body = replaceAwaitExpressions(transformedNested);
-    const header = removeToken(source, candidate.start, candidate.headerEnd, candidate.start, candidate.asyncEnd);
+    // Keep the async marker on the generated function. The body still routes
+    // through the runtime generator bridge for task tracking, but callers must
+    // observe the standard AsyncFunction constructor/toString identity.
+    const header = source.slice(candidate.start, candidate.headerEnd);
     if (candidate.kind === 'function' || candidate.kind === 'method') {
       return {
         start: candidate.start,
@@ -576,7 +566,7 @@ function transformCandidates(source, candidates, bindingName) {
       return {
         start: candidate.start,
         end: candidate.bodyEnd,
-        value: `${header}${bindingName}(function* () {${body}}, this, arguments)`,
+        value: `${header}{ return ${bindingName}(function* () {${body}}, this, arguments); }`,
       };
     }
     return {

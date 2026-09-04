@@ -17,32 +17,8 @@ function samePartMode(left, right) {
 function appendPart(parts, text, expandVariables, glob) {
   const mode = { expandVariables, glob };
   const previous = parts.at(-1);
-  if (previous && !previous.commandSubstitution && samePartMode(previous, mode)) previous.text += text;
+  if (previous && samePartMode(previous, mode)) previous.text += text;
   else parts.push({ text, ...mode });
-}
-
-function appendCommandSubstitution(parts, command, expandVariables, glob) {
-  parts.push({ command, commandSubstitution: true, expandVariables, glob });
-}
-
-function commandSubstitutionEnd(source, start) {
-  let depth = 1;
-  let quote = null;
-  for (let index = start + 2; index < source.length; index += 1) {
-    const character = source[index];
-    if (quote) {
-      if (character === '\\') index += 1;
-      else if (character === quote) quote = null;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-      continue;
-    }
-    if (character === '(') depth += 1;
-    else if (character === ')' && --depth === 0) return index;
-  }
-  return -1;
 }
 
 function operatorAt(source, index) {
@@ -98,15 +74,6 @@ export function tokenizeShellScript(command) {
         wordStarted = true;
         continue;
       }
-      if (character === '$' && source[index + 1] === '(') {
-        const end = commandSubstitutionEnd(source, index);
-        if (end >= 0) {
-          appendCommandSubstitution(parts, source.slice(index + 2, end), true, false);
-          wordStarted = true;
-          index = end;
-          continue;
-        }
-      }
       appendPart(parts, character, true, false);
       wordStarted = true;
       continue;
@@ -123,15 +90,6 @@ export function tokenizeShellScript(command) {
       continue;
     }
     if (character === '`') throw shellSyntaxError('command substitution is not supported in npm scripts');
-    if (character === '$' && source[index + 1] === '(') {
-      const end = commandSubstitutionEnd(source, index);
-      if (end >= 0) {
-        appendCommandSubstitution(parts, source.slice(index + 2, end), true, true);
-        wordStarted = true;
-        index = end;
-        continue;
-      }
-    }
     if (character === '\n' || character === '\r') {
       if (character === '\r' && source[index + 1] === '\n') index += 1;
       if (wordStarted) {
@@ -247,36 +205,6 @@ export function expandShellWord(word, env, lastStatus = 0) {
   let value = '';
   let glob = false;
   for (const part of word.parts) {
-    if (part.commandSubstitution) {
-      value += `$(${part.command})`;
-      glob ||= part.glob;
-      continue;
-    }
-    const expanded = part.expandVariables
-      ? part.text.replace(VARIABLE_PATTERN, (_, braced, plain) => expandVariable(braced || plain, env, lastStatus))
-      : part.text;
-    value += expanded;
-    glob ||= part.glob;
-  }
-  return { value, glob };
-}
-
-/** Expand a shell word, including asynchronous POSIX command substitutions. */
-export async function expandShellWordAsync(word, env, lastStatus = 0, runCommand) {
-  let value = '';
-  let glob = false;
-  for (const part of word.parts) {
-    if (part.commandSubstitution) {
-      const nested = typeof runCommand === 'function'
-        ? await runCommand(part.command)
-        : { stdout: '' };
-      // POSIX command substitution removes all trailing newlines from the
-      // substituted command's standard output. Its stderr remains the
-      // surrounding command's stderr and is handled by the caller.
-      value += String(nested?.stdout || '').replace(/\n+$/, '');
-      glob ||= part.glob;
-      continue;
-    }
     const expanded = part.expandVariables
       ? part.text.replace(VARIABLE_PATTERN, (_, braced, plain) => expandVariable(braced || plain, env, lastStatus))
       : part.text;

@@ -147,7 +147,7 @@ function makeInMemoryIpcPair(scope, { preserveReferences = false } = {}) {
   return { parent: left, child: right };
 }
 
-function makeTerminal(identity, state, kind, code, signal, error, forced) {
+function makeTerminal(identity, state, kind, code, signal, error, forced, runtimeState = null) {
   return Object.freeze({
     runId: identity.runId,
     childId: identity.childId,
@@ -163,6 +163,7 @@ function makeTerminal(identity, state, kind, code, signal, error, forced) {
     signal: signal ?? null,
     forced: Boolean(forced),
     error: error ? { name: error.name, message: error.message, stack: error.stack, code: error.code } : null,
+    runtimeState,
   });
 }
 
@@ -244,7 +245,19 @@ function createInMemoryProcess(options) {
   const finish = (kind, code = childProcess.getCode?.() || 0, signal = null, error = null, forced = false) => {
     if (terminal) return;
     transition(error || forced ? 'failed' : 'exited');
-    terminal = makeTerminal(identity, state, kind, code, signal, error, forced);
+    terminal = makeTerminal(
+      identity,
+      state,
+      kind,
+      code,
+      signal,
+      error,
+      forced,
+      childProcess.__bnhRuntimeState
+        || childProcess.__bnhNodeTestState
+        || childProcess.__bnhChildActivity
+        || null,
+    );
     if (childProcess.connected) childProcess.disconnect?.();
     else ipcPair.child.close();
     emitDisconnect();
@@ -366,8 +379,14 @@ function createInMemoryProcess(options) {
         childProcess._markExited();
         return;
       }
-      Promise.resolve(runResult).then(() => {
-        if (!terminal) childProcess._markExited();
+      Promise.resolve(runResult).then((result) => {
+        if (terminal) return;
+        // Runtime entrypoints return their logical process exit status. Carry
+        // it across the in-memory child boundary before the process terminal
+        // is emitted; otherwise a child failure can be masked by the
+        // bootstrap process's default exit code of zero.
+        if (Number.isInteger(result)) childProcess.exitCode = result;
+        childProcess._markExited();
       }, (error) => {
         if (terminal) return;
         pendingFailure = error;

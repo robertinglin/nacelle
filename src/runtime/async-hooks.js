@@ -399,6 +399,10 @@ function destroyResource(asyncId) {
   }
   contexts.delete(asyncId);
   relatedAsyncIds.delete(asyncId);
+  // Destroyed records must leave the strong resources map or long promise
+  // churn grows it to V8's 2^24 Map entry cap and newAsyncId throws
+  // RangeError: Map maximum size exceeded.
+  resources.delete(asyncId);
 }
 
 function resourceValue(record) {
@@ -536,6 +540,30 @@ function runWithPromiseScope(promise, callback) {
 }
 
 const taskHookTargets = new WeakMap();
+
+// Harness-driven queues (MessagePort delivery, stream write completion) resume
+// guest code from contexts the guest did not choose. Node models each
+// delivered message as a MESSAGEPORT async resource and runs stream write
+// callbacks in the initiating write's context; capture the current scope when
+// the guest hands work to such a queue and restore it when the queue calls
+// back, or scheduler loops that yield there (React's scheduler in Next dev)
+// lose their AsyncLocalStorage store.
+export function captureAsyncScope(type = 'ASYNCSCOPE') {
+  return newAsyncId(type, executionId, null);
+}
+
+export function runInCapturedScope(asyncId, callback) {
+  if (asyncId === undefined || asyncId === null) return callback();
+  try {
+    return runInScope(asyncId, callback, undefined, []);
+  } finally {
+    const record = resources.get(asyncId);
+    if (record && !record.destroyed) {
+      record.destroyed = true;
+      queueDestroy(asyncId);
+    }
+  }
+}
 
 function wrapQueueMicrotask(target) {
   const wrapped = function patchedQueueMicrotask(callback) {

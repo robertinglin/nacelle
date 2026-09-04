@@ -413,6 +413,65 @@ test('VM Script dynamic import callbacks expose a module namespace', async ({ ha
   });
 });
 
+test('VM SourceTextModule routes comment-separated dynamic imports through the virtual HTTP loader', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const { spawn } = require('node:child_process');
+    const http = require('node:http');
+    const server = http.createServer((_request, response) => {
+      response.setHeader('content-type', 'text/javascript');
+      response.end('export const answer = 51;');
+    });
+    server.listen(0, '127.0.0.1', () => {
+      const target = 'http://127.0.0.1:' + server.address().port + '/index.mjs';
+      const child = spawn(process.execPath, ['/node/vm-source-text-module-import-child.cjs'], {
+        env: { TARGET_URL: target },
+      });
+      let output = '';
+      let errorOutput = '';
+      child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+      child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+      child.once('close', (code, signal) => {
+        server.close(() => process.stdout.write(JSON.stringify({ code, signal, output, errorOutput })));
+      });
+    });
+  `, {
+    capabilities,
+    files: {
+      '/node/vm-source-text-module-import-child.cjs': `
+        const vm = require('node:vm');
+        (async () => {
+          const sourceModule = new vm.SourceTextModule(
+            'const loaded = await import /* preserve valid comment-separated syntax */ (process.env.TARGET_URL);\\n'
+              + 'export const answer = loaded.answer;',
+            {
+              context: vm.createContext({ process }),
+              importModuleDynamically: (specifier) => process.__bnhModuleImport(
+                specifier,
+                '/node/vm-source-text-module-import-child.cjs',
+                undefined,
+                process,
+              ),
+            },
+          );
+          await sourceModule.link(() => { throw new Error('unexpected static dependency'); });
+          await sourceModule.evaluate();
+          process.stdout.write(String(sourceModule.namespace.answer));
+        })().catch((error) => { console.error(error); process.exitCode = 1; });
+      `,
+    },
+    env: { TARGET_URL: 'unused-by-parent' },
+  });
+
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.timedOut, JSON.stringify(result)).not.toBe(true);
+  expect(JSON.parse(result.stdout)).toEqual({
+    code: 0,
+    signal: null,
+    output: '51',
+    errorOutput: '',
+  });
+});
+
 test('Function-constructed imports use the owning CommonJS module loader', async ({ harnessPage }) => {
   const result = await harnessPage.run(`
     const { spawn } = require('node:child_process');

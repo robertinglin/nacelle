@@ -637,8 +637,8 @@ function createVmFunctionConstructor(NativeFunction, processObject, filename) {
 }
 
 function transformModuleSource(source) {
-  let transformed = String(source).replace(/\bimport\.meta\b/g, '__bnhImportMeta');
-  transformed = transformed.replace(/\bimport\s*\(/g, '__bnhDynamicImport(');
+  let transformed = rewriteScriptDynamicImports(String(source), '__bnhDynamicImport')
+    .replace(/\bimport\.meta\b/g, '__bnhImportMeta');
   transformed = transformed.replace(
     /\bimport\s+([\s\S]*?)\s+from\s+(['"])([^'"]+)\2\s*(?:with\s*\{[^}]*\})?\s*;?/g,
     (_, clause, quote, specifier) => {

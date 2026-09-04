@@ -301,6 +301,49 @@ test.describe('browser ESM loader', () => {
     expect(result.stdout).toContain('raw source shape contract passed');
   });
 
+  test('lets an async resolve hook map a missing JavaScript spelling to a source file', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { register } from 'node:module';
+
+      register('./extension-fallback-loader.mjs', import.meta.url);
+      const loaded = await import('./virtual-entry.js');
+      assert.strictEqual(loaded.value, 'resolved through hook');
+      process.stdout.write('extension fallback resolve completed');
+    `, {
+      entryPath: '/node/extension-fallback-entry.mjs',
+      files: {
+        '/node/extension-fallback-loader.mjs': `
+          export async function resolve(specifier, context, nextResolve) {
+            try {
+              return await nextResolve(specifier, context);
+            } catch (error) {
+              if (error?.code !== 'ERR_MODULE_NOT_FOUND' || !error.url?.endsWith('/virtual-entry.js')) throw error;
+              return nextResolve(error.url.slice(0, -3) + '.ts', context);
+            }
+          }
+
+          export async function load(url, context, nextLoad) {
+            if (!url.endsWith('.ts')) return nextLoad(url, context);
+            const result = await nextLoad(url, { ...context, format: 'module' });
+            const source = typeof result.source === 'string'
+              ? result.source
+              : new TextDecoder().decode(result.source);
+            return {
+              format: 'module',
+              shortCircuit: true,
+              source: source.replace(': string', ''),
+            };
+          }
+        `,
+        '/node/virtual-entry.ts': "export const value: string = 'resolved through hook';",
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('extension fallback resolve completed');
+  });
+
   test('loads a cyclic ESM graph without deadlocking URL materialization', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       import { value } from './cycle-a.mjs';

@@ -7073,7 +7073,8 @@ export function createRuntime({
               .filter(([, value]) => value !== undefined),
           );
           const nodeOptions = tokenizeShell(env.NODE_OPTIONS || '', env);
-          const rawArgs = [...nodeOptions, ...(Array.isArray(args) ? args : [])].map(String);
+          const childExecArgv = Array.isArray(options?.execArgv) ? options.execArgv : [];
+          const rawArgs = [...nodeOptions, ...childExecArgv, ...(Array.isArray(args) ? args : [])].map(String);
           const preloads = [];
           const importPreloads = [];
           let evalCode = null;
@@ -13311,7 +13312,7 @@ export function createRuntime({
       capabilities.output.on('data', outputListener);
       let artifacts = {};
       let runtimeState = null;
-      worker.on('message', (message) => {
+      worker.on('internalMessage', (message) => {
         if (message?.type === 'bnh-artifacts') artifacts = message.artifacts || {};
         if (message?.type === 'bnh-runtime-state') runtimeState = message.state || null;
       });

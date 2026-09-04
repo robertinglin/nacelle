@@ -262,10 +262,12 @@ export async function runProcessEntry(context) {
       child_outputs: context.process.__bnhChildOutputs || [],
     };
     context.process.__bnhRuntimeState = runtimeState;
-    await context.process.send({ type: 'bnh-runtime-state', state: runtimeState });
+    const sendRuntimeState = context.process.__bnhSendInternal || context.process.send;
+    await sendRuntimeState.call(context.process, { type: 'bnh-runtime-state', state: runtimeState });
     const declared = descriptor.capabilities.vfs.mounts.some((mount) => mount.artifacts?.length);
     const artifacts = declared ? runtime.exportArtifacts() : { version: 1, artifacts: [] };
-    await context.process.send({ type: 'bnh-artifacts', artifacts });
+    const sendInternal = context.process.__bnhSendInternal || context.process.send;
+    await sendInternal.call(context.process, { type: 'bnh-artifacts', artifacts });
   }
   return code;
 }

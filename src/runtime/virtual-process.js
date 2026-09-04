@@ -121,6 +121,14 @@ function makeInMemoryIpcPair(scope, { preserveReferences = false } = {}) {
         callback?.(null);
         return true;
       },
+      sendInternal(value) {
+        if (!connected) return false;
+        const peerWasConnected = Boolean(endpoint.peer?.connected);
+        queueMicrotask(() => {
+          if (peerWasConnected) endpoint.peer?.emit('internalMessage', value);
+        });
+        return true;
+      },
       disconnect() {
         if (!connected) return false;
         connected = false;
@@ -272,6 +280,9 @@ function createInMemoryProcess(options) {
   childProcess.on('exit', (code) => finish(pendingSignal ? 'signal' : (pendingFailure ? 'rejection' : 'exit'), pendingSignal ? null : code, pendingSignal, pendingFailure));
   ipcPair.parent.on('message', (message, handle) => {
     events.emit('message', message, handle);
+  });
+  ipcPair.parent.on('internalMessage', (message, handle) => {
+    events.emit('internalMessage', message, handle);
   });
   ipcPair.parent.on('peerDisconnect', emitDisconnect);
   ipcPair.child.on('message', (message, handle) => {

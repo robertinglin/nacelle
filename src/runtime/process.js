@@ -722,7 +722,11 @@ export function createProcess({
     }
     return ipc.send(...args);
   };
-  process.__bnhSendInternal = (value) => ipc?.sendInternal?.(value) || false;
+  process.__bnhSendInternal = (value) => {
+    if (!ipc) return false;
+    if (typeof ipc.sendInternal === 'function') return ipc.sendInternal(value);
+    return ipc.send(value);
+  };
   process.disconnect = () => {
     if (!ipc) return false;
     process.connected = false;
@@ -815,13 +819,16 @@ export function createBrowserProcess(options = {}) {
     get terminalRecord() { return terminalRecord; },
     get childOutputs() { return childOutputs; },
     stdout: options.stdout || options.output?.stdout, stderr: options.stderr || options.output?.stderr,
-    send(value, transferList, callback) {
+    send(value, transferList, sendOptions, callback) {
       if (!ipc) {
         const error = errorWithCode('ERR_IPC_CLOSED', 'IPC channel is closed');
         if (typeof transferList === 'function') callback = transferList;
+        else if (typeof sendOptions === 'function') callback = sendOptions;
         if (callback) { queueMicrotask(() => callback(error)); return false; }
         throw error;
       }
+      if (typeof transferList === 'function') callback = transferList;
+      else if (typeof sendOptions === 'function') callback = sendOptions;
       return ipc.send(value, transferList, callback);
     },
     disconnect() {
@@ -1032,6 +1039,7 @@ export function createBrowserProcess(options = {}) {
           finalize(frame);
         }
       },
+      onInternalMessage: (value, handle) => events.emit('internalMessage', value, handle),
       onDisconnect: emitDisconnect,
     });
     control.on('message', onControlFrame);

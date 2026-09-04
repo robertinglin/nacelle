@@ -1103,7 +1103,10 @@ function serverListenOptions(args) {
   const port = Number(options.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     const error = new RangeError(`port must be an integer between 0 and 65535: ${options.port}`);
-    error.code = 'ERR_INVALID_ARG_VALUE';
+    // Node's net/http listen path reports malformed port values as a socket
+    // error, including non-numeric strings. Keep the compatibility layer's
+    // observable error code aligned with that shared contract.
+    error.code = 'ERR_SOCKET_BAD_PORT';
     throw error;
   }
   options.port = port;
@@ -1111,11 +1114,18 @@ function serverListenOptions(args) {
 }
 
 function hostMatches(bindingHost, requestHost) {
-  const binding = String(bindingHost || '127.0.0.1').toLowerCase();
-  const request = String(requestHost || 'localhost').toLowerCase();
+  // URL.hostname is normally unbracketed for IPv6, while listen() and raw
+  // request Host headers may retain the URI brackets. Compare the endpoint
+  // identity, not that presentation detail, for every virtual caller.
+  const normalizeHost = (value) => String(value || '')
+    .trim()
+    .replace(/^\[|\]$/g, '')
+    .toLowerCase();
+  const binding = normalizeHost(bindingHost || '127.0.0.1');
+  const request = normalizeHost(requestHost || 'localhost');
   if (binding === request || binding === '::' || binding === '0.0.0.0') return true;
   const loopbackV4 = new Set(['localhost', '127.0.0.1']);
-  const loopbackV6 = new Set(['::1', '[::1]']);
+  const loopbackV6 = new Set(['::1']);
   return (loopbackV4.has(binding) && loopbackV4.has(request))
     || (loopbackV6.has(binding) && loopbackV6.has(request));
 }
@@ -1268,7 +1278,10 @@ class VirtualServerRequest extends Readable {
     this.url = init.requestTarget || `${parsed.pathname}${parsed.search}`;
     this.headers = headersObject(headers);
     this.rawHeaders = [...headers].flatMap(([name, value]) => [name, value]);
-    this.httpVersion = '1.1';
+    this.httpVersionMajor = Number(init.httpVersionMajor ?? 1);
+    this.httpVersionMinor = Number(init.httpVersionMinor ?? 1);
+    this.httpVersion = `${this.httpVersionMajor}.${this.httpVersionMinor}`;
+    this.shouldKeepAlive = init.shouldKeepAlive ?? true;
     this.complete = false;
     this.aborted = false;
     this.readableComplete = false;
@@ -2110,12 +2123,13 @@ class VirtualServerResponse extends Writable {
   destroy(error) {
     if (this._responseBody) this._responseBody._bnhTerminated = true;
     this._responseBody?.close();
-    // A ServerResponse destroy terminates the underlying connection.  The
-    // virtual response is also a Writable, but destroying only that stream
-    // leaves raw HTTP clients waiting forever after a post-header failure.
+    // A failed or incomplete ServerResponse terminates the underlying
+    // connection. A normally completed response is auto-destroyed by the
+    // Writable implementation after `end()`, but Node keeps its HTTP/1
+    // connection reusable in that case.
     const socket = this.connection || this.socket;
     const result = Writable.prototype.destroy.call(this, error);
-    if (socket && !socket.destroyed) {
+    if (socket && !socket.destroyed && (!this._completedResponse || error)) {
       // Socket writes are dispatched on microtasks. Give writes already
       // accepted by ServerResponse one turn to reach the client before
       // closing a failed response connection.
@@ -2268,6 +2282,11 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
     const versionMajor = Number(versionMatch?.[1] || 1);
     const versionMinor = Number(versionMatch?.[2] || 1);
     const normalizedMethod = method.toUpperCase();
+    if (/[\u0000-\u0020\u007f]/.test(path)) {
+      const error = new Error('Parse Error: Invalid request-target');
+      error.code = 'HPE_INVALID_URL';
+      throw error;
+    }
     const headers = {};
     for (const line of lines) {
       const separator = line.indexOf(':');
@@ -2296,6 +2315,10 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
     const body = bytes.slice(bodyStart, bodyStart + contentLength);
     const host = headers.host || `${binding.host}:${binding.port}`;
     const protocol = binding.protocol;
+    const connection = String(headers.connection || '').toLowerCase();
+    const shouldKeepAlive = versionMajor === 1 && versionMinor === 1
+      ? !/(?:^|\W)close(?:$|\W)/i.test(connection)
+      : /(?:^|\W)keep-alive(?:$|\W)/i.test(connection);
     const url = isConnect
       ? `${protocol}//${path}`
       : `${protocol}//${host}${path.startsWith('/') ? path : `/${path}`}`;
@@ -2306,12 +2329,16 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
       target: path,
       httpVersionMajor: versionMajor,
       httpVersionMinor: versionMinor,
+      shouldKeepAlive,
       missingHostHeader: versionMajor === 1 && versionMinor === 1 && !Object.hasOwn(headers, 'host'),
       connect: isConnect,
       init: {
         method: normalizedMethod,
         headers,
         body,
+        httpVersionMajor: versionMajor,
+        httpVersionMinor: versionMinor,
+        shouldKeepAlive,
         __bnhPreserveMissingHost: !Object.hasOwn(headers, 'host'),
       },
     };
@@ -2321,11 +2348,14 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
     const headers = { ...result.headers };
     const hasLength = Object.keys(headers).some((name) => name.toLowerCase() === 'content-length');
     const hasTransferEncoding = Object.keys(headers).some((name) => name.toLowerCase() === 'transfer-encoding');
+    let chunked = false;
     if (streaming && !hasLength && !hasTransferEncoding) {
-      // The browser gateway forwards the virtual socket bytes directly, so
-      // it must not receive HTTP/1 chunk framing as response content. A
-      // close-delimited response preserves streaming and its terminal signal.
-      headers.connection ||= 'close';
+      // A response that has already flushed headers cannot know its final
+      // length. Use HTTP/1.1 chunk framing so the connection remains reusable;
+      // close-delimiting it would discard pipelined requests and is not the
+      // Node server contract for a persistent connection.
+      headers['transfer-encoding'] = 'chunked';
+      chunked = true;
     } else if (!hasLength && !hasTransferEncoding) {
       headers['content-length'] = String(result.body?.byteLength || 0);
     }
@@ -2344,6 +2374,7 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
     const encoder = scope.TextEncoder || TextEncoder;
     const headerBytes = new encoder().encode(headerText);
     socket.write(headerBytes);
+    return { chunked };
   }
 
   function writeRawResponse(socket, result) {
@@ -2486,7 +2517,28 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
                 if (!headersFlushed) writeRawResponse(socket, result);
                 else if (result.body?.byteLength) writeRawChunk(socket, result.body, responseChunked);
                 if (headersFlushed && responseChunked) endRawChunkedResponse(socket);
-                socket.end?.();
+                const responseHeaders = result.headers || {};
+                const responseConnection = String(
+                  responseHeaders.connection || responseHeaders.Connection || '',
+                ).toLowerCase();
+                const hasLength = Object.keys(responseHeaders)
+                  .some((name) => name.toLowerCase() === 'content-length');
+                const hasTransferEncoding = Object.keys(responseHeaders)
+                  .some((name) => name.toLowerCase() === 'transfer-encoding');
+                const responseMustClose = /(?:^|\W)close(?:$|\W)/i.test(responseConnection)
+                  || (headersFlushed && !responseChunked && !hasLength && !hasTransferEncoding);
+                // A raw HTTP connection may carry more than one request. The
+                // previous unconditional end() discarded pipelined requests
+                // and prevented clientError handlers from producing the
+                // second response. Close only when either HTTP side asks for
+                // it or the response has no reusable framing.
+                if (!requestData.shouldKeepAlive || responseMustClose) {
+                  // Complete the peer-visible close after queued response
+                  // bytes have flushed. A half-close alone leaves a default
+                  // client waiting on `close` indefinitely when the server
+                  // has selected Connection: close.
+                  socket.end?.(() => socket.destroy?.());
+                }
                 resolve();
               } catch (error) {
                 reject(error);
@@ -2503,7 +2555,7 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
                 responseDestroyed: Boolean(response?.destroyed),
                 requestAborted: Boolean(request?.aborted),
               });
-              writeRawHeaders(socket, result, true);
+              responseChunked = writeRawHeaders(socket, result, true).chunked;
             }, (chunk, callback) => {
               try {
                 recordNetworkLifecycle('server-response-write', request, response, {
@@ -2569,8 +2621,10 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
         void drain();
       } catch (error) {
         globalThis.__bnhGatewayLogs?.push?.({ type: 'http-raw-socket-error', message: error.message, stack: error.stack });
-        binding.server._runInOwnerContext(() => binding.server.emit('clientError', error, socket));
-        if (!socket.destroyed) socket.destroy();
+        const handled = binding.server._runInOwnerContext(
+          () => binding.server.emit('clientError', error, socket),
+        );
+        if (!socket.destroyed && !handled) socket.destroy();
       }
     });
     socket.on('end', () => {
@@ -2639,9 +2693,10 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
 
   function find(url) {
     const parsed = new scope.URL(url);
+    const hostname = String(parsed.hostname || '').replace(/^\[|\]$/g, '');
     return bindings.find((binding) => binding.protocol === parsed.protocol
       && binding.port === Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80))
-      && hostMatches(binding.host, parsed.hostname));
+      && hostMatches(binding.host, hostname));
   }
 
   function dispatch(url, init) {
@@ -4648,6 +4703,32 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
           return;
         }
       }
+
+      // Resolve browser-local HTTP servers before asking the default agent to
+      // create a TCP socket. The browser DNS layer cannot resolve a virtual
+      // listener's address (notably bracketed IPv6 literals), and opening the
+      // socket first also bypasses the in-memory HTTP dispatch path. Custom
+      // agents and configured proxies retain their normal connection path;
+      // the shared BrowserAgent is the compatibility layer's default agent.
+      if (!this._proxy && !environmentProxyConfig
+        && this._agent instanceof BrowserAgent && this._virtualNetwork?.dispatch) {
+        let virtualInit;
+        try {
+          virtualInit = this._fetchInit();
+        } catch (error) {
+          this.destroy(error);
+          return;
+        }
+        const virtualResponse = this._virtualNetwork.dispatch(this._url, virtualInit);
+        if (virtualResponse) {
+          Promise.resolve(virtualResponse).then(
+            (response) => this._runInAsyncScope(() => this._handleResponse(response)),
+            (error) => this._handleFetchError(error),
+          );
+          return;
+        }
+      }
+
       const isDataURL = virtualTarget?.protocol === 'data:';
       const customCreateConnection = isDataURL ? null : this._agent?.createConnection;
       const customCreateSocket = this._agent?.createSocket;

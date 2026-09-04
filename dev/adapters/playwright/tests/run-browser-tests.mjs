@@ -6,6 +6,7 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 const adapterRoot = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
+const runtimeRoot = path.resolve(adapterRoot, '../../..');
 const harnessPage = '<!doctype html><script type="module" src="/target-bridge.example.js"></script>';
 
 function safePath(value) {
@@ -26,7 +27,18 @@ function contentType(relative) {
 const server = createServer(async (request, response) => {
   try {
     const { relative, absolute } = safePath(request.url || '/');
-    const body = relative === 'harness.html' ? harnessPage : await readFile(absolute);
+    let body;
+    if (relative === 'harness.html') body = harnessPage;
+    else {
+      try {
+        body = await readFile(absolute);
+      } catch (error) {
+        if (error?.code !== 'ENOENT' || !relative.startsWith('wasm/')) throw error;
+        // Browser runtime modules resolve core WASM beside the runtime asset.
+        // Keep the test server's /wasm path consistent with the CITGM server.
+        body = await readFile(path.join(runtimeRoot, 'src', relative));
+      }
+    }
     response.writeHead(200, {
       'content-type': contentType(relative),
       'Cross-Origin-Opener-Policy': 'same-origin',

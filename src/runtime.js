@@ -39,7 +39,7 @@ import { createVfs, fileURLToPath, pathToFileURL } from './runtime/vfs.js';
 import { path } from './runtime/path.js';
 import { runShellScript } from './runtime/shell.js';
 import {
-  Readable, Writable, Duplex, Transform, PassThrough, Stream, duplexPair, pipeline, destroy,
+  Readable, initializeCallableReadable, Writable, Duplex, Transform, PassThrough, Stream, duplexPair, pipeline, destroy,
   compose, isDestroyed, isDisturbed, isErrored, isReadable, isWritable, promises as streamPromises,
   setDefaultHighWaterMark, getDefaultHighWaterMark,
 } from './runtime/streams.js';
@@ -538,6 +538,7 @@ function onceCallback(callback, { preserveReturnValue = false } = {}) {
 
 function createNodeWebStreamModule(runtimeRequire, scope = globalThis) {
   const module = {};
+  const kWebStreamClosed = Symbol.for('nodejs.webstream.isClosedPromise');
   const exports = [
     ['ReadableStream', 'internal/webstreams/readablestream'],
     ['ReadableStreamDefaultReader', 'internal/webstreams/readablestream'],
@@ -560,16 +561,40 @@ function createNodeWebStreamModule(runtimeRequire, scope = globalThis) {
   const cache = new Map();
   const readableStreamWrappers = new WeakMap();
   const inspectCustom = Symbol.for('nodejs.util.inspect.custom');
-  const bindReadableStreamSource = (source) => {
+  const bindReadableStreamSource = (source, lifecycle) => {
     if (source === null || typeof source !== 'object') return source;
     const wrapped = { ...source };
     let resource;
+    const wrapController = (controller) => {
+      if (!controller || typeof controller !== 'object') return controller;
+      return new Proxy(controller, {
+        get(target, property) {
+          const value = Reflect.get(target, property, target);
+          if (property === 'close' && typeof value === 'function') {
+            return (...args) => {
+              lifecycle.resolve();
+              return value.apply(target, args);
+            };
+          }
+          if (property === 'error' && typeof value === 'function') {
+            return (reason) => {
+              lifecycle.reject(reason || new Error('ReadableStream errored'));
+              return value.call(target, reason);
+            };
+          }
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+    };
     for (const name of ['start', 'pull', 'cancel']) {
       const callback = source[name];
       if (typeof callback !== 'function') continue;
       resource ||= new AsyncResource('ReadableStream');
       wrapped[name] = function boundReadableStreamCallback(...args) {
-        return resource.runInAsyncScope(callback, this, ...args);
+        const callbackArgs = name === 'cancel'
+          ? args
+          : [wrapController(args[0]), ...args.slice(1)];
+        return resource.runInAsyncScope(callback, this, ...callbackArgs);
       };
     }
     return resource ? wrapped : source;
@@ -602,10 +627,26 @@ function createNodeWebStreamModule(runtimeRequire, scope = globalThis) {
           error.code = 'ERR_INVALID_ARG_VALUE';
           throw error;
         }
+        let resolveClosed;
+        let rejectClosed;
+        const lifecycle = {
+          promise: new Promise((resolve, reject) => {
+            resolveClosed = resolve;
+            rejectClosed = reject;
+          }),
+          resolve() { resolveClosed(); },
+          reject(error) { rejectClosed(error); },
+        };
+        lifecycle.promise.catch(() => {});
         super(
-          bindReadableStreamSource(source),
+          bindReadableStreamSource(source, lifecycle),
           Array.isArray(strategy) || strategy === null ? undefined : strategy,
         );
+        Object.defineProperty(this, kWebStreamClosed, {
+          configurable: true,
+          enumerable: false,
+          value: lifecycle,
+        });
       }
       getReader(options) {
         if (options !== undefined) {
@@ -2437,93 +2478,6 @@ function rewriteCommonJsDynamicImports(source) {
   return scanCode();
 }
 
-// CommonJS packages sometimes defer parsing dynamic import syntax by compiling
-// a function from a string with eval().  A direct eval still executes in the
-// module's lexical environment, so rewrite only a static string argument and
-// leave the eval call itself intact.  This keeps the normal __bnhImport
-// binding available without changing eval semantics for computed source.
-function rewriteEvalDynamicImports(source) {
-  const text = String(source);
-  let index = 0;
-  let result = '';
-  const isIdentifierPart = (character) => character !== undefined && /[$\w]/u.test(character);
-
-  const copyQuoted = () => {
-    const quote = text[index];
-    const start = index;
-    index += 1;
-    while (index < text.length) {
-      const character = text[index];
-      index += 1;
-      if (character === '\\') {
-        index += 1;
-        continue;
-      }
-      if (character === quote) break;
-    }
-    return { raw: text.slice(start, index), quote };
-  };
-
-  while (index < text.length) {
-    const character = text[index];
-    if (character === '\'' || character === '"') {
-      const quoted = copyQuoted();
-      result += quoted.raw;
-      continue;
-    }
-    if (character === '/' && (text[index + 1] === '/' || text[index + 1] === '*')) {
-      const start = index;
-      index += 2;
-      if (text[start + 1] === '/') {
-        while (index < text.length && text[index] !== '\n' && text[index] !== '\r') index += 1;
-      } else {
-        while (index < text.length && !(text[index] === '*' && text[index + 1] === '/')) index += 1;
-        if (index < text.length) index += 2;
-      }
-      result += text.slice(start, index);
-      continue;
-    }
-    if (text.startsWith('eval', index)
-      && !isIdentifierPart(text[index - 1])
-      && !isIdentifierPart(text[index + 4])) {
-      let open = index + 4;
-      while (/\s/u.test(text[open] || '')) open += 1;
-      if (text[open] === '(') {
-        let argument = open + 1;
-        while (/\s/u.test(text[argument] || '')) argument += 1;
-        if (text[argument] === '\'' || text[argument] === '"') {
-          const literalStart = argument;
-          const quoted = copyQuotedAt(text, argument);
-          const rawBody = quoted.raw.slice(1, -1);
-          const rewrittenBody = rewriteCommonJsDynamicImports(rawBody);
-          result += text.slice(index, literalStart);
-          result += quoted.quote + rewrittenBody + quoted.quote;
-          index = quoted.end;
-          continue;
-        }
-      }
-    }
-    result += character;
-    index += 1;
-  }
-  return result;
-}
-
-function copyQuotedAt(text, start) {
-  const quote = text[start];
-  let index = start + 1;
-  while (index < text.length) {
-    const character = text[index];
-    index += 1;
-    if (character === '\\') {
-      index += 1;
-      continue;
-    }
-    if (character === quote) break;
-  }
-  return { raw: text.slice(start, index), quote, end: index };
-}
-
 function hasTopLevelCommonJsProcessBinding(source) {
   const masked = String(source)
     .replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '')
@@ -2535,9 +2489,7 @@ function hasTopLevelCommonJsProcessBinding(source) {
 function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = null, processOverride = null) {
   // npm bin shims are executable text files and commonly start with a
   // shebang, which JavaScript's Function constructor cannot parse.
-  const transformedAsyncSource = transformAsyncSource(
-    rewriteEvalDynamicImports(rewriteCommonJsDynamicImports(source)),
-  );
+  const transformedAsyncSource = transformAsyncSource(rewriteCommonJsDynamicImports(source));
   const sourceText = `${transformedAsyncSource.source
     .replace(/^#![^\r\n]*(?:\r\n|\n|$)/, (shebang) => shebang.endsWith('\n') ? '\n' : '')
   }\n//# sourceURL=${sourceURL}`;
@@ -3139,26 +3091,6 @@ function moduleCandidates(pathname) {
   return [pathname, `${pathname}.js`, `${pathname}.cjs`, `${pathname}.mjs`, `${pathname}.json`,
     `${pathname}.node`, `${pathname}/index.js`, `${pathname}/index.cjs`, `${pathname}/index.mjs`,
     `${pathname}/index.json`, `${pathname}/index.node`];
-}
-
-// CommonJS resolution only performs the historical .js/.json/.node probes.
-// .cjs and .mjs are valid when named explicitly (including by package.json
-// "main" or "exports"), but Node does not discover them from an extensionless
-// require() request.
-function commonJsModuleCandidates(pathname) {
-  return [pathname, `${pathname}.js`, `${pathname}.json`, `${pathname}.node`,
-    `${pathname}/index.js`, `${pathname}/index.json`, `${pathname}/index.node`];
-}
-
-function commonJsFileCandidates(pathname) {
-  return [pathname, `${pathname}.js`, `${pathname}.json`, `${pathname}.node`];
-}
-
-// npm's .bin directory contains executable shims rather than package
-// modules. Its owning project package scope remains relevant when a shim is
-// extensionless and the project is an ESM package.
-function isNpmBinShimPath(pathname) {
-  return /\/node_modules\/\.bin(?:\/|$)/.test(String(pathname));
 }
 
 function addonsDisabled(processObject, pathname = '') {
@@ -4152,7 +4084,7 @@ function createCryptoShim(scope, Buffer, processObject) {
     createSign,
     createVerify,
     generateKeyPair: (type, options, callback) => generateKeyPair(type, options, callback, scope),
-    generateKeyPairSync: (type, options = {}) => generateKeyPairSync(type, options),
+    generateKeyPairSync: (type, options = {}) => generateKeyPairSync(type, options, scope),
     generateKeySync: nodeGenerateKeySync,
     createECDH: (curve) => createECDH(curve, scope),
     ECDH: (() => {
@@ -4650,6 +4582,7 @@ export function createRuntime({
   let runSpec = null;
   let virtualNetwork = getSharedVirtualNetwork(scope);
   let esmExecutionTail = Promise.resolve();
+  let esmExecutionDepth = 0;
   let dnsModule = createBrowserDns({ network: virtualNetwork });
   let proxyCapability = createProxyCapability();
   let executionIsolation = 'inline';
@@ -4791,7 +4724,7 @@ export function createRuntime({
         const pkgJson = path.join(pkgDir, 'package.json');
         if (vfs.files.has(pkgJson)) {
           try {
-            const raw = vfs.readSource(pkgJson);
+            const raw = vfs.read(pkgJson);
             const config = JSON.parse(typeof raw === 'string' ? raw : new TextDecoder().decode(raw));
             if (subpath) {
               const subBase = path.join(pkgDir, subpath);
@@ -4815,6 +4748,23 @@ export function createRuntime({
     const base = specifier.startsWith('/') ? specifier : normalizePath(specifier, importer ? path.dirname(importer) : '/node');
     const candidate = moduleCandidates(base).find((pathname) => vfs.files.has(pathname));
     if (candidate) return candidate;
+    // CommonJS treats a directory request as a package request before falling
+    // back to index.js. Keep that contract for relative and absolute imports;
+    // package-name resolution above already follows the same main field.
+    const packageJson = path.join(base, 'package.json');
+    if (vfs.files.has(packageJson)) {
+      try {
+        const raw = vfs.read(packageJson);
+        const config = JSON.parse(typeof raw === 'string' ? raw : new TextDecoder().decode(raw));
+        if (typeof config.main === 'string') {
+          const mainBase = path.resolve(base, config.main);
+          const mainCandidate = moduleCandidates(mainBase).find((pathname) => vfs.files.has(pathname));
+          if (mainCandidate) return mainCandidate;
+        }
+      } catch { /* invalid package data is reported by the module loader */ }
+    }
+    const indexCandidate = moduleCandidates(path.join(base, 'index')).find((pathname) => vfs.files.has(pathname));
+    if (indexCandidate) return indexCandidate;
     // The canonical no-addons fixture resolves a generated .node file that is
     // intentionally absent from the browser bundle. Preserve the Node
     // resolution boundary so loading it reports ERR_DLOPEN_DISABLED instead
@@ -4824,19 +4774,20 @@ export function createRuntime({
   }
 
   function runtimePackageType(entryPath) {
+    // Node resolves a bin symlink before determining the package scope of the
+    // launched JavaScript file.  Looking at the .bin path itself can select
+    // the wrong CommonJS boundary for an ESM package executable.
+    try { entryPath = vfs.fs.realpathSync(entryPath); } catch { /* resolve below */ }
     let directory = path.dirname(entryPath);
     for (;;) {
-      if (directory.endsWith('/node_modules') && !isNpmBinShimPath(entryPath)) return 'commonjs';
-      const packagePath = path.join(directory, 'package.json');
-      if (vfs.files.has(packagePath)) {
-        try {
-          const source = vfs.readSource(packagePath);
-          const text = typeof source === 'string' ? source : new TextDecoder().decode(source);
-          const config = JSON.parse(text);
-          return config.type === 'module' ? 'module' : 'commonjs';
-        } catch (error) {
-          if (error?.code !== 'ENOENT') return 'commonjs';
-        }
+      if (directory.endsWith('/node_modules')) return 'commonjs';
+      try {
+        const source = vfs.read(path.join(directory, 'package.json'));
+        const text = typeof source === 'string' ? source : new TextDecoder().decode(source);
+        const config = JSON.parse(text);
+        return config.type === 'module' ? 'module' : 'commonjs';
+      } catch (error) {
+        if (error?.code !== 'ENOENT') return 'commonjs';
       }
       // Unresolved specifiers reach here as relative paths; dirname('.') is
       // '.', so without this guard the climb never ends and the page hangs.
@@ -4845,10 +4796,34 @@ export function createRuntime({
     }
   }
 
+  function isRuntimeEsmLauncher(entryPath, source = undefined) {
+    if (!String(entryPath).includes('/node_modules/.bin/')) return false;
+    let text = source;
+    if (text === undefined) {
+      try {
+        const value = readSource(entryPath);
+        text = typeof value === 'string' ? value : new TextDecoder().decode(value);
+      } catch {
+        return false;
+      }
+    }
+    if (!String(text).startsWith('#!')) return false;
+    const body = String(text).replace(/^#![^\n]*(?:\n|$)/, '');
+    if (/(?:^|[;\n])\s*(?:import\s+|export\s+)/m.test(body)) return true;
+    // npm-generated bin launchers use a dynamic import wrapper. A launcher
+    // that also contains require/module.exports remains CommonJS, preserving
+    // the standard CJS contract for hand-written .bin scripts.
+    const result = /\bimport\s*\(/.test(body)
+      && !/\brequire\s*\(/.test(body)
+      && !/\b(?:module\.exports|exports\.)/.test(body);
+    return result;
+  }
+
   function isRuntimeEsmModule(entryPath, execArgv = []) {
     if (entryPath.endsWith('.mjs')) return true;
     if (entryPath.endsWith('.cjs') || entryPath.endsWith('.json') || entryPath.endsWith('.node')) return false;
     if (entryPath.startsWith('/node/lib/')) return false;
+    if (isRuntimeEsmLauncher(entryPath)) return true;
     for (let index = 0; index < execArgv.length; index += 1) {
       const argument = String(execArgv[index]);
       if (argument === '--input-type') {
@@ -4876,31 +4851,7 @@ export function createRuntime({
 
   function makeBuiltins(processObject, runtimeRequire, diagnosticsChannels, runtimeOptions, performancePrimitives, trackTask, stdout, stderr, readSource, sourcePath, runtimeFetchRef) {
     const fs = vfs.fs;
-    const childActivity = processObject.__bnhChildActivity || {
-      launched: 0,
-      completed: 0,
-      failed: 0,
-      first: null,
-      last: null,
-      recent: [],
-    };
-    Object.defineProperty(processObject, '__bnhChildActivity', {
-      configurable: true,
-      enumerable: false,
-      value: childActivity,
-    });
     const cjsPackageEntryCache = new Map();
-    const cjsPackageConfigCache = new Map();
-    const cjsPackageTypeCache = new Map();
-    const readCjsPackageConfig = (packageBase) => {
-      const manifest = `${packageBase}/package.json`;
-      if (!vfs.files.has(manifest)) return undefined;
-      if (cjsPackageConfigCache.has(packageBase)) return cjsPackageConfigCache.get(packageBase);
-      const source = readSource(manifest);
-      const config = JSON.parse(typeof source === 'string' ? source : new TextDecoder().decode(source));
-      cjsPackageConfigCache.set(packageBase, config);
-      return config;
-    };
     const recordPerformanceEntry = performancePrimitives.recordEntry || (() => {});
     const performanceNow = () => Number(scope.performance?.now?.()) || 0;
     const recordDnsEntry = (name, startTime, detail) => {
@@ -5288,7 +5239,14 @@ export function createRuntime({
         const compileSource = format === 'module' || moduleHasStaticEsmSyntax(source)
           ? moduleSynchronousEsmSource(source, resolved)
           : source;
+        // require.extensions handlers (notably proxyquire) may install a
+        // module-specific require before delegating to _compile. Preserve
+        // that hook while still giving ordinary modules the local loader.
+        const inheritedRequire = this.require;
         const require = (name) => {
+          if (inheritedRequire && inheritedRequire !== Module.prototype.require) {
+            return inheritedRequire(name);
+          }
           const value = moduleApi._load(name, this);
           if (value && this.children && value !== this.exports) {
             const child = moduleApi._cache?.get?.(name);
@@ -5601,6 +5559,13 @@ export function createRuntime({
           : typeof parent === 'object' ? parent.paths : undefined;
         let resolved;
         try {
+          // CommonJS resolves relative and absolute requests with Node's
+          // extension/index probing. Do this before the ESM resolver, which
+          // intentionally keeps extensionless relative URLs unresolved.
+          if (request.startsWith('.') || request.startsWith('/')) {
+            const commonJsResolved = resolveFile(request, importer, processObj);
+            if (vfs.files.has(commonJsResolved)) return commonJsResolved;
+          }
           if (options?.paths !== undefined && !Array.isArray(options.paths)) {
             const error = new TypeError(`The \"options.paths\" property must be an array of strings. Received ${String(options.paths)}`);
             error.code = 'ERR_INVALID_ARG_VALUE';
@@ -5697,7 +5662,7 @@ export function createRuntime({
               ? moduleApi._load(name, importer)
               : runtimeRequire(name, importer, processObj);
           };
-          req.resolve = (name) => moduleApi._resolve ? moduleApi._resolve(name, importer) : esmLoader.resolveRequire(name, importer);
+          req.resolve = (name) => moduleApi._resolve ? moduleApi._resolve(name, importer) : name;
           req.main = moduleApi._main || null;
           req.cache = moduleApi._cache || new Map();
           req.extensions = moduleExtensions;
@@ -5867,6 +5832,10 @@ export function createRuntime({
         const instance = new Readable(...args);
         if (new.target.prototype && new.target.prototype !== Readable.prototype) Object.setPrototypeOf(instance, new.target.prototype);
         return instance;
+      }
+      if (this !== undefined && this !== null
+        && (typeof this === 'object' || typeof this === 'function')) {
+        return initializeCallableReadable(this, args[0]);
       }
       return new Readable(...args);
     };
@@ -6064,6 +6033,59 @@ export function createRuntime({
       },
     };
     const dnsPromises = dns.promises;
+    const createTrackedDns = (ownerProcess) => {
+      const tracker = ownerProcess?._bnhTaskTracker;
+      if (typeof tracker !== 'function') return dns;
+      const callbackNames = [
+        'lookup', 'lookupService', 'resolve', 'resolveAny', 'resolve4', 'resolve6',
+        'resolveCaa', 'resolveCname', 'resolveMx', 'resolveNaptr', 'resolveNs',
+        'resolvePtr', 'resolveSoa', 'resolveSrv', 'resolveTlsa', 'resolveTxt', 'reverse',
+      ];
+      const promiseNames = callbackNames.filter((name) => typeof dnsPromises?.[name] === 'function');
+      const trackedCallback = (name, method) => function trackedDnsCallback(...args) {
+        const callbackIndex = args.length - 1;
+        if (typeof args[callbackIndex] !== 'function') return Reflect.apply(method, this, args);
+        const release = tracker(`dns:${name}`);
+        let released = false;
+        const releaseOnce = () => {
+          if (released) return;
+          released = true;
+          release?.();
+        };
+        const callback = args[callbackIndex];
+        const wrappedArgs = [...args];
+        wrappedArgs[callbackIndex] = (...callbackArgs) => {
+          try { return callback(...callbackArgs); }
+          finally { releaseOnce(); }
+        };
+        try { return Reflect.apply(method, this, wrappedArgs); }
+        catch (error) {
+          releaseOnce();
+          throw error;
+        }
+      };
+      const tracked = { ...dns };
+      for (const name of callbackNames) {
+        if (typeof dns[name] === 'function') tracked[name] = trackedCallback(name, dns[name]);
+      }
+      tracked.promises = { ...dnsPromises };
+      for (const name of promiseNames) {
+        const method = dnsPromises[name];
+        tracked.promises[name] = function trackedDnsPromise(...args) {
+          const release = tracker(`dns:${name}`);
+          try {
+            return Promise.resolve(Reflect.apply(method, this, args)).then(
+              (value) => { release?.(); return value; },
+              (error) => { release?.(); throw error; },
+            );
+          } catch (error) {
+            release?.();
+            throw error;
+          }
+        };
+      }
+      return tracked;
+    };
     const notifyClusterListening = runtimeOptions.clusterWorker && typeof processObject.send === 'function'
       ? (address) => {
           return processObject.send({ type: 'bnh-cluster-listening', address });
@@ -6977,19 +6999,16 @@ export function createRuntime({
               continue;
             }
             if (!stopOptions && argument.startsWith('-')) continue;
-            if (script === null && evalCode === null && !printResult) script = argument;
+            if (script === null) script = argument;
             else afterScript.push(argument);
           }
           const executionArgv = [executable, ...rawArgs];
           const id = ++childSequence;
-          const commonJsEvalPath = normalizePath(`.bnh-child-${id}.cjs`, cwd);
           const mainPath = script
             ? normalizePath(script, cwd)
             : interactive
               ? normalizePath(`.bnh-child-${id}.js`, cwd)
-              : evalCode !== null
-                ? commonJsEvalPath
-                : `/node/.bnh-child-${id}.js`;
+              : `/node/.bnh-child-${id}.js`;
           const moduleEvalPath = normalizePath(`.bnh-child-${id}.mjs`, cwd);
           const moduleEntry = moduleInput || importPreloads.length > 0;
           if (importPreloads.length > 0 && evalCode !== null) moduleInput = true;
@@ -7000,7 +7019,7 @@ export function createRuntime({
           // eval-with-preload still needs a synthetic source entry.
           const entryPath = moduleEntry && evalCode !== null
             ? moduleEvalPath
-            : mainPath;
+            : evalCode !== null ? `/node/.bnh-child-${id}.js` : mainPath;
           const commandName = executable.split('/').pop();
           const versionOnly = (commandName === 'node' || commandName === 'nodejs' || executable === processObject.execPath)
             && script === null && evalCode === null
@@ -7075,7 +7094,15 @@ export function createRuntime({
           const stream = new Readable({ read() {} });
           stream.write = (value, encoding, callback) => {
             const accepted = stream.push(value, encoding);
-            if (stream.readableFlowing && stream.readableLength > 0) {
+            // A child-process pipe is a live Readable endpoint.  A consumer
+            // may have installed its `data` listener while the producer was
+            // being started, before the stream's flowing flag has made the
+            // corresponding microtask turn.  Honor that consumer here and
+            // drain the just-written chunk; otherwise a nested ESM child can
+            // finish with bytes stranded in the pipe and only expose them
+            // through the parent's terminal fallback.
+            if ((stream.readableFlowing || stream.listenerCount('data') > 0)
+              && stream.readableLength > 0) {
               const pending = stream.read(stream.readableHighWaterMark);
               if (pending !== null) stream.emit('data', pending);
             }
@@ -7096,6 +7123,15 @@ export function createRuntime({
           const stderrStream = outputStream();
           const child = new BrowserChildProcess();
           const ownerProcess = scope.process || processObject;
+          const childActivity = ownerProcess.__bnhChildActivity ||= {
+            launched: 0,
+            completed: 0,
+            failed: 0,
+            first: null,
+            last: null,
+            recent: [],
+          };
+          childActivity.recent ||= [];
           const executableName = String(file).split('/').pop();
           const emitChildMessage = (value, handle) => {
             const event = value && typeof value === 'object'
@@ -7134,6 +7170,7 @@ export function createRuntime({
           const ipc = options?.ipc ? {
             process: null,
             pendingExit: null,
+            pendingDisconnect: false,
             queued: [],
             pendingIncoming: [],
             handleBacklog: 0,
@@ -7156,11 +7193,10 @@ export function createRuntime({
               else ipc.pendingIncoming.push({ value, handle });
             },
             onChildExit: (code, signal = null) => {
-              // A same-realm fork can call process.exit() while its bootstrap
-              // is still synchronous. Defer the outer terminal event until
-              // the ChildProcess has been associated with that process, so
-              // queued IPC messages and the caller's listeners are observed
-              // in Node order.
+              // Same-realm children can call process.exit() while their
+              // synchronous bootstrap is still running. Defer the outer
+              // terminal event until virtualAsync has attached the process
+              // handle and flushed the IPC frames queued by that bootstrap.
               if (!ipc.process) {
                 ipc.pendingExit = { code, signal };
                 return;
@@ -7168,6 +7204,10 @@ export function createRuntime({
               finish(code, signal);
             },
             onChildDisconnect: () => {
+              if (!ipc.process) {
+                ipc.pendingDisconnect = true;
+                return;
+              }
               if (child.connected) {
                 child.connected = false;
                 scope.queueMicrotask(() => child.emit('disconnect'));
@@ -7179,7 +7219,8 @@ export function createRuntime({
           const trackOwnedTask = typeof ownerProcess?._bnhTaskTracker === 'function'
             ? ownerProcess._bnhTaskTracker
             : trackTask;
-          let releaseChildTask = trackOwnedTask?.() || null;
+          const childTaskLabel = `child:${String(file || '<unknown>').split('/').pop() || '<unknown>'} args:${Array.isArray(args) ? args.length : 0}`.slice(0, 128);
+          let releaseChildTask = trackOwnedTask?.(childTaskLabel) || null;
           let abortListener = null;
           let childProcess = null;
           let timeoutHandle = null;
@@ -7188,6 +7229,52 @@ export function createRuntime({
           let stderr = '';
           let stdoutEmitted = false;
           let stderrEmitted = false;
+          const activityRecord = {
+            command: executableName || '<unknown>',
+            entry: String(commandPath).slice(0, 256),
+            argv: (Array.isArray(args) ? args : []).slice(0, 32).map((value) => String(value).slice(0, 128)),
+            argumentCount: Array.isArray(args) ? args.length : 0,
+            cwd: String(ownerProcess.cwd?.() || '/node').slice(0, 256),
+            code: null,
+            signal: null,
+            pending: true,
+            stdoutBytes: 0,
+            stderrBytes: 0,
+            stdoutExcerpt: '',
+            stderrExcerpt: '',
+            terminal: null,
+            error: null,
+          };
+          // Keep the live process handle out of serialized activity records,
+          // but retain it privately so bounded runtime heartbeats can inspect
+          // a nested ESM/CJS child while its terminal frame is pending.
+          Object.defineProperty(activityRecord, 'processHandle', {
+            configurable: true,
+            enumerable: false,
+            writable: true,
+            value: null,
+          });
+          const publishChildOutput = () => {
+            const outputRecord = {
+              ...activityRecord,
+              // Activity metadata stays bounded, while the complete streams
+              // travel through the dedicated artifact channel.
+              stdout,
+              stderr,
+            };
+            if (typeof ownerProcess.__bnhChildOutput === 'function') {
+              ownerProcess.__bnhChildOutput(outputRecord);
+            } else {
+              (ownerProcess.__bnhChildOutputs ||= []).push(outputRecord);
+            }
+          };
+          childActivity.launched += 1;
+          if (!childActivity.first) childActivity.first = activityRecord;
+          childActivity.last = activityRecord;
+          childActivity.recent.push(activityRecord);
+          if (childActivity.recent.length > 16) childActivity.recent.shift();
+          let activityRecorded = false;
+          let childTerminal = null;
           const stdioEntry = (index) => Array.isArray(options?.stdio) ? options.stdio[index] : options?.stdio;
           const stdioIgnored = (index) => stdioEntry(index) === 'ignore';
           const stdioInherited = (index) => stdioEntry(index) === 'inherit';
@@ -7255,22 +7342,6 @@ export function createRuntime({
             const emit = stream.emit.bind(stream);
             stream.emit = (name, ...args) => runInOwnerContext(() => emit(name, ...args));
             return stream;
-          };
-          const appendReturnedOutput = (value, current, write) => {
-            const returned = normalizeOutputChunk(value);
-            if (!returned || current === returned || current.endsWith(returned)) return current;
-            let overlap = 0;
-            const maximum = Math.min(current.length, returned.length);
-            for (let length = maximum; length > 0; length -= 1) {
-              if (current.endsWith(returned.slice(0, length))) {
-                overlap = length;
-                break;
-              }
-            }
-            const missing = returned.slice(overlap);
-            if (!missing) return current;
-            write(missing);
-            return current + missing;
           };
           const wrapChildHandle = (handle) => {
             if (!handle || typeof handle.on !== 'function') return handle;
@@ -7482,6 +7553,41 @@ export function createRuntime({
           const finish = (code, signal, error = null) => {
             if (closed) return;
             closed = true;
+            if (!activityRecorded) {
+              activityRecorded = true;
+              activityRecord.code = code;
+              activityRecord.signal = signal;
+              activityRecord.pending = false;
+              activityRecord.stdoutBytes = new TextEncoder().encode(String(stdout || '')).byteLength;
+              activityRecord.stderrBytes = new TextEncoder().encode(String(stderr || '')).byteLength;
+              activityRecord.stdoutExcerpt = String(stdout || '').slice(0, 512);
+              activityRecord.stderrExcerpt = String(stderr || '').slice(0, 512);
+              const activeChildProcess = childProcess?.processObject || childProcess;
+              activityRecord.childState = activeChildProcess ? {
+                exited: Boolean(activeChildProcess._bnhIsExited?.()),
+                exitRequested: Boolean(activeChildProcess._exitRequested?.()),
+                timers: Number(activeChildProcess._timers?.size) || 0,
+                pendingTasks: Boolean(activeChildProcess._bnhHasPendingTasks?.()),
+                code: activeChildProcess.getCode?.() ?? null,
+                signal: activeChildProcess.getSignal?.() ?? null,
+              } : null;
+              activityRecord.terminal = childTerminal ? {
+                status: childTerminal.status || null,
+                kind: childTerminal.kind || null,
+                code: childTerminal.code ?? null,
+                signal: childTerminal.signal ?? null,
+                error: childTerminal.error ? {
+                  name: String(childTerminal.error.name || 'Error').slice(0, 64),
+                  code: childTerminal.error.code || null,
+                } : null,
+              } : null;
+              activityRecord.error = error ? {
+                name: String(error.name || 'Error').slice(0, 64),
+                code: error.code || null,
+              } : null;
+              childActivity.completed += 1;
+              if (error || code !== 0) childActivity.failed += 1;
+            }
             child.exitCode = code;
             child.signalCode = signal;
             if (timeoutHandle !== null) {
@@ -7494,6 +7600,7 @@ export function createRuntime({
             if (prepared.executionArgv.some((value) => String(value) === '--no-warnings')) {
               stderr = stderr.replace(/\[DEP0005\] DeprecationWarning: Buffer\(\) is deprecated due to security and usability issues\. Please use the Buffer\.alloc\(\), Buffer\.allocUnsafe\(\), or Buffer\.from\(\) methods instead\.\n/g, '');
             }
+            publishChildOutput();
             try {
               processResource.runInAsyncScope(() => runInOwnerContext(() => {
                 pipeResources[0].runInAsyncScope(() => {});
@@ -7517,8 +7624,8 @@ export function createRuntime({
             } finally {
               for (const resource of pipeResources) resource.emitDestroy();
               processResource.emitDestroy();
-              // Keep the owner alive through child exit/close listeners and
-              // the Promise continuations those listeners schedule. Releasing
+              // Keep the owner alive through exit/close listeners and the
+              // Promise continuations those listeners schedule. Releasing
               // before emit() lets the owner's exit check win that microtask
               // race and can terminate a setup script between sequential
               // child commands.
@@ -7598,6 +7705,48 @@ export function createRuntime({
             return child;
           }
           const commandName = prepared.command.split('/').pop();
+          if (commandName === 'node') {
+          }
+          const launchesNpmEntrypoint = commandName === 'node'
+            && prepared.entryPath.endsWith('/node_modules/.bin/npm')
+            && (prepared.scriptPath === prepared.entryPath
+              || prepared.commandArgs[0] === prepared.entryPath);
+          if (launchesNpmEntrypoint) {
+            // npm's own CLI is a Node launcher.  A real `spawn('node',
+            // [npmBin, ...args])` must preserve that invocation contract,
+            // while the browser runtime provides npm through its virtual
+            // package-manager implementation.
+            child.spawn({ file, args });
+            scope.queueMicrotask(() => child.emit('spawn'));
+            const npmPrepared = {
+              ...prepared,
+              command: prepared.entryPath,
+              commandArgs: prepared.commandArgs.slice(1),
+              argv: [prepared.entryPath, ...prepared.commandArgs.slice(1)],
+              executionArgv: [prepared.entryPath, ...prepared.commandArgs.slice(1)],
+            };
+            runNpmChild(npmPrepared, ownerProcess, {
+              ...options,
+              onStdout: writeStdout,
+              onStderr: writeStderr,
+            }).then((result) => {
+              if (result.stdout && !result.forwarded) {
+                stdout += result.stdout;
+                writeStdout(result.stdout);
+              }
+              if (result.stderr && !result.forwarded) {
+                stderr += result.stderr;
+                writeStderr(result.stderr);
+              }
+              finish(result.code, null);
+            }, (error) => {
+              const message = `${error?.stack || error?.message || error}\n`;
+              stderr += message;
+              writeStderr(message);
+              finish(1, null, error);
+            });
+            return child;
+          }
           if (commandName === 'grep' || commandName === 'sed') {
             const stdinStream = outputStream();
             child.stdin = stdinStream;
@@ -7654,20 +7803,19 @@ export function createRuntime({
               if (commandName === 'npm' || commandName === 'yarn' || commandName === 'yarnpkg') {
                 child.spawn({ file, args });
                 scope.queueMicrotask(() => child.emit('spawn'));
-                const npmChildOptions = {
+                runNpmChild(prepared, ownerProcess, {
                   ...options,
-                  onStdout: (value) => {
-                    stdout += normalizeOutputChunk(value);
-                    writeStdout(value);
-                  },
-                  onStderr: (value) => {
-                    stderr += normalizeOutputChunk(value);
-                    writeStderr(value);
-                  },
-                };
-                runNpmChild(prepared, ownerProcess, npmChildOptions).then((result) => {
-                  stdout = appendReturnedOutput(result.stdout, stdout, writeStdout);
-                  stderr = appendReturnedOutput(result.stderr, stderr, writeStderr);
+                  onStdout: writeStdout,
+                  onStderr: writeStderr,
+                }).then((result) => {
+                  if (result.stdout && !result.forwarded) {
+                    stdout += result.stdout;
+                    writeStdout(result.stdout);
+                  }
+                  if (result.stderr && !result.forwarded) {
+                    stderr += result.stderr;
+                    writeStderr(result.stderr);
+                  }
                   finish(result.code, null);
                 }, (error) => {
                   const message = `${error?.stack || error?.message || error}\n`;
@@ -7696,20 +7844,19 @@ export function createRuntime({
                   argv: [prepared.entryPath, ...prepared.commandArgs.slice(1)],
                   executionArgv: [prepared.entryPath, ...prepared.commandArgs.slice(1)],
                 };
-                const npmChildOptions = {
+                runNpmChild(npmPrepared, ownerProcess, {
                   ...options,
-                  onStdout: (value) => {
-                    stdout += normalizeOutputChunk(value);
-                    writeStdout(value);
-                  },
-                  onStderr: (value) => {
-                    stderr += normalizeOutputChunk(value);
-                    writeStderr(value);
-                  },
-                };
-                runNpmChild(npmPrepared, ownerProcess, npmChildOptions).then((result) => {
-                  stdout = appendReturnedOutput(result.stdout, stdout, writeStdout);
-                  stderr = appendReturnedOutput(result.stderr, stderr, writeStderr);
+                  onStdout: writeStdout,
+                  onStderr: writeStderr,
+                }).then((result) => {
+                  if (result.stdout && !result.forwarded) {
+                    stdout += result.stdout;
+                    writeStdout(result.stdout);
+                  }
+                  if (result.stderr && !result.forwarded) {
+                    stderr += result.stderr;
+                    writeStderr(result.stderr);
+                  }
                   finish(result.code, null);
                 }, (error) => {
                   const message = `${error?.stack || error?.message || error}\n`;
@@ -7730,6 +7877,7 @@ export function createRuntime({
                   stderr += normalizeOutputChunk(value);
                   writeStderr(value);
                 });
+                activityRecord.processHandle = processHandle;
                 if (ipc) {
                   ipc.processHandle = processHandle;
                   processHandle.on('message', (value, handle) => {
@@ -7744,8 +7892,12 @@ export function createRuntime({
                 }
                 child.spawn({ processHandle, file, args });
                 processHandle.wait().then((terminal) => {
-                  if (terminal.code !== 0 || terminal.signal) finish(terminal.code, terminal.signal);
-                  else finish(0, null);
+                  childTerminal = terminal;
+                  if (terminal.code !== 0 || terminal.signal) {
+                    const detail = terminal.error?.stack || terminal.error?.message || '';
+                    if (detail) writeStderr(`${detail}\n`);
+                    finish(terminal.code, terminal.signal);
+                  } else finish(0, null);
                 }, (error) => finish(1, null, error));
                 return;
               }
@@ -7761,12 +7913,20 @@ export function createRuntime({
                   writeStderr(value);
                 },
               });
+              activityRecord.bootstrap = {
+                pending: Boolean(result.pending),
+                status: result.status ?? null,
+                timers: Number(result.process?._timers?.size) || 0,
+                exitRequested: Boolean(result.process?._exitRequested?.()),
+                exited: Boolean(result.process?._bnhIsExited?.()),
+              };
               const terminalSignal = result.signal
                 || (prepared.abortOnUncaughtException && result.status !== 0
                   ? 'SIGABRT'
                   : null);
               const terminalCode = terminalSignal ? null : result.status;
               childProcess = result.process;
+              activityRecord.processHandle = childProcess;
               child.spawn({ processHandle: childProcess, file, args });
               stdout = result.stdout?.toString?.() || String(result.stdout || '');
               stderr = result.stderr?.toString?.() || String(result.stderr || '');
@@ -7786,12 +7946,21 @@ export function createRuntime({
                 for (const message of ipc.queued.splice(0)) {
                   runInChildContext(() => ipc.process?.emit('message', message.value, message.sendHandle));
                 }
+                if (ipc.pendingDisconnect) {
+                  ipc.pendingDisconnect = false;
+                  if (child.connected) {
+                    child.connected = false;
+                    scope.queueMicrotask(() => child.emit('disconnect'));
+                  }
+                }
                 const pendingExit = ipc.pendingExit;
                 ipc.pendingExit = null;
-                if (result.status !== 0 || (!pendingExit && (result.process?._exitRequested?.() || result.process?._bnhIsExited?.()))) {
-                  finish(terminalCode, terminalSignal);
+                if (pendingExit || result.status !== 0 || result.process?._exitRequested?.() || result.process?._bnhIsExited?.()) {
+                  finish(
+                    pendingExit?.signal ? null : (pendingExit?.code ?? terminalCode),
+                    pendingExit?.signal ?? terminalSignal,
+                  );
                 }
-                if (pendingExit) scope.queueMicrotask(() => finish(pendingExit.code, pendingExit.signal));
               } else if (!result.pending && !result.process) {
                 // A spawned child must not emit exit/close until the caller
                 // has had a chance to attach listeners. The synchronous
@@ -7880,69 +8049,52 @@ export function createRuntime({
           const internalName = source.startsWith('node:') ? source.slice(5) : source;
           if (internalName.startsWith('internal/')) {
             const internalBase = `/node/lib/${internalName}`;
-            const internalCandidate = commonJsFileCandidates(internalBase).find((candidate) => vfs.files.has(candidate));
-            if (internalCandidate) return internalCandidate;
+            for (const candidate of moduleCandidates(internalBase)) {
+              try { readSource(candidate); return candidate; } catch { /* ignore */ }
+            }
           }
           if (!source.startsWith('.') && !source.startsWith('/')) {
             const coreName = source.startsWith('node:') ? source.slice(5) : source;
-            const coreCandidate = commonJsFileCandidates(`/node/lib/${coreName}`).find((candidate) => vfs.files.has(candidate));
-            if (coreCandidate) return coreCandidate;
+            for (const candidate of moduleCandidates(`/node/lib/${coreName}`)) {
+              try { readSource(candidate); return candidate; } catch { /* ignore */ }
+            }
             let directory = path.dirname(importer || '/node/index.js');
             while (true) {
               const packageBase = path.join(directory, 'node_modules', source);
-              let packageConfig;
-              try { packageConfig = readCjsPackageConfig(packageBase); } catch { packageConfig = undefined; }
-              if (packageConfig?.exports !== undefined && typeof processObj?.__bnhModuleResolve === 'function') {
-                const exported = processObj.__bnhModuleResolve(source, importer, ['node', 'require']).url;
-                const exportedPath = exported?.startsWith('file:') ? fileURLToPath(exported) : exported;
-                const exportedCandidate = typeof exportedPath === 'string'
-                  ? commonJsFileCandidates(exportedPath).find((candidate) => vfs.files.has(candidate))
-                  : undefined;
-                if (exportedCandidate) return exportedCandidate;
-              }
               if (!cjsPackageEntryCache.has(packageBase)) {
                 let packageEntry = null;
-                if (packageConfig) try {
-                  const main = typeof packageConfig.main === 'string' ? packageConfig.main : null;
+                const packageManifest = `${packageBase}/package.json`;
+                if (vfs.files.has(packageManifest)) try {
+                  const packageSource = readSource(packageManifest);
+                  const packageConfig = JSON.parse(typeof packageSource === 'string'
+                    ? packageSource
+                    : new TextDecoder().decode(packageSource));
+                  const main = typeof packageConfig.main === 'string'
+                    ? packageConfig.main
+                    : typeof packageConfig.module === 'string' ? packageConfig.module : null;
                   if (main && !main.startsWith('/')) packageEntry = path.join(packageBase, main);
                 } catch { /* package directory has no readable manifest */ }
                 cjsPackageEntryCache.set(packageBase, packageEntry);
               }
               const packageEntry = cjsPackageEntryCache.get(packageBase);
               if (packageEntry) {
-                const packageCandidate = commonJsFileCandidates(packageEntry).find((candidate) => vfs.files.has(candidate));
-                if (packageCandidate) return packageCandidate;
+                for (const candidate of moduleCandidates(packageEntry)) {
+                  try { readSource(candidate); return candidate; } catch { /* ignore */ }
+                }
               }
               // A package manifest's main entry takes precedence over the
               // package-root extension probes. Packages may ship an
               // index.mjs alongside a CommonJS main for require callers.
-              const packageRootCandidate = commonJsModuleCandidates(packageBase)
-                .find((candidate) => vfs.files.has(candidate));
-              if (packageRootCandidate) return packageRootCandidate;
+              for (const candidate of moduleCandidates(packageBase)) {
+                try { readSource(candidate); return candidate; } catch { /* ignore */ }
+              }
               if (directory === '/' || directory === '.' || directory === '') break;
               directory = path.dirname(directory);
             }
           }
           const base = specifier.startsWith('/') ? specifier : normalizePath(specifier, importer ? path.dirname(importer) : '/node');
-          const candidate = commonJsFileCandidates(base).find((pathname) => vfs.files.has(pathname));
-          if (candidate) return candidate;
-          // A mounted package graph may expose the directory only through its
-          // indexed child entries. Treat an existing CommonJS index as
-          // sufficient directory evidence before consulting package.json.
-          const indexCandidate = commonJsModuleCandidates(path.join(base, 'index'))
-            .find((pathname) => vfs.files.has(pathname));
-          let isDirectory = false;
-          try { isDirectory = vfs.fs.statSync(base).isDirectory?.() === true; } catch { /* missing path */ }
-          isDirectory ||= Boolean(indexCandidate);
-          if (isDirectory) {
-            let packageConfig;
-            try { packageConfig = readCjsPackageConfig(base); } catch { packageConfig = undefined; }
-            if (typeof packageConfig?.main === 'string' && !packageConfig.main.startsWith('/')) {
-              const packageCandidate = commonJsFileCandidates(path.resolve(base, packageConfig.main))
-                .find((pathname) => vfs.files.has(pathname));
-              if (packageCandidate) return packageCandidate;
-            }
-            if (indexCandidate) return indexCandidate;
+          for (const candidate of moduleCandidates(base)) {
+            try { readSource(candidate); return candidate; } catch { /* ignore */ }
           }
           if (addonsDisabled(processObj) || isNativeAddonBuildPath(base)) return nativeAddonPath(base);
           return base;
@@ -7950,15 +8102,14 @@ export function createRuntime({
         function packageType(entryPath) {
           let directory = path.dirname(entryPath);
           for (;;) {
-            if (directory.endsWith('/node_modules') && !isNpmBinShimPath(entryPath)) return 'commonjs';
-            if (cjsPackageTypeCache.has(directory)) return cjsPackageTypeCache.get(directory);
+            const packagePath = path.join(directory, 'package.json');
             try {
-              const packageConfig = readCjsPackageConfig(directory);
-              if (packageConfig) {
-                const type = packageConfig.type === 'module' ? 'module' : 'commonjs';
-                cjsPackageTypeCache.set(directory, type);
-                return type;
-              }
+              const packageSource = readSource(packagePath);
+              const packageText = typeof packageSource === 'string'
+                ? packageSource
+                : new TextDecoder().decode(packageSource);
+              const packageConfig = JSON.parse(packageText);
+              return packageConfig.type === 'module' ? 'module' : 'commonjs';
             } catch (error) {
               if (error?.code !== 'ENOENT') return 'commonjs';
             }
@@ -8093,6 +8244,13 @@ export function createRuntime({
         }
 
         function loadModuleSync(entryPath, parentImport = entryPath, processObj, scopeObj, bufferClass, stderrArr = [], sourceOverride = undefined, moduleState = { main: null }, isMain = false, compileCacheState = null, fromEval = false, syncStreamWebApi = null) {
+          // A synchronous child has its own CommonJS globals and module
+          // extension registry.  Reusing the runtime's outer Module API here
+          // compiles the entry through the parent process and sends stdio to
+          // the parent instead of the child's pipe.
+          const activeModuleApi = processObj?.__bnhModuleApi
+            || processObj?.__bnhModuleApiFactory?.()
+            || moduleApi;
           const moduleMocks = processObj?.__bnhModuleMocks
             || scopeObj?.process?.__bnhModuleMocks
             || scopeObj?.__bnhModuleMocks
@@ -8202,13 +8360,35 @@ export function createRuntime({
             if (compileCacheState && entryPath === compileCacheState.entryPath) compileCacheState.primaryAction = cacheAction;
           }
           const moduleExports = {};
-          const moduleRecord = new moduleApi(entryPath, moduleState.cache[parentImport] || null);
+          const moduleRecord = new activeModuleApi(entryPath, moduleState.cache[parentImport] || null);
           moduleRecord.filename = entryPath;
           moduleRecord.paths = moduleSearchPaths(entryPath);
           moduleRecord.exports = moduleExports;
           moduleState.cache[entryPath] = moduleRecord;
-          moduleApi._cache = moduleState.cache;
+          activeModuleApi._cache = moduleState.cache;
           if (isMain) moduleState.main = moduleRecord;
+          // Node invokes the active extension handler for CommonJS files.
+          // This is observable API surface used by loaders such as
+          // proxyquire to install a temporary module.require implementation.
+          // Entry source overrides (eval/launcher input) have no VFS file for
+          // an extension handler to read, so retain the direct path below.
+          const extensionHandler = activeModuleApi._extensions?.[path.extname(entryPath) || '.js'];
+          if (sourceOverride === undefined && !entryPath.startsWith('data:') && typeof extensionHandler === 'function') {
+            // The extension handler compiles through Module.prototype._compile,
+            // which reads the active API's _main property when it creates the
+            // module-local require function. Keep that API-level view in sync
+            // with the per-child loader state for the entry module; otherwise
+            // a normal file-backed main script observes require.main === null.
+            const previousMain = activeModuleApi._main;
+            if (isMain) activeModuleApi._main = moduleRecord;
+            try {
+              extensionHandler(moduleRecord, entryPath);
+            } finally {
+              if (isMain) activeModuleApi._main = previousMain;
+            }
+            moduleRecord.loaded = true;
+            return moduleRecord.exports;
+          }
           if (entryPath.endsWith('.json')) {
             moduleRecord.exports = JSON.parse(text);
             moduleRecord.loaded = true;
@@ -8262,8 +8442,8 @@ export function createRuntime({
                 emitInternalTestBindingWarning(processObj);
                 return internalTestBinding;
               }
-              if (builtin === 'dns') return dns;
-              if (builtin === 'dns/promises') return dnsPromises;
+              if (builtin === 'dns') return processObj?.__bnhDns || dns;
+              if (builtin === 'dns/promises') return processObj?.__bnhDns?.promises || dnsPromises;
               if (builtin === 'v8') return createBrowserV8Module(processObj, scopeObj);
               if (builtin === 'dgram' && processObj?._bnhDgram) return processObj._bnhDgram;
               const value = runtimeRequire(name);
@@ -8280,26 +8460,43 @@ export function createRuntime({
           // require.cache[filePath], so every CommonJS module must see the
           // cache that loadModuleSync actually consults.
           requireFn.cache = moduleState.cache;
-          requireFn.extensions = moduleApi._extensions;
+          requireFn.extensions = activeModuleApi._extensions;
           moduleRecord.require = requireFn;
           const importFromCommonJs = (specifier, options) => {
+            const tracker = processObj?._bnhTaskTracker;
+            const release = typeof tracker === 'function' ? tracker() : null;
+            const settle = (promise) => Promise.resolve(promise).then(
+              (value) => {
+                release?.(); return value;
+              },
+              (error) => {
+                release?.();
+                throw error;
+              },
+            );
             if (processObj?.execArgv?.some((argument) => String(argument) === '--experimental-default-type=module')
               && (String(specifier).startsWith('./') || String(specifier).startsWith('../'))
               && !path.extname(String(specifier))) {
               const error = new Error(`Cannot find module '${specifier}' imported from '${entryPath}'`);
               error.code = 'ERR_MODULE_NOT_FOUND';
               error.name = 'Error [ERR_MODULE_NOT_FOUND]';
+              release?.();
               throw error;
             }
-            if (typeof processObj?.__bnhModuleImport === 'function') {
-              return processObj.__bnhModuleImport(specifier, entryPath, options);
+            try {
+              if (typeof processObj?.__bnhModuleImport === 'function') {
+                return settle(processObj.__bnhModuleImport(specifier, entryPath, options));
+              }
+              const name = builtinName(specifier);
+              if (BUILTIN_NAMES.includes(name)) {
+                const value = runtimeRequire(name, entryPath);
+                return settle({ default: value, ...value });
+              }
+              return settle(esmLoader.import(specifier, entryPath, {}, options));
+            } catch (error) {
+              release?.();
+              throw error;
             }
-            const name = builtinName(specifier);
-            if (BUILTIN_NAMES.includes(name)) {
-              const value = runtimeRequire(name, entryPath);
-              return Promise.resolve({ default: value, ...value });
-            }
-            return esmLoader.import(specifier, entryPath, {}, options);
           };
           const previousActiveProcess = scopeObj.__bnhActiveProcess;
           const previousRuntimeActiveProcess = processObject.__bnhActiveProcess;
@@ -8314,7 +8511,7 @@ export function createRuntime({
               entryPath,
               [requireFn, moduleRecord, moduleExports, entryPath, path.dirname(entryPath),
                 importFromCommonJs],
-              moduleApi.wrapper,
+              activeModuleApi.wrapper,
               processObj,
             );
           } finally {
@@ -8493,11 +8690,20 @@ export function createRuntime({
             if (prepared.reportOnUncaughtException) childProc.processObject.report.reportOnUncaughtException = true;
             const childTaskReleases = new Set();
             const nativeQueueMicrotask = runtimeQueueMicrotask;
+            // A same-realm child has to drain the current Promise/microtask
+            // turn before its implicit beforeExit check. Node runs all
+            // already-queued promise reactions before deciding that a
+            // process is idle; checking from a microtask can otherwise close
+            // a child between two `await` continuations and lose its final
+            // stdout. Use the host timer surface so this check is not itself
+            // registered as child work.
+            const nativeSetTimeout = scope.__BNH_NATIVE_TIMERS__?.setTimeout
+              || scope.setTimeout.bind(scope);
             let childExitCheckQueued = false;
             const tryExitChild = () => {
               if (childExitCheckQueued) return;
               childExitCheckQueued = true;
-              nativeQueueMicrotask(() => {
+              nativeSetTimeout(() => {
                 childExitCheckQueued = false;
                 childProc.processObject._bnhRunInContext?.(() => {
                   if (childProc.processObject._bnhIsExited?.()
@@ -8516,8 +8722,8 @@ export function createRuntime({
                 });
               });
             };
-            const childTrackTask = () => {
-              const release = trackTask();
+            const childTrackTask = (label = null) => {
+              const release = trackTask(label);
               let released = false;
               const releaseChildTask = () => {
                 if (released) return;
@@ -8554,6 +8760,10 @@ export function createRuntime({
             }
             scope.http = childHttpModule;
             childProc.processObject._bnhTaskTracker = childTrackTask;
+            const childDns = createTrackedDns(childProc.processObject);
+            childProc.processObject.__bnhDns = childDns;
+            childProc.processObject._bnhBuiltinOverrides.dns = childDns;
+            childProc.processObject._bnhBuiltinOverrides['dns/promises'] = childDns.promises;
             childProc.processObject._bnhDgram = createBrowserDgram({
               network: virtualNetwork,
               BufferClass: Buffer,
@@ -8770,7 +8980,17 @@ export function createRuntime({
                 ].map((name) => [name, scope[name]]))
                 : null;
               if (nativeStreamWebApi) {
-                syncStreamWebApi = nativeStreamWebApi;
+                // Keep the browser-native implementation for the auxiliary
+                // constructors, but use the runtime's tracked ReadableStream
+                // wrapper. Node's `stream.finished()` must observe a web
+                // stream without acquiring its reader; the wrapper exposes
+                // the non-consuming closed lifecycle used by that contract.
+                syncStreamWebApi = {
+                  ...nativeStreamWebApi,
+                  ReadableStream: typeof streamWebApi?.ReadableStream === 'function'
+                    ? streamWebApi.ReadableStream
+                    : nativeStreamWebApi.ReadableStream,
+                };
               } else {
                 const syncReadable = loadSyncInternal('internal/webstreams/readablestream');
                 const syncWritable = loadSyncInternal('internal/webstreams/writablestream');
@@ -8936,20 +9156,13 @@ export function createRuntime({
                 const basename = (compileCacheState.primaryPath || entryPath).split('/').pop() || entryPath;
                 stderrArr.push(`[compile cache] skip ${basename} because cache was the same\n`);
               }
-              if (!options.asyncLifecycle || childProc?.processObject?._bnhIsExited?.()) {
-                scope.process = previousState.process;
-              } else {
-                // Same-realm async children continue after this synchronous
-                // bootstrap returns. Keep their Node process binding visible
-                // until the child exits so native async continuations do not
-                // observe the parent process object.
-                scope.process = childProc.processObject;
-              }
-              if (!options.asyncLifecycle || childProc?.processObject?._bnhIsExited?.()) {
-                scope.console = previousState.console;
-              } else {
-                scope.console = childProc.processObject._bnhConsole;
-              }
+              // Async callbacks re-enter their owning child through the
+              // timer/stream context hooks above. Never leave a child’s
+              // logical process or console installed globally after this
+              // synchronous bootstrap; doing so contaminates the parent
+              // runner while the child remains alive.
+              scope.process = previousState.process;
+              scope.console = previousState.console;
               scope.require = previousState.require;
               scope.global = previousState.global;
               scope.Buffer = previousState.Buffer;
@@ -9018,34 +9231,40 @@ export function createRuntime({
         }
 
         function runPreparedESM(prepared, options, writeStdout, writeStderr) {
-          // Child descriptors are created in this same browser realm. VFS
-          // file buffers are replaced, never mutated in place, so sharing
-          // them avoids copying the complete mounted tree for every child.
-          // An IPC child crosses a Worker boundary and cannot receive the
-          // live backend. Give that boundary a complete serializable snapshot
-          // without first duplicating every immutable file buffer; the worker
-          // boundary converts those buffers to shared storage when available.
-          vfs.shareFileBuffers?.(scope);
-          const snapshot = options.ipc
-            ? vfs.snapshot({ copy: false, includeFiles: false })
-            : vfs.snapshot({ copy: false, includeBackend: true, includeFiles: false });
-          const files = snapshot.backend
-            ? {}
-            : Object.fromEntries(snapshot.artifacts.map(({ path, bytes }) => [path, bytes]));
-          if (options.ipc) {
-            for (const directory of snapshot.directories || []) {
-              if (directory !== '/node' && !directory.startsWith('/node/')) continue;
-              if (!files[directory]) files[directory] = { type: 'directory' };
-            }
+          let esmEntryPath = prepared.entryPath;
+          try { esmEntryPath = vfs.fs.realpathSync(esmEntryPath); } catch { /* preserve unresolved diagnostics */ }
+          const esmPrepared = esmEntryPath === prepared.entryPath
+            ? prepared
+            : {
+              ...prepared,
+              entryPath: esmEntryPath,
+              mainPath: prepared.mainPath === prepared.entryPath ? esmEntryPath : prepared.mainPath,
+              scriptPath: prepared.scriptPath === prepared.entryPath ? esmEntryPath : prepared.scriptPath,
+            };
+          // An asynchronous ESM child is a separate Node process and must not
+          // share its parent's module-loader cache or lifecycle event loop.
+          // Keep the VFS and network capabilities shared through the normal
+          // worker bridge, but give every async ESM child its own realm. This
+          // also prevents a parent waiting on a child from blocking that
+          // child's module evaluation and terminal frame.
+          const workerIsolation = Boolean(
+            options.ipc
+            || options.asyncLifecycle
+            || esmExecutionDepth > 0
+            || processObject.__bnhEsmNested,
+          );
+          const snapshot = vfs.snapshot();
+          const files = Object.fromEntries(
+            snapshot.artifacts.map(({ path, bytes }) => [path, bytes]),
+          );
+          if (esmPrepared.source !== null) {
+            files[esmPrepared.entryPath] = new TextEncoder().encode(esmPrepared.source);
           }
-          if (prepared.source !== null) {
-            files[prepared.entryPath] = new TextEncoder().encode(prepared.source);
-          }
-          const networkChannel = options.ipc ? createMessageChannel(scope) : null;
+          const networkChannel = workerIsolation ? createMessageChannel(scope) : null;
           const workerNetworkBridge = networkChannel
             ? createWorkerNetworkBridge({ network: virtualNetwork, port: networkChannel.port1 })
             : null;
-          const suppressWarnings = prepared.executionArgv.some((value) => String(value) === '--no-warnings');
+          const suppressWarnings = esmPrepared.executionArgv.some((value) => String(value) === '--no-warnings');
           const forwardStdout = (value) => {
             const text = normalizeOutputChunk(value);
             if (text) writeStdout(text);
@@ -9057,9 +9276,9 @@ export function createRuntime({
             }
             if (text) writeStderr(text);
           };
-          const childArgv = prepared.evalCode !== null
-            ? [prepared.executionArgv[0], ...prepared.afterScript]
-            : [prepared.executionArgv[0], ...(prepared.scriptPath ? [prepared.scriptPath] : []), ...prepared.afterScript];
+          const childArgv = esmPrepared.evalCode !== null
+            ? [esmPrepared.executionArgv[0], ...esmPrepared.afterScript]
+            : [esmPrepared.executionArgv[0], ...(esmPrepared.scriptPath ? [esmPrepared.scriptPath] : []), ...esmPrepared.afterScript];
           const scriptIndex = prepared.scriptPath
             ? prepared.executionArgv.indexOf(prepared.scriptPath)
             : prepared.executionArgv.length;
@@ -9081,41 +9300,34 @@ export function createRuntime({
                   typeof proxyCapability.adapter[operation] === 'function'
                 ))
             : [];
-          // A worker boundary can only receive structured-cloneable data.
-          // Keep the live adapter in the parent and expose its allowlisted
-          // operations through the existing process RPC channel.
-          const proxySelection = {
-            mode: proxyCapability.mode,
-            enabled: proxyCapability.enabled,
-            capabilityKey: proxyCapability.capabilityKey,
-            capability: proxyCapability.capability,
-            capabilityGranted: proxyCapability.capabilityGranted,
-          };
-          const childProxy = options.ipc && proxyCapability.adapter
-            ? { ...proxySelection, operations: proxyOperations, rpc: true }
+          const childProxy = workerIsolation
+            ? proxyCapability.adapter
+              ? { ...(capabilities.manifest.proxy || {}), operations: proxyOperations, rpc: true }
+              : capabilities.manifest.proxy
             : proxyCapability.adapter ? proxyCapability : capabilities.manifest.proxy;
           const esmDescriptor = {
             capabilities: capabilities.manifest,
             nodeVersion: resolvedProfile.id,
             files,
-            ...(options.ipc ? {} : { vfsBackend: snapshot.backend }),
             symlinks: snapshot.symlinks,
-            entry: prepared.entryPath,
+            entry: esmPrepared.entryPath,
             execArgv: childExecArgv,
             proxy: childProxy,
-            virtualNetwork: options.ipc
-              ? { shared: true }
-              : { shared: true, network: virtualNetwork },
+            virtualNetwork: workerIsolation ? { shared: true } : { shared: true, network: virtualNetwork },
+            esmNested: workerIsolation,
           };
           const run = async (context) => {
             const previous = esmExecutionTail;
             let release;
             esmExecutionTail = new Promise((resolve) => { release = resolve; });
             await previous;
+            esmExecutionDepth += 1;
             try {
               const { runProcessEntry } = await import('./runtime/process-entry.js');
-              return await runProcessEntry({ ...context, vfs: esmDescriptor });
+              const result = await runProcessEntry({ ...context, vfs: esmDescriptor });
+              return result;
             } finally {
+              esmExecutionDepth = Math.max(0, esmExecutionDepth - 1);
               release();
             }
           };
@@ -9124,10 +9336,10 @@ export function createRuntime({
             nodeVersion: resolvedProfile.id,
             runId: runSpec?.runId,
             childId: `child-${childSequence}`,
-            entry: prepared.entryPath,
+            entry: esmPrepared.entryPath,
             argv: childArgv,
-            env: prepared.env,
-            cwd: prepared.cwd,
+            env: esmPrepared.env,
+            cwd: esmPrepared.cwd,
             signal: options.signal,
             signalGrants: capabilities.manifest.signals.allowed,
             workerSource: new URL('./runtime/process-entry.js', import.meta.url).href,
@@ -9135,14 +9347,12 @@ export function createRuntime({
             execArgv: childExecArgv,
             vfs: esmDescriptor,
             run,
-            // ESM fork children are independent process boundaries. Keep
-            // non-IPC children in this realm so they can share live virtual
-            // resources, but isolate IPC children so a parent awaiting its
-            // own module lifecycle cannot serialize a child behind itself.
-            forceFallback: !options.ipc,
+            // Child processes may create a server after they start. Keep them
+            // in this realm so later siblings can share the live registry.
+            forceFallback: !workerIsolation,
             preserveReferences: true,
             networkPort: networkChannel?.raw.port2,
-            proxyAdapter: options.ipc ? proxyCapability.adapter : undefined,
+            proxyAdapter: workerIsolation ? proxyCapability.adapter : undefined,
             stdout: forwardStdout,
             stderr: forwardStderr,
           });
@@ -9184,11 +9394,7 @@ export function createRuntime({
           return execFileSync(parsed.file, parsed.args, { ...options, stdinPath: parsed.stdinPath });
         }
 
-        const runNpmChild = async (prepared, ownerProcess, childOptions = {}) => {
-          // Package-manager link registrations belong to the owning process,
-          // so separate child commands in one lifecycle can share them.
-          const yarnLinks = ownerProcess.__bnhYarnLinks || new Map();
-          ownerProcess.__bnhYarnLinks = yarnLinks;
+          const runNpmChild = async (prepared, ownerProcess, childOptions = {}) => {
           const args = prepared.commandArgs.map(String);
           const optionsWithValues = new Set([
             '--cache', '--prefix', '--registry', '--userconfig', '--loglevel', '--workspace', '-w',
@@ -9202,14 +9408,10 @@ export function createRuntime({
             }
             return { name: '', index: -1 };
           })();
-          // Package managers receive the child environment assembled by
-          // prepareChild. Reading only the owner would drop child-specific
-          // npm/TMP settings and makes a nested package command observe the
-          // wrong process contract.
+          // Package managers receive the environment assembled for this
+          // child. Reading only the owner drops child-specific npm/TMP
+          // settings from nested lifecycle commands.
           const env = prepared.env || ownerProcess.env || processObject.env || {};
-          // npm resolves its temporary directory during startup. The browser
-          // implementation does not run npm's host-side setup, so establish
-          // the standard virtual paths before emulating the child.
           for (const key of ['npm_config_tmp', 'TMPDIR', 'TMP', 'TEMP']) {
             const configuredPath = env[key];
             if (typeof configuredPath === 'string' && configuredPath.startsWith('/')) {
@@ -9266,61 +9468,48 @@ export function createRuntime({
             return { npm, metadata, parsed, ...resolved };
           };
 
-          const safeChildPath = (value, cwd = '/node') => {
-            const normalized = normalizePath(String(value || ''), cwd || '/node');
-            if (normalized === '/node' || normalized.startsWith('/node/')) return normalized.slice(0, 256);
-            return `<path:${normalized.split('/').pop()?.slice(0, 80) || 'unknown'}>`;
+          const childActivity = processObject.__bnhChildActivity ||= {
+            launched: 0,
+            completed: 0,
+            failed: 0,
+            first: null,
+            last: null,
+            recent: [],
           };
-          const safeChildArg = (value, cwd) => {
-            const text = String(value ?? '');
-            if (text.startsWith('/') || text.startsWith('.') || text.includes('/')) return safeChildPath(text, cwd);
-            if (text.startsWith('-')) return text.split('=', 1)[0].slice(0, 80);
-            return `<arg:${text.length}>`;
-          };
-          const outputBytes = (value) => {
-            if (value instanceof ArrayBuffer) return value.byteLength;
-            if (ArrayBuffer.isView(value)) return value.byteLength;
-            return new TextEncoder().encode(String(value || '')).byteLength;
-          };
-          const recordChildActivity = (options, result, error = null) => {
-            childActivity.completed += 1;
-            if (error || result?.code !== 0) childActivity.failed += 1;
-            const terminal = result?.terminal;
-            const record = {
-              command: String(options.entry || '').split('/').pop() || '<unknown>',
-              stage: options.stage || null,
-              entry: safeChildPath(options.entry, options.cwd),
-              argv: (options.argv || []).slice(0, 32).map((value) => safeChildArg(value, options.cwd)),
-              argumentCount: Array.isArray(options.argv) ? options.argv.length : 0,
-              cwd: safeChildPath(options.cwd || '/node'),
-              code: result?.code ?? null,
-              signal: terminal?.signal ?? null,
-              stdoutBytes: outputBytes(result?.stdout || ''),
-              stderrBytes: outputBytes(result?.stderr || ''),
-              terminal: terminal ? {
-                status: terminal.status || null,
-                kind: terminal.kind || null,
-                code: terminal.code ?? null,
-                signal: terminal.signal ?? null,
-                error: terminal.error ? {
-                  name: terminal.error.name || 'Error',
-                  code: terminal.error.code || null,
-                } : null,
-              } : null,
-              error: error ? {
-                name: error.name || 'Error',
-                code: error.code || null,
-              } : null,
-            };
-            if (!childActivity.first) childActivity.first = record;
-            childActivity.last = record;
-            childActivity.recent.push(record);
-            if (childActivity.recent.length > 16) childActivity.recent.shift();
-          };
-          const runVirtualCommandInternal = (options) => {
-            const { entry, argv, cwd, commandEnv, stdin, signal, timeout, onStdout, onStderr } = options;
-            childActivity.launched += 1;
+          childActivity.recent ||= [];
+          const runVirtualCommandInternal = ({ entry, argv, cwd, commandEnv, stdin, signal, timeout, onStdout, onStderr }) => {
             const isNodeExecutable = (pathname) => /(?:^|\/)node(?:js)?$/.test(String(pathname));
+            const commandName = String(entry).split('/').pop();
+            if (['npm', 'yarn', 'yarnpkg'].includes(commandName)) {
+              const managerPrepared = prepareChild(entry, argv || [], {
+                cwd,
+                env: commandEnv,
+                input: stdin,
+                signal,
+                timeout,
+              }, ownerProcess);
+              return (async () => {
+                let streamedOutput = false;
+                const result = await runNpmChild(managerPrepared, ownerProcess, {
+                  signal,
+                  timeout,
+                  stdin: stdin,
+                  onStdout: (value) => {
+                    streamedOutput = true;
+                    onStdout?.(value);
+                  },
+                  onStderr: (value) => {
+                    streamedOutput = true;
+                    onStderr?.(value);
+                  },
+                });
+                if (!streamedOutput) {
+                  if (result.stdout) onStdout?.(result.stdout);
+                  if (result.stderr) onStderr?.(result.stderr);
+                }
+                return result;
+              })();
+            }
             let shebangScript = false;
             try {
               const source = readSource(normalizePath(entry, cwd || ownerProcess.cwd?.() || '/node'));
@@ -9338,20 +9527,16 @@ export function createRuntime({
                 signal,
                 timeout,
               }, ownerProcess);
-              const stdout = [];
-              const stderr = [];
-              const complete = (code, signalValue) => ({
-                code: signalValue ? null : code ?? 1,
-                stdout: stdout.join(''),
-                stderr: stderr.join(''),
-                streamed: Boolean(stdout.length || stderr.length),
-              });
-              // A shebang launcher may itself be an ESM file (for example a
-              // package bin in a module-typed package). Preserve Node's
-              // module format at this boundary instead of forcing every
-              // direct virtual command through the CommonJS evaluator.
-              if (isRuntimeEsmModule(prepared.entryPath, prepared.executionArgv)) {
-                const processHandle = runPreparedESM(prepared, { signal, timeout, asyncLifecycle: true }, (value) => {
+              const useEsm = prepared.entryPath.endsWith('.mjs') || prepared.moduleInput
+                || prepared.experimentalLoader
+                || isRuntimeEsmModule(prepared.entryPath, prepared.executionArgv);
+              if (useEsm) {
+                const stdout = [];
+                const stderr = [];
+                const processHandle = runPreparedESM(prepared, {
+                  signal,
+                  timeout,
+                }, (value) => {
                   const chunk = normalizeOutputChunk(value);
                   stdout.push(chunk);
                   onStdout?.(chunk);
@@ -9360,18 +9545,28 @@ export function createRuntime({
                   stderr.push(chunk);
                   onStderr?.(chunk);
                 });
-                return processHandle.wait().then(
-                  (terminal) => complete(terminal.code, terminal.signal),
-                  (error) => {
-                    const message = `${error?.stack || error?.message || error}\n`;
-                    if (!stderr.length) {
+                return processHandle.wait().then((terminal) => {
+                  const code = terminal.signal ? null : terminal.code ?? 1;
+                  if (code !== 0 || terminal.signal || terminal.error) {
+                    const detail = terminal.error?.stack || terminal.error?.message || '';
+                    const message = detail ? `${detail}\n` : '';
+                    if (message) {
                       stderr.push(message);
                       onStderr?.(message);
                     }
-                    return complete(1, null);
-                  },
-                );
+                  }
+                  return {
+                    code,
+                    stdout: stdout.join(''),
+                    stderr: stderr.join(''),
+                    streamed: Boolean((onStdout && stdout.length) || (onStderr && stderr.length)),
+                    terminal,
+                    runtimeState: terminal.runtimeState || null,
+                  };
+                });
               }
+              const stdout = [];
+              const stderr = [];
               const result = runPreparedSync(prepared, {
                 asyncLifecycle: true,
                 encoding: 'utf8',
@@ -9400,102 +9595,32 @@ export function createRuntime({
               };
               forwardReturnedOutput(result.stdout, stdout, onStdout);
               forwardReturnedOutput(result.stderr, stderr, onStderr);
-              const syncComplete = (code, signalValue) => ({
-                code: signalValue ? null : code ?? result.status ?? 1,
-                stdout: stdout.join(''),
-                stderr: stderr.join(''),
-                streamed: Boolean(stdout.length || stderr.length),
-              });
-              if (!result.pending || !result.process) {
-                return Promise.resolve(syncComplete(result.status, result.signal));
-              }
-              return new Promise((resolve) => {
-                result.process.once('exit', (code, signalValue) => {
-                  scope.queueMicrotask(() => {
-                    const finalSignal = result.process.getSignal?.() || signalValue || null;
-                    const finalCode = finalSignal
-                      ? null
-                      : (result.process.getCode?.() ?? code);
-                    resolve(syncComplete(finalCode, finalSignal));
-                  });
-                });
-              });
-            }
-            if ((entry === processObject.execPath || isNodeExecutable(entry)) && Array.isArray(argv)
-              && typeof argv[0] === 'string' && !argv[0].startsWith('-')) {
-              const prepared = prepareChild(entry, argv, {
-                cwd,
-                env: commandEnv,
-                input: stdin,
-                signal,
-                timeout,
-              }, ownerProcess);
-              const stdout = [];
-              const stderr = [];
-              const complete = (code, signalValue) => ({
-                code: signalValue ? null : code ?? 1,
-                stdout: stdout.join(''),
-                stderr: stderr.join(''),
-                streamed: Boolean(stdout.length || stderr.length),
-              });
-              if (isRuntimeEsmModule(prepared.entryPath, prepared.executionArgv)) {
-                const processHandle = runPreparedESM(prepared, { signal, timeout, asyncLifecycle: true }, (value) => {
-                  const chunk = normalizeOutputChunk(value);
-                  stdout.push(chunk);
-                  onStdout?.(chunk);
-                }, (value) => {
-                  const chunk = normalizeOutputChunk(value);
-                  stderr.push(chunk);
-                  onStderr?.(chunk);
-                });
-                return processHandle.wait().then(
-                  (terminal) => complete(terminal.code, terminal.signal),
-                  (error) => {
-                    const message = String(error?.stack || error?.message || error) + '\n';
-                    if (!stderr.length) {
-                      stderr.push(message);
-                      onStderr?.(message);
-                    }
-                    return complete(1, null);
-                  },
-                );
-              }
-              const result = runPreparedSync(prepared, {
-                asyncLifecycle: true,
-                encoding: 'utf8',
-                onStdout: (value) => {
-                  const chunk = normalizeOutputChunk(value);
-                  stdout.push(chunk);
-                  onStdout?.(chunk);
-                },
-                onStderr: (value) => {
-                  const chunk = normalizeOutputChunk(value);
-                  stderr.push(chunk);
-                  onStderr?.(chunk);
-                },
-              });
-              const forwardReturnedOutput = (value, target, callback) => {
-                const returned = normalizeOutputChunk(value);
-                if (!returned) return;
-                const streamed = target.join('');
-                if (streamed === returned || streamed.endsWith(returned)) return;
-                const missing = returned.startsWith(streamed)
-                  ? returned.slice(streamed.length)
-                  : returned;
-                if (!missing) return;
-                target.push(missing);
-                callback?.(missing);
+              const complete = (code, signalValue) => {
+                const finalCode = signalValue ? null : code ?? result.status ?? 1;
+                if (finalCode !== 0) {
+                  const terminalError = result.process?.terminalRecord?.error
+                    || result.process?.terminal?.error
+                    || result.process?.__bnhUncaughtException;
+                  const detail = terminalError?.stack || terminalError?.message
+                    || `child exited with code ${finalCode} (runtime exitCode=${result.process?.exitCode ?? 'unknown'})`;
+                  const message = `${detail}\n`;
+                  stderr.push(message);
+                  onStderr?.(message);
+                }
+                return {
+                  code: finalCode,
+                  stdout: stdout.join(''),
+                  stderr: stderr.join(''),
+                  streamed: Boolean((onStdout && stdout.length) || (onStderr && stderr.length)),
+                  terminal: result.process?.terminalRecord || result.process?.terminal || null,
+                  runtimeState: result.process?.terminalRecord?.runtimeState
+                    || result.process?.terminal?.runtimeState
+                    || result.process?.__bnhNodeTestState
+                    || null,
+                };
               };
-              forwardReturnedOutput(result.stdout, stdout, onStdout);
-              forwardReturnedOutput(result.stderr, stderr, onStderr);
-              const syncComplete = (code, signalValue) => ({
-                code: signalValue ? null : code ?? result.status ?? 1,
-                stdout: stdout.join(''),
-                stderr: stderr.join(''),
-                streamed: Boolean(stdout.length || stderr.length),
-              });
               if (!result.pending || !result.process) {
-                return Promise.resolve(syncComplete(result.status, result.signal));
+                return Promise.resolve(complete(result.status, result.signal));
               }
               return new Promise((resolve) => {
                 result.process.once('exit', (code, signalValue) => {
@@ -9504,7 +9629,7 @@ export function createRuntime({
                     const finalCode = finalSignal
                       ? null
                       : (result.process.getCode?.() ?? code);
-                    resolve(syncComplete(finalCode, finalSignal));
+                    resolve(complete(finalCode, finalSignal));
                   });
                 });
               });
@@ -9530,7 +9655,75 @@ export function createRuntime({
                 code: result.status ?? 1,
                 stdout,
                 stderr,
-                streamed: Boolean(stdout || stderr),
+                streamed: Boolean((onStdout && stdout) || (onStderr && stderr)),
+              });
+            }
+            // A shell's `node script.js` command is a real child launch. Run
+            // the script through the same prepared-process path as spawn so
+            // its exit, output, and pending lifecycle are observed directly;
+            // routing back through virtualAsync would create a second child
+            // boundary and can lose the terminal event between sequential
+            // package lifecycle commands.
+            if ((entry === processObject.execPath || isNodeExecutable(entry))
+              && Array.isArray(argv) && typeof argv[0] === 'string' && !argv[0].startsWith('-')) {
+              const prepared = prepareChild(entry, argv, {
+                cwd,
+                env: commandEnv,
+                input: stdin,
+                signal,
+                timeout,
+              }, ownerProcess);
+              const stdout = [];
+              const stderr = [];
+              const result = runPreparedSync(prepared, {
+                asyncLifecycle: true,
+                encoding: 'utf8',
+                onStdout: (value) => {
+                  const chunk = normalizeOutputChunk(value);
+                  stdout.push(chunk);
+                  onStdout?.(chunk);
+                },
+                onStderr: (value) => {
+                  const chunk = normalizeOutputChunk(value);
+                  stderr.push(chunk);
+                  onStderr?.(chunk);
+                },
+              });
+              const complete = (code, signalValue) => {
+                const finalCode = signalValue ? null : code ?? result.status ?? 1;
+                if (finalCode !== 0) {
+                  const terminalError = result.process?.terminalRecord?.error
+                    || result.process?.terminal?.error
+                    || result.process?.__bnhUncaughtException;
+                  const detail = terminalError?.stack || terminalError?.message
+                    || `child exited with code ${finalCode} (runtime exitCode=${result.process?.exitCode ?? 'unknown'})`;
+                  const message = `${detail}\n`;
+                  if (!stderr.join('').includes(message)) {
+                    stderr.push(message);
+                    onStderr?.(message);
+                  }
+                }
+                return {
+                  code: finalCode,
+                  stdout: stdout.join(''),
+                  stderr: stderr.join(''),
+                  streamed: Boolean((onStdout && stdout.length) || (onStderr && stderr.length)),
+                  terminal: result.process?.terminalRecord || result.process?.terminal || null,
+                  runtimeState: result.process?.terminalRecord?.runtimeState
+                    || result.process?.terminal?.runtimeState
+                    || result.process?.__bnhNodeTestState
+                    || null,
+                };
+              };
+              if (!result.pending || !result.process) return Promise.resolve(complete(result.status, result.signal));
+              return new Promise((resolve) => {
+                result.process.once('exit', (code, signalValue) => {
+                  scope.queueMicrotask(() => {
+                    const finalSignal = result.process.getSignal?.() || signalValue || null;
+                    const finalCode = finalSignal ? null : (result.process.getCode?.() ?? code);
+                    resolve(complete(finalCode, finalSignal));
+                  });
+                });
               });
             }
             return new Promise((resolve) => {
@@ -9549,7 +9742,7 @@ export function createRuntime({
                   code: code ?? 1,
                   stdout,
                   stderr,
-                  streamed: output.length > 0 || errors.length > 0,
+                  streamed: Boolean((onStdout && output.length) || (onStderr && errors.length)),
                 });
               };
               const child = virtualAsync(entry, argv, {
@@ -9579,7 +9772,99 @@ export function createRuntime({
             });
           };
 
+          const summarizeChildRuntimeState = (value) => {
+            if (!value || typeof value !== 'object') return null;
+            const nodeTest = value.nodeTest && typeof value.nodeTest === 'object'
+              ? value.nodeTest
+              : value;
+            const boundedText = (input, limit = 512) => String(input || '').slice(0, limit);
+            const listSummary = (items) => {
+              if (!Array.isArray(items)) return null;
+              return {
+                count: items.length,
+                first: items.length ? boundedText(items[0], 256) : null,
+                last: items.length > 1 ? boundedText(items.at(-1), 256) : items.length ? boundedText(items[0], 256) : null,
+              };
+            };
+            return {
+              exitCode: value.exitCode ?? null,
+              runtimeCode: value.runtimeCode ?? null,
+              nodeTest: {
+                registered: Number(nodeTest.registered) || 0,
+                completed: Number(nodeTest.completed) || 0,
+                activeTest: nodeTest.activeTest ? {
+                  name: boundedText(nodeTest.activeTest.name, 160) || null,
+                  fullName: boundedText(nodeTest.activeTest.fullName, 240) || null,
+                  file: boundedText(nodeTest.activeTest.file, 256) || null,
+                  state: boundedText(nodeTest.activeTest.state, 32) || 'running',
+                } : null,
+                requestedFiles: listSummary(nodeTest.requestedFiles),
+                files: listSummary(nodeTest.files),
+                streamEvents: listSummary(nodeTest.streamEvents),
+                streamError: nodeTest.streamError ? {
+                  name: boundedText(nodeTest.streamError.name || 'Error', 64),
+                  message: boundedText(nodeTest.streamError.message || nodeTest.streamError),
+                } : null,
+                streamTerminal: nodeTest.streamTerminal == null ? null : boundedText(nodeTest.streamTerminal, 64),
+              },
+            };
+          };
+          const recordChildActivity = (options, result, error = null) => {
+            childActivity.completed += 1;
+            if (error || result?.code !== 0) childActivity.failed += 1;
+            const terminal = result?.terminal;
+            const boundedText = (value, limit = 512) => String(value || '').slice(0, limit);
+            const outputBytes = (value) => {
+              if (value instanceof ArrayBuffer) return value.byteLength;
+              if (ArrayBuffer.isView(value)) return value.byteLength;
+              return new TextEncoder().encode(String(value || '')).byteLength;
+            };
+            const record = {
+              entry: boundedText(options.entry, 256),
+              argv: (options.argv || []).slice(0, 32).map((value) => boundedText(value, 128)),
+              argumentCount: Array.isArray(options.argv) ? options.argv.length : 0,
+              cwd: boundedText(options.cwd, 256),
+              code: result?.code ?? null,
+              pending: Boolean(result?.pending),
+              stdoutBytes: outputBytes(result?.stdout || ''),
+              stderrBytes: outputBytes(result?.stderr || ''),
+              stdoutExcerpt: boundedText(result?.stdout),
+              stderrExcerpt: boundedText(result?.stderr),
+              terminal: terminal ? {
+                status: boundedText(terminal.status, 64) || null,
+                kind: boundedText(terminal.kind, 64) || null,
+                code: terminal.code ?? null,
+                signal: terminal.signal ?? null,
+                error: terminal.error ? {
+                  name: boundedText(terminal.error.name, 64) || 'Error',
+                  message: boundedText(terminal.error.message || terminal.error),
+                  code: boundedText(terminal.error.code, 64) || null,
+                } : null,
+              } : null,
+              runtimeState: summarizeChildRuntimeState(result?.runtimeState || terminal?.runtimeState),
+              error: error ? {
+                name: boundedText(error.name, 64) || 'Error',
+                message: boundedText(error.message || error),
+                code: boundedText(error.code, 64) || null,
+              } : null,
+            };
+            if (!childActivity.first) childActivity.first = record;
+            childActivity.last = record;
+            childActivity.recent.push(record);
+            if (childActivity.recent.length > 16) childActivity.recent.shift();
+            const completeOutput = {
+              ...record,
+              stdout: normalizeOutputChunk(result?.stdout || ''),
+              stderr: normalizeOutputChunk(result?.stderr || ''),
+            };
+            if (typeof ownerProcess.__bnhChildOutput === 'function') {
+              ownerProcess.__bnhChildOutput(completeOutput);
+            } else {
+              (ownerProcess.__bnhChildOutputs ||= []).push(completeOutput);
+            }
+          };
           const runVirtualCommand = (options) => {
+            childActivity.launched += 1;
             let result;
             try {
               result = runVirtualCommandInternal(options);
@@ -9610,27 +9895,6 @@ export function createRuntime({
             copy: (source, destination, copyOptions) => vfs.fs.cpSync(source, destination, copyOptions),
             rename: (source, destination) => vfs.fs.renameSync(source, destination),
             glob: async (pattern, cwd) => vfs.fs.globSync(pattern, { cwd }),
-          };
-
-          const runPackageLink = async ({ packages = [], cwd = prepared.cwd }) => {
-            const npm = createNpm();
-            const packageJson = await npm.readPackageJson(cwd);
-            if (!packages.length) {
-              if (!packageJson?.name) return { code: 1, stdout: '', stderr: 'npm link requires a named package\n' };
-              yarnLinks.set(packageJson.name, cwd);
-              return { code: 0, stdout: '', stderr: '' };
-            }
-            for (const packageName of packages) {
-              const source = yarnLinks.get(packageName);
-              if (!source) {
-                return { code: 1, stdout: '', stderr: `npm link ${packageName}: package has not been linked\n` };
-              }
-              const destination = `${cwd.replace(/\/+$/, '')}/node_modules/${packageName}`;
-              if (vfs.fs.existsSync(destination)) vfs.fs.rmSync(destination, { recursive: true, force: true });
-              await vfs.fs.promises.mkdir(path.dirname(destination), { recursive: true });
-              await vfs.fs.promises.symlink(source, destination);
-            }
-            return { code: 0, stdout: '', stderr: '' };
           };
 
           const runNodeCommand = (nodeOptions) => {
@@ -9677,7 +9941,7 @@ export function createRuntime({
                 code: terminal.signal ? null : terminal.code ?? 1,
                 stdout: stdout.join(''),
                 stderr: stderr.join(''),
-                streamed: Boolean(stdout.length || stderr.length),
+                streamed: Boolean((nodeOptions.onStdout && stdout.length) || (nodeOptions.onStderr && stderr.length)),
               }),
               (error) => {
                 const message = `${error?.stack || error?.message || error}\n`;
@@ -9689,7 +9953,7 @@ export function createRuntime({
                   code: 1,
                   stdout: stdout.join(''),
                   stderr: stderr.join(''),
-                  streamed: Boolean(stdout.length || stderr.length),
+                  streamed: Boolean((nodeOptions.onStdout && stdout.length) || (nodeOptions.onStderr && stderr.length)),
                 };
               },
             );
@@ -9727,34 +9991,27 @@ export function createRuntime({
               onStdout: (chunk) => {
                 const textChunk = String(chunk);
                 stdout.push(textChunk);
-                forwarded = true;
-                scriptOptions.onStdout?.(textChunk);
+                if (typeof scriptOptions.onStdout === 'function') {
+                  forwarded = true;
+                  scriptOptions.onStdout(textChunk);
+                }
               },
               onStderr: (chunk) => {
                 const textChunk = String(chunk);
                 stderr.push(textChunk);
-                forwarded = true;
-                scriptOptions.onStderr?.(textChunk);
+                if (typeof scriptOptions.onStderr === 'function') {
+                  forwarded = true;
+                  scriptOptions.onStderr(textChunk);
+                }
               },
               npmRun: (nestedName, nestedOptions) => runPackageScript(nestedName, {
                 ...nestedOptions,
                 cwd: nestedOptions?.cwd || scriptCwd,
                 env: nestedOptions?.env || scriptEnv,
+                onNetwork: nestedOptions?.onNetwork || scriptOptions.onNetwork,
+                onStdout: nestedOptions?.onStdout || scriptOptions.onStdout,
+                onStderr: nestedOptions?.onStderr || scriptOptions.onStderr,
               }),
-              npmInstall: async ({ specs = [], cwd = scriptCwd }) => {
-                const npm = createNpm();
-                const packageJson = await npm.readPackageJson(cwd);
-                const installSpecs = specs.length
-                  ? specs
-                  : Object.entries({
-                    ...packageJson?.dependencies,
-                    ...packageJson?.devDependencies,
-                    ...packageJson?.optionalDependencies,
-                  }).map(([name, range]) => `${name}@${range}`);
-                await npm.install(installSpecs, { cwd, cacheUnpacked: false, returnFiles: false });
-                return { code: 0 };
-              },
-              npmLink: (linkOptions) => runPackageLink({ ...linkOptions, cwd: linkOptions?.cwd || scriptCwd }),
               runCommand: (commandOptions) => runVirtualCommand({
                 entry: commandOptions.entry,
                 argv: commandOptions.argv,
@@ -9795,23 +10052,57 @@ export function createRuntime({
             const stderr = [];
             let forwarded = false;
             for (const name of lifecycle) {
-              const result = await runScriptBody(name, packageJson, {
-                ...scriptOptions,
-                args: name === scriptName ? scriptOptions.args : [],
-              });
+              let result;
+              try {
+                result = await runScriptBody(name, packageJson, {
+                  ...scriptOptions,
+                  args: name === scriptName ? scriptOptions.args : [],
+                });
+              } catch (error) {
+                const message = `${error?.stack || error?.message || error}\n`;
+                scriptOptions.onStderr?.(message);
+                return {
+                  code: 1,
+                  stdout: stdout.join(''),
+                  stderr: `${stderr.join('')}${message}`,
+                  streamed: true,
+                  forwarded: Boolean(stdout.length || stderr.length),
+                };
+              }
               stdout.push(result.stdout);
               stderr.push(result.stderr);
               forwarded ||= result.forwarded;
-              if (result.code !== 0) return {
-                code: result.code,
-                stdout: stdout.join(''),
-                stderr: stderr.join(''),
-                streamed: true,
-                forwarded,
-              };
+              if (result.code !== 0) {
+                return {
+                  code: result.code,
+                  stdout: stdout.join(''),
+                  stderr: stderr.join(''),
+                  streamed: true,
+                  forwarded,
+                };
+              }
             }
             return { code: 0, stdout: stdout.join(''), stderr: stderr.join(''), streamed: true, forwarded };
           };
+
+          const packageManagerName = String(prepared.command).split('/').pop();
+          const isYarn = packageManagerName === 'yarn' || packageManagerName === 'yarnpkg';
+          if (isYarn && command.name && !new Set([
+            '--version', '-v', 'add', 'config', 'info', 'install', 'pack', 'remove', 'run', 'run-script', 'test', 'upgrade',
+          ]).has(command.name)) {
+            const separator = commandArguments.indexOf('--');
+            const scriptArgs = separator >= 0 ? commandArguments.slice(separator + 1) : commandArguments;
+            return runPackageScript(command.name, {
+              cwd: prepared.cwd,
+              env,
+              args: scriptArgs,
+              stdin: prepared.stdin,
+              signal: childOptions.signal,
+              timeout: childOptions.timeout,
+              onStdout: childOptions.onStdout,
+              onStderr: childOptions.onStderr,
+            });
+          }
 
           if (command.name === '--version' || command.name === '-v'
             || commandArguments.includes('--version') || commandArguments.includes('-v')) {
@@ -9845,10 +10136,6 @@ export function createRuntime({
             const filename = `${resolved.parsed.name.replace(/^@/, '').replaceAll('/', '-')}-${resolved.version}.tgz`;
             await vfs.fs.promises.writeFile(path.join(prepared.cwd, filename), bytes);
             return { code: 0, stdout: `${filename}\n`, stderr: '' };
-          }
-
-          if (command.name === 'link') {
-            return runPackageLink({ packages: positionalArguments(), cwd: prepared.cwd });
           }
 
           if (command.name === 'run' || command.name === 'run-script' || command.name === 'test') {
@@ -9930,7 +10217,7 @@ export function createRuntime({
               ...packageJson?.devDependencies,
               ...packageJson?.optionalDependencies,
             }).map(([name, range]) => `${name}@${range}`);
-          const result = await npm.install(installSpecs, { cwd: prepared.cwd, cacheUnpacked: false, returnFiles: false });
+          const result = await npm.install(installSpecs, { cwd: prepared.cwd });
           if (!noSave && specs.length > 0) {
             if (packageJson) {
               const section = saveDev ? 'devDependencies' : 'dependencies';
@@ -10015,9 +10302,13 @@ export function createRuntime({
             const spawnOptions = normalized.options;
             const hasIpcStdio = Array.isArray(spawnOptions.stdio)
               && spawnOptions.stdio.some((entry) => entry === 'ipc');
-            return virtualAsync(file, normalized.args, hasIpcStdio
-              ? { ...spawnOptions, ipc: true }
-              : spawnOptions);
+            try {
+              return virtualAsync(file, normalized.args, hasIpcStdio
+                ? { ...spawnOptions, ipc: true }
+                : spawnOptions);
+            } catch (error) {
+              throw error;
+            }
           },
           fork(modulePath, args = [], options = {}) {
             modulePath = normalizeChildModulePath(modulePath);
@@ -10108,13 +10399,39 @@ export function createRuntime({
       for (const [key, value] of options.environmentData || []) environmentData.set(key, value);
     }
     let pending = 0;
-    const trackTask = () => {
+    const pendingTaskRecords = new Map();
+    let nextPendingTaskId = 0;
+    const publishLifecycleState = () => {
+      if (!injectedProcess) return;
+      injectedProcess.__bnhRuntimeLifecycle = {
+        pending,
+        tasks: [...pendingTaskRecords.values()].slice(-4),
+      };
+      injectedProcess.__bnhReportRuntimeState?.();
+    };
+    const trackTask = (label = null) => {
       pending += 1;
+      const taskId = ++nextPendingTaskId;
+      const stackLine = String(new Error().stack || '').split('\n')[2]?.trim().slice(0, 160) || null;
+      pendingTaskRecords.set(taskId, {
+        id: taskId,
+        label: label == null ? null : String(label).slice(0, 128),
+        stack: stackLine,
+      });
+      publishLifecycleState();
       return () => {
         pending = Math.max(0, pending - 1);
+        pendingTaskRecords.delete(taskId);
+        publishLifecycleState();
       };
     };
     const injectedProcess = options.processObject;
+    const reportExecutePhase = (phase) => {
+      if (injectedProcess) {
+        injectedProcess.__bnhRuntimePhase = phase;
+        injectedProcess.__bnhReportRuntimeState?.();
+      }
+    };
     const timerHandles = new Set();
     const rootTimers = scope.__BNH_NATIVE_TIMERS__;
     const nativeSetTimeout = rootTimers?.setTimeout || scope.setTimeout.bind(scope);
@@ -10124,6 +10441,23 @@ export function createRuntime({
     const nativeQueueMicrotask = typeof scope.queueMicrotask === 'function'
       ? scope.queueMicrotask.bind(scope)
       : (callback) => nativeSetTimeout(callback, 0);
+    let pendingMicrotasks = 0;
+    const trackedQueueMicrotask = (callback) => {
+      if (typeof callback !== 'function') return nativeQueueMicrotask(callback);
+      pendingMicrotasks += 1;
+      try {
+        nativeQueueMicrotask(() => {
+          try {
+            callback();
+          } finally {
+            pendingMicrotasks = Math.max(0, pendingMicrotasks - 1);
+          }
+        });
+      } catch (error) {
+        pendingMicrotasks = Math.max(0, pendingMicrotasks - 1);
+        throw error;
+      }
+    };
     if (!scope.__BNH_NATIVE_TIMERS__) {
       Object.defineProperty(scope, '__BNH_NATIVE_TIMERS__', {
         configurable: true,
@@ -10146,6 +10480,15 @@ export function createRuntime({
       if (typeof handle?.hasRef === 'function') return handle.hasRef();
       return handle?._refed !== false;
     });
+    // `execute()` owns the timers installed on the browser-global surface,
+    // while the process contract owns timers created through its internal
+    // timer API. Injected and same-realm children can use both surfaces;
+    // treating only one set as authoritative lets a pending child callback
+    // disappear at the lifecycle idle check.
+    const allRuntimeTimers = () => new Set([
+      ...timerHandles,
+      ...(processObject?._timers || []),
+    ]);
     const lifecycleWaitTimer = Symbol('bnh.lifecycleWaitTimer');
     const hasReferencedRuntimeTimers = (handles) => [...handles]
       .some((handle) => !handle?.[lifecycleWaitTimer]
@@ -10189,11 +10532,13 @@ export function createRuntime({
       return workerThreadParentPort.listenerCount?.('message') > 0
         || typeof workerThreadParentPort.onmessage === 'function';
     };
+    reportExecutePhase('process-create');
     const fullProcessData = createProcess(scope, {
       ...options,
       nodeProfile: resolvedProfile,
       isPidAlive: isVirtualPidAlive,
     }, stdout, stderr, trackTask);
+    reportExecutePhase('process-created');
     const processData = injectedProcess
       ? (() => {
           const processObject = fullProcessData.processObject;
@@ -10237,6 +10582,9 @@ export function createRuntime({
             return true;
           };
           processObject.send = (value, sendHandle, sendOptions, callback) => { if (typeof injectedProcess.send === 'function') return injectedProcess.send(value, sendHandle, sendOptions, callback); throw new Error('process.send is unavailable'); };
+          if (typeof injectedProcess.__bnhChildOutput === 'function') {
+            processObject.__bnhChildOutput = injectedProcess.__bnhChildOutput;
+          }
           processObject.connected = Boolean(injectedProcess.connected);
           processObject.disconnect = () => {
             if (typeof injectedProcess.disconnect !== 'function') return false;
@@ -10300,7 +10648,23 @@ export function createRuntime({
           return { processObject, setTimer: fullProcessData.setTimer, clearTimer: fullProcessData.clearTimer };
         })()
       : fullProcessData;
+    reportExecutePhase('process-bound');
     const processObject = processData.processObject;
+    const childActivity = processObject.__bnhChildActivity ||= {
+      launched: 0,
+      completed: 0,
+      failed: 0,
+      first: null,
+      last: null,
+    };
+    // Builtins such as node:test attach their run state while the runtime
+    // process is being constructed. Mirror that state onto an injected child
+    // immediately so both natural and exceptional terminal paths can report
+    // it, including runners that finish before the lifecycle idle loop.
+    if (injectedProcess && processObject.__bnhNodeTestState) {
+      injectedProcess.__bnhNodeTestState = processObject.__bnhNodeTestState;
+    }
+    if (injectedProcess) injectedProcess.__bnhChildActivity = childActivity;
     if (typeof injectedProcess?.__bnhNetworkEvent === 'function') {
       processObject.__bnhNetworkEvent = injectedProcess.__bnhNetworkEvent;
     }
@@ -10315,7 +10679,7 @@ export function createRuntime({
         || String(options.entry || '').startsWith('/node/.bnh-worker-eval-'),
     });
     processObject._bnhShouldRunUnref = () => pending > 0
-      || hasReferencedTimers(processObject._timers || timerHandles)
+      || hasReferencedTimers(allRuntimeTimers())
       || hasLiveVirtualProcess()
       || hasReferencedIpc()
       || hasReferencedWorkerParentPort();
@@ -10476,14 +10840,9 @@ export function createRuntime({
         error.code = 'ERR_CAPABILITY_DENIED';
         throw error;
       }
-      const snapshot = vfs.snapshot({ copy: false, includeFiles: false });
       const files = Object.fromEntries(
-        snapshot.artifacts.map(({ path, bytes }) => [path, bytes]),
+        vfs.snapshot({ copy: false }).artifacts.map(({ path, bytes }) => [path, bytes]),
       );
-      for (const directory of snapshot.directories || []) {
-        if (directory !== '/node' && !directory.startsWith('/node/')) continue;
-        if (!files[directory]) files[directory] = { type: 'directory' };
-      }
       if (isEval) files[workerPath] = new scope.TextEncoder().encode(String(source));
       const child = createBrowserProcess({
         scope,
@@ -10940,17 +11299,11 @@ export function createRuntime({
       trackTask,
       stdout,
       stderr,
-      (pathname) => vfs.readSource(pathname),
+      (pathname) => vfs.read(pathname),
       entry,
       runtimeFetchRef,
     );
-    if (injectedProcess && injectedProcess !== processObject) {
-      Object.defineProperty(injectedProcess, '__bnhChildActivity', {
-        configurable: true,
-        enumerable: false,
-        value: processObject.__bnhChildActivity,
-      });
-    }
+    reportExecutePhase('builtins-ready');
     if (options.workerThread || String(options.entry || '').startsWith('/node/.bnh-worker-eval-')) {
       Object.defineProperty(builtins, 'trace_events', {
         configurable: true,
@@ -10971,11 +11324,12 @@ export function createRuntime({
       const name = builtinName(id);
       return BUILTIN_NAMES.includes(name) ? builtins[name] : undefined;
     };
+    reportExecutePhase('builtin-api-ready');
     builtins.module._cache = new Map();
     builtins.module._main = null;
     builtins.module._resolve = (name, parent) => {
       const importer = typeof parent === 'string' ? parent : parent?.filename || entry;
-      return BUILTIN_NAMES.includes(builtinName(name)) ? name : esmLoader.resolveRequire(name, importer);
+      return BUILTIN_NAMES.includes(builtinName(name)) ? name : resolveFile(name, importer, processObject);
     };
     builtins.module._load = (name, parent) => {
       if (String(name).startsWith('file:') && String(name).endsWith('.mjs')) {
@@ -10991,11 +11345,12 @@ export function createRuntime({
       if (builtin === 'trace_events' && processObject._bnhTraceEventsUnavailable) {
         throw traceEventsUnavailableError();
       }
-      if (BUILTIN_NAMES.includes(builtin)) return builtins[builtin] ?? {};
-      return loadModule(name, importer);
+      return BUILTIN_NAMES.includes(builtin) ? builtins[builtin] ?? {} : loadModule(name, importer);
     };
     const streamWebApi = builtins['stream/web'];
+    reportExecutePhase('stream-api-ready');
     installBlobStreamClass(() => streamWebApi.ReadableStream);
+    reportExecutePhase('blob-stream-ready');
     const internalBindings = builtins['internal/test/binding'].__bnhContract;
     const internalUtil = {
       customInspectSymbol: Symbol.for('nodejs.util.inspect.custom'),
@@ -11060,7 +11415,7 @@ export function createRuntime({
       newHandle: () => ({ close() {} }),
     };
     const nativeFetch = browserIO.fetch;
-    const responseFromNodeResponse = (response, url) => new Promise((resolve, reject) => {
+    const responseFromNodeResponse = (response, url, method = 'GET') => new Promise((resolve, reject) => {
       const chunks = [];
       response.on('data', (chunk) => chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)));
       response.once('error', reject);
@@ -11070,6 +11425,19 @@ export function createRuntime({
         for (const chunk of chunks) {
           body.set(chunk, offset);
           offset += chunk.byteLength;
+        }
+        try {
+          processObject.__bnhNetworkEvent?.({
+            source: 'guest-http',
+            method: String(method || 'GET').toUpperCase(),
+            url: String(url || ''),
+            phase: 'body',
+            status: Number(response.statusCode || 0),
+            bodyBytes: body.byteLength,
+            bodyExcerpt: new (scope.TextDecoder || TextDecoder)().decode(body).slice(0, 512),
+          });
+        } catch {
+          // Network diagnostics must never change HTTP response delivery.
         }
         const result = new scope.Response(body, {
           status: response.statusCode,
@@ -11096,7 +11464,7 @@ export function createRuntime({
       });
       return new Promise((resolve, reject) => {
         request.once('response', (response) => {
-          responseFromNodeResponse(response, url).then(resolve, reject);
+          responseFromNodeResponse(response, url, init.method).then(resolve, reject);
         });
         request.once('error', reject);
         request.end(init.body);
@@ -11242,6 +11610,8 @@ export function createRuntime({
               phase: 'response',
               transport,
               status: Number(response?.status || 0),
+              statusType: typeof response?.status,
+              statusValue: String(response?.status ?? ''),
               ok: Boolean(response?.ok),
               contentLength: contentLength === null || contentLength === undefined ? null : Number(contentLength) || 0,
               duration: Math.max(0, (Number(scope.performance?.now?.()) || startTime) - startTime),
@@ -11268,12 +11638,7 @@ export function createRuntime({
         && /^https?:$/i.test(scope.location.protocol || '')
         ? scope.location.origin
         : null;
-      const explicitProxy = proxyCapability?.mode === 'proxy'
-        && proxyCapability.enabled
-        && proxyCapability.capabilityGranted
-        && proxyCapability.adapter;
       const npmProxyUrl = npmProxyOrigin && isNpmRegistryRequest
-        && !explicitProxy
         ? `${npmProxyOrigin}/__npm_proxy__/${encodeURIComponent(target)}`
         : null;
       const canCacheNpmRequest = method === 'GET' && npmRegistryOrigins.has(targetOrigin)
@@ -11313,9 +11678,7 @@ export function createRuntime({
         });
       };
       const fetchNetwork = () => {
-        if (httpClientFetch && !explicitProxy) {
-          return fetchWithTelemetry('browser-native', () => nativeFetch(input, init));
-        }
+        if (httpClientFetch) return fetchWithTelemetry('browser-native', () => nativeFetch(input, init));
         if (npmProxyUrl) {
           // npm registry responses are cross-origin and many registry routes do
           // not opt into CORS. Use the same-origin download proxy when the
@@ -11347,7 +11710,6 @@ export function createRuntime({
 
     builtins.worker_threads = workerThreads;
     const cache = Object.create(null);
-    const cjsResolutionCache = new Map();
     const executionGlobal = createExecutionGlobal(scope);
     const moduleHookContext = (importer) => ({
       conditions: ['node', 'require'],
@@ -11384,7 +11746,7 @@ export function createRuntime({
       seen.add(normalizedEntry);
       let source;
       try {
-        source = vfs.readSource(normalizedEntry);
+        source = vfs.read(normalizedEntry);
       } catch {
         return false;
       }
@@ -11487,6 +11849,10 @@ export function createRuntime({
         });
       }
       if (name === 'repl') return ensureReplDispose(loadModule('/node/lib/repl.js', importer, false, processObj));
+      if (name.startsWith('#')) {
+        const resolved = esmLoader.resolve(name, importer, ['node', 'require']);
+        return loadModule(resolved, importer, true, processObj);
+      }
       if (BUILTIN_NAMES.includes(name)) {
         if (name === 'internal/test/binding') emitInternalTestBindingWarning(processObj);
         if (name === 'dns') scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ = Math.max(1, Number(scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ || 0));
@@ -11537,25 +11903,13 @@ export function createRuntime({
           ?? (name === 'process' ? processObj : builtins[name] ?? {});
       }
       const context = moduleHookContext(importer);
-      const resolutionCache = processObj === processObject
-        ? cjsResolutionCache
-        : (processObj.__bnhCjsResolutionCache ||= new Map());
-      const requestCacheKey = skipResolve
-        ? null
-        : `${typeof importer === 'string' ? importer : importer?.filename || entry}\x00${String(specifier)}`;
-      const requestCachedPath = requestCacheKey ? resolutionCache.get(requestCacheKey) : null;
-      if (requestCachedPath && Object.hasOwn(moduleCache, requestCachedPath)) {
-        return moduleCache[requestCachedPath].exports;
-      }
       const resolvedResult = skipResolve
         ? {
             url: specifier.startsWith('file:') ? specifier : pathToFileURL(specifier).href,
             format: specifier.endsWith('.json') ? 'json' : isRuntimeEsmModule(specifier, processObj.execArgv) ? 'module' : 'commonjs',
           }
         : runModuleHook('resolve', specifier, context, (currentSpecifier) => {
-            const candidate = context.conditions?.includes('require') && !context.conditions.includes('import')
-              ? esmLoader.resolveRequire(currentSpecifier, importer)
-              : esmLoader.resolve(currentSpecifier, importer, context.conditions);
+            const candidate = esmLoader.resolve(currentSpecifier, importer, ['node', 'require']);
             if (candidate.startsWith('http:') || candidate.startsWith('https:')) {
               return { url: candidate, format: 'module' };
             }
@@ -11574,7 +11928,6 @@ export function createRuntime({
       }
       const resolvedURL = resolvedResult?.url || pathToFileURL(resolveFile(specifier, importer, processObj)).href;
       let resolved = resolvedURL.startsWith('file:') ? fileURLToPath(resolvedURL) : resolvedURL;
-      if (requestCacheKey && resolved.startsWith('/')) resolutionCache.set(requestCacheKey, resolved);
       if (isRuntimeEsmModule(resolved, processObj.execArgv) && isRequireEsmEnabled(processObj)) {
         const cachedNamespace = getEsmNamespace(resolved, processObj);
         if (cachedNamespace) {
@@ -11590,15 +11943,18 @@ export function createRuntime({
       if (isNativeAddonBuildPath(resolved) || (resolved.endsWith('.node') && addonsDisabled(processObj))) {
         rejectNativeAddon(nativeAddonPath(resolved), processObj);
       }
-      if (Object.hasOwn(moduleCache, resolved)) {
-        return moduleCache[resolved].exports;
-      }
       let loaded;
       try {
         loaded = runModuleHook('load', resolvedURL, context, (url) => {
           const candidate = url.startsWith('file:') ? fileURLToPath(url) : url;
-          if (candidate.endsWith('.node')) rejectNativeAddon(candidate, processObj);
-          const source = vfs.readSource(candidate);
+          // An explicit missing .node path is still a module-resolution
+          // failure. Only an existing native boundary should reach the
+          // unsupported-addon contract; otherwise vfs.read() supplies the
+          // normal MODULE_NOT_FOUND/ERR_MODULE_NOT_FOUND error.
+          if (candidate.endsWith('.node') && vfs.files.has(candidate)) {
+            rejectNativeAddon(candidate, processObj);
+          }
+          const source = vfs.read(candidate);
           return {
             url,
             format: candidate.endsWith('.json') ? 'json' : isRuntimeEsmModule(candidate, processObj.execArgv) ? 'module' : 'commonjs',
@@ -11639,7 +11995,7 @@ export function createRuntime({
             }
             return cachedExports;
           }
-      const source = loaded?.source ?? vfs.readSource(resolved);
+      const source = loaded?.source ?? vfs.read(resolved);
       const text = typeof source === 'string' ? source : new TextDecoder().decode(source);
       const compileText = text;
           if (resolved.endsWith('.mjs')
@@ -11659,20 +12015,29 @@ export function createRuntime({
       activeModuleApi._cache = moduleCache;
       if (resolved.endsWith('.json')) module.exports = JSON.parse(text);
       else {
-        const require = (name) => loadModule(name, resolved, false, processObj);
+        const require = (name) => loadModule(esmLoader.resolve(name, resolved, ['node', 'require']), resolved, false, processObj);
         require.resolve = (name) => BUILTIN_NAMES.includes(builtinName(name))
           ? name
-          : esmLoader.resolveRequire(name, resolved);
+          : esmLoader.resolve(name, resolved, ['node', 'require']);
         require.main = mainModule;
         require.cache = moduleCache;
         require.extensions = activeModuleApi._extensions;
         module.require = require;
         try {
-          runInProcessContext(() => module._compile(
-            compileText,
-            resolved,
-            loaded?.format === 'module' || moduleHasStaticEsmSyntax(compileText) ? 'module' : loaded?.format,
-          ));
+          const extensionHandler = activeModuleApi._extensions?.[path.extname(resolved)];
+          if (typeof extensionHandler === 'function' && loaded?.format !== 'module') {
+            // CommonJS consumers can replace require.extensions handlers to
+            // install a module-local require (proxyquire is one example).
+            // Invoke the active handler at the same boundary as Node's CJS
+            // loader instead of bypassing it with a direct _compile call.
+            runInProcessContext(() => extensionHandler(module, resolved));
+          } else {
+            runInProcessContext(() => module._compile(
+              compileText,
+              resolved,
+              loaded?.format === 'module' || moduleHasStaticEsmSyntax(compileText) ? 'module' : loaded?.format,
+            ));
+          }
         } catch (error) {
           throw error;
         }
@@ -11688,7 +12053,7 @@ export function createRuntime({
         for (const match of text.matchAll(/\bmodule\.exports\s*=\s*require\(\s*(['\"])(.*?)\1\s*\)/g)) {
           try {
             const child = esmLoader.resolve(match[2], resolved, ['node', 'require']);
-            const childSource = vfs.readSource(child);
+            const childSource = vfs.read(child);
             for (const name of cjsStaticExportNames(typeof childSource === 'string'
               ? childSource : new TextDecoder().decode(childSource))) exportNames.add(name);
             } catch { /* static metadata is best effort */ }
@@ -11697,7 +12062,7 @@ export function createRuntime({
           if (!text.includes(`Object.keys(${match[1]})`)) continue;
           try {
             const child = esmLoader.resolve(match[3], resolved, ['node', 'require']);
-            const childSource = vfs.readSource(child);
+            const childSource = vfs.read(child);
             for (const name of cjsStaticExportNames(typeof childSource === 'string'
               ? childSource : new TextDecoder().decode(childSource))) exportNames.add(name);
           } catch { /* static metadata is best effort */ }
@@ -11717,8 +12082,6 @@ export function createRuntime({
         has: (pathname) => vfs.files.has(pathname),
         get: (pathname) => vfs.read(pathname),
       },
-      readSource: (pathname) => vfs.readSource(pathname),
-      fetchModule: (url, init) => runtimeFetchRef.current(url, init),
       builtins,
       globalObject: scope,
       evaluateCommonJS: (specifier, importer, processOverride) => loadModule(
@@ -11734,8 +12097,8 @@ export function createRuntime({
         (argument) => String(argument) === '--experimental-default-type=module',
       ) ? 'module' : 'commonjs',
     });
-    processObject.__bnhModuleResolve = (specifier, importer, conditions = ['node', 'import']) => (
-      esmLoader.resolveWithHooks(specifier, importer, conditions)
+    processObject.__bnhModuleResolve = (specifier, importer) => (
+      esmLoader.resolveWithHooks(specifier, importer)
     );
     processObject.__bnhModuleImport = (specifier, importer, options, ownerProcess = processObject) => {
       const release = ownerProcess?._bnhTaskTracker?.() || trackTask();
@@ -11932,36 +12295,9 @@ export function createRuntime({
     const injectedSetTimeout = (callback, delay, ...args) => setTimer(function timerCallback() {
       return callback.apply(this, args);
     }, delay);
-    const injectedSetInterval = (callback, delay, ...args) => setTimer(function intervalCallback() {
-      return callback.apply(this, args);
-    }, delay, true);
-    const injectedSetImmediate = (callback, ...args) => setTimer(function immediateCallback() {
-      return callback.apply(this, args);
-    }, 0, false, 'Immediate');
-    // execute() shares a realm with its adapter. Keep adapter-owned timers on
-    // native scheduling so they cannot prolong the guest lifecycle.
-    const inGuestTimerContext = () => scope.__bnhUserCode === true;
-    const scopedSetTimeout = (callback, delay, ...args) => inGuestTimerContext()
-      ? injectedSetTimeout(callback, delay, ...args)
-      : nativeSetTimeout(callback, delay, ...args);
-    const scopedSetInterval = (callback, delay, ...args) => inGuestTimerContext()
-      ? injectedSetInterval(callback, delay, ...args)
-      : nativeSetInterval(callback, delay, ...args);
-    const nativeSetImmediate = typeof previous.setImmediate === 'function'
-      ? previous.setImmediate.bind(scope)
-      : (callback, ...args) => nativeSetTimeout(callback, 0, ...args);
-    const nativeClearImmediate = typeof previous.clearImmediate === 'function'
-      ? previous.clearImmediate.bind(scope)
-      : nativeClearTimeout;
-    const scopedSetImmediate = (callback, ...args) => inGuestTimerContext()
-      ? injectedSetImmediate(callback, ...args)
-      : nativeSetImmediate(callback, ...args);
-    const scopedClearTimeout = (handle) => inGuestTimerContext() ? clearTimer(handle) : nativeClearTimeout(handle);
-    const scopedClearInterval = (handle) => inGuestTimerContext() ? clearTimer(handle) : nativeClearInterval(handle);
-    const scopedClearImmediate = (handle) => inGuestTimerContext() ? clearTimer(handle) : nativeClearImmediate(handle);
-    Object.defineProperty(scopedSetTimeout, Symbol.for('nodejs.util.promisify.custom'), {
+    Object.defineProperty(injectedSetTimeout, Symbol.for('nodejs.util.promisify.custom'), {
       configurable: true,
-      value: (delay, ...args) => new Promise((resolve) => scopedSetTimeout(resolve, delay, ...args)),
+      value: (delay, ...args) => new Promise((resolve) => injectedSetTimeout(resolve, delay, ...args)),
     });
     Object.assign(scope, {
       process: processObject,
@@ -11982,12 +12318,20 @@ export function createRuntime({
       URL: builtins.url.URL,
       URLSearchParams: builtins.url.URLSearchParams,
       __bnh: { deterministicEnvironment },
-      setTimeout: scopedSetTimeout,
-      clearTimeout: scopedClearTimeout,
-      setInterval: scopedSetInterval,
-      clearInterval: scopedClearInterval,
-      setImmediate: scopedSetImmediate,
-      clearImmediate: scopedClearImmediate,
+      setTimeout: injectedSetTimeout,
+      clearTimeout: clearTimer,
+      setInterval: (callback, delay, ...args) => setTimer(function intervalCallback() {
+        return callback.apply(this, args);
+      }, delay, true),
+      clearInterval: clearTimer,
+      setImmediate: (callback, ...args) => setTimer(function immediateCallback() {
+        return callback.apply(this, args);
+      }, 0, false, 'Immediate'),
+      // Node's stream and event primitives use next-turn microtasks. Keep
+      // those callbacks inside the entry lifecycle so a buffered stream is
+      // not abandoned when no timer or child process is otherwise referenced.
+      queueMicrotask: trackedQueueMicrotask,
+      clearImmediate: clearTimer,
       fetch: runtimeFetch,
       primordials: createPrimordials(scope),
       internalBinding: internalBindings.internalBinding,
@@ -12035,20 +12379,30 @@ export function createRuntime({
       writable: true,
       value: createWasmContract(scope),
     });
+    reportExecutePhase('before-corepack');
     vfs.mkdir('/node/deps/corepack', { recursive: true });
+    reportExecutePhase('corepack-ready');
     vfs.writeFile('/node/deps/corepack/package.json', JSON.stringify({ version: '0.34.6' }));
+    reportExecutePhase('preload');
     try {
       await importPreloads();
-      if (isRuntimeEsmModule(entry, processObject.execArgv)) await esmLoader.import(entry, entry, {}, undefined, processObject);
+      reportExecutePhase('preloaded');
+      reportExecutePhase('entry-format');
+      const entryIsEsm = isRuntimeEsmModule(entry, processObject.execArgv);
+      reportExecutePhase(entryIsEsm ? 'entry-esm-load' : 'entry-cjs-load');
+      if (entryIsEsm) await esmLoader.import(entry, entry, {}, undefined, processObject);
       else loadModule(entry, entry);
+      reportExecutePhase('entry-loaded');
+      builtins.test?.__bnhSourceLoaded?.();
+      reportExecutePhase('entry-source-notified');
       await Promise.resolve();
-      let lifecyclePollDelay = 0;
+      reportExecutePhase('entry-microtask');
+      reportExecutePhase(`lifecycle:p${pending}:t${hasReferencedRuntimeTimers(allRuntimeTimers()) ? 1 : 0}:v${hasLiveVirtualProcess() ? 1 : 0}:i${hasReferencedIpc() ? 1 : 0}:w${hasReferencedWorkerParentPort() ? 1 : 0}`);
       while (!options.isCancelled?.() && !options.signal?.aborted && !processObject._exitRequested?.()) {
-        const activeTimers = processObject._timers || timerHandles;
-        const canExit = pending === 0 && !hasReferencedRuntimeTimers(activeTimers) && !hasLiveVirtualProcess()
-          && !hasReferencedIpc() && !hasReferencedWorkerParentPort();
-        if (canExit) {
-          lifecyclePollDelay = 0;
+        const activeTimers = allRuntimeTimers();
+        if (pending === 0 && pendingMicrotasks === 0
+          && !hasReferencedRuntimeTimers(activeTimers) && !hasLiveVirtualProcess()
+          && !hasReferencedIpc() && !hasReferencedWorkerParentPort()) {
           // Node exits when no referenced work remains. beforeExit is the
           // lifecycle signal that gives listeners one chance to create more
           // work; any such work is observed by the predicates above on the
@@ -12056,17 +12410,24 @@ export function createRuntime({
           if (!processObject._emitBeforeExit?.()) break;
           continue;
         }
-        // A referenced handle can live for minutes. Avoid turning the
-        // lifecycle observer into a full-core busy loop while it waits.
-        lifecyclePollDelay = lifecyclePollDelay === 0 ? 1 : Math.min(8, lifecyclePollDelay * 2);
         await new Promise((resolve) => {
-          const handle = nativeSetTimeout(resolve, lifecyclePollDelay);
+          const handle = nativeSetTimeout(resolve, 0);
           if (handle && (typeof handle === 'object' || typeof handle === 'function')) {
             handle[lifecycleWaitTimer] = true;
           }
         });
       }
       if (options.isCancelled?.() || options.signal?.aborted) return null;
+      // A worker-backed child reports its logical runtime state through the
+      // injected process object. Keep this generic handoff adjacent to the
+      // natural lifecycle result so node:test discovery and stream terminal
+      // state cannot disappear with the worker realm.
+      if (injectedProcess && processObject.__bnhNodeTestState) {
+        injectedProcess.__bnhNodeTestState = processObject.__bnhNodeTestState;
+      }
+      if (injectedProcess && processObject.__bnhChildActivity) {
+        injectedProcess.__bnhChildActivity = processObject.__bnhChildActivity;
+      }
       const naturalCode = processObject.getCode();
       return naturalCode;
     } catch (error) {
@@ -12115,10 +12476,7 @@ export function createRuntime({
         capabilities: validateCapabilityManifest(context.capabilities),
         fixtures: context.fixtures,
       };
-      capabilities = assembleBrowserCapabilities(runSpec, {
-        globalObject: scope,
-        vfsBackend: context.vfsBackend,
-      });
+      capabilities = assembleBrowserCapabilities(runSpec, { globalObject: scope });
       const manifestProxy = capabilities.manifest.proxy || { mode: 'virtual', enabled: false, capabilityKey: 'proxy', capabilityGranted: false };
       const requestedProxy = context.proxy && typeof context.proxy === 'object' ? context.proxy : {};
       const configuredAdapter = requestedProxy.adapter
@@ -12235,18 +12593,12 @@ export function createRuntime({
       const stdout = capabilities.output.stdout;
       const stderr = capabilities.output.stderr;
       const workerSource = new URL('./runtime/process-entry.js', import.meta.url).href;
-      vfs.shareFileBuffers?.(scope);
-      const snapshot = vfs.snapshot({ copy: false, includeFiles: false });
       const files = Object.fromEntries(
-        snapshot.artifacts.map(({ path, bytes }) => [path, {
+        vfs.snapshot({ copy: false }).artifacts.map(({ path, bytes }) => [path, {
           data: bytes,
           mode: vfs.stat(path).mode & 0o777,
         }]),
       );
-      for (const directory of snapshot.directories || []) {
-        if (directory !== '/node' && !directory.startsWith('/node/')) continue;
-        if (!files[directory]) files[directory] = { type: 'directory' };
-      }
       const workerIsolation = executionIsolation === 'worker';
       const proxyOperations = proxyCapability.adapter
         ? typeof proxyCapability.adapter === 'function' || typeof proxyCapability.adapter.handle === 'function'
@@ -12255,15 +12607,8 @@ export function createRuntime({
               typeof proxyCapability.adapter[operation] === 'function'
             ))
         : [];
-      const proxySelection = {
-        mode: proxyCapability.mode,
-        enabled: proxyCapability.enabled,
-        capabilityKey: proxyCapability.capabilityKey,
-        capability: proxyCapability.capability,
-        capabilityGranted: proxyCapability.capabilityGranted,
-      };
       const spawnProxy = workerIsolation && proxyCapability.adapter
-        ? { ...proxySelection, operations: proxyOperations, rpc: true }
+        ? { ...capabilities.manifest.proxy, operations: proxyOperations, rpc: true }
         : proxyCapability.adapter ? proxyCapability : capabilities.manifest.proxy;
       const childExecArgv = [];
       const valueTakingFlags = new Set(['--import', '--experimental-loader', '--loader', '--require', '--input-type']);
@@ -12315,9 +12660,6 @@ export function createRuntime({
       const worker = proxyCapability.adapter && !workerIsolation
         ? createVirtualProcess({ ...processOptions, scope, forceFallback: true })
         : capabilities.process.create(processOptions);
-      // The worker boundary has consumed the snapshot. Keep the returned
-      // child/output listener from retaining the complete VFS descriptor map.
-      processOptions.vfs = undefined;
       const outputListener = (record) => {
         if (record.stream === 'stdout') processOptions.onStdout?.(record.bytes);
         else processOptions.onStderr?.(record.bytes);
@@ -12329,22 +12671,21 @@ export function createRuntime({
         if (message?.type === 'bnh-artifacts') artifacts = message.artifacts || {};
         if (message?.type === 'bnh-runtime-state') runtimeState = message.state || null;
       });
+      const workerExit = worker.wait();
       const child = {
         exit: null,
         _worker: worker,
-        stdoutText: async () => { await terminalPromise; return new TextDecoder().decode(capabilities.output.stdoutBytes); },
-        stderrText: async () => { await terminalPromise; return new TextDecoder().decode(capabilities.output.stderrBytes); },
+        stdoutText: async () => { await worker.wait(); return new TextDecoder().decode(capabilities.output.stdoutBytes); },
+        stderrText: async () => { await worker.wait(); return new TextDecoder().decode(capabilities.output.stderrBytes); },
         structuredResult: null,
         output: capabilities.output,
         async kill() {
           try { worker.kill('SIGKILL'); } catch { /* already terminal */ }
-          await terminalPromise;
+          await worker.wait();
         },
       };
-      // Publish the structured result on the same settlement chain as
-      // child.exit. Callers that await exit must not race the result cleanup
-      // callback, especially when the runner records terminal artifacts.
-      const terminalPromise = worker.wait().then((terminal) => {
+      activeChild = child;
+      child.exit = workerExit.then((terminal) => {
         workerNetworkBridge?.close();
         if (activeChild === child) activeChild = null;
         capabilities.output.off('data', outputListener);
@@ -12355,7 +12696,7 @@ export function createRuntime({
           outcome: terminal.status === 'exited' && terminal.code === 0
             ? 'passed'
             : String(terminal.error?.code || '').startsWith('ERR_UNSUPPORTED_') ? 'unsupported' : 'failed',
-          phase: terminal.kind === 'timeout' ? 'shutdown' : terminal.status === 'exited' ? 'running' : 'launch',
+          phase: terminal.kind === 'timeout' ? 'shutdown' : terminal.status === 'exited' ? 'complete' : 'launch',
           exit: { code: terminal.code, signal: terminal.signal, reason: terminal.kind },
           error: terminal.error,
           stdout: capabilities.output.stdoutBytes,
@@ -12366,18 +12707,17 @@ export function createRuntime({
             network_mode: proxyCapability.mode,
             proxy_enabled: Boolean(proxyCapability.enabled && proxyCapability.capabilityGranted && proxyCapability.adapter),
             virtual_network: true,
-            runtimeState: terminal.runtimeState || runtimeState,
-            childActivity: terminal.runtimeState?.childActivity
-              || (terminal.runtimeState?.launched !== undefined ? terminal.runtimeState : null)
-              || runtimeState?.childActivity
-              || (runtimeState?.launched !== undefined ? runtimeState : null),
+            // The terminal control frame is the authoritative process
+            // boundary. The runtime-state IPC message is retained for
+            // compatibility, but may arrive after terminal on independent
+            // MessagePorts.
+            runtime_state: runtimeState || terminal.runtimeState || null,
+            child_outputs: worker.childOutputs || [],
           },
           artifacts,
         };
-        return terminal;
+        return terminal.code;
       });
-      child.exit = terminalPromise.then((terminal) => terminal.code);
-      activeChild = child;
       return child;
     },
     get vfs() { return vfs; },

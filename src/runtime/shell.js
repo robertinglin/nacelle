@@ -1,5 +1,5 @@
 import {
-  expandShellWordAsync,
+  expandShellWord,
   literalShellWord,
   parseShellScript,
   rawShellWord,
@@ -60,13 +60,7 @@ async function fileIs(fs, pathname, type = 'file') {
 }
 
 async function expandWord(word, context, { pathname = false } = {}) {
-  const expanded = await expandShellWordAsync(word, context.env, context.lastStatus, context.runSubstitution
-    ? async (command) => {
-      const nested = await context.runSubstitution(command);
-      if (nested?.stderr) context.onStderr?.(nested.stderr);
-      return nested;
-    }
-    : undefined);
+  const expanded = expandShellWord(word, context.env, context.lastStatus);
   if (pathname || !expanded.glob || !GLOB_PATTERN.test(expanded.value) || !context.fs.glob) {
     return [expanded.value];
   }
@@ -88,7 +82,7 @@ async function expandWords(words, context) {
 async function resolveCommand(name, context) {
   if (BUILTINS.has(name)) return { type: 'builtin', name };
   if (name === 'node' || name === 'nodejs' || name === '/browser/node') return { type: 'node', name };
-  if (name === 'npm' || name === 'npx' || name === 'yarn' || name === 'yarnpkg') return { type: 'npm', name };
+  if (name === 'npm' || name === 'npx') return { type: 'npm', name };
   if (name === 'sh' || name === 'bash' || name === '/bin/sh' || name === '/bin/bash') return { type: 'shell', name };
 
   const candidates = [];
@@ -100,14 +94,7 @@ async function resolveCommand(name, context) {
     }
   }
   for (const pathname of candidates) {
-    if (await fileIs(context.fs, pathname)) {
-      const commandName = pathname.slice(pathname.lastIndexOf('/') + 1);
-      // PATH lookup must preserve Node command identity. A virtual install can
-      // expose node through node_modules/.bin, but package scripts still
-      // invoke the Node child lifecycle (including ESM format selection).
-      if (commandName === 'node' || commandName === 'nodejs') return { type: 'node', name };
-      return { type: 'external', path: pathname, name };
-    }
+    if (await fileIs(context.fs, pathname)) return { type: 'external', path: pathname, name };
   }
   return null;
 }
@@ -596,7 +583,6 @@ async function runBuiltin(name, args, input, context, runProgram, options) {
     let source;
     try { source = String(await context.fs.readFile(shellPath(script, context.cwd))); }
     catch { return commandError(name, `${script}: No such file or directory`); }
-
     const shellState = context.shellState || context;
     const stdout = [];
     const stderr = [];
@@ -745,10 +731,16 @@ async function runNode(args, input, context, options) {
   const script = args[index];
   if (!script) return commandError('node', 'no script specified');
   return options.runNode({
-    script: shellPath(script, context.cwd), args: args.slice(index + 1), input,
-    cwd: context.cwd, env: context.env, signal: context.signal, timeout: context.timeout,
+    script: shellPath(script, context.cwd),
+    args: args.slice(index + 1),
+    cwd: context.cwd,
+    env: context.env,
+    input,
+    signal: context.signal,
+    timeout: context.timeout,
     onNetwork: context.onNetwork,
-    onStdout: context.onStdout, onStderr: context.onStderr,
+    onStdout: context.onStdout,
+    onStderr: context.onStderr,
   });
 }
 
@@ -789,51 +781,18 @@ async function runNpm(name, args, input, context, options) {
   }
   const meaningfulArgs = args.filter((arg) => !['--silent', '--loglevel=silent'].includes(arg));
   if (meaningfulArgs[0] === '--version' || meaningfulArgs[0] === '-v') return result(0, '10.0.0-browser\n');
-  const isYarn = name === 'yarn' || name === 'yarnpkg';
   const isTest = meaningfulArgs[0] === 'test';
-  const isRun = ['run', 'run-script'].includes(meaningfulArgs[0]);
-  const isInstall = ['install', 'i', 'add'].includes(meaningfulArgs[0]);
-  if (isYarn && isInstall) {
-    if (typeof options.npmInstall !== 'function') return commandError(name, 'package installation is unavailable');
-    const specs = meaningfulArgs.slice(1).filter((arg) => !arg.startsWith('-'));
-    try {
-      return result((await options.npmInstall({
-        specs,
-        cwd: context.cwd,
-        env: context.env,
-        stdin: input,
-        signal: context.signal,
-        timeout: context.timeout,
-      }))?.code ?? 1);
-    } catch (error) {
-      return commandError(name, error.message || String(error));
-    }
-  }
-  if (isYarn && meaningfulArgs[0] === 'link') {
-    if (typeof options.npmLink !== 'function') return commandError(name, 'package linking is unavailable');
-    try {
-      return result((await options.npmLink({
-        packages: meaningfulArgs.slice(1).filter((arg) => !arg.startsWith('-')),
-        cwd: context.cwd,
-        env: context.env,
-      }))?.code ?? 1);
-    } catch (error) {
-      return commandError(name, error.message || String(error));
-    }
-  }
-  if (isYarn) {
-    if (!isTest && !meaningfulArgs[0]) return commandError(name, 'script name is required');
-  } else if ((!isRun && !isTest) || (!isTest && !meaningfulArgs[1])) {
-    return commandError(name, 'only npm run is supported by the browser shell');
+  if ((!['run', 'run-script'].includes(meaningfulArgs[0]) && !isTest)
+    || (!isTest && !meaningfulArgs[1])) {
+    return commandError('npm', 'only npm run is supported by the browser shell');
   }
   if (typeof options.npmRun !== 'function') return commandError('npm', 'npm execution is unavailable');
-  const scriptName = isTest ? 'test' : isRun ? meaningfulArgs[1] : meaningfulArgs[0];
+  const scriptName = isTest ? 'test' : meaningfulArgs[1];
   const separator = meaningfulArgs.indexOf('--');
-  const scriptArgs = separator >= 0
-    ? meaningfulArgs.slice(separator + 1)
-    : isTest ? [] : meaningfulArgs.slice(isRun ? 2 : 1);
+  const scriptArgs = separator >= 0 ? meaningfulArgs.slice(separator + 1) : isTest ? [] : meaningfulArgs.slice(2);
   const stdout = [];
   const stderr = [];
+  let streamed = false;
   try {
     const child = await options.npmRun(scriptName, {
       args: scriptArgs,
@@ -846,22 +805,40 @@ async function runNpm(name, args, input, context, options) {
       onStdout: (chunk) => {
         const text = String(chunk);
         stdout.push(text);
+        if (text) streamed = true;
         context.onStdout?.(text);
       },
       onStderr: (chunk) => {
         const text = String(chunk);
         stderr.push(text);
+        if (text) streamed = true;
         context.onStderr?.(text);
       },
     });
     const code = child && typeof child === 'object' && 'exit' in child
       ? await child.exit
-      : Object.prototype.hasOwnProperty.call(child || {}, 'code') ? child.code : 1;
+      : child?.code;
+    // A package-script implementation may expose its terminal output as
+    // returned text instead of invoking the streaming callbacks. Preserve
+    // that standard child-process contract without duplicating chunks that
+    // were already forwarded through the callbacks.
+    if (!stdout.length && typeof child?.stdoutText === 'function') {
+      const returned = await child.stdoutText();
+      if (returned) stdout.push(String(returned));
+    }
+    if (!stderr.length && typeof child?.stderrText === 'function') {
+      const returned = await child.stderrText();
+      if (returned) stderr.push(String(returned));
+    }
     const res = result(code ?? 1, stdout.join(''), stderr.join(''));
-    if (context.onStdout || context.onStderr) res.streamed = true;
+    // A callback being available does not mean that the child actually
+    // delivered output through it.  Callers use this bit to decide whether
+    // returned stdout/stderr still needs forwarding; marking an empty stream
+    // as streamed loses a valid child result at the shell boundary.
+    res.streamed = streamed;
     return res;
   } catch (error) {
-    return commandError(name, error.message || String(error));
+    return commandError('npm', error.message || String(error));
   }
 }
 
@@ -993,19 +970,6 @@ export async function runShellScript(command, options) {
     lastStatus: 0,
     fs: options.fs,
     onNetwork: options.onNetwork,
-  };
-  state.runSubstitution = async (nestedCommand) => {
-    const stdout = [];
-    const stderr = [];
-    const nested = await runShellScript(nestedCommand, {
-      ...options,
-      args: [],
-      cwd: state.cwd,
-      env: state.env,
-      onStdout: (chunk) => stdout.push(String(chunk)),
-      onStderr: (chunk) => stderr.push(String(chunk)),
-    });
-    return { ...nested, stdout: stdout.join(''), stderr: stderr.join('') };
   };
   const finalPipeline = pipelines.at(-1);
   const extraArgs = Array.isArray(options.args) ? options.args : [];

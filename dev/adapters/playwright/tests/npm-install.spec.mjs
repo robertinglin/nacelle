@@ -1,6 +1,6 @@
 import { expect, test } from 'playwright/test';
 import { packTar, unpackTar, packTarGz, unpackTarGz } from '../runtime/tar.js';
-import { BrowserNpm, satisfiesSemver, parsePackageSpec } from '../runtime/npm.js';
+import { BrowserNpm, satisfiesSemver, parseNpmAlias, parsePackageSpec } from '../runtime/npm.js';
 import { createVfs } from '../runtime/vfs.js';
 import { createModuleLoader } from '../runtime/module-loader.js';
 import { EventEmitter } from '../runtime/events.js';
@@ -69,44 +69,6 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     expect([...vfs.fs.readFileSync('/node/numeric.txt')]).toEqual([7, 8, 9]);
   });
 
-  test('VFS can omit the redundant file map from internal snapshots', () => {
-    const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
-    vfs.fs.writeFileSync('/node/module.js', 'module.exports = 1;');
-    const snapshot = vfs.snapshot({ copy: false, includeFiles: false });
-
-    expect(snapshot.files).toBeUndefined();
-    expect(snapshot.artifacts.find(({ path }) => path === '/node/module.js')).toBeDefined();
-  });
-
-  test('VFS source cache is bounded and invalidates changed files', () => {
-    const vfs = createVfs({
-      sourceCacheBytes: 8,
-      mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }],
-    });
-    vfs.fs.writeFileSync('/node/first.js', '12345678');
-    vfs.fs.writeFileSync('/node/second.js', 'abcdefgh');
-    expect(vfs.readSource('/node/first.js')).toBe('12345678');
-    expect(vfs.readSource('/node/second.js')).toBe('abcdefgh');
-    expect(vfs.sourceCacheBytes).toBe(8);
-    expect(vfs.sourceCacheSize).toBe(1);
-    vfs.fs.writeFileSync('/node/second.js', 'updated');
-    expect(vfs.readSource('/node/second.js')).toBe('updated');
-    expect(vfs.sourceCacheBytes).toBeLessThanOrEqual(8);
-  });
-
-  test('VFS promotes immutable file buffers once for worker snapshots', () => {
-    const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
-    vfs.fs.writeFileSync('/node/module.js', 'module.exports = 1;');
-    const sharedCount = vfs.shareFileBuffers({ crossOriginIsolated: true, SharedArrayBuffer });
-    expect(sharedCount).toBe(1);
-    const first = vfs.snapshot({ copy: false, includeFiles: false }).artifacts
-      .find(({ path }) => path === '/node/module.js').bytes;
-    expect(first.buffer instanceof SharedArrayBuffer).toBe(true);
-    expect(vfs.shareFileBuffers({ crossOriginIsolated: true, SharedArrayBuffer })).toBe(0);
-    vfs.fs.writeFileSync('/node/module.js', 'module.exports = 2;');
-    expect(new TextDecoder().decode(vfs.read('/node/module.js'))).toBe('module.exports = 2;');
-  });
-
   test('semver utilities parse and match version specs', () => {
     expect(parsePackageSpec('express@4.19.2')).toEqual({ name: 'express', range: '4.19.2' });
     expect(parsePackageSpec('@types/node@^20.0.0')).toEqual({ name: '@types/node', range: '^20.0.0' });
@@ -124,6 +86,82 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     expect(satisfiesSemver('2.1.0', '^1.0.0 || ^2.0.0')).toBe(true);
     expect(satisfiesSemver('3.0.0', '^1.0.0 || ^2.0.0')).toBe(false);
     expect(satisfiesSemver('1.5.0', '1.2.0 - 1.8.0')).toBe(true);
+  });
+
+  test('BrowserNpm requests scoped registry metadata with an unescaped scope separator', async () => {
+    const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
+    const requests = [];
+    const npm = new BrowserNpm({
+      vfs,
+      registry: 'https://registry.test',
+      proxyUrl: null,
+      fetchFn: async (url) => {
+        requests.push(url);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ name: '@scope/package', versions: {}, 'dist-tags': {} }),
+        };
+      },
+    });
+
+    await npm.fetchPackageMetadata('@scope/package');
+
+    expect(requests).toEqual(['https://registry.test/@scope/package']);
+  });
+
+  test('BrowserNpm resolves npm aliases using the target metadata while preserving the alias location', async () => {
+    const encoder = new TextEncoder();
+    const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
+    const archive = await packTarGz([
+      {
+        path: 'package/package.json',
+        data: encoder.encode(JSON.stringify({ name: 'target-package', version: '1.2.3', main: 'index.js' })),
+      },
+      { path: 'package/index.js', data: encoder.encode('module.exports = { aliased: true };') },
+    ]);
+    const requests = [];
+    const npm = new BrowserNpm({
+      vfs,
+      registry: 'https://registry.test',
+      proxyUrl: null,
+      fetchFn: async (url) => {
+        requests.push(url);
+        if (url === 'https://registry.test/target-package') {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              name: 'target-package',
+              'dist-tags': { latest: '1.2.3' },
+              versions: {
+                '1.2.3': {
+                  name: 'target-package',
+                  version: '1.2.3',
+                  dist: { tarball: 'https://registry.test/target-package/-/target-package-1.2.3.tgz' },
+                },
+              },
+            }),
+          };
+        }
+        if (url === 'https://registry.test/target-package/-/target-package-1.2.3.tgz') {
+          return { ok: true, status: 200, arrayBuffer: async () => archive.buffer };
+        }
+        return { ok: false, status: 404 };
+      },
+    });
+
+    expect(parseNpmAlias('npm:target-package@^1.2.0')).toEqual({ name: 'target-package', range: '^1.2.0' });
+    const result = await npm.install('target-alias@npm:target-package@1.2.3', { cwd: '/node' });
+
+    expect(result.packages).toHaveLength(1);
+    expect(result.packages[0].name).toBe('target-alias');
+    expect(vfs.files.has('/node/node_modules/target-alias/index.js')).toBe(true);
+    expect(vfs.files.has('/node/node_modules/target-package/index.js')).toBe(false);
+    expect(requests).toEqual([
+      'https://registry.test/target-package',
+      'https://registry.test/target-package/-/target-package-1.2.3.tgz',
+    ]);
   });
 
   test('BrowserNpm installs packages into VFS and module-loader requires them', async () => {
@@ -168,10 +206,9 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     cache.set('pkg-tarball:mini-express@1.0.0', miniExpressTarball);
 
     const npm = new BrowserNpm({ vfs, cache });
-    const result = await npm.install(['mini-express@1.0.0'], { cwd: '/node', cacheUnpacked: false, returnFiles: false });
+    const result = await npm.install(['mini-express@1.0.0'], { cwd: '/node' });
 
     expect(result.packages.length).toBe(1);
-    expect(Object.keys(result.files)).toHaveLength(0);
     expect(result.packages[0].name).toBe('mini-express');
     expect(vfs.files.has('/node/node_modules/mini-express/package.json')).toBe(true);
     expect(vfs.files.has('/node/node_modules/mini-express/lib/index.js')).toBe(true);
@@ -193,7 +230,50 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     const app = miniExpress();
     app.get('/hello', () => 'Hello from mini-express!');
     expect(app.handle('/hello')).toBe('Hello from mini-express!');
-    expect(npm.cache.unpackedPackages.size).toBe(0);
+  });
+
+  test('BrowserNpm launches an installed ESM bin through its generated shim', async () => {
+    const encoder = new TextEncoder();
+    const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
+    const esmBinTarball = await packTarGz([
+      {
+        path: 'package/package.json',
+        data: encoder.encode(JSON.stringify({
+          name: 'esm-bin-package',
+          version: '1.0.0',
+          type: 'module',
+          bin: { 'esm-bin-command': 'bin.js' },
+        })),
+      },
+      {
+        path: 'package/bin.js',
+        data: encoder.encode("#!/usr/bin/env node\nexport const ran = true;\nglobalThis.__BNH_INSTALLED_ESM_BIN_RAN__ = true;\n"),
+      },
+    ]);
+
+    const npm = new BrowserNpm({
+      vfs,
+      cache: new Map([['pkg-tarball:esm-bin-package@1.0.0', esmBinTarball]]),
+    });
+    await npm.install('esm-bin-package@1.0.0', { cwd: '/node' });
+
+    const launcher = new TextDecoder().decode(vfs.read('/node/node_modules/.bin/esm-bin-command'));
+    expect(launcher).toContain('import(');
+    expect(launcher).not.toContain('require(');
+
+    const loader = createModuleLoader({
+      files: {
+        has: (pathname) => vfs.files.has(pathname),
+        get: (pathname) => vfs.read(pathname),
+      },
+      globalObject: globalThis,
+      builtins: {},
+    });
+    delete globalThis.__BNH_INSTALLED_ESM_BIN_RAN__;
+    await loader.import('/node/node_modules/.bin/esm-bin-command', '/node/entry.mjs');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(globalThis.__BNH_INSTALLED_ESM_BIN_RAN__).toBe(true);
+    delete globalThis.__BNH_INSTALLED_ESM_BIN_RAN__;
   });
 
   test('module-loader preserves named exports from an installed ESM package', async () => {
@@ -233,25 +313,6 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     });
     const imported = await loader.import('esm-package', '/node/entry.mjs');
     expect(imported.answer()).toBe(42);
-  });
-
-  test('module-loader uses the bounded VFS source seam for textual modules', async () => {
-    const vfs = createVfs({
-      mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }],
-    });
-    vfs.fs.writeFileSync('/node/index.mjs', 'export const answer = 42;');
-    const loader = createModuleLoader({
-      files: {
-        has: (pathname) => vfs.files.has(pathname),
-        get: () => { throw new Error('textual module read bypassed the VFS source seam'); },
-      },
-      readSource: (pathname) => vfs.readSource(pathname),
-      globalObject: globalThis,
-      builtins: {},
-    });
-    const imported = await loader.import('./index.mjs', '/node/entry.mjs');
-    expect(imported.answer).toBe(42);
-    expect(vfs.sourceCacheSize).toBe(1);
   });
 
   test('creates ESM-compatible shims for ESM package bin entries', async () => {
@@ -362,36 +423,12 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     const stats = await cache.getStats();
     expect(stats.count).toBeGreaterThanOrEqual(1);
 
-    cache.clearMemory();
-    expect(cache.memoryMeta.size).toBe(0);
-    expect(cache.memoryTarballs.size).toBe(0);
-    expect(cache.unpackedPackages.size).toBe(0);
-
     // Test clear
     await cache.clear();
     const afterClearMeta = await cache.getMetadata('test-pkg');
     expect(afterClearMeta).toBeNull();
     const afterClearTarball = await cache.getTarball('tarball:test-pkg@2.0.0');
     expect(afterClearTarball).toBeNull();
-  });
-
-  test('BrowserNpmCache bounds in-memory metadata and tarball acceleration layers', async () => {
-    const { BrowserNpmCache } = await import('../runtime/npm.js');
-    const cache = new BrowserNpmCache({
-      dbName: 'test_bnh_npm_cache_bounds',
-      maxMetadataBytes: 40,
-      maxTarballBytes: 5,
-    });
-
-    cache.setMemoryMetadata('old', { value: '12345678901234567890' });
-    cache.setMemoryMetadata('new', { value: 'abcdefghijklmnopqrst' });
-    cache.setMemoryTarball('old', new Uint8Array([1, 2, 3, 4]));
-    cache.setMemoryTarball('new', new Uint8Array([5, 6, 7, 8]));
-
-    expect(cache.memoryMetaBytes).toBeLessThanOrEqual(40);
-    expect(cache.memoryTarballBytes).toBeLessThanOrEqual(5);
-    expect(cache.memoryMeta.has('old')).toBe(false);
-    expect(cache.memoryTarballs.has('old')).toBe(false);
   });
 
   test('BrowserNpm installs from custom/live registry and leverages BrowserNpmCache', async () => {

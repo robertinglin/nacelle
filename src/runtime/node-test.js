@@ -533,10 +533,67 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
   let passCount = 0;
   let failCount = 0;
   let testApiUsed = false;
+  let activeRun = null;
+  let runOwnsOutput = false;
+  let sourceEvaluationComplete = false;
+  let resolveSourceEvaluation;
+  const sourceEvaluation = new Promise((resolve) => { resolveSourceEvaluation = resolve; });
+  // `node:test.run()` discovers every requested file before starting any of
+  // their tests.  Keep registration-time chains behind this gate so a test
+  // from the first file cannot start while a later file is still registering
+  // its root hooks.
+  let testStartGate = Promise.resolve();
+  const runtimeState = {
+    registered: 0,
+    completed: 0,
+    files: [],
+    requestedFiles: [],
+    activeRun: false,
+    activeTest: null,
+    streamEvents: [],
+    streamError: null,
+    streamTerminal: null,
+  };
+  processObject.__bnhNodeTestState = runtimeState;
+  function emitRunEvent(type, data, { emit = true, push = true } = {}) {
+    if (!activeRun) return;
+    const event = { type, data };
+    runtimeState.streamEvents.push(type);
+    if (emit) activeRun.stream.emit(type, data);
+    if (push) activeRun.stream.push(event);
+    return event;
+  }
   function recordResult(result) {
     testCount += 1;
+    runtimeState.completed = testCount;
     if (result.status === 'fail') failCount += 1;
     else if (result.status === 'pass') passCount += 1;
+    if (!activeRun) return;
+    const passed = result.status === 'pass';
+    const data = {
+      name: result.name,
+      nesting: 0,
+      testNumber: testCount,
+      testId: testCount,
+      parentId: 0,
+      details: {
+        duration_ms: result.duration_ms || 0,
+        type: 'test',
+        passed,
+        ...(passed ? {} : { error: { cause: result.error || new Error(`test '${result.name}' failed`) } }),
+      },
+      tags: [],
+      line: 1,
+      column: 1,
+      file: result.file || activeRun.file || sourcePath || processObject.argv?.[1],
+    };
+    emitRunEvent('test:complete', data);
+    emitRunEvent('test:start', data);
+    const outcomeData = passed
+      ? { ...data, details: { ...data.details } }
+      : data;
+    if (passed) delete outcomeData.details.passed;
+    emitRunEvent(passed ? 'test:pass' : 'test:fail', outcomeData);
   }
   const assertionRegistry = new Map();
   let activeProcessOverride;
@@ -553,8 +610,36 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
   const assertionApi = (...args) => Reflect.apply(assert, undefined, args);
   Object.defineProperty(assertionApi, 'register', { configurable: true, enumerable: true, value: registerAssertion });
 
-  function reportFailure(error) { processObject.exitCode ||= 1; const detail = formatError(error); stderr(`${detail}\n`); if (detail.includes('Missing snapshots')) stdout(`${detail}\n`); return detail; }
+  function reportFailure(error) { processObject.exitCode ||= 1; const detail = formatError(error); if (!runOwnsOutput) stderr(`${detail}\n`); if (!runOwnsOutput && detail.includes('Missing snapshots')) stdout(`${detail}\n`); return detail; }
   async function runHooks(hooks, context) { for (const hook of hooks) await Reflect.apply(hook, context, [context]); }
+  async function runWithTimeout(action, timeout, label, onTimeout) {
+    if (timeout === undefined || timeout === null) return action();
+    if (!Number.isFinite(timeout) || timeout < 0) {
+      throw codedError(TypeError, 'ERR_INVALID_ARG_VALUE', `The value of \"timeout\" is out of range. It must be >= 0. Received ${timeout}`);
+    }
+    let timer;
+    let timedOut = false;
+    const actionPromise = Promise.resolve().then(action);
+    // A timed-out test may still be unwinding an operation it created. Attach
+    // a rejection handler so that late completion cannot become an unrelated
+    // process-level unhandled rejection after node:test has reported the
+    // timeout.
+    actionPromise.catch(() => {});
+    const timeoutPromise = new Promise((resolve, reject) => {
+      timer = scope.setTimeout(() => {
+        timedOut = true;
+        const error = codedError(Error, 'ERR_TEST_FAILURE', `test \"${label}\" timed out after ${timeout}ms`);
+        error.failureType = 'testTimeout';
+        onTimeout?.(error);
+        reject(error);
+      }, timeout);
+    });
+    try {
+      return await Promise.race([actionPromise, timeoutPromise]);
+    } finally {
+      if (!timedOut && timer !== undefined) scope.clearTimeout?.(timer);
+    }
+  }
   function diagnostic(message) { stdout(`# ${String(message).replace(/\r?\n/g, '\n# ')}\n`); }
   function registerAssertion(name, fn) { if (typeof name !== 'string') throw invalidType('name', 'string', name); if (typeof fn !== 'function') throw invalidType('fn', 'function', fn); assertionRegistry.set(name, fn); }
   function serialize(value, localSerializers = serializers) {
@@ -617,59 +702,336 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
   function hookChain(suite, name) { const chain = []; for (let current = suite; current; current = current.parent) chain.push(...current[name]); return name === 'afterEach' ? chain : chain.reverse(); }
   function createSuite(name, options, callback, parent) {
     const suite = { name: String(name ?? '(anonymous suite)'), fullName: parent === root ? String(name ?? '(anonymous suite)') : `${parent.fullName} > ${String(name ?? '(anonymous suite)')}`, parent, signal: options.signal, before: [], after: [], beforeEach: [], afterEach: [], children: [], started: false, beforeReady: null, completion: null, runTail: Promise.resolve() };
+    let definitionError = null;
+    if (!options.skip && !options.todo && typeof callback === 'function') {
+      suiteStack.push(suite);
+      const context = { name: suite.name, fullName: suite.fullName, signal: suite.signal, diagnostic, assert };
+      try { Reflect.apply(callback, context, [context]); } catch (error) { definitionError = error; } finally { suiteStack.pop(); }
+    }
+    // Hooks are registered while the suite definition callback runs. Start
+    // the suite only after that callback has returned so async before hooks
+    // cannot race test execution with an empty hook list.
     parent.children.push(startSuite(suite).completion);
-    if (!options.skip && !options.todo && typeof callback === 'function') { suiteStack.push(suite); const context = { name: suite.name, fullName: suite.fullName, signal: suite.signal, diagnostic, assert }; try { Reflect.apply(callback, context, [context]); } finally { suiteStack.pop(); } }
+    if (definitionError) throw definitionError;
     return suite.completion;
   }
   function register(name, options, callback, parent = suiteStack.at(-1), ownerNode = null) {
     testApiUsed = true;
+    runtimeState.registered += 1;
     const task = splitDefinition(name, options, callback); const label = String(task.name ?? '(unnamed test)'); const testOptions = task.options; const fullName = ownerNode?.fullName ? `${ownerNode.fullName} > ${label}` : parent === root ? label : `${parent.fullName} > ${label}`;
+    // Capture the owning file while the file is being discovered. The active
+    // run advances to the next file before the serialized result is emitted,
+    // so consulting activeRun.file at completion misattributes failures and
+    // leaves reporters without the real per-test error context.
+    const file = activeRun?.file || sourcePath || processObject.argv?.[1];
     const result = new Promise((resolve) => {
-      const node = { children: [], fullName, before: [], after: [], beforeEach: [], afterEach: [], beforeReady: null, context: null, mock: null };
-      const run = async () => { const release = trackTask(); try {
-        const suiteState = startSuite(parent); const beforeError = await suiteState.beforeReady; if (beforeError) { const detail = reportFailure(beforeError); stderr(`not ok - ${label}: ${detail}\n`); return { name: label, status: 'fail' }; }
-        if (testOptions.skip || testOptions.todo) { stdout(`ok - ${label}${testOptions.skip ? ' # SKIP' : ' # TODO'}\n`); return { name: label, status: testOptions.skip ? 'skip' : 'pass' }; }
-        let planCount = null; const context = { name: label, fullName, filePath: undefined, signal: testOptions.signal, assert: null, _assertionCount: 0, diagnostic, before: (fn) => node.before.push(fn), after: (fn) => node.after.push(fn), beforeEach: (fn) => node.beforeEach.push(fn), afterEach: (fn) => node.afterEach.push(fn), plan(count) { if (!Number.isInteger(count) || count < 0) throw codedError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The "count" argument must be a non-negative integer'); planCount = count; }, runOnly(value) { node.runOnly = Boolean(value); }, skip(message) { node.skipReason = message || true; }, todo(message) { node.todoReason = message || true; }, test: (childName, childOptions, childCallback) => { const child = register(childName, childOptions, childCallback, parent, node); node.children.push(child); return child; }, waitFor: (condition, options = {}) => { if (typeof condition !== 'function') throw invalidType('condition', 'function', condition); const interval = options.interval ?? 50; const timeout = options.timeout ?? 1000; return new Promise((resolve, reject) => { const started = Date.now(); const poll = async () => { try { resolve(await condition()); } catch (error) { if (Date.now() - started >= timeout) { error.cause ||= error; reject(error); } else scope.setTimeout(poll, interval); } }; poll(); }); } };
-        context.assert = createTestAssert(context); node.context = context; node.mock = createMockTracker(scope, { timers, timerPromises }, trackerOptions); Object.defineProperty(context, 'mock', { enumerable: true, get: () => node.mock });
-        let failure = null; try { await runHooks(hookChain(parent, 'beforeEach'), context); if (ownerNode?.beforeReady) await ownerNode.beforeReady; if (ownerNode) await runHooks(ownerNode.beforeEach, context); if (typeof task.callback === 'function') { if (task.callback.length > 1) await new Promise((resolve, reject) => { let called = false; const done = (error) => { if (called) return; called = true; if (error) reject(error); else resolve(); }; try { Reflect.apply(task.callback, context, [context, done]); } catch (error) { reject(error); } }); else await Reflect.apply(task.callback, context, [context]); } } catch (error) { failure = error; }
-        try { if (ownerNode) await runHooks([...ownerNode.afterEach].reverse(), context); await runHooks(hookChain(parent, 'afterEach'), context); } catch (error) { failure ||= error; }
-        const childResults = await Promise.all(node.children); if (node.beforeReady) await node.beforeReady; try { await runHooks([...node.after].reverse(), context); } catch (error) { failure ||= error; }
-        if (planCount !== null && context._assertionCount !== planCount) failure ||= new Error(`_plan_ assertion count mismatch: expected ${planCount}, actual ${context._assertionCount}`);
-        if (!failure && childResults.some((child) => child.status === 'fail')) failure = new Error(`subtest of '${label}' failed`);
-        node.mock.reset(); globalMock.reset(); if (failure) { const detail = reportFailure(failure); stderr(`not ok - ${label}: ${detail}\n`); return { name: label, status: 'fail' }; }
-        stdout(`ok - ${label}\n`); return { name: label, status: 'pass' };
-      } finally { release?.(); } };
+      const node = { children: [], fullName, file, before: [], after: [], beforeEach: [], afterEach: [], beforeReady: null, context: null, mock: null };
+      const run = async () => {
+        const release = trackTask();
+        runtimeState.activeTest = { name: label, fullName, file, state: 'running' };
+        try {
+          const suiteState = startSuite(parent);
+          const beforeError = await suiteState.beforeReady;
+          if (beforeError) {
+            const detail = reportFailure(beforeError);
+            if (!runOwnsOutput) stderr(`not ok - ${label}: ${detail}\n`);
+            return { name: label, status: 'fail', error: beforeError, file };
+          }
+          if (testOptions.skip || testOptions.todo) {
+            if (!runOwnsOutput) stdout(`ok - ${label}${testOptions.skip ? ' # SKIP' : ' # TODO'}\n`);
+            return { name: label, status: testOptions.skip ? 'skip' : 'pass', file };
+          }
+          let planCount = null;
+          const testAbortController = typeof scope.AbortController === 'function'
+            ? new scope.AbortController()
+            : null;
+          const externalSignal = testOptions.signal;
+          let removeExternalAbort = null;
+          if (testAbortController && externalSignal?.addEventListener) {
+            const forwardAbort = () => testAbortController.abort(externalSignal.reason);
+            if (externalSignal.aborted) forwardAbort();
+            else {
+              externalSignal.addEventListener('abort', forwardAbort, { once: true });
+              removeExternalAbort = () => externalSignal.removeEventListener('abort', forwardAbort);
+            }
+          }
+          const testSignal = testAbortController?.signal || externalSignal;
+          const context = {
+            name: label,
+            fullName,
+            filePath: file,
+            signal: testSignal,
+            assert: null,
+            _assertionCount: 0,
+            diagnostic,
+            before: (fn) => node.before.push(fn),
+            after: (fn) => node.after.push(fn),
+            beforeEach: (fn) => node.beforeEach.push(fn),
+            afterEach: (fn) => node.afterEach.push(fn),
+            plan(count) {
+              if (!Number.isInteger(count) || count < 0) {
+                throw codedError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The "count" argument must be a non-negative integer');
+              }
+              planCount = count;
+            },
+            runOnly(value) { node.runOnly = Boolean(value); },
+            skip(message) { node.skipReason = message || true; },
+            todo(message) { node.todoReason = message || true; },
+            test: (childName, childOptions, childCallback) => {
+              const child = register(childName, childOptions, childCallback, parent, node);
+              node.children.push(child);
+              return child;
+            },
+            waitFor: (condition, options = {}) => {
+              if (typeof condition !== 'function') throw invalidType('condition', 'function', condition);
+              const interval = options.interval ?? 50;
+              const waitTimeout = options.timeout ?? 1000;
+              return new Promise((resolve, reject) => {
+                const started = Date.now();
+                const poll = async () => {
+                  try { resolve(await condition()); }
+                  catch (error) {
+                    if (Date.now() - started >= waitTimeout) {
+                      error.cause ||= error;
+                      reject(error);
+                    } else scope.setTimeout(poll, interval);
+                  }
+                };
+                poll();
+              });
+            },
+          };
+          context.assert = createTestAssert(context);
+          node.context = context;
+          node.mock = createMockTracker(scope, { timers, timerPromises }, trackerOptions);
+          Object.defineProperty(context, 'mock', { enumerable: true, get: () => node.mock });
+          let failure = null;
+          const execute = async () => {
+            try {
+              await runHooks(hookChain(parent, 'beforeEach'), context);
+              if (ownerNode?.beforeReady) await ownerNode.beforeReady;
+              if (ownerNode) await runHooks(ownerNode.beforeEach, context);
+              if (typeof task.callback === 'function') {
+                if (task.callback.length > 1) {
+                  await new Promise((resolve, reject) => {
+                    let called = false;
+                    const done = (error) => {
+                      if (called) return;
+                      called = true;
+                      if (error) reject(error);
+                      else resolve();
+                    };
+                    try { Reflect.apply(task.callback, context, [context, done]); }
+                    catch (error) { reject(error); }
+                  });
+                } else await Reflect.apply(task.callback, context, [context]);
+              }
+            } catch (error) {
+              failure = error;
+            }
+            try {
+              if (ownerNode) await runHooks([...ownerNode.afterEach].reverse(), context);
+              await runHooks(hookChain(parent, 'afterEach'), context);
+            } catch (error) {
+              failure ||= error;
+            }
+            const childResults = await Promise.all(node.children);
+            if (node.beforeReady) await node.beforeReady;
+            try { await runHooks([...node.after].reverse(), context); }
+            catch (error) { failure ||= error; }
+            if (planCount !== null && context._assertionCount !== planCount) {
+              failure ||= new Error(`_plan_ assertion count mismatch: expected ${planCount}, actual ${context._assertionCount}`);
+            }
+            if (!failure && childResults.some((child) => child.status === 'fail')) {
+              failure = new Error(`subtest of '${label}' failed`);
+            }
+          };
+          const timeout = testOptions.timeout ?? activeRun?.timeout;
+          try {
+            try { await runWithTimeout(execute, timeout, label, (error) => testAbortController?.abort(error)); }
+            catch (error) { failure ||= error; }
+            node.mock.reset();
+            globalMock.reset();
+            if (failure) {
+              const detail = reportFailure(failure);
+              if (!runOwnsOutput) stderr(`not ok - ${label}: ${detail}\n`);
+              return { name: label, status: 'fail', error: failure, file };
+            }
+            if (!runOwnsOutput) stdout(`ok - ${label}\n`);
+            return { name: label, status: 'pass', file };
+          } finally {
+            removeExternalAbort?.();
+          }
+        } finally {
+          if (runtimeState.activeTest?.file === file && runtimeState.activeTest?.name === label) {
+            runtimeState.activeTest = null;
+          }
+          release?.();
+        }
+      };
       const finish = (value) => { recordResult(value); resolve(value); };
-      if (ownerNode) schedule(() => run().then(finish, (error) => finish({ name: label, status: 'fail', error })));
-      else { const previous = testTail; testTail = previous.then(() => run()).then(finish, (error) => finish({ name: label, status: 'fail', error })); }
+      if (ownerNode) schedule(() => run().then(finish, (error) => finish({ name: label, status: 'fail', error, file })));
+      else {
+        const previous = testTail;
+        testTail = previous.then(() => testStartGate).then(() => run()).then(
+          finish,
+          (error) => finish({ name: label, status: 'fail', error, file }),
+        );
+      }
     });
     parent.children.push(result); return result;
   }
   const test = (name, options, callback) => register(name, options, callback);
   const describe = (name, options, callback) => { const definition = splitDefinition(name, options, callback); return createSuite(definition.name, definition.options, definition.callback, suiteStack.at(-1)); };
   const mock = globalMock;
-  Object.assign(test, { test, it: test, describe, suite: describe, only: test, skip: (name, options, callback) => { const d = splitDefinition(name, options, callback); return register(d.name, { ...d.options, skip: true }, d.callback); }, todo: (name, options, callback) => { const d = splitDefinition(name, options, callback); return register(d.name, { ...d.options, todo: true }, d.callback); }, before: (callback) => hook('before', callback), after: (callback) => hook('after', callback), beforeEach: (callback) => hook('beforeEach', callback), afterEach: (callback) => hook('afterEach', callback), run: (options = {}) => ({ concurrency: options.concurrency ?? 1 }) });
+  const run = (options = {}) => {
+    if (activeRun) return activeRun.stream;
+    runOwnsOutput = true;
+    const releaseRunTask = trackTask();
+    const streamApi = scope.require('node:stream');
+    const Readable = streamApi?.Readable;
+    if (typeof Readable !== 'function') throw codedError(Error, 'ERR_UNSUPPORTED_NODE_TEST_RUN', 'node:test run requires node:stream.Readable');
+    const stream = new Readable({ objectMode: true, read() {} });
+    activeRun = {
+      stream,
+      file: null,
+      timeout: options['no-timeout'] ? null : options.timeout ?? 30000,
+    };
+    runtimeState.activeRun = true;
+    runtimeState.streamEvents = [];
+    runtimeState.streamError = null;
+    runtimeState.streamTerminal = null;
+    stream.once('error', (error) => {
+      runtimeState.streamError = formatError(error);
+      runtimeState.streamTerminal = 'error';
+    });
+    stream.once('end', () => { runtimeState.streamTerminal = 'end'; });
+    stream.once('close', () => { runtimeState.streamTerminal ||= 'close'; });
+    const files = Array.isArray(options.files) ? options.files : options.files ? [options.files] : [];
+    runtimeState.requestedFiles = files.map((file) => String(file));
+    runtimeState.files = [];
+    const importer = processObject.argv?.[1] || sourcePath || '/node/index.js';
+    let releaseDiscovery;
+    const discoveryComplete = new Promise((resolve) => { releaseDiscovery = resolve; });
+    testStartGate = discoveryComplete;
+    const finishDiscovery = () => {
+      releaseDiscovery?.();
+      releaseDiscovery = null;
+      if (testStartGate === discoveryComplete) testStartGate = Promise.resolve();
+    };
+    (async () => {
+      try {
+        // Match Node's TestsStream scheduling: give callers a turn to attach
+        // event listeners before discovery and execution begin.
+        await Promise.resolve();
+        for (const file of files) {
+          activeRun.file = String(file);
+          runtimeState.files.push(activeRun.file);
+          emitRunEvent('test:enqueue', {
+            nesting: 0,
+            name: activeRun.file,
+            type: 'test',
+            testId: runtimeState.files.length,
+            parentId: 0,
+            tags: [],
+            line: 1,
+            column: 1,
+            file: activeRun.file,
+          }, { emit: false });
+          emitRunEvent('test:dequeue', {
+            nesting: 0,
+            name: activeRun.file,
+            type: 'test',
+            testId: runtimeState.files.length,
+            parentId: 0,
+            tags: [],
+            line: 1,
+            column: 1,
+            file: activeRun.file,
+          });
+          if (typeof processObject.__bnhModuleImport !== 'function') {
+            throw codedError(Error, 'ERR_UNSUPPORTED_NODE_TEST_RUN', 'node:test run cannot load test files in this process');
+          }
+          await processObject.__bnhModuleImport(String(file), importer, undefined, processObject);
+        }
+        // Release test chains only after the final file has finished
+        // registering its tests and root hooks.
+        finishDiscovery();
+        await testTail;
+        emitRunEvent('test:plan', { nesting: 0, count: testCount });
+        for (const [name, count] of [
+          ['tests', testCount], ['suites', 0], ['pass', passCount], ['fail', failCount],
+          ['cancelled', 0], ['skipped', 0], ['todo', 0],
+        ]) emitRunEvent('test:diagnostic', { nesting: 0, message: `${name} ${count}`, level: 'info' });
+        emitRunEvent('test:summary', {
+          success: failCount === 0,
+          counts: {
+            tests: testCount,
+            failed: failCount,
+            passed: passCount,
+            cancelled: 0,
+            skipped: 0,
+            todo: 0,
+            topLevel: testCount,
+            suites: 0,
+          },
+          duration_ms: 0,
+          file: undefined,
+        });
+      } catch (error) {
+        processObject.exitCode ||= 1;
+        runtimeState.streamError = formatError(error);
+        stderr(`${formatError(error)}\n`);
+        stream.destroy(error);
+        return;
+      } finally {
+        finishDiscovery();
+        if (!stream.destroyed) stream.push(null);
+        activeRun = null;
+        runtimeState.activeRun = false;
+        releaseRunTask?.();
+      }
+    })();
+    return stream;
+  };
+  Object.assign(test, { test, it: test, describe, suite: describe, only: test, skip: (name, options, callback) => { const d = splitDefinition(name, options, callback); return register(d.name, { ...d.options, skip: true }, d.callback); }, todo: (name, options, callback) => { const d = splitDefinition(name, options, callback); return register(d.name, { ...d.options, todo: true }, d.callback); }, before: (callback) => hook('before', callback), after: (callback) => hook('after', callback), beforeEach: (callback) => hook('beforeEach', callback), afterEach: (callback) => hook('afterEach', callback), run });
   Object.defineProperty(test, 'mock', { configurable: true, enumerable: true, get: () => mock });
   Object.defineProperty(test, '__bnhSetActiveProcess', {
     configurable: true,
     value: (value) => { activeProcessOverride = value; },
   });
+  Object.defineProperty(test, '__bnhSourceLoaded', {
+    configurable: true,
+    value: () => {
+      if (sourceEvaluationComplete) return;
+      sourceEvaluationComplete = true;
+      resolveSourceEvaluation?.();
+      resolveSourceEvaluation = null;
+    },
+  });
   Object.defineProperty(test, 'snapshot', { configurable: true, enumerable: true, value: snapshotApi });
   Object.defineProperty(test, 'assert', { configurable: true, enumerable: true, value: assertionApi });
   const summaryRelease = trackTask();
   schedule(async () => {
+    // Entry evaluation may yield for preloads before it registers its first
+    // test. Do not mistake that initial empty window for a test-free process;
+    // the runtime marks the entry loaded after the CommonJS/ESM boundary.
+    await sourceEvaluation;
     await testTail;
     if (!testApiUsed) {
       summaryRelease?.();
       return;
     }
     try { writeSnapshotFiles(); } catch (error) { failCount += 1; processObject.exitCode ||= 1; stderr(`${formatError(error)}\n`); }
-    stdout(`# tests ${testCount}\n# pass ${passCount}\n# fail ${failCount}\n`);
+    if (!runOwnsOutput) stdout(`# tests ${testCount}\n# pass ${passCount}\n# fail ${failCount}\n`);
     summaryRelease?.();
   });
   const instances = new WeakMap([[processObject, test]]);
   const activeInstance = () => {
-    const activeProcess = scope.process || processObject;
+    // ESM evaluation resumes after the loader has restored the ambient
+    // scope.process.  Keep builtin node:test imports bound to the logical
+    // process selected by the loader instead of creating a second registry.
+    const activeProcess = activeProcessOverride || scope.__bnhActiveProcess || scope.process || processObject;
     if (activeProcess === processObject) return test;
     let instance = instances.get(activeProcess);
     if (!instance) {

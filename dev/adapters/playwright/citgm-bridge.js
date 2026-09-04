@@ -31,7 +31,7 @@ function headerEnd(bytes) {
   return -1;
 }
 
-function createFetchTransport(host, port, loadCachedResource) {
+function createFetchTransport(host, port, loadCachedProject) {
   const listeners = new Map();
   const requestChunks = [];
   const controller = new AbortController();
@@ -133,7 +133,7 @@ function createFetchTransport(host, port, loadCachedResource) {
       const body = contentLength > 0 ? requestBytes.slice(end, end + contentLength) : undefined;
       const protocol = Number(port) === 443 ? 'https:' : 'http:';
       const url = new URL(requestTarget, `${protocol}//${host}`).href;
-      const cachedBody = method === 'GET' ? await loadCachedResource?.(url) : null;
+      const cachedBody = method === 'GET' ? await loadCachedProject?.(url) : null;
       const response = cachedBody
         ? {
             status: 200,
@@ -169,24 +169,8 @@ function createFetchTransport(host, port, loadCachedResource) {
   return transport;
 }
 
-function createBrowserProxyAdapter(loadCachedResource) {
+function createBrowserProxyAdapter(loadCachedProject) {
   return {
-    async request(request = {}) {
-      if (request.__bnhNpmCache !== true) return null;
-      if (request.type === 'metadata' && request.name) {
-        const metadata = await npmCache.getMetadata(String(request.name));
-        return metadata ? { metadata } : null;
-      }
-      if (request.type === 'tarball' && request.key) {
-        const bytes = await npmCache.getTarball(String(request.key));
-        return bytes ? { bytes } : null;
-      }
-      if (request.type === 'package-entries' && request.name && request.version) {
-        const entries = npmCache.getUnpackedPackage(String(request.name), String(request.version));
-        return entries ? { entries } : null;
-      }
-      return null;
-    },
     resolve() {
       // The transport uses the original hostname from client._connectOptions;
       // this address only gives the virtual socket a routable placeholder.
@@ -197,7 +181,7 @@ function createBrowserProxyAdapter(loadCachedResource) {
         || request.host
         || request.address;
       return {
-        transport: createFetchTransport(String(clientHost), Number(request.port), loadCachedResource),
+        transport: createFetchTransport(String(clientHost), Number(request.port), loadCachedProject),
         localAddress: '127.0.0.1',
         localPort: 0,
         remoteAddress: String(clientHost),
@@ -242,14 +226,12 @@ class ArtifactNpmCache extends BrowserNpmCache {
   }
 
   async getMetadata(packageName) {
-    const memoryValue = this.getMemoryMetadata(packageName);
-    if (memoryValue !== undefined) return memoryValue;
     const relative = this.artifactManifest?.metadata?.[packageName];
     if (relative && this.artifactBaseUrl) {
       const response = await fetch(new URL(relative, this.artifactBaseUrl));
       if (response.ok) {
         const metadata = await response.json();
-        this.setMemoryMetadata(packageName, metadata);
+        this.memoryMeta.set(packageName, metadata);
         return metadata;
       }
     }
@@ -259,16 +241,12 @@ class ArtifactNpmCache extends BrowserNpmCache {
   async getTarball(key) {
     const rawKey = key.replace(/^(?:pkg-tarball:|tarball:|pkg:)/, '');
     const candidateKeys = [key, rawKey, `tarball:${rawKey}`, `pkg-tarball:${rawKey}`, `pkg:${rawKey}`];
-    for (const candidate of candidateKeys) {
-      const memoryValue = this.getMemoryTarball(candidate);
-      if (memoryValue) return memoryValue;
-    }
     const relative = candidateKeys.map((candidate) => this.artifactManifest?.tarballs?.[candidate]).find(Boolean);
     if (relative && this.artifactBaseUrl) {
       const response = await fetch(new URL(relative, this.artifactBaseUrl));
       if (response.ok) {
         const bytes = new Uint8Array(await response.arrayBuffer());
-        this.setMemoryTarball(key, bytes);
+        this.memoryTarballs.set(key, bytes);
         return bytes;
       }
     }
@@ -285,27 +263,14 @@ class ArtifactNpmCache extends BrowserNpmCache {
 
 const runtime = createRuntime({ globalObject: globalThis, nodeVersion: 'v22' });
 const npmCache = new ArtifactNpmCache({ globalObject: globalThis });
-const browserProxyAdapter = createBrowserProxyAdapter(async (url) => {
-  const project = await npmCache.getProject(url);
-  if (project) return project;
-  let parsed;
-  try { parsed = new URL(url); } catch { return null; }
-  const registryOrigin = npmCache.artifactManifest?.registry
-    ? String(npmCache.artifactManifest.registry).replace(/\/+$/, '')
-    : DEFAULT_REGISTRY;
-  if (parsed.origin !== registryOrigin) return null;
-  if (/\/[^/]+\/[-][^/]+\.tgz$/.test(parsed.pathname)) {
-    return npmCache.getTarball(`tarball:${url}`);
-  }
-  const packageName = decodeURIComponent(parsed.pathname.replace(/^\/+|\/+$/g, ''));
-  if (!packageName || packageName.includes('/-/')) return null;
-  const metadata = await npmCache.getMetadata(packageName);
-  return metadata ? new TextEncoder().encode(JSON.stringify(metadata)) : null;
-});
+const browserProxyAdapter = createBrowserProxyAdapter((url) => npmCache.getProject(url));
 globalThis.__BNH_NPM_CACHE__ = npmCache;
 let running = false;
 
 function capabilitiesFor(env) {
+  const pageOrigin = typeof location?.origin === 'string' && /^https?:$/i.test(location.protocol || '')
+    ? location.origin
+    : null;
   return {
     vfs: { mounts: [{ path: '/node', mode: 'read-write' }] },
     workers: { entryModules: ['*'], maxChildren: 32 },
@@ -315,7 +280,7 @@ function capabilitiesFor(env) {
     envVars: { allowed: Object.keys(env) },
     proxy: { mode: 'proxy', enabled: true, capability: true },
     network: {
-      origins: [DEFAULT_REGISTRY, 'https://github.com', 'https://codeload.github.com'],
+      origins: [DEFAULT_REGISTRY, 'https://github.com', 'https://codeload.github.com', ...(pageOrigin ? [pageOrigin] : [])],
       methods: ['GET', 'HEAD', 'OPTIONS'],
     },
     npm: { registries: [DEFAULT_REGISTRY], lifecycleScripts: false, allowedScripts: [] },
@@ -329,9 +294,6 @@ function text(value) {
   return String(value);
 }
 
-function progressIdentity(value, limit = 128) {
-  return text(value).replace(/[^a-zA-Z0-9@._/:=-]/g, '_').slice(0, limit);
-}
 function byteLength(value) {
   if (value instanceof Uint8Array) return value.byteLength;
   if (ArrayBuffer.isView(value)) return value.byteLength;
@@ -356,14 +318,28 @@ function structuredCitgmStage(value) {
   return null;
 }
 
-async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 1000, citgmVersion = DEFAULT_CITGM_VERSION, browser = 'unknown', progress: progressConfig = null, output: outputConfig = null }) {
+function npmCacheSnapshot(cache) {
+  const snapshot = {
+    metadata: Object.fromEntries(cache.memoryMeta),
+    tarballs: Object.fromEntries([...cache.memoryTarballs.entries()].map(([key, bytes]) => [
+      key,
+      bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes),
+    ])),
+  };
+  if (cache.artifactManifest && cache.artifactBaseUrl) {
+    snapshot.artifact = {
+      baseUrl: cache.artifactBaseUrl.href,
+      metadata: cache.artifactManifest.metadata || {},
+      tarballs: cache.artifactManifest.tarballs || {},
+    };
+  }
+  return snapshot;
+}
+
+async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 1000, citgmVersion = DEFAULT_CITGM_VERSION, browser = 'unknown', progress: progressConfig = null, capture: captureConfig = null }) {
   if (running) throw new Error('a CITGM run is already active in this browser page');
   if (!module || typeof module !== 'string') throw new TypeError('module is required');
   running = true;
-  // Unpacked package contents are an ephemeral acceleration layer. Keep it
-  // scoped to this CITGM invocation so repeated runs cannot retain an
-  // unbounded second copy of the persistent tarball cache.
-  npmCache.clearUnpackedPackages();
 
   const registry = String(env.npm_config_registry || DEFAULT_REGISTRY).replace(/\/+$/, '');
   const runEnv = {
@@ -380,30 +356,27 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
   const controller = new AbortController();
   const timeout = Number(timeoutMs) > 0 ? Number(timeoutMs) : 15 * 60 * 1000;
   const runId = `citgm-${Date.now()}`;
-  const childIdentity = {
-    module: progressIdentity(module),
-    spec: progressIdentity(module),
-    citgmVersion: progressIdentity(citgmVersion),
-    browser: progressIdentity(browser || 'unknown', 32),
-    command: 'node',
-    entry: CITGM_ENTRY,
-  };
+  const retainProgressTrace = captureConfig?.progressBinding === undefined;
+  const progressTrace = retainProgressTrace ? [] : null;
   const progressReporter = createProgressReporter({
     binding: progressConfig?.binding,
     runId,
+    onEvent: (event) => progressTrace?.push(event),
   });
   const progress = {
     bootstrap: { events: 0, phases: {}, last: null },
     preload: { events: 0, phases: {}, last: null },
   };
-  const networkEvents = [];
+  const retainNetworkTrace = typeof captureConfig?.networkBinding !== 'string';
+  const networkEvents = retainNetworkTrace ? [] : null;
+  let networkEventCount = 0;
   const outputCounters = {
     stdout: { bytes: 0, chunks: 0 },
     stderr: { bytes: 0, chunks: 0 },
   };
-  const outputChunks = { stdout: [], stderr: [] };
-  const outputBinding = outputConfig?.binding || progressConfig?.outputBinding;
-  const pendingOutputWrites = new Set();
+  const retainOutputChunks = typeof captureConfig?.outputBinding !== 'string';
+  const outputChunks = retainOutputChunks ? { stdout: [], stderr: [] } : null;
+  const capturePromises = new Set();
   let installStats = null;
   let preloadStats = null;
   let child = null;
@@ -415,6 +388,76 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     const state = child?.state || child?._worker?.state;
     return state === 'starting' || state === 'running';
   };
+  const childRuntimeState = () => {
+    const worker = child?._worker;
+    const runtimeState = worker?.runtimeState || child?.runtimeState;
+    const boundedText = (value, limit = 256) => value == null ? null : String(value).slice(0, limit);
+    const nodeTest = runtimeState?.nodeTest;
+    const activity = runtimeState?.childActivity;
+    return {
+      state: boundedText(child?.state || worker?.state, 32),
+      lifecycle: Array.isArray(child?.stateHistory || worker?.stateHistory)
+        ? (child?.stateHistory || worker?.stateHistory).slice(-6).map((value) => boundedText(value, 32))
+        : [],
+      runtimePhase: boundedText(runtimeState?.phase, 64),
+      nodeTest: nodeTest ? {
+        registered: Number(nodeTest.registered) || 0,
+        completed: Number(nodeTest.completed) || 0,
+        activeRun: Boolean(nodeTest.activeRun),
+        activeTest: nodeTest.activeTest ? {
+          name: boundedText(nodeTest.activeTest.name, 160),
+          fullName: boundedText(nodeTest.activeTest.fullName, 240),
+          file: boundedText(nodeTest.activeTest.file, 256),
+          state: boundedText(nodeTest.activeTest.state, 32),
+        } : null,
+        streamTerminal: boundedText(nodeTest.streamTerminal, 32),
+        streamError: nodeTest.streamError ? {
+          name: boundedText(nodeTest.streamError.name, 64),
+          message: boundedText(nodeTest.streamError.message || nodeTest.streamError, 512),
+        } : null,
+      } : null,
+      childActivity: activity ? {
+        launched: Number(activity.launched) || 0,
+        completed: Number(activity.completed) || 0,
+        failed: Number(activity.failed) || 0,
+        recent: Array.isArray(activity.recent) ? activity.recent.slice(-4).map((record) => ({
+          entry: boundedText(record.entry || record.command, 256),
+          argumentCount: Number(record.argumentCount) || 0,
+          code: record.code ?? null,
+          signal: record.signal ?? null,
+          pending: Boolean(record.pending),
+          stdoutBytes: Number(record.stdoutBytes) || 0,
+          stderrBytes: Number(record.stderrBytes) || 0,
+          stdoutExcerpt: boundedText(record.stdoutExcerpt, 512) || '',
+          stderrExcerpt: boundedText(record.stderrExcerpt, 512) || '',
+          nestedState: record.nestedState ? {
+            state: boundedText(record.nestedState.state, 32),
+            runtimePhase: boundedText(record.nestedState.runtimePhase, 64),
+            nodeTest: record.nestedState.nodeTest ? {
+              registered: Number(record.nestedState.nodeTest.registered) || 0,
+              completed: Number(record.nestedState.nodeTest.completed) || 0,
+              activeRun: Boolean(record.nestedState.nodeTest.activeRun),
+              activeTest: record.nestedState.nodeTest.activeTest ? {
+                name: boundedText(record.nestedState.nodeTest.activeTest.name, 160),
+                fullName: boundedText(record.nestedState.nodeTest.activeTest.fullName, 240),
+                file: boundedText(record.nestedState.nodeTest.activeTest.file, 256),
+              } : null,
+              streamTerminal: boundedText(record.nestedState.nodeTest.streamTerminal, 32),
+              streamError: record.nestedState.nodeTest.streamError ? {
+                name: boundedText(record.nestedState.nodeTest.streamError.name, 64),
+                message: boundedText(record.nestedState.nodeTest.streamError.message, 512),
+              } : null,
+            } : null,
+          } : null,
+        })) : [],
+      } : null,
+      terminal: child?.terminal || worker?.terminal ? {
+        code: child?.terminal?.code ?? worker?.terminal?.code ?? null,
+        signal: child?.terminal?.signal ?? worker?.terminal?.signal ?? null,
+        kind: boundedText(child?.terminal?.kind || worker?.terminal?.kind, 32),
+      } : null,
+    };
+  };
   const counters = () => ({
     npm: {
       citgmInstallEvents: progress.bootstrap.events,
@@ -424,7 +467,7 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       candidatePreloadPackages: preloadStats?.packages?.length || 0,
       candidatePreloadFiles: preloadStats?.totalFiles || 0,
     },
-    networkEvents: networkEvents.length,
+    networkEvents: networkEventCount || networkEvents?.length || 0,
     output: {
       stdoutBytes: outputCounters.stdout.bytes,
       stdoutChunks: outputCounters.stdout.chunks,
@@ -439,6 +482,8 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       stage: currentStage,
       childActive: childActive(),
       counters: counters(),
+      ...(event === 'child-running' || event === 'child-started' || event === 'upstream-test-started'
+        ? { childState: childRuntimeState() } : {}),
       ...fields,
     });
   };
@@ -449,7 +494,18 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       : ArrayBuffer.isView(value)
         ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice()
         : encoder.encode(text(value));
-    outputChunks[stream].push(bytes);
+    outputChunks?.[stream].push(bytes);
+    if (typeof captureConfig?.outputBinding === 'string') {
+      try {
+        const pending = Promise.resolve(globalThis[captureConfig.outputBinding]?.({
+          runId,
+          stream,
+          text: text(value),
+        })).catch(() => {});
+        capturePromises.add(pending);
+        void pending.finally(() => capturePromises.delete(pending));
+      } catch { /* capture is observational */ }
+    }
     target.bytes += byteLength(value);
     target.chunks += 1;
     progressReporter.output(stream, value, {
@@ -457,11 +513,6 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       childActive: childActive(),
       counters: counters(),
     });
-    if (outputBinding && typeof globalThis[outputBinding] === 'function') {
-      const write = Promise.resolve(globalThis[outputBinding]({ stream, value })).catch(() => {});
-      pendingOutputWrites.add(write);
-      void write.finally(() => pendingOutputWrites.delete(write));
-    }
     const label = structuredCitgmStage(value);
     if (label) report('execution', 'stage-label', { label });
   };
@@ -521,58 +572,36 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       void child?.kill();
     }, timeout);
 
-    // Retain only the small install summary. The full result also contains
-    // the materialized file map; keeping it alive after mount would retain
-    // the pre-shared ArrayBuffers alongside the VFS's immutable file views.
-    const { packages, totalFiles } = await npm.install(`citgm@${citgmVersion}`, {
+    installStats = await npm.install(`citgm@${citgmVersion}`, {
       cwd: '/node',
-      // The materialized VFS is the authoritative package tree for this run.
-      // Keep the cache focused on metadata/tarballs so it does not retain a
-      // second unpacked copy of every installed package.
-      cacheUnpacked: false,
-      returnFiles: false,
       onProgress: (event) => recordProgress(progress.bootstrap, event),
     });
-    installStats = {
-      packages,
-      totalFiles,
-    };
     await progressReporter.flush();
     report('setup', 'citgm-install-complete', { events: progress.bootstrap.events });
 
+    const preloadVfs = createVfs({
+      mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }],
+    });
+    const preloadNpm = new BrowserNpm({
+      vfs: preloadVfs,
+      registry,
+      cache: npmCache,
+      globalObject: globalThis,
+      proxyUrl: null,
+      platform: 'browser',
+      arch: 'browser',
+      libc: 'browser',
+    });
     currentStage = 'candidate-dependency-preload';
     report('setup', 'candidate-dependency-preload-started');
-    {
-      const preloadVfs = createVfs({
-        mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }],
-      });
-      const preloadNpm = new BrowserNpm({
-        vfs: preloadVfs,
-        registry,
-        cache: npmCache,
-        globalObject: globalThis,
-        proxyUrl: null,
-        platform: 'browser',
-        arch: 'browser',
-        libc: 'browser',
-      });
-      // This phase warms metadata and tarballs for the real child install.
-      // With no materialized VFS, retaining every unpacked entry would keep a
-      // second package tree alive for the duration of the browser run.
-      preloadStats = await preloadNpm.install(module, {
-        cwd: '/node',
-        nodeModulesDir: '/node/node_modules',
-        includeDevDependencies: true,
-        materialize: false,
-        cacheUnpacked: false,
-        onProgress: (event) => recordProgress(progress.preload, event),
-      });
-    }
+    preloadStats = await preloadNpm.install(module, {
+      cwd: '/node',
+      nodeModulesDir: '/node/node_modules',
+      includeDevDependencies: true,
+      onProgress: (event) => recordProgress(progress.preload, event),
+    });
     await progressReporter.flush();
     report('setup', 'candidate-dependency-preload-complete', { events: progress.preload.events });
-    // Precache has warmed persistent artifacts; do not retain the warm
-    // in-memory layers while the materializing install builds the VFS.
-    npmCache.clearMemory();
     await runtime.mount({});
 
     const processArgv = createCitgmProcessArgv(CITGM_ENTRY, module, args);
@@ -584,27 +613,39 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
         env: runEnv,
         signal: controller.signal,
         timeout,
-        npmCache: { rpc: true },
+        npmCache: npmCacheSnapshot(npmCache),
         processArgv,
         onNetwork: (event) => {
-          networkEvents.push(event);
-          report('execution', 'network-activity', { events: networkEvents.length });
+          networkEventCount += 1;
+          networkEvents?.push(event);
+          if (typeof captureConfig?.networkBinding === 'string') {
+            try {
+              const pending = Promise.resolve(globalThis[captureConfig.networkBinding]?.({ runId, event })).catch(() => {});
+              capturePromises.add(pending);
+              void pending.finally(() => capturePromises.delete(pending));
+            } catch { /* capture is observational */ }
+          }
+          report('execution', 'network-activity', { events: networkEventCount });
         },
         onStdout: (value) => recordOutput('stdout', value),
         onStderr: (value) => recordOutput('stderr', value),
       },
     );
     report('execution', 'child-started', {
-      ...childIdentity,
-      testStage: 'citgm-runner',
+      command: 'node',
+      entry: CITGM_ENTRY,
+      module,
+      spec: module,
       script: 'citgm',
       argumentCount: Math.max(0, processArgv.length - 2),
       childActive: childActive(),
     });
     currentStage = 'upstream-test-execution';
     report('execution', 'upstream-test-started', {
-      ...childIdentity,
-      testStage: 'package-manager-test',
+      command: 'node',
+      entry: CITGM_ENTRY,
+      module,
+      spec: module,
       script: 'citgm',
     });
     livenessTimer = setInterval(() => {
@@ -616,11 +657,11 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     report('lifecycle', 'completed', { code: exitCode ?? null, childActive: false });
     await Promise.resolve();
     const [stdout, stderr] = await Promise.all([child.stdoutText(), child.stderrText()]);
-    const stdoutBytes = concatBytes(outputChunks.stdout);
-    const stderrBytes = concatBytes(outputChunks.stderr);
+    await Promise.all([...capturePromises]);
+    const stdoutBytes = outputChunks ? concatBytes(outputChunks.stdout) : new Uint8Array();
+    const stderrBytes = outputChunks ? concatBytes(outputChunks.stderr) : new Uint8Array();
     return {
       module,
-      runId,
       citgmVersion,
       exitCode,
       timedOut: controller.signal.aborted,
@@ -640,25 +681,21 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       precache: { used: precacheUsed, packages: npmCache.artifactManifest?.packageCount || 0 },
       install: { packages: installStats?.packages?.length || 0, files: installStats?.totalFiles || 0 },
       preload: { packages: preloadStats?.packages?.length || 0, files: preloadStats?.totalFiles || 0 },
-      output: {
-        stdout: { ...outputCounters.stdout },
-        stderr: { ...outputCounters.stderr },
-      },
       progress,
-      networkEvents,
+      progressTrace,
+      networkEvents: networkEvents || [],
     };
   } catch (error) {
     report('lifecycle', 'failed', { code: error?.code || 'ERR_CITGM_RUN' });
     return {
       module,
-      runId,
       citgmVersion,
       exitCode: 1,
       timedOut: controller.signal.aborted,
       stdout: '',
       stderr: '',
-      stdoutBytes: concatBytes(outputChunks.stdout),
-      stderrBytes: concatBytes(outputChunks.stderr),
+      stdoutBytes: outputChunks ? concatBytes(outputChunks.stdout) : new Uint8Array(),
+      stderrBytes: outputChunks ? concatBytes(outputChunks.stderr) : new Uint8Array(),
       outputCounters: {
         stdout: { ...outputCounters.stdout },
         stderr: { ...outputCounters.stderr },
@@ -666,19 +703,15 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       outputStats: { stdout: null, stderr: null },
       error: { name: error.name || 'Error', message: String(error.message || error), code: error.code || null },
       precache: { used: Boolean(npmCache.artifactManifest), packages: npmCache.artifactManifest?.packageCount || 0 },
-      output: {
-        stdout: { ...outputCounters.stdout },
-        stderr: { ...outputCounters.stderr },
-      },
       progress,
-      networkEvents,
+      progressTrace,
+      networkEvents: networkEvents || [],
     };
   } finally {
-    await Promise.allSettled([...pendingOutputWrites]);
     clearTimeout(timer);
     clearInterval(livenessTimer);
     await progressReporter.flush();
-    npmCache.clearUnpackedPackages();
+    await Promise.all([...capturePromises]);
     running = false;
   }
 }

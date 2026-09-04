@@ -19,6 +19,7 @@ const SymbolNodeAsyncDispose = Symbol.for('nodejs.asyncDispose');
 const SymbolInspectCustom = Symbol.for('nodejs.util.inspect.custom');
 const BODYLESS_METHODS = new Set(['GET', 'HEAD']);
 const objectToString = Object.prototype.toString;
+
 const HTTP_TOKEN_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const HTTP_TOKEN_CHARACTERS = new Set("!#$%&'*+-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ^_`abcdefghijklmnopqrstuvwxyz|~".split(''));
 const INVALID_HEADER_CHAR_PATTERN = /[^\t\x20-\x7e\x80-\xff]/;
@@ -2356,6 +2357,11 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
       // Node server contract for a persistent connection.
       headers['transfer-encoding'] = 'chunked';
       chunked = true;
+    } else if (hasTransferEncoding && hasChunkedEncoding(headers)) {
+      // An application may select chunked framing explicitly before the first
+      // write. Preserve that framing decision when reporting the raw writer's
+      // mode; otherwise the body is emitted unframed under a chunked header.
+      chunked = true;
     } else if (!hasLength && !hasTransferEncoding) {
       headers['content-length'] = String(result.body?.byteLength || 0);
     }
@@ -2768,6 +2774,19 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
       schedule(scope, () => binding.server.emit('clientError', error, socket));
       return Promise.reject(error);
     }
+    const dispatchProcess = scope.process?.__bnhNetworkEvent ? scope.process : ownerProcess;
+    try {
+      dispatchProcess?.__bnhNetworkEvent?.({
+        source: 'guest-http',
+        method: String(init?.method || 'GET'),
+        url: String(url || ''),
+        phase: 'virtual-dispatch',
+        transport: 'virtual-network',
+        binding: Boolean(binding),
+      });
+    } catch {
+      // Network diagnostics must never affect dispatch.
+    }
     return new Promise((resolve, reject) => {
       const request = new VirtualServerRequest(url, init, scope, BufferClass);
       if (init.requestTarget) request.url = init.requestTarget;
@@ -3098,7 +3117,13 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
     return find(url)?.rawServer?._tcpResource?.asyncId();
   }
 
-  return { bind, unbind, dispatch, dispatchProxyConnect, getServerAsyncId };
+  return {
+    bind,
+    unbind,
+    dispatch,
+    dispatchProxyConnect,
+    getServerAsyncId,
+  };
 }
 
 function createServerClass(protocol, scope, registry, BufferClass, trackTask, ownerProcess) {
@@ -4702,6 +4727,10 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       if (this._started || this.destroyed) return;
       if (this._agentSocketAttempted && (this._agentSocket || this.destroyed)) return;
       this._started = true;
+      this._recordNetworkLifecycle('client-dispatch', {
+        agent: this._agent?.constructor?.name || null,
+        virtualNetwork: Boolean(this._virtualNetwork?.dispatch),
+      });
       this._performanceStart = Number(scope.performance?.now?.()) || 0;
       this._taskRelease ||= trackTask?.() || null;
       this._ensureAsyncResources();
@@ -5171,6 +5200,10 @@ function createProtocolModule(protocol, ClientRequest, Server, Agent, scope, Buf
     const clientRequest = new ClientRequest(url, {
       ...requestOptions,
       agent: requestOptions.agent === undefined ? protocolModule.globalAgent : requestOptions.agent,
+    });
+    clientRequest._recordNetworkLifecycle('client-request-created', {
+      agent: clientRequest._agent?.constructor?.name || null,
+      virtualNetwork: Boolean(clientRequest._virtualNetwork?.dispatch),
     });
     if (parsed.callback) clientRequest.once('response', parsed.callback);
     clientRequest._agent?.addRequest?.(clientRequest, requestOptions);

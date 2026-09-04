@@ -2523,11 +2523,23 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
     const previousActiveProcess = globalThis.__bnhActiveProcess;
     globalThis.__bnhUserCode = true;
     if (processOverride) globalThis.__bnhActiveProcess = processOverride;
+    const previousFunction = globalThis.Function;
+    // Install the guest Function constructor for every CommonJS evaluation
+    // owned by a virtual process.  A module can construct a function from a
+    // string whose dynamic import is therefore invisible to the source
+    // rewriter (for example, `new Function('return import(specifier)')`).
+    // The constructor delegates unchanged to the native Function for all
+    // other bodies, so this preserves ordinary Function semantics while
+    // keeping deferred imports inside the owning module loader.
+    if (processOverride?.__bnhModuleImport) {
+      globalThis.Function = createGuestFunctionConstructor(previousFunction, processOverride, sourceURL);
+    }
     try {
       return wrapped(...values);
     } finally {
       if (previousActiveProcess === undefined) delete globalThis.__bnhActiveProcess;
       else globalThis.__bnhActiveProcess = previousActiveProcess;
+      globalThis.Function = previousFunction;
       if (previousUserCode === undefined) delete globalThis.__bnhUserCode;
       else globalThis.__bnhUserCode = previousUserCode;
     }
@@ -2544,6 +2556,12 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
   const previousActiveProcess = globalThis.__bnhActiveProcess;
   globalThis.__bnhUserCode = true;
   if (processOverride) globalThis.__bnhActiveProcess = processOverride;
+  const previousFunction = globalThis.Function;
+  // See the module-wrapper path above: dynamic import syntax may only exist
+  // in a string compiled after this CommonJS evaluation has returned.
+  if (processOverride?.__bnhModuleImport) {
+    globalThis.Function = createGuestFunctionConstructor(previousFunction, processOverride, sourceURL);
+  }
   try {
     const values = [...commonJsValues, commonJsValues[5] || ((specifier) => import(specifier))];
     if (bindProcess) values.push(processOverride);
@@ -2552,6 +2570,7 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
   } finally {
     if (previousActiveProcess === undefined) delete globalThis.__bnhActiveProcess;
     else globalThis.__bnhActiveProcess = previousActiveProcess;
+    globalThis.Function = previousFunction;
     if (previousUserCode === undefined) delete globalThis.__bnhUserCode;
     else globalThis.__bnhUserCode = previousUserCode;
   }

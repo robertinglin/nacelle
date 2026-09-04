@@ -1,4 +1,5 @@
 import { BrowserEventEmitter } from './events.js';
+import { captureAsyncScope, runInCapturedScope } from './async-hooks.js';
 
 const uncloneableValues = new WeakSet();
 const uncloneableErrors = new WeakMap();
@@ -531,7 +532,10 @@ export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePor
   };
   const drainDeferredMessages = () => {
     if (closed || (events.listenerCount('message') === 0 && !assignedOnMessage)) return;
-    while (deferredMessages.length && !closed) deliverMessage(deferredMessages.shift());
+    while (deferredMessages.length && !closed) {
+      const deferred = deferredMessages.shift();
+      runInCapturedScope(deferred.scope, () => deliverMessage(deferred.data));
+    }
   };
   const onMessage = (event) => {
     if (closed) return;
@@ -542,8 +546,11 @@ export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePor
     );
     try {
       if (queued?.consumed) return;
-      if (events.listenerCount('message') === 0 && !assignedOnMessage) deferredMessages.push(data);
-      else deliverMessage(data);
+      if (events.listenerCount('message') === 0 && !assignedOnMessage) {
+        deferredMessages.push({ data, scope: queued?.scope });
+      } else {
+        runInCapturedScope(queued?.scope, () => deliverMessage(data));
+      }
     } finally {
       if (pendingMessages > 0) pendingMessages -= 1;
       if (closing && pendingMessages === 0) closeLocally();
@@ -578,7 +585,9 @@ export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePor
     callNative(nativePort, 'close');
     events.emit('close');
     events.removeAllListeners();
-    deferredMessages.length = 0;
+    // Release the async scopes captured for messages that will never deliver.
+    for (const deferred of deferredMessages.splice(0)) runInCapturedScope(deferred.scope, () => {});
+    for (const queued of queuedMessages.splice(0)) runInCapturedScope(queued.scope, () => {});
     for (const closeCallback of closeCallbacks.splice(0)) queueMicrotask(closeCallback);
   };
   const closeLocally = (callback) => {
@@ -657,7 +666,8 @@ export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePor
       }
       const [message, transfers] = transferArguments(value, normalizedTransfers);
       const hasTransfer = Array.isArray(transfers) ? transfers.length > 0 : transfers !== undefined;
-      notifyPeerMessage?.(hasTransfer ? undefined : message, hasTransfer);
+      const messageScope = peerPort ? captureAsyncScope('MESSAGEPORT') : undefined;
+      notifyPeerMessage?.(hasTransfer ? undefined : message, hasTransfer, messageScope);
       if (transfers === undefined) callNative(nativePort, 'postMessage', message);
       else callNative(nativePort, 'postMessage', message, transfers);
     },
@@ -693,9 +703,9 @@ export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePor
       value: (callback) => { closePeer = callback; },
     },
     __bnhMessageQueued: {
-      value: (value, useNative = false) => {
+      value: (value, useNative = false, scope = undefined) => {
         pendingMessages += 1;
-        queuedMessages.push({ value, useNative, consumed: false });
+        queuedMessages.push({ value, useNative, consumed: false, scope });
       },
     },
     __bnhReceiveMessage: {

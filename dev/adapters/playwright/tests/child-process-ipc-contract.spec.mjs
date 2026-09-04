@@ -708,6 +708,56 @@ test('preserves the refable IPC channel through an advanced ESM child handshake'
   expect(result.stdout).toContain('advanced ESM IPC contract passed');
 });
 
+test('delivers fork options through an async-iterable CommonJS IPC helper', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const assert = require('node:assert/strict');
+    const { fork } = require('node:child_process');
+
+    const child = fork('/node/async-iterable-child.mjs', [], {
+      cwd: '/node',
+      silent: true,
+      serialization: 'advanced',
+    });
+    child.once('error', (error) => {
+      process.stderr.write(error.stack + '\\n');
+      process.exitCode = 1;
+    });
+    child.on('message', (message) => {
+      if (message?.kind === 'ready') child.send({ kind: 'options', value: 42 });
+      if (message?.kind === 'done') child.disconnect();
+    });
+    child.once('close', (code, signal) => {
+      assert.strictEqual(code, 0);
+      assert.strictEqual(signal, null);
+      process.stdout.write('async-iterable IPC contract passed');
+    });
+  `, {
+    files: {
+      '/node/async-iterable-child.mjs': [
+        "import assert from 'node:assert/strict';",
+        "import helper from './async-iterable-ipc.cjs';",
+        "helper.sendReady();",
+        'const options = await helper.waitForOptions();',
+        "assert.deepStrictEqual(options, { kind: 'options', value: 42 });",
+        'helper.sendDone();',
+      ].join('\n'),
+      '/node/async-iterable-ipc.cjs': [
+        "const { on } = require('node:events');",
+        "const nodeProcess = require('node:process');",
+        'nodeProcess.channel.ref();',
+        'module.exports = {',
+        "  sendReady() { nodeProcess.send({ kind: 'ready' }); },",
+        "  async waitForOptions() { for await (const [message] of on(nodeProcess, 'message')) { if (message?.kind === 'options') return message; } },",
+        "  sendDone() { nodeProcess.send({ kind: 'done' }); nodeProcess.channel.unref(); },",
+        '};',
+      ].join('\n'),
+    },
+  });
+
+  await expectPass(expect, result);
+  expect(result.stdout).toContain('async-iterable IPC contract passed');
+});
+
 test('forwards the child IPC send callback through an isolated ESM child', async ({ harnessPage }) => {
   const result = await harnessPage.run(`
     const assert = require('node:assert/strict');

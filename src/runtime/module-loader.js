@@ -248,6 +248,7 @@ export function createModuleLoader({
   resolveBuiltin,
   runModuleHook: sharedRunModuleHook,
   readSource,
+  fetchModule,
   defaultModuleType = 'commonjs',
 } = {}) {
   const registeredHooks = sharedRunModuleHook ? [] : wrapSynchronousLoadHook(builtins?.module);
@@ -299,6 +300,23 @@ export function createModuleLoader({
   // Textual module reads can use the VFS source cache, while binary module
   // formats continue through the byte-oriented files seam below.
   const readTextFile = (path) => typeof readSource === 'function' ? readSource(path) : readFile(path);
+  const fetchRemoteModule = async (url, context = {}) => {
+    if (typeof fetchModule !== 'function') {
+      const error = new Error(`No fetch capability is registered for ${url}`);
+      error.code = 'ERR_UNSUPPORTED_ESM_URL_SCHEME';
+      throw error;
+    }
+    const response = await fetchModule(url);
+    if (!response?.ok) {
+      const error = new Error(`Failed to fetch module '${url}'`);
+      error.code = 'ERR_MODULE_NOT_FOUND';
+      throw error;
+    }
+    return {
+      format: context.format || 'module',
+      source: await response.text(),
+    };
+  };
   const hasBuiltin = (name) => Object.prototype.hasOwnProperty.call(builtins || {}, name)
     || Object.prototype.hasOwnProperty.call(builtins || {}, `node:${name}`);
   const builtinName = (specifier) => String(specifier).startsWith('node:')
@@ -420,6 +438,7 @@ export function createModuleLoader({
   const defaultLoad = (url, context = {}) => {
     if (url.startsWith('node:')) return { format: 'builtin', source: null };
     if (url.startsWith('data:')) return { format: 'module', source: null };
+    if (url.startsWith('http:') || url.startsWith('https:')) return fetchRemoteModule(url, context);
     const resolved = url.startsWith('file:') ? fileURLToPath(url) : url;
     if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) unsupportedNativeAddon(resolved);
     const value = resolved.endsWith('.wasm') || resolved.endsWith('.node')
@@ -1507,8 +1526,10 @@ export function createModuleLoader({
     const promise = (async () => {
       const context = hookContext(resolved, importer);
       const loaded = sharedRunModuleHook
-        ? await sharedRunModuleHook('load', resolved, context, () => undefined)
-        : undefined;
+        ? await sharedRunModuleHook('load', resolved, context, (nextURL, nextContext) => (
+            defaultLoad(nextURL, nextContext)
+          ))
+        : await defaultLoad(resolved, context);
       if (!loaded || loaded.source === undefined || loaded.source === null) {
         throw packageError('ERR_UNSUPPORTED_ESM_URL_SCHEME', `No loader is registered for ${resolved}`);
       }

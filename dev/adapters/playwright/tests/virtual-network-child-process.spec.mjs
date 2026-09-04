@@ -103,6 +103,48 @@ test('CommonJS child processes can reach a parent-owned virtual server', async (
   });
 });
 
+test('ESM children route dynamic HTTP imports through the virtual network', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const { spawn } = require('node:child_process');
+    const http = require('node:http');
+    const server = http.createServer((_request, response) => {
+      response.setHeader('content-type', 'text/javascript');
+      response.end('export const answer = 42;');
+    });
+    server.listen(0, () => {
+      const target = 'http://localhost:' + server.address().port + '/module.mjs';
+      const child = spawn(process.execPath, ['/node/virtual-network-import-child.mjs'], {
+        env: { TARGET_URL: target },
+      });
+      let output = '';
+      let errorOutput = '';
+      child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+      child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+      child.once('close', (code, signal) => {
+        server.close(() => process.stdout.write(JSON.stringify({ code, signal, output, errorOutput })));
+      });
+    });
+  `, {
+    capabilities,
+    files: {
+      '/node/virtual-network-import-child.mjs': `
+        const imported = await import(process.env.TARGET_URL);
+        process.stdout.write(String(imported.answer));
+      `,
+    },
+    env: { TARGET_URL: 'unused-by-parent' },
+  });
+
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.timedOut, JSON.stringify(result)).not.toBe(true);
+  expect(JSON.parse(result.stdout)).toEqual({
+    code: 0,
+    signal: null,
+    output: '42',
+    errorOutput: '',
+  });
+});
+
 test('CommonJS child processes keep their own HTTP server alive through a request', async ({ harnessPage }) => {
   const result = await harnessPage.run(`
     const { spawn } = require('node:child_process');

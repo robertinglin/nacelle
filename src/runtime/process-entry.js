@@ -162,7 +162,10 @@ export async function runProcessEntry(context) {
     delete globalThis.__BNH_NPM_CACHE__;
   }
   const remoteVirtualNetwork = context.networkPort
-    ? createRemoteVirtualNetwork({ port: context.networkPort })
+    ? createRemoteVirtualNetwork({
+        port: context.networkPort,
+        transport: descriptor.proxy?.rpc ? descriptor.proxy.adapter : undefined,
+      })
     : null;
   // Network telemetry uses a control frame, not guest IPC. It cannot affect
   // the guest's own channel lifecycle or ordering when a process exits.

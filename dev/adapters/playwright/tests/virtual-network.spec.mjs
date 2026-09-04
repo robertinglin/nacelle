@@ -146,6 +146,54 @@ test.describe('browser-native virtual networking', () => {
     await new Promise((resolve) => server.close(resolve));
   });
 
+  test('accepts inbound connections from an explicit network transport', async () => {
+    let accepted;
+    const writes = [];
+    const network = createVirtualNetwork({
+      transport: {
+        bindTcp(request) {
+          queueMicrotask(() => {
+            const peer = {
+              destroyed: false,
+              _runTcpResource(callback) { return callback(); },
+              _peerClosed() { this.destroyed = true; },
+              push(bytes) {
+                if (bytes === null) return true;
+                writes.push(text(bytes instanceof Uint8Array ? bytes : new TextEncoder().encode(bytes)));
+                return true;
+              },
+              destroy() { this.destroyed = true; },
+            };
+            accepted = request.onConnection({
+              client: peer,
+              localAddress: '127.0.0.1',
+              localPort: 54000,
+              remoteAddress: request.address,
+              remotePort: request.port,
+            });
+          });
+          return { close() {} };
+        },
+        unbindTcp() {},
+      },
+    });
+    const browserNet = net.createBrowserNet({ network });
+    const server = browserNet.createServer((socket) => {
+      socket.on('data', (chunk) => socket.write(`echo:${text(chunk)}`));
+    });
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(43209, '127.0.0.1', resolve);
+    });
+    await new Promise((resolve) => queueMicrotask(resolve));
+    expect(accepted).toBeTruthy();
+    accepted.push(new TextEncoder().encode('inbound'));
+    await new Promise((resolve) => queueMicrotask(resolve));
+    expect(writes).toEqual(['echo:inbound']);
+    accepted.destroy();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
   test('uses an explicitly granted proxy only for names outside the virtual DNS table', async () => {
     const calls = [];
     const proxy = createProxyCapability({

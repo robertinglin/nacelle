@@ -170,6 +170,9 @@ function createFetchTransport(host, port, loadCachedProject) {
 }
 
 function createBrowserProxyAdapter(loadCachedProject) {
+  const loopbackBindings = new Map();
+  const loopbackByBindingKey = new Map();
+  const loopbackConnections = new Map();
   return {
     async request(request = {}) {
       if (request.__bnhNpmCache !== true) return null;
@@ -217,6 +220,100 @@ function createBrowserProxyAdapter(loadCachedProject) {
         remoteAddress: String(clientHost),
         remotePort: Number(request.port),
       };
+    },
+    bindTcp(request = {}) {
+      const bindingKey = String(request.bindingKey || '');
+      const registration = {
+        id: null,
+        listener: request.onConnection,
+        error: request.onError,
+        onConnection(listener) {
+          registration.listener = listener;
+          return registration;
+        },
+        close() {
+          for (const [connectionId, connection] of loopbackConnections) {
+            if (connection.registration === registration) {
+              connection.socket?.destroy?.();
+              loopbackConnections.delete(connectionId);
+            }
+          }
+          if (registration.id === null) return;
+          loopbackBindings.delete(registration.id);
+          if (loopbackByBindingKey.get(bindingKey) === registration) loopbackByBindingKey.delete(bindingKey);
+          globalThis.__bnhCloseLoopback?.({ id: registration.id });
+          registration.id = null;
+        },
+      };
+      loopbackByBindingKey.set(bindingKey, registration);
+      const open = globalThis.__bnhOpenLoopback;
+      if (typeof open !== 'function') {
+        const error = new Error('external loopback capability is unavailable');
+        error.code = 'ERR_NETWORK_CAPABILITY_UNAVAILABLE';
+        registration.error?.(error);
+        return registration;
+      }
+      Promise.resolve(open({
+        bindingKey,
+        address: request.address,
+        port: request.port,
+      })).then((result) => {
+        if (!result || result.id === undefined) throw new Error('external loopback listener did not return an id');
+        registration.id = String(result.id);
+        loopbackBindings.set(registration.id, registration);
+      }).catch((error) => registration.error?.(error));
+      return registration;
+    },
+    unbindTcp(request = {}) {
+      loopbackByBindingKey.get(String(request.bindingKey || ''))?.close();
+    },
+    deliverLoopback(id, event, value) {
+      if (event === 'connect') {
+        const registration = loopbackBindings.get(String(value?.listenerId || id));
+        if (!registration) return false;
+        const connectionId = String(value?.socketId || id);
+        const peer = {
+          destroyed: false,
+          _runTcpResource(callback) { return callback(); },
+          push(bytes) {
+            if (this.destroyed) return false;
+            const valueBytes = bytes === null
+              ? null
+              : bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+            globalThis.__bnhWriteLoopback?.({
+              id: connectionId,
+              operation: valueBytes === null ? 'end' : 'data',
+              bytes: valueBytes === null ? undefined : [...valueBytes],
+            });
+            return true;
+          },
+          destroy() {
+            if (this.destroyed) return;
+            this.destroyed = true;
+            globalThis.__bnhWriteLoopback?.({ id: connectionId, operation: 'close' });
+          },
+        };
+        const socket = registration.listener?.({
+          client: peer,
+          localAddress: value?.remoteAddress || '127.0.0.1',
+          localPort: Number(value?.remotePort || 0),
+          remoteAddress: value?.localAddress || '127.0.0.1',
+          remotePort: Number(value?.localPort || 0),
+        }) || null;
+        if (!socket) return false;
+        loopbackConnections.set(connectionId, { registration, peer, socket });
+        return true;
+      }
+      const connection = loopbackConnections.get(String(id));
+      if (!connection) return false;
+      if (event === 'data') return Boolean(connection.socket?.push?.(new Uint8Array(value || [])));
+      if (event === 'end') return Boolean(connection.socket?.push?.(null));
+      if (event === 'close') {
+        connection.socket?.destroy?.();
+        loopbackConnections.delete(String(id));
+        return true;
+      }
+      return false;
     },
     tls() {
       return { authorized: true, protocol: 'TLSv1.3' };
@@ -293,7 +390,27 @@ class ArtifactNpmCache extends BrowserNpmCache {
 
 const runtime = createRuntime({ globalObject: globalThis, nodeVersion: 'v22' });
 const npmCache = new ArtifactNpmCache({ globalObject: globalThis });
-const browserProxyAdapter = createBrowserProxyAdapter((url) => npmCache.getProject(url));
+const browserProxyAdapter = createBrowserProxyAdapter(async (url) => {
+  const project = await npmCache.getProject(url);
+  if (project) return project;
+  let parsed;
+  try { parsed = new URL(url); } catch { return null; }
+  const registryOrigin = npmCache.artifactManifest?.registry
+    ? String(npmCache.artifactManifest.registry).replace(/\/+$/, '')
+    : DEFAULT_REGISTRY;
+  if (parsed.origin !== registryOrigin) return null;
+  if (/\/[^/]+\/[-][^/]+\.tgz$/.test(parsed.pathname)) {
+    return npmCache.getTarball(`tarball:${url}`);
+  }
+  const packageName = decodeURIComponent(parsed.pathname.replace(/^\/+|\/+$/g, ''));
+  if (!packageName || packageName.includes('/-/')) return null;
+  const metadata = await npmCache.getMetadata(packageName);
+  return metadata ? new TextEncoder().encode(JSON.stringify(metadata)) : null;
+});
+Object.defineProperty(globalThis, '__BNH_EXTERNAL_TCP_DELIVER__', {
+  configurable: true,
+  value: (id, event, value) => browserProxyAdapter.deliverLoopback(id, event, value),
+});
 globalThis.__BNH_NPM_CACHE__ = npmCache;
 let running = false;
 

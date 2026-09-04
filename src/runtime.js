@@ -2437,6 +2437,93 @@ function rewriteCommonJsDynamicImports(source) {
   return scanCode();
 }
 
+// CommonJS packages sometimes defer parsing dynamic import syntax by compiling
+// a function from a string with eval().  A direct eval still executes in the
+// module's lexical environment, so rewrite only a static string argument and
+// leave the eval call itself intact.  This keeps the normal __bnhImport
+// binding available without changing eval semantics for computed source.
+function rewriteEvalDynamicImports(source) {
+  const text = String(source);
+  let index = 0;
+  let result = '';
+  const isIdentifierPart = (character) => character !== undefined && /[$\w]/u.test(character);
+
+  const copyQuoted = () => {
+    const quote = text[index];
+    const start = index;
+    index += 1;
+    while (index < text.length) {
+      const character = text[index];
+      index += 1;
+      if (character === '\\') {
+        index += 1;
+        continue;
+      }
+      if (character === quote) break;
+    }
+    return { raw: text.slice(start, index), quote };
+  };
+
+  while (index < text.length) {
+    const character = text[index];
+    if (character === '\'' || character === '"') {
+      const quoted = copyQuoted();
+      result += quoted.raw;
+      continue;
+    }
+    if (character === '/' && (text[index + 1] === '/' || text[index + 1] === '*')) {
+      const start = index;
+      index += 2;
+      if (text[start + 1] === '/') {
+        while (index < text.length && text[index] !== '\n' && text[index] !== '\r') index += 1;
+      } else {
+        while (index < text.length && !(text[index] === '*' && text[index + 1] === '/')) index += 1;
+        if (index < text.length) index += 2;
+      }
+      result += text.slice(start, index);
+      continue;
+    }
+    if (text.startsWith('eval', index)
+      && !isIdentifierPart(text[index - 1])
+      && !isIdentifierPart(text[index + 4])) {
+      let open = index + 4;
+      while (/\s/u.test(text[open] || '')) open += 1;
+      if (text[open] === '(') {
+        let argument = open + 1;
+        while (/\s/u.test(text[argument] || '')) argument += 1;
+        if (text[argument] === '\'' || text[argument] === '"') {
+          const literalStart = argument;
+          const quoted = copyQuotedAt(text, argument);
+          const rawBody = quoted.raw.slice(1, -1);
+          const rewrittenBody = rewriteCommonJsDynamicImports(rawBody);
+          result += text.slice(index, literalStart);
+          result += quoted.quote + rewrittenBody + quoted.quote;
+          index = quoted.end;
+          continue;
+        }
+      }
+    }
+    result += character;
+    index += 1;
+  }
+  return result;
+}
+
+function copyQuotedAt(text, start) {
+  const quote = text[start];
+  let index = start + 1;
+  while (index < text.length) {
+    const character = text[index];
+    index += 1;
+    if (character === '\\') {
+      index += 1;
+      continue;
+    }
+    if (character === quote) break;
+  }
+  return { raw: text.slice(start, index), quote, end: index };
+}
+
 function hasTopLevelCommonJsProcessBinding(source) {
   const masked = String(source)
     .replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '')
@@ -2448,7 +2535,9 @@ function hasTopLevelCommonJsProcessBinding(source) {
 function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = null, processOverride = null) {
   // npm bin shims are executable text files and commonly start with a
   // shebang, which JavaScript's Function constructor cannot parse.
-  const transformedAsyncSource = transformAsyncSource(rewriteCommonJsDynamicImports(source));
+  const transformedAsyncSource = transformAsyncSource(
+    rewriteEvalDynamicImports(rewriteCommonJsDynamicImports(source)),
+  );
   const sourceText = `${transformedAsyncSource.source
     .replace(/^#![^\r\n]*(?:\r\n|\n|$)/, (shebang) => shebang.endsWith('\n') ? '\n' : '')
   }\n//# sourceURL=${sourceURL}`;

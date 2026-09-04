@@ -5315,7 +5315,10 @@ export function createRuntime({
         this.paths = [];
       }
       Module.prototype.require = function require(name) {
-        return moduleApi._load(name, this.filename || sourcePath, false, processObj);
+        // Preserve the actual parent module object. Loaders such as
+        // proxyquire inspect module.parent and pass that object back through
+        // Module._load; reducing it to a filename loses the CommonJS graph.
+        return moduleApi._load(name, this, false, processObj);
       };
       Object.defineProperties(Module.prototype, {
         isPreloading: {
@@ -5756,6 +5759,9 @@ export function createRuntime({
             const error = new Error(`Cannot find module '${name}'`);
             error.code = 'MODULE_NOT_FOUND';
             throw error;
+          }
+          if (typeof ownerProcess?.__bnhSyncModuleLoader === 'function') {
+            return ownerProcess.__bnhSyncModuleLoader(name, parent, isMain);
           }
           return runtimeRequire(
             name,
@@ -8248,6 +8254,26 @@ export function createRuntime({
               .find((pathname) => vfs.files.has(pathname));
             if (indexCandidate) return indexCandidate;
           }
+          // A relative or absolute directory request follows the CommonJS
+          // package main contract before falling back to index.*.  Keep this
+          // in the synchronous child resolver as well as the normal loader;
+          // package tools commonly use Module._load during a sync entry.
+          const packageManifest = path.join(base, 'package.json');
+          try {
+            const packageSource = readSource(packageManifest);
+            const packageConfig = JSON.parse(typeof packageSource === 'string'
+              ? packageSource
+              : new TextDecoder().decode(packageSource));
+            if (typeof packageConfig.main === 'string') {
+              const mainBase = path.resolve(base, packageConfig.main);
+              for (const candidate of moduleCandidates(mainBase)) {
+                try { readSource(candidate); return candidate; } catch { /* ignore */ }
+              }
+            }
+          } catch { /* no package manifest or invalid directory request */ }
+          for (const candidate of moduleCandidates(path.join(base, 'index'))) {
+            try { readSource(candidate); return candidate; } catch { /* ignore */ }
+          }
           if (addonsDisabled(processObj) || isNativeAddonBuildPath(base)) return nativeAddonPath(base);
           return base;
         }
@@ -8776,6 +8802,37 @@ export function createRuntime({
                 }, () => () => {});
             childProc.processObject._bnhVirtualChild = true;
             childProc.processObject.__bnhModuleApiFactory = () => createModuleApi(childProc.processObject);
+            // Keep Module._load inside a synchronous virtual child on the
+            // child's moduleState cache. The normal runtime loader has a
+            // separate async cache, which would make module.parent null for
+            // packages loaded by CommonJS tooling such as proxyquire.
+            childProc.processObject.__bnhSyncModuleLoader = (name, parent, isMain = false) => {
+              const importer = typeof parent === 'object' && parent !== null
+                ? parent.filename || entryPath
+                : String(parent || entryPath);
+              const builtin = builtinName(name);
+              if (BUILTIN_NAMES.includes(builtin)) {
+                if (builtin === 'module') return createModuleApi(childProc.processObject, (value) => stderrArr.push(value));
+                if (builtin === 'process') return childProc.processObject;
+                if (builtin === 'stream/web' && syncStreamWebApi) return syncStreamWebApi;
+                return runtimeRequire(name, importer, childProc.processObject);
+              }
+              const resolved = resolveFileSync(name, importer, childProc.processObject);
+              return loadModuleSync(
+                resolved,
+                importer,
+                childProc.processObject,
+                scope,
+                Buffer,
+                stderrArr,
+                undefined,
+                moduleState,
+                Boolean(isMain),
+                compileCacheState,
+                false,
+                syncStreamWebApi,
+              );
+            };
             if (typeof processObject.__bnhModuleResolve === 'function') {
               childProc.processObject.__bnhModuleResolve = processObject.__bnhModuleResolve;
             }

@@ -411,9 +411,10 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       forced,
       lastUserSequence: userSequence,
       error: errorRecord(error),
-      runtimeState: processStateSource?.__bnhRuntimeState
-        || processStateSource?.__bnhNodeTestState
-        || compactRuntimeState(),
+      // Terminal diagnostics cross a worker boundary and must stay bounded.
+      // The process may retain a raw internal snapshot for its own IPC, but
+      // callers receive the compact summary with recent activity and phase.
+      runtimeState: compactRuntimeState(),
     });
     // Keep the user port alive for one turn. MessagePort has independent
     // delivery from the control port, so closing it synchronously can discard

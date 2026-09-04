@@ -73,3 +73,13 @@ test('keeps async function boundaries intact across nested template literals', a
 
   assert.equal(await invoke('value'), 'nested value');
 });
+
+test('preserves native async identity when no await lowering is needed', () => {
+  const source = 'const invoke = async () => 7;';
+  const transformed = transformAsyncSource(source).source;
+  const invoke = new Function(`${transformed}; return invoke;`)();
+
+  assert.equal(transformed, source);
+  assert.equal(invoke.constructor.name, 'AsyncFunction');
+  assert.equal(Object.prototype.toString.call(invoke), '[object AsyncFunction]');
+});

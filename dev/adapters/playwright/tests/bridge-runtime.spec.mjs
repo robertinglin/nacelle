@@ -898,15 +898,18 @@ test.describe('browser runtime bridge and core primitives', () => {
 
     await expectPass(expect, result);
     expect(result.runResult?.details?.childActivity).toMatchObject({
-      launched: 1,
-      completed: 1,
-      failed: 1,
-      last: {
-        command: 'node',
+      // Activity includes the package-manager boundary and its nested Node
+      // child. Assert the bounded summary rather than mutable raw records.
+      launched: 2,
+      completed: 2,
+      failed: 2,
+      lastCommand: 'node',
+      recent: expect.arrayContaining([expect.objectContaining({
         code: 7,
         stdoutBytes: 22,
         stderrBytes: 0,
-      },
+        command: 'node',
+      })]),
     });
   });
 

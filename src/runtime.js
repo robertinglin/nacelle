@@ -5083,7 +5083,7 @@ export function createRuntime({
     return resolvedProfile.features?.require_module === true;
   }
 
-  function makeBuiltins(processObject, runtimeRequire, diagnosticsChannels, runtimeOptions, performancePrimitives, trackTask, stdout, stderr, readSource, sourcePath, runtimeFetchRef) {
+  function makeBuiltins(processObject, runtimeRequire, diagnosticsChannels, runtimeOptions, performancePrimitives, trackTask, stdout, stderr, readSource, sourcePath, runtimeFetchRef, workerTransport) {
     const fs = vfs.fs;
     const cjsPackageEntryCache = new Map();
     const cjsPackageConfigCache = new Map();
@@ -6337,9 +6337,10 @@ export function createRuntime({
       }
       return tracked;
     };
-    const notifyClusterListening = runtimeOptions.clusterWorker && typeof processObject.send === 'function'
+    const sendWorkerMessage = workerTransport?.send || processObject.send;
+    const notifyClusterListening = runtimeOptions.clusterWorker && typeof sendWorkerMessage === 'function'
       ? (address) => {
-          return processObject.send({ type: 'bnh-cluster-listening', address });
+          return sendWorkerMessage({ type: 'bnh-cluster-listening', address });
         }
       : undefined;
     let cluster;
@@ -6406,8 +6407,8 @@ export function createRuntime({
       trackTask,
       clusterGroupId: runtimeOptions.clusterGroupId,
       onWorkerMessage: (message) => {
-        if (!options.workerThread || typeof processObject?.send !== 'function') return;
-        processObject.send({ __bnhInternalWorkerMessage: message?.type });
+        if (!options.workerThread || typeof sendWorkerMessage !== 'function') return;
+        sendWorkerMessage({ __bnhInternalWorkerMessage: message?.type });
       },
     });
     internalBindingContract.bindings.constants.os.signals = Object.freeze({
@@ -11261,6 +11262,23 @@ export function createRuntime({
     const createRuntimeWorker = typeof scope.Worker === 'function'
       ? createWorkerFactory(scope, { bootstrap: WORKER_BOOTSTRAP })
       : undefined;
+    // A worker thread communicates through worker_threads.parentPort. The
+    // transport is still needed by the harness, but Node does not expose the
+    // child_process IPC identity (send/channel/connected/disconnect) on the
+    // worker thread's process object. Keep bound private capabilities for the
+    // parentPort implementation before removing that child-only surface.
+    const workerParentSend = options.workerThread && typeof processObject.send === 'function'
+      ? processObject.send.bind(processObject)
+      : null;
+    const workerParentDisconnect = options.workerThread && typeof processObject.disconnect === 'function'
+      ? processObject.disconnect.bind(processObject)
+      : null;
+    if (options.workerThread) {
+      delete processObject.send;
+      delete processObject.channel;
+      delete processObject.connected;
+      delete processObject.disconnect;
+    }
     const workerThreadParentPort = options.workerThread
       ? (() => {
           const parentPort = new EventEmitter();
@@ -11337,7 +11355,7 @@ export function createRuntime({
               queuePendingMessageFlush();
             }
           });
-          parentPort.postMessage = (value, transferList) => processObject.send(value, transferList);
+          parentPort.postMessage = (value, transferList) => workerParentSend?.(value, transferList);
           parentPort.start = () => parentPort;
           parentPort.ref = () => parentPort;
           parentPort.unref = () => parentPort;
@@ -11351,7 +11369,7 @@ export function createRuntime({
           });
           parentPort.close = () => {
             processObject.removeListener('message', onMessage);
-            processObject.disconnect?.();
+            workerParentDisconnect?.();
           };
           return parentPort;
         })()
@@ -11821,7 +11839,7 @@ export function createRuntime({
             };
             processObject.on('message', onResult);
             try {
-              processObject.send({
+              workerParentSend?.({
                 __bnhThreadMessageRequest: {
                   requestId,
                   source: workerThreads.threadId,
@@ -11866,6 +11884,7 @@ export function createRuntime({
       (pathname) => vfs.read(pathname),
       entry,
       runtimeFetchRef,
+      { send: workerParentSend },
     );
     reportExecutePhase('builtins-ready');
     if (options.workerThread || String(options.entry || '').startsWith('/node/.bnh-worker-eval-')) {

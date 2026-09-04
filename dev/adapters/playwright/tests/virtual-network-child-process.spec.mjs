@@ -215,7 +215,7 @@ test('VM scripts route dynamic imports through the virtual HTTP loader', async (
     files: {
       '/node/vm-import-child.cjs': `
         const vm = require('node:vm');
-        const dynamicImport = vm.runInNewContext('(url) => import(url)', { process });
+        const dynamicImport = vm.runInNewContext('eval("(url) => import(url)")', { process });
         dynamicImport(process.env.TARGET_URL)
           .then((module) => process.stdout.write(String(module.answer)))
           .catch((error) => { console.error(error); process.exitCode = 1; });

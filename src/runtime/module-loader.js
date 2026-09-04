@@ -823,10 +823,11 @@ export function createModuleLoader({
       if (isInvalidPackageSpecifier(value)) {
         throw packageError('ERR_INVALID_MODULE_SPECIFIER', `Invalid module specifier '${value}'`);
       }
-      return resolveInternalModule(value)
+      const resolvedPackage = resolveInternalModule(value)
         || resolveNodeLibrary(value)
-        || resolvePackage(value, importer, conditions)
-        || value;
+        || resolvePackage(value, importer, conditions);
+      if (resolvedPackage) return resolvedPackage;
+      throw packageError('MODULE_NOT_FOUND', `Cannot find package '${value}' imported from '${importer}'`);
     }
     if ((importer.startsWith('http:') || importer.startsWith('https:'))
       && (value.startsWith('./') || value.startsWith('../') || value === '.' || value === '..')) {
@@ -836,7 +837,13 @@ export function createModuleLoader({
     // ESM resolution does not add file extensions. CommonJS resolution keeps
     // the Node-style extension and index fallbacks through require conditions.
     if (conditions.includes('import') && !posix.extname(value)) return base;
-    return resolveFileOrDirectory(base, false) || base;
+    const requireConditions = conditions.includes('require') && !conditions.includes('import');
+    return resolveFileOrDirectory(
+      base,
+      false,
+      requireConditions ? commonJsFileCandidates : fileCandidates,
+      requireConditions ? commonJsDirectoryCandidates : directoryCandidates,
+    ) || base;
   };
 
   const resolveRequire = (specifier, importer = '/node/index.js') => {
@@ -1747,7 +1754,8 @@ export function createModuleLoader({
         }
         throw error;
       }
-      importCache.set(key, import(url).then((namespace) => {
+      let pendingImport;
+      pendingImport = import(url).then((namespace) => {
         storeSharedNamespace(resolved, processOverride, namespace);
         return namespace;
       }).catch((error) => {
@@ -1762,8 +1770,14 @@ export function createModuleLoader({
           error.message = message.replaceAll(internalURL, originalSpecifier);
           if (typeof error.stack === 'string') error.stack = error.stack.replaceAll(internalURL, originalSpecifier);
         }
+        // A failed native import must not poison this specifier forever.
+        // Packages may be installed into the VFS after an initial lookup, so
+        // a later import must be allowed to resolve and evaluate the module
+        // again just as it would in a normal Node process after installation.
+        if (importCache.get(key) === pendingImport) importCache.delete(key);
         throw error;
-      }));
+      });
+      importCache.set(key, pendingImport);
     }
     return importCache.get(key);
   };

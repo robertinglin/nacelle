@@ -650,13 +650,24 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     // registration visible to the parent without changing guest lifecycle or
     // outcome semantics.
     sendRuntimeState();
-    runtimeStateTimer = setInterval(sendRuntimeState, 100);
+    runtimeStateTimer = typeof setInterval === 'function'
+      ? setInterval(sendRuntimeState, 100)
+      : undefined;
     const vfs = message.vfs;
     const output = {
       stdout: (value) => process.stdout.write(value),
       stderr: (value) => process.stderr.write(value),
     };
-    const context = { process, ipc: process, stdout: output.stdout, stderr: output.stderr, vfs, signal: process, networkPort: message.networkPort };
+    const context = {
+      process,
+      ipc: process,
+      stdout: output.stdout,
+      stderr: output.stderr,
+      vfs,
+      signal: process,
+      networkPort: message.networkPort,
+      vfsUpdatePort: message.vfsUpdatePort,
+    };
     process.__bnhRuntimePhase = 'dispatch-queued';
     sendRuntimeState();
     Promise.resolve().then(() => {

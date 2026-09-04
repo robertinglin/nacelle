@@ -91,6 +91,25 @@ test('gateway initialization waits until the service worker controls the page', 
   assert.equal(await initialization, registration);
 });
 
+test('gateway initialization resolves immediately when the page is already controlled', async () => {
+  const serviceWorker = new EventTarget();
+  const registration = {
+    active: { state: 'activated' },
+    update: async () => {},
+  };
+  serviceWorker.controller = { state: 'activated' };
+  serviceWorker.register = async () => registration;
+  serviceWorker.ready = Promise.resolve(registration);
+
+  const result = await Promise.race([
+    Nacelle.initServiceWorker('/runtime/gateway-sw.js', '/', {
+      navigator: { serviceWorker },
+    }),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('controlled page initialization stalled')), 100)),
+  ]);
+  assert.equal(result, registration);
+});
+
 test('tar extraction rejects traversal, absolute paths, symlinks, and resource exhaustion', async () => {
   const traversal = packTar([{ path: 'package/../../escape.txt', data: new Uint8Array([1]) }]);
   assert.throws(() => unpackTar(traversal, { stripPrefix: 'package/', targetDir: '/app' }), { code: 'ERR_ARCHIVE_PATH' });
@@ -188,7 +207,7 @@ assert.throws(() => require('./only-cjs'), (error) => error.code === 'MODULE_NOT
 const { spawnSync } = require('node:child_process');
 const child = spawnSync('node', ['-e', 'process.stdout.write(JSON.stringify(process.argv))', '--', 'arg'], { cwd: '/node/app', encoding: 'utf8' });
 assert.equal(child.status, 0);
-assert.deepEqual(JSON.parse(child.stdout), ['node', 'arg']);
+assert.deepEqual(JSON.parse(child.stdout), ['/browser/node', 'arg']);
 process.stdout.write('commonjs resolver contracts completed');`,
       '/node/app/dir/package.json': JSON.stringify({ main: 'entry.cjs' }),
       '/node/app/dir/entry.cjs': "module.exports = 'directory-main';",

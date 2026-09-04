@@ -3,6 +3,7 @@ import { createRuntime } from './runtime.js';
 import { createVfs } from './runtime/vfs.js';
 import { createProgressReporter } from './progress-protocol.mjs';
 import { createCitgmProcessArgv } from './citgm-argv.mjs';
+import { createSerializedCaptureQueue } from './citgm-capture.mjs';
 
 const DEFAULT_CITGM_VERSION = '10.0.2';
 const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
@@ -377,6 +378,7 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
   const retainOutputChunks = typeof captureConfig?.outputBinding !== 'string';
   const outputChunks = retainOutputChunks ? { stdout: [], stderr: [] } : null;
   const capturePromises = new Set();
+  const captureQueue = createSerializedCaptureQueue(globalThis);
   let installStats = null;
   let preloadStats = null;
   let child = null;
@@ -497,11 +499,11 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     outputChunks?.[stream].push(bytes);
     if (typeof captureConfig?.outputBinding === 'string') {
       try {
-        const pending = Promise.resolve(globalThis[captureConfig.outputBinding]?.({
+        const pending = captureQueue(captureConfig.outputBinding, {
           runId,
           stream,
           text: text(value),
-        })).catch(() => {});
+        });
         capturePromises.add(pending);
         void pending.finally(() => capturePromises.delete(pending));
       } catch { /* capture is observational */ }
@@ -620,7 +622,7 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
           networkEvents?.push(event);
           if (typeof captureConfig?.networkBinding === 'string') {
             try {
-              const pending = Promise.resolve(globalThis[captureConfig.networkBinding]?.({ runId, event })).catch(() => {});
+            const pending = captureQueue(captureConfig.networkBinding, { runId, event });
               capturePromises.add(pending);
               void pending.finally(() => capturePromises.delete(pending));
             } catch { /* capture is observational */ }

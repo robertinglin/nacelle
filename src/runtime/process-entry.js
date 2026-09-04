@@ -151,6 +151,16 @@ export async function runProcessEntry(context) {
       await runtime.mount(missingFiles, { symlinks: missingSymlinks });
     }
   } else await runtime.mount(descriptor.files, { symlinks: descriptor.symlinks });
+  const vfsUpdatePort = context.vfsUpdatePort || descriptor.vfsUpdatePort;
+  const onVfsUpdate = (event) => {
+    const update = event?.data ?? event;
+    if (update && typeof update === 'object') runtime.applyVfsUpdate?.(update);
+  };
+  if (vfsUpdatePort) {
+    if (typeof vfsUpdatePort.addEventListener === 'function') vfsUpdatePort.addEventListener('message', onVfsUpdate);
+    else if (typeof vfsUpdatePort.on === 'function') vfsUpdatePort.on('message', onVfsUpdate);
+    vfsUpdatePort.start?.();
+  }
   let code;
   try {
     setRuntimePhase('execute');
@@ -177,6 +187,9 @@ export async function runProcessEntry(context) {
     throw error;
   } finally {
     setRuntimePhase('cleanup');
+    vfsUpdatePort?.removeEventListener?.('message', onVfsUpdate);
+    vfsUpdatePort?.off?.('message', onVfsUpdate);
+    vfsUpdatePort?.close?.();
     remoteVirtualNetwork?.close();
   }
   const uncaught = context.process?.__bnhUncaughtException;

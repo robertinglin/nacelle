@@ -391,17 +391,20 @@ function sourcePath(value) {
   return value;
 }
 
-function normalizePath(value, cwd = '/node') {
+function normalizePath(value, cwd = '/node', logicalRoot = cwd) {
   const source = sourcePath(value);
   if (!source || source.includes('\\') || source.includes('\0')) throw invalidPath();
   const absolute = source.startsWith('/');
   const base = absolute ? [] : cwd.split('/').filter(Boolean);
+  const root = absolute ? [] : logicalRoot.split('/').filter(Boolean);
   const parts = source.split('/');
   const result = [...base];
   for (const part of parts) {
     if (!part || part === '.') continue;
     if (part === '..') {
-      if (result.length <= base.length) throw invalidPath('path escapes its logical mount');
+      if (result.length <= root.length || result.slice(0, root.length).some((segment, index) => segment !== root[index])) {
+        throw invalidPath('path escapes its logical mount');
+      }
       result.pop();
       continue;
     }
@@ -739,18 +742,22 @@ export function createVfs(options = {}) {
   let nextTemporaryDirectory = 0;
   let mutationQueue = Promise.resolve();
   let warningEmitter = null;
+  const mutationListeners = new Set();
   let nonPortableTemplateWarningEmitted = false;
   let recursiveRmdirWarningEmitted = false;
   let truncateDescriptorWarningEmitted = false;
 
-  const currentWorkingDirectory = () => {
-    try {
-      const cwd = globalThis.process?.cwd?.();
-      return typeof cwd === 'string' && cwd.startsWith('/') ? cwd : '/node';
-    } catch {
-      return '/node';
-    }
-  };
+  const currentWorkingDirectory = typeof options.cwd === 'function'
+    ? options.cwd
+    : () => {
+      try {
+        const activeProcess = globalThis.__bnhActiveProcess || globalThis.process;
+        const cwd = activeProcess?.cwd?.();
+        return typeof cwd === 'string' && cwd.startsWith('/') ? cwd : '/node';
+      } catch {
+        return '/node';
+      }
+    };
   const virtualSocketExists = (path) => globalThis.__BNH_VIRTUAL_PIPE_PATHS__ instanceof Set
     && globalThis.__BNH_VIRTUAL_PIPE_PATHS__.has(path);
 
@@ -763,7 +770,16 @@ export function createVfs(options = {}) {
   }
 
   function resolve(value) {
-    return normalizePath(value, currentWorkingDirectory());
+    const cwd = normalizePath(currentWorkingDirectory(), '/');
+    let logicalRoot = cwd;
+    let selectedMount;
+    for (const mount of mounts.values()) {
+      if (isWithin(cwd, mount.path) && (!selectedMount || mount.path.length > selectedMount.path.length)) {
+        selectedMount = mount;
+      }
+    }
+    if (selectedMount) logicalRoot = selectedMount.path;
+    return normalizePath(value, cwd, logicalRoot);
   }
 
   function access(path, operation, write = false) {
@@ -899,6 +915,115 @@ export function createVfs(options = {}) {
     }
   }
 
+  function emitMutation(update) {
+    if (!update || typeof update !== 'object') return;
+    for (const listener of [...mutationListeners]) {
+      try { listener(update); } catch { /* observers must not affect filesystem mutations */ }
+    }
+  }
+
+  function trackStreamLifecycle(stream, label) {
+    const release = taskTracker?.(label);
+    if (typeof release !== 'function') return;
+    let released = false;
+    stream.once('close', () => {
+      if (released) return;
+      released = true;
+      release();
+    });
+  }
+
+  function describePath(pathValue) {
+    const path = resolvePath(pathValue);
+    if (files.has(path)) {
+      return {
+        path,
+        type: 'file',
+        bytes: new Uint8Array(files.get(path)),
+        mode: metadata.get(path)?.mode,
+      };
+    }
+    if (symlinks.has(path)) return { path, type: 'symlink', target: symlinks.get(path) };
+    if (directories.has(path)) return { path, type: 'directory', mode: metadata.get(path)?.mode };
+    return null;
+  }
+
+  function exportState() {
+    return {
+      files: Object.fromEntries([...files.entries()].map(([path, bytes]) => [path, new Uint8Array(bytes)])),
+      directories: [...directories],
+      symlinks: [...symlinks.entries()],
+    };
+  }
+
+  function applyUpdate(update = {}) {
+    const removed = Array.isArray(update.removed) ? update.removed : [];
+    for (const pathValue of removed) {
+      const path = resolvePath(pathValue);
+      if (path === '/') continue;
+      try { removeTree(path, true, true); } catch { /* a concurrent local removal is already in sync */ }
+    }
+
+    const state = update.state && typeof update.state === 'object' ? update.state : null;
+    const directoriesToApply = state?.directories || update.directories || [];
+    for (const pathValue of [...directoriesToApply].sort((left, right) => String(left).length - String(right).length)) {
+      const path = resolvePath(pathValue);
+      if (path === '/') continue;
+      try { makeDirectory(path, true, 'sync'); } catch { /* already present or outside the mount */ }
+    }
+
+    const symlinksToApply = state?.symlinks || update.symlinks || [];
+    for (const item of symlinksToApply) {
+      const [pathValue, targetValue] = Array.isArray(item) ? item : [item.path, item.target];
+      const path = resolvePath(pathValue);
+      try {
+        if (nodeExists(path)) removeTree(path, true, true);
+        ensureParent(path, 'sync');
+        symlinks.set(path, sourcePath(targetValue));
+        metadataFor(path);
+      } catch { /* a concurrent local update may have won the race */ }
+    }
+
+    const filesToApply = state?.files || update.files || {};
+    const entries = filesToApply instanceof Map ? filesToApply.entries() : Object.entries(filesToApply);
+    for (const [pathValue, value] of entries) {
+      const path = resolvePath(pathValue);
+      const bytes = value?.bytes ?? value?.data ?? value;
+      try {
+        if (symlinks.has(path)) symlinks.delete(path);
+        if (!directories.has(parentOf(path))) makeDirectory(parentOf(path), true, 'sync');
+        setFile(path, bytes, false, 'sync');
+        if (value && typeof value === 'object' && value.mode !== undefined) metadataFor(path).mode = modeValue(value.mode);
+      } catch { /* a concurrent local update may have won the race */ }
+    }
+
+    const changes = Array.isArray(update.changes) ? update.changes : [];
+    for (const change of changes) {
+      const path = resolvePath(change.path);
+      if (change.type === 'remove') {
+        if (path !== '/') {
+          try { removeTree(path, true, true); } catch { /* already absent */ }
+        }
+      } else if (change.type === 'directory') {
+        try { makeDirectory(path, true, 'sync'); } catch { /* already present */ }
+      } else if (change.type === 'symlink') {
+        try {
+          if (nodeExists(path)) removeTree(path, true, true);
+          ensureParent(path, 'sync');
+          symlinks.set(path, sourcePath(change.target));
+          metadataFor(path);
+        } catch { /* a concurrent local update may have won the race */ }
+      } else if (change.type === 'file') {
+        try {
+          if (symlinks.has(path)) symlinks.delete(path);
+          if (!directories.has(parentOf(path))) makeDirectory(parentOf(path), true, 'sync');
+          setFile(path, change.bytes, false, 'sync');
+          if (change.mode !== undefined) metadataFor(path).mode = modeValue(change.mode);
+        } catch { /* a concurrent local update may have won the race */ }
+      }
+    }
+  }
+
   function ensureParent(path, operation) {
     const parent = resolvePath(parentOf(path));
     access(parent, operation);
@@ -915,6 +1040,7 @@ export function createVfs(options = {}) {
     directories.add(path);
     metadataFor(path);
     notify(path, 'rename');
+    emitMutation({ action: 'change', path, type: 'directory', mode: metadata.get(path)?.mode });
     return true;
   }
 
@@ -935,11 +1061,13 @@ export function createVfs(options = {}) {
       directories.add(path);
       metadataFor(path);
       notify(path, 'rename');
+      emitMutation({ action: 'change', path, type: 'directory', mode: metadata.get(path)?.mode });
       return createdParent || path;
     }
     directories.add(path);
     metadataFor(path);
     notify(path, 'rename');
+    emitMutation({ action: 'change', path, type: 'directory', mode: metadata.get(path)?.mode });
     return recursive ? path : undefined;
   }
 
@@ -988,6 +1116,7 @@ export function createVfs(options = {}) {
     setFileBytes(path, append && previous ? new Uint8Array([...previous, ...bytes]) : bytes);
     metadataFor(path);
     notify(path, previous ? 'change' : 'rename');
+    emitMutation({ action: 'change', path, type: 'file', bytes: new Uint8Array(files.get(path)), mode: metadata.get(path)?.mode });
     return mount;
   }
 
@@ -1009,6 +1138,7 @@ export function createVfs(options = {}) {
     symlinks.delete(path);
     removeMetadata(path);
     notify(path, 'rename');
+    emitMutation({ action: 'change', path, type: 'remove' });
   }
 
   function removeDirectory(path, recursive = false) {
@@ -1030,6 +1160,7 @@ export function createVfs(options = {}) {
     }
     directories.delete(path);
     notify(path, 'rename');
+    emitMutation({ action: 'change', path, type: 'remove' });
   }
 
   function removeTree(path, recursive = false, force = false) {
@@ -1040,6 +1171,7 @@ export function createVfs(options = {}) {
       symlinks.delete(path);
       removeMetadata(path);
       notify(path, 'rename');
+      emitMutation({ action: 'change', path, type: 'remove' });
       return;
     }
     if (!directories.has(path)) {
@@ -1058,6 +1190,7 @@ export function createVfs(options = {}) {
     }
     directories.delete(path);
     notify(path, 'rename');
+    emitMutation({ action: 'change', path, type: 'remove' });
   }
 
   function directoryEntries(path) {
@@ -1363,6 +1496,7 @@ export function createVfs(options = {}) {
     symlinks.set(path, target);
     metadataFor(path);
     notify(path, 'rename');
+    emitMutation({ action: 'change', path, type: 'symlink', target });
   }
 
   function symlink(targetValue, pathValue, typeValue, callback) {
@@ -1393,6 +1527,7 @@ export function createVfs(options = {}) {
     attributes.nlink += 1;
     metadata.set(destination, attributes);
     notify(destination, 'rename');
+    emitMutation({ action: 'change', path: destination, type: files.has(destination) ? 'file' : 'symlink', bytes: files.has(destination) ? new Uint8Array(files.get(destination)) : undefined, target: symlinks.get(destination), mode: metadata.get(destination)?.mode });
   }
 
   function link(existingPath, newPath, callback) {
@@ -1921,6 +2056,7 @@ export function createVfs(options = {}) {
     if (sourceMount.path !== destinationMount.path) throw denied(destination, 'rename');
     if (source === destination) return;
     if (!nodeExists(source)) throw missing(source, 'rename');
+    const sourceWasDirectory = directories.has(source);
     ensureParent(destination, 'rename');
     if (files.has(destination) && directories.has(source)) throw notDirectory(destination, 'rename');
     if (directories.has(destination) && (files.has(source) || symlinks.has(source))) throw isDirectory(destination, 'rename');
@@ -1955,6 +2091,9 @@ export function createVfs(options = {}) {
     }
     notify(source, 'rename');
     notify(destination, 'rename');
+    emitMutation(sourceWasDirectory
+      ? { action: 'sync' }
+      : { action: 'rename', paths: [source, destination] });
   }
 
   function normalizeOpenFlags(value) {
@@ -2557,6 +2696,7 @@ export function createVfs(options = {}) {
     stream._fsClosed = false;
     stream._fsPerformingIO = false;
     stream._fsIoWaiters = [];
+    trackStreamLifecycle(stream, 'fs.ReadStream');
     stream._fsCloseWith = typeof fsApi?.close === 'function'
       ? (fd, callback) => {
         const closeFn = fsApi.close;
@@ -2965,6 +3105,7 @@ export function createVfs(options = {}) {
       enumerable: false,
       value: true,
     });
+    trackStreamLifecycle(stream, 'fs.WriteStream');
     stream._destroyHook = WriteStream.prototype._destroy;
     const destroy = stream.destroy.bind(stream);
     stream.destroy = (error, callback) => {
@@ -3231,6 +3372,7 @@ export function createVfs(options = {}) {
       if (nodeExists(linkPath)) throw existsError(linkPath, 'mount');
       symlinks.set(linkPath, sourcePath(target));
     }
+    emitMutation({ action: 'sync' });
     return { path: mountRecord.path, mode: mountRecord.mode };
   }
 
@@ -3869,6 +4011,9 @@ export function createVfs(options = {}) {
     setTaskTracker(tracker) {
       taskTracker = typeof tracker === 'function' ? tracker : null;
     },
+    getTaskTracker() {
+      return taskTracker;
+    },
     setActiveRequestTracker(tracker) {
       activeRequestTracker = typeof tracker === 'function' ? tracker : null;
     },
@@ -3882,6 +4027,14 @@ export function createVfs(options = {}) {
     reset,
     snapshot,
     exportArtifacts: snapshot,
+    subscribeMutations(listener) {
+      if (typeof listener !== 'function') return () => {};
+      mutationListeners.add(listener);
+      return () => mutationListeners.delete(listener);
+    },
+    describe: describePath,
+    exportState,
+    applyUpdate,
     declareArtifact(pathValue) {
       const path = resolve(pathValue);
       const mountRecord = access(path, 'declareArtifact');

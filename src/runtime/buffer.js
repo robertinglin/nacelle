@@ -712,10 +712,17 @@ function inspectTypedArray(value) {
 
 function bufferInspect(_recurseTimes, context = {}, inspectValue = null) {
   const max = this.constructor?.__bnhInspectMaxBytes ?? 50;
-  const actualMax = Math.min(max, this.length);
-  const byteCount = Number.isFinite(actualMax) ? Math.max(0, Math.trunc(actualMax)) : this.length;
-  let text = encodeHex(this.subarray(0, byteCount)).replace(/(.{2})/g, '$1 ').trim();
-  const remaining = this.length - max;
+  // Custom inspection can be invoked with an object that inherits the
+  // prototype method without being a typed-array receiver. Never invoke
+  // TypedArray accessors on such a value while formatting an error.
+  const isTypedArray = ArrayBuffer.isView(this) && !(this instanceof DataView);
+  const length = isTypedArray ? this.length : 0;
+  const actualMax = Math.min(max, length);
+  const byteCount = Number.isFinite(actualMax) ? Math.max(0, Math.trunc(actualMax)) : length;
+  let text = isTypedArray
+    ? encodeHex(this.subarray(0, byteCount)).replace(/(.{2})/g, '$1 ').trim()
+    : '';
+  const remaining = length - max;
   if (remaining > 0) text += ` ... ${remaining} more byte${remaining > 1 ? 's' : ''}`;
 
   const keys = Reflect.ownKeys(this).filter((key) => {
@@ -736,7 +743,7 @@ function bufferInspect(_recurseTimes, context = {}, inspectValue = null) {
       else inspected = String(value);
       return `${label}: ${inspected}`;
     });
-    if (this.length !== 0) text += ', ';
+    if (length !== 0) text += ', ';
     text += extras.join(', ');
   }
   let constructorName = 'Buffer';

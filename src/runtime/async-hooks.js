@@ -9,6 +9,7 @@ const promiseIds = new WeakMap();
 const promiseContexts = new WeakMap();
 const promiseAwaitContexts = new WeakMap();
 const promiseTargets = new WeakMap();
+const asyncCompletionHandlers = new WeakMap();
 const userContextMarker = Symbol('bnhUserContext');
 const errorAsyncIds = new WeakMap();
 const reportedRejections = new WeakSet();
@@ -154,8 +155,35 @@ export function isPromiseRejectionReported(promise) {
   return reportedRejections.has(promise) || reportedRejections.has(promiseTarget(promise));
 }
 
-export function runAsyncGenerator(generatorFunction, thisArg, args = []) {
-  return new Promise((resolve, reject) => {
+export function registerAsyncCompletion(promise, callback) {
+  if (promise && typeof callback === 'function') {
+    asyncCompletionHandlers.set(promise, callback);
+    // A dynamic import may be consumed by native Promise reactions rather
+    // than the transformed async-generator runner. Attach the lifecycle
+    // release to the Promise settlement itself so both forms observe the
+    // same completion boundary.
+    // Observable promises are deliberately thenable proxies rather than
+    // native Promise receivers. Use their underlying native target for the
+    // internal settlement observer so the hook does not expose a brand error
+    // to user code.
+    originalThen.call(promiseTarget(promise),
+      () => completeAsyncCompletion(promise),
+      () => completeAsyncCompletion(promise));
+  }
+  return promise;
+}
+
+function completeAsyncCompletion(promise) {
+  const callback = asyncCompletionHandlers.get(promise);
+  if (!callback) return;
+  asyncCompletionHandlers.delete(promise);
+  callback();
+}
+
+export function runAsyncGenerator(generatorFunction, thisArg, args = [], taskTracker = null) {
+  let asyncResult;
+  let pendingCompletion;
+  asyncResult = new Promise((resolve, reject) => {
     let iterator;
     try {
       iterator = Reflect.apply(generatorFunction, thisArg, args);
@@ -173,17 +201,47 @@ export function runAsyncGenerator(generatorFunction, thisArg, args = []) {
         return;
       }
       if (result.done) {
+        const completion = asyncCompletionHandlers.get(result.value);
+        if (completion) {
+          asyncCompletionHandlers.delete(result.value);
+          if (asyncResult) asyncCompletionHandlers.set(asyncResult, completion);
+          else pendingCompletion = completion;
+        }
         resolve(result.value);
         return;
       }
-      Promise.resolve(result.value).then(
-        (nextValue) => advance('next', nextValue),
-        (error) => advance('throw', error),
+      const yielded = result.value;
+      const releaseYield = typeof taskTracker === 'function' ? taskTracker() : null;
+      let yieldReleased = false;
+      const completeYield = () => {
+        if (yieldReleased) return;
+        yieldReleased = true;
+        releaseYield?.();
+      };
+      Promise.resolve(yielded).then(
+        (nextValue) => {
+          try {
+            advance('next', nextValue);
+            completeAsyncCompletion(yielded);
+          } finally {
+            completeYield();
+          }
+        },
+        (error) => {
+          try {
+            advance('throw', error);
+            completeAsyncCompletion(yielded);
+          } finally {
+            completeYield();
+          }
+        },
       );
     };
 
     advance('next', undefined);
   });
+  if (pendingCompletion) asyncCompletionHandlers.set(asyncResult, pendingCompletion);
+  return asyncResult;
 }
 
 // Node gives queued destroy hooks a chance to run between long promise chains
@@ -224,7 +282,7 @@ function emit(name, ...args) {
 
 function newAsyncId(type, triggerAsyncId, resource, weakResource = false, collectOnExplicitGc = false, emitInitEvent = true) {
   const asyncId = nextAsyncId++;
-  const resourceProcess = globalThis.process;
+  const resourceProcess = globalThis.__bnhActiveProcess || globalThis.process;
   const initObserved = emitInitEvent
     && [...hooks].some((hook) => hook.process === resourceProcess);
   const record = {
@@ -540,15 +598,22 @@ function installPromiseHooks() {
     let asyncId;
     const nativeResolver = typeof onFulfilled === 'function'
       && String(onFulfilled).includes('[native code]');
-    const fulfill = typeof onFulfilled === 'function'
-      ? (...args) => {
-        return runInScope(asyncId, onFulfilled, this, args, nativeResolver || Boolean(awaitContext));
-      }
-      : onFulfilled;
-    const reject = typeof onRejected === 'function'
-      ? (...args) => runInScope(asyncId, onRejected, this, args)
-      : onRejected;
-    const result = originalThen.call(sourcePromise, fulfill, reject);
+    const fulfill = (...args) => {
+      return typeof onFulfilled === 'function'
+        ? runInScope(asyncId, onFulfilled, this, args, nativeResolver || Boolean(awaitContext))
+        : args[0];
+    };
+    const reject = (...args) => {
+      return typeof onRejected === 'function'
+        ? runInScope(asyncId, onRejected, this, args)
+        : (() => { throw args[0]; })();
+    };
+    let result;
+    try {
+      result = originalThen.call(sourcePromise, fulfill, reject);
+    } catch (error) {
+      throw error;
+    }
     // The async resource belongs to the promise returned by then(), not the
     // source promise. A source promise may have multiple continuations.
     asyncId = newAsyncId('PROMISE', triggerAsyncId, result, true);

@@ -75,6 +75,9 @@ test.describe('browser runtime test contracts', () => {
     expect(citgm).toContain('cacheUnpacked: false');
     expect(citgm).toContain('candidate-install-runs-on-demand-in-active-child');
     expect(citgm).not.toContain('preloadNpm.install');
+    const processEntry = await source('adapters/playwright/runtime/process-entry.js');
+    expect(processEntry).toContain("type: 'set-tarball'");
+    expect(processEntry).toContain('cache.setUnpackedPackage = () => {}');
     expect(citgm).toContain('installStats = {');
     expect(citgm).toContain('npmCache.clearMemory()');
   });

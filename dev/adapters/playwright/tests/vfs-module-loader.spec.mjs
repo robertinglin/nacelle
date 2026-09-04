@@ -162,6 +162,32 @@ test.describe('browser-native VFS and module loading', () => {
     expect(result.stdout).toContain('CommonJS extension hook completed');
   });
 
+  test('preserves the CommonJS parent graph through Module._load', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (() => {
+        const assert = require('node:assert/strict');
+        const Module = require('node:module');
+        const child = Module._load('./child.cjs', module);
+        assert.strictEqual(child.parent, '/node/module-parent/main.cjs');
+        assert.strictEqual(child.main, '/node/module-parent/main.cjs');
+        process.stdout.write('CommonJS parent graph completed');
+      })();
+    `, {
+      entryPath: '/node/module-parent/main.cjs',
+      files: {
+        '/node/module-parent/child.cjs': [
+          'module.exports = {',
+          '  parent: module.parent && module.parent.filename,',
+          '  main: require.main && require.main.filename,',
+          '};',
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('CommonJS parent graph completed');
+  });
+
   test('shares and invalidates the CommonJS require cache like Node', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert/strict');

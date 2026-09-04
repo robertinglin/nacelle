@@ -939,7 +939,13 @@ export function createVmModule(scope = globalThis) {
         : this.code;
       if (runOptions.timeout > 0 && isObviouslyUnbounded(source)) throw timedOutScriptError(runOptions.timeout);
       const context = contextifiedObject;
-      const activeProcess = context.process || scope.process;
+      const candidateProcess = context.process || scope.process;
+      // VM sandboxes commonly provide a process-shaped test object. Dynamic
+      // import still belongs to the runtime process that owns the VM context,
+      // so use that owner when the sandbox object is not loader-capable.
+      const activeProcess = typeof candidateProcess?.__bnhModuleImport === 'function'
+        ? candidateProcess
+        : scope.__bnhActiveProcess || scope.process;
       const previousFunction = context.Function;
       if (typeof activeProcess?.__bnhModuleImport === 'function') {
         Object.defineProperty(context, 'Function', {
@@ -955,7 +961,10 @@ export function createVmModule(scope = globalThis) {
             return Promise.resolve(this.options.importModuleDynamically(specifier, this))
               .then((module) => module?.namespace || module);
           }
-          const activeProcess = context.process || scope.process;
+          const candidateProcess = context.process || scope.process;
+          const activeProcess = typeof candidateProcess?.__bnhModuleImport === 'function'
+            ? candidateProcess
+            : scope.__bnhActiveProcess || scope.process;
           if (typeof activeProcess?.__bnhModuleImport === 'function') {
             const filename = this.options.filename;
             const importer = typeof filename === 'string' && filename.startsWith('/')

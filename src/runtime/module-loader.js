@@ -1625,7 +1625,8 @@ export function createModuleLoader({
         rewritten = `${rewritten.slice(0, replacement.start)}${replacement.replacement}${rewritten.slice(replacement.end)}`;
       }
     }
-    if (/\bimport\s*\(/.test(rewritten)) {
+    const dynamicImport = /\bimport\s*(?:(?:\/\*[\s\S]*?\*\/|\/\/[^\r\n]*(?:\r\n|\r|\n|$))\s*)*\(/g;
+    if (dynamicImport.test(rewritten)) {
       const token = register((dynamicSpecifier, options) => {
         const pending = globalObject.process?.__bnhModuleRegistrationPromises;
         const load = () => importModule(dynamicSpecifier, importer, {}, options, processOverride);
@@ -1643,7 +1644,7 @@ export function createModuleLoader({
           (error) => { release?.(); throw error; },
         );
       });
-      rewritten = rewritten.replace(/\bimport\s*\(/g, `globalThis[${quote(registryName)}][${quote(token)}](`);
+      rewritten = rewritten.replace(dynamicImport, `globalThis[${quote(registryName)}][${quote(token)}](`);
     }
     if (/\bimport\.meta\.resolve\b/.test(rewritten)) {
       const token = register((specifier) => {

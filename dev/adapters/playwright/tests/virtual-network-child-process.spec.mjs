@@ -311,9 +311,9 @@ test('Function-constructed imports use the owning CommonJS module loader', async
     capabilities,
     files: {
       '/node/function-import-child.cjs': `
-        const vm = require('node:vm');
-        const dynamicImport = vm.runInThisContext(
-          'new Function("specifier", "return import(specifier)")',
+        const dynamicImport = new Function(
+          'specifier',
+          'return import(specifier)',
         );
         dynamicImport(process.env.TARGET_URL)
           .then((module) => process.stdout.write(String(module.answer)))

@@ -286,6 +286,53 @@ test('VM scripts evaluated in the current context route dynamic imports through 
   });
 });
 
+test('Function-constructed imports use the owning CommonJS module loader', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const { spawn } = require('node:child_process');
+    const http = require('node:http');
+    const server = http.createServer((_request, response) => {
+      response.setHeader('content-type', 'text/javascript');
+      response.end('export const answer = 46;');
+    });
+    server.listen(0, '127.0.0.1', () => {
+      const target = 'http://127.0.0.1:' + server.address().port + '/index.mjs';
+      const child = spawn(process.execPath, ['/node/function-import-child.cjs'], {
+        env: { TARGET_URL: target },
+      });
+      let output = '';
+      let errorOutput = '';
+      child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+      child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+      child.once('close', (code, signal) => {
+        server.close(() => process.stdout.write(JSON.stringify({ code, signal, output, errorOutput })));
+      });
+    });
+  `, {
+    capabilities,
+    files: {
+      '/node/function-import-child.cjs': `
+        const vm = require('node:vm');
+        const dynamicImport = vm.runInThisContext(
+          'new Function("specifier", "return import(specifier)")',
+        );
+        dynamicImport(process.env.TARGET_URL)
+          .then((module) => process.stdout.write(String(module.answer)))
+          .catch((error) => { console.error(error); process.exitCode = 1; });
+      `,
+    },
+    env: { TARGET_URL: 'unused-by-parent' },
+  });
+
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.timedOut, JSON.stringify(result)).not.toBe(true);
+  expect(JSON.parse(result.stdout)).toEqual({
+    code: 0,
+    signal: null,
+    output: '46',
+    errorOutput: '',
+  });
+});
+
 test('ESM imports preserve deferred import callbacks from CommonJS dependencies', async ({ harnessPage }) => {
   const result = await harnessPage.run(`
     const { spawn } = require('node:child_process');

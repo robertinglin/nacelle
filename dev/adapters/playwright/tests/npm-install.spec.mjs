@@ -139,7 +139,7 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     cache.set('pkg-tarball:mini-express@1.0.0', miniExpressTarball);
 
     const npm = new BrowserNpm({ vfs, cache });
-    const result = await npm.install(['mini-express@1.0.0'], { cwd: '/node' });
+    const result = await npm.install(['mini-express@1.0.0'], { cwd: '/node', cacheUnpacked: false });
 
     expect(result.packages.length).toBe(1);
     expect(result.packages[0].name).toBe('mini-express');
@@ -163,6 +163,7 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     const app = miniExpress();
     app.get('/hello', () => 'Hello from mini-express!');
     expect(app.handle('/hello')).toBe('Hello from mini-express!');
+    expect(npm.cache.unpackedPackages.size).toBe(0);
   });
 
   test('module-loader preserves named exports from an installed ESM package', async () => {

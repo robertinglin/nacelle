@@ -74,6 +74,8 @@ test.describe('browser runtime test contracts', () => {
     expect(citgm).toContain('outputCounters');
     expect(citgm).toContain('materialize: false');
     expect(citgm).toContain('cacheUnpacked: false');
+    expect(citgm).toContain('The materialized VFS is the authoritative package tree');
+    expect(citgm).toContain('installStats = {');
   });
 
   test('coalesces burst activity and delivers progress in report order', async () => {

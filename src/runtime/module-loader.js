@@ -247,6 +247,7 @@ export function createModuleLoader({
   evaluateCommonJS,
   resolveBuiltin,
   runModuleHook: sharedRunModuleHook,
+  readSource,
   defaultModuleType = 'commonjs',
 } = {}) {
   const registeredHooks = sharedRunModuleHook ? [] : wrapSynchronousLoadHook(builtins?.module);
@@ -275,6 +276,9 @@ export function createModuleLoader({
     return typeof files?.has === 'function' ? files.has(path) : Object.hasOwn(files || {}, path);
   };
   const readFile = (path) => (typeof files?.get === 'function' ? files.get(path) : files[path]);
+  // Textual module reads can use the VFS source cache, while binary module
+  // formats continue through the byte-oriented files seam below.
+  const readTextFile = (path) => typeof readSource === 'function' ? readSource(path) : readFile(path);
   const hasBuiltin = (name) => Object.prototype.hasOwnProperty.call(builtins || {}, name)
     || Object.prototype.hasOwnProperty.call(builtins || {}, `node:${name}`);
   const builtinName = (specifier) => String(specifier).startsWith('node:')
@@ -398,7 +402,9 @@ export function createModuleLoader({
     if (url.startsWith('data:')) return { format: 'module', source: null };
     const resolved = url.startsWith('file:') ? fileURLToPath(url) : url;
     if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) unsupportedNativeAddon(resolved);
-    const value = read(resolved, resolved).value;
+    const value = resolved.endsWith('.wasm') || resolved.endsWith('.node')
+      ? read(resolved, resolved).value
+      : readTextFile(resolved);
     return {
       format: context?.format ?? (resolved.endsWith('.json') ? 'json' : moduleFormat(resolved)),
       source: value,
@@ -457,7 +463,7 @@ export function createModuleLoader({
     if (!hasFile(packagePath)) return undefined;
     if (packageConfigCache.has(packagePath)) return packageConfigCache.get(packagePath);
     try {
-      const config = JSON.parse(sourceText(readFile(packagePath)));
+      const config = JSON.parse(sourceText(readTextFile(packagePath)));
       packageConfigCache.set(packagePath, config);
       return config;
     } catch (cause) {
@@ -859,7 +865,9 @@ export function createModuleLoader({
       try {
         const child = read(specifier, resolved);
         if (child.resolved.endsWith('.mjs') || child.resolved.endsWith('.json')) continue;
-        const childMetadata = cjsExportNames(child.resolved, sourceText(child.value), seen);
+        const childValue = child.resolved.endsWith('.wasm') || child.resolved.endsWith('.node')
+          ? child.value : readTextFile(child.resolved);
+        const childMetadata = cjsExportNames(child.resolved, sourceText(childValue), seen);
         for (const name of childMetadata.names) names.add(name);
       } catch {
         // Node keeps the statically detected names when a re-export cannot be resolved.
@@ -1323,7 +1331,9 @@ export function createModuleLoader({
     }
     let value;
     try {
-      value = read(resolved, resolved).value;
+      value = resolved.endsWith('.wasm') || resolved.endsWith('.node')
+        ? read(resolved, resolved).value
+        : readTextFile(resolved);
     } catch (error) {
       if (error?.code === 'MODULE_NOT_FOUND') return missingModuleSource(resolved);
       throw error;
@@ -1622,7 +1632,9 @@ export function createModuleLoader({
     if (resolved.startsWith('data:')) {
       return `${bindProcess(await rewriteImportsAsync(decodeDataBody(resolved), resolved, processOverride, ancestors), processOverride)}\n//# sourceURL=${resolved}`;
     }
-    const value = read(resolved, resolved).value;
+    const value = resolved.endsWith('.wasm') || resolved.endsWith('.node')
+      ? read(resolved, resolved).value
+      : readTextFile(resolved);
     if (isWasmBytes(value)) return wasmModuleSource(value, resolved, processOverride);
     if (resolved.endsWith('.json')) return `export default ${JSON.stringify(JSON.parse(sourceText(value)))};`;
     const loadedText = sourceText(value);

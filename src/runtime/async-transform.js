@@ -160,8 +160,14 @@ function asyncGeneratorBodyRanges(tokens) {
     const isMethodGenerator = tokens[index].value === 'async'
       && tokens[index + 1].value === '*';
     if (!isFunctionGenerator && !isMethodGenerator) continue;
-    const bodyIndex = tokens.findIndex((token, tokenIndex) => tokenIndex > index && token.value === '{');
-    if (bodyIndex < 0) continue;
+    const parameterStart = index + (isFunctionGenerator ? 3 : 2);
+    const parameterIndex = tokens.findIndex((token, tokenIndex) => (
+      tokenIndex >= parameterStart && token.value === '('
+    ));
+    if (parameterIndex < 0) continue;
+    const parameterEnd = matchingToken(tokens, parameterIndex, '(', ')');
+    const bodyIndex = parameterEnd < 0 ? -1 : parameterEnd + 1;
+    if (bodyIndex < 0 || tokens[bodyIndex]?.value !== '{') continue;
     const bodyEnd = matchingToken(tokens, bodyIndex, '{', '}');
     if (bodyEnd >= 0) ranges.push({ start: bodyIndex, end: bodyEnd });
   }

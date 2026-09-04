@@ -1009,12 +1009,12 @@ test.describe('browser runtime bridge and core primitives', () => {
   test('leaves for-await loops in async generators intact while transforming callers', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       (async () => {
-        async function* values() {
-          yield 7;
+        async function* values({ start = 7 } = {}) {
+          yield start;
           yield 8;
         }
-        async function* doubled() {
-          for await (const value of values()) {
+        async function* doubled({ start } = {}) {
+          for await (const value of values({ start })) {
             yield value * 2;
           }
         }

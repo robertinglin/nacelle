@@ -411,6 +411,16 @@ export class BrowserNpmCache {
     }
   }
 
+  // Drop the in-memory acceleration layer without deleting persistent cache
+  // records.  CITGM uses this boundary before handing a live cache proxy to a
+  // child so packages fetched after child startup still travel through the
+  // normal metadata/tarball path instead of being captured in a parent-only
+  // snapshot.
+  clearMemory() {
+    this.memoryMeta.clear();
+    this.memoryTarballs.clear();
+  }
+
   async getStats() {
     const items = await this.listTarballs();
     const totalBytes = items.reduce((acc, item) => acc + (item.size || item.bytes?.byteLength || 0), 0);

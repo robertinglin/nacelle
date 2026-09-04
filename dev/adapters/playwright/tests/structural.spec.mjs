@@ -21,7 +21,7 @@ test.describe('browser runtime test contracts', () => {
     expect(contract).toContain('timedOut?: boolean');
     expect(contract).toContain('expected?:');
     expect(contract).toContain("binding: '__bnhReportProgress'");
-    expect(contract).toContain("binding: '__bnhRecordOutput'");
+    expect(contract).toContain("binding: '__bnhReportOutput'");
     expect(contract).toContain("type: 'progress'");
   });
 
@@ -50,8 +50,8 @@ test.describe('browser runtime test contracts', () => {
     expect(adapter).toContain("progress: onProgress ? { binding: '__bnhReportProgress' }");
     expect(adapter).not.toContain('spawn(process.execPath');
     const runner = await source('adapters/playwright/run-citgm.mjs');
-    expect(runner).toContain("page.exposeBinding('__bnhRecordOutput'");
-    expect(runner).toContain("output: { binding: '__bnhRecordOutput' }");
+    expect(runner).toContain("page.exposeBinding('__bnhReportOutput'");
+    expect(runner).toContain("outputBinding: '__bnhReportOutput'");
   });
 
   test('uses a bounded, candidate-output-free progress protocol', async () => {
@@ -72,13 +72,13 @@ test.describe('browser runtime test contracts', () => {
     expect(citgm).toContain('processArgv');
     expect(citgm).toContain('networkEvents');
     expect(citgm).toContain('outputCounters');
-    expect(citgm).toContain('cacheUnpacked: false');
+    expect(citgm).toContain('candidatePreloadPackages: 0');
     expect(citgm).toContain('candidate-install-runs-on-demand-in-active-child');
     expect(citgm).not.toContain('preloadNpm.install');
     const processEntry = await source('adapters/playwright/runtime/process-entry.js');
     expect(processEntry).toContain("type: 'set-tarball'");
     expect(processEntry).toContain('cache.setUnpackedPackage = () => {}');
-    expect(citgm).toContain('installStats = {');
+    expect(citgm).toContain('installStats = await npm.install');
     expect(citgm).toContain('npmCache.clearMemory()');
   });
 

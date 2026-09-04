@@ -4,7 +4,14 @@ import path from 'node:path';
 import process from 'node:process';
 import { spawn } from 'node:child_process';
 import { firefox, chromium } from 'playwright';
+import { launchBrowser } from './adapter-core.mjs';
 import { formatProgressLine } from './progress-protocol.mjs';
+import {
+  compactForSummary,
+  createCITGMArtifactWriter,
+  failureExcerpt,
+  outputSummary,
+} from './result-artifacts.mjs';
 
 const adapterRoot = path.dirname(new URL(import.meta.url).pathname);
 const browserTypes = { chromium, firefox };
@@ -52,6 +59,28 @@ function parseArgs(rawArgs) {
   return { browserName, citgmVersion, timeoutMs, module, citgmArgs };
 }
 
+function boundedRunResult(value) {
+  if (!value || typeof value !== 'object') return null;
+  const boundedEvents = (events) => {
+    if (!Array.isArray(events)) return compactForSummary(events || null);
+    return {
+      count: events.length,
+      first: events.slice(0, 4).map((event) => compactForSummary(event)),
+      recent: events.slice(-32).map((event) => compactForSummary(event)),
+    };
+  };
+  return {
+    runId: compactForSummary(value.runId || null),
+    outcome: compactForSummary(value.outcome || null),
+    phase: compactForSummary(value.phase || null),
+    exit: compactForSummary(value.exit || null),
+    error: compactForSummary(value.error || null),
+    lifecycleEvents: boundedEvents(value.lifecycleEvents),
+    outputEvents: boundedEvents(value.outputEvents),
+    details: compactForSummary(value.details || {}),
+  };
+}
+
 async function allocatePort() {
   return await new Promise((resolve, reject) => {
     const server = net.createServer();
@@ -92,18 +121,45 @@ async function main() {
   let serverError = '';
   server.stderr.setEncoding('utf8');
   server.stderr.on('data', (chunk) => { serverError += chunk; });
+  let artifactWriterPromise = null;
+  let lastProgressEvent = null;
 
   try {
     const url = `http://127.0.0.1:${port}/citgm.html`;
     await waitForServer(url, server);
-    const browser = await browserTypes[options.browserName].launch({ headless: true });
+    const browser = await launchBrowser(browserTypes[options.browserName], options.browserName);
     try {
       const page = await browser.newPage();
       page.setDefaultTimeout(0);
       await page.goto(url, { waitUntil: 'domcontentloaded' });
       await page.waitForFunction(() => typeof globalThis.__NACELLE_CITGM__?.run === 'function');
       await page.exposeBinding('__bnhReportProgress', async (_source, event) => {
-        try { process.stderr.write(formatProgressLine(event)); } catch { /* diagnostics cannot affect the run */ }
+        try {
+          lastProgressEvent = event;
+          if (!artifactWriterPromise) {
+            artifactWriterPromise = createCITGMArtifactWriter({
+              rootDir: process.env.NACELLE_CITGM_ARTIFACT_DIR,
+              module: options.module,
+              runId: event.runId || `browser-${Date.now()}`,
+            });
+          }
+          const writer = await artifactWriterPromise;
+          await writer.recordProgress(event);
+          process.stderr.write(formatProgressLine(event));
+        } catch { /* diagnostics cannot affect the run */ }
+      });
+      await page.exposeBinding('__bnhRecordOutput', async (_source, event) => {
+        try {
+          if (!artifactWriterPromise) {
+            artifactWriterPromise = createCITGMArtifactWriter({
+              rootDir: process.env.NACELLE_CITGM_ARTIFACT_DIR,
+              module: options.module,
+              runId: event?.runId || `browser-${Date.now()}`,
+            });
+          }
+          const writer = await artifactWriterPromise;
+          await writer.recordOutput(event?.stream, event?.value);
+        } catch { /* artifact capture cannot affect the run */ }
       });
       process.stdout.write('Starting browser-side CITGM execution...\n');
       const result = await page.evaluate((request) => globalThis.__NACELLE_CITGM__.run(request), {
@@ -113,28 +169,98 @@ async function main() {
         citgmVersion: options.citgmVersion,
         browser: options.browserName,
         progress: { binding: '__bnhReportProgress' },
+        output: { binding: '__bnhRecordOutput' },
       });
-      if (result.stdout) process.stdout.write(result.stdout);
-      if (result.stderr) process.stderr.write(result.stderr);
-      process.stdout.write(`${JSON.stringify({
-        module: result.module,
-        citgmVersion: result.citgmVersion,
+      const runId = result.runId || result.runResult?.runId || `unknown-${Date.now()}`;
+      const artifactWriter = artifactWriterPromise
+        ? await artifactWriterPromise
+        : await createCITGMArtifactWriter({
+            rootDir: process.env.NACELLE_CITGM_ARTIFACT_DIR,
+            module: options.module,
+            runId,
+          });
+      const output = outputSummary(result, lastProgressEvent);
+      const networkEvents = result.networkEvents || [];
+      const artifactPaths = artifactWriter.paths;
+      const summary = {
+        type: 'citgm-terminal',
+        runId: compactForSummary(runId),
+        module: compactForSummary(result.module),
+        citgmVersion: compactForSummary(result.citgmVersion),
         browser: options.browserName,
         exitCode: result.exitCode,
         timedOut: result.timedOut,
-        error: result.error || result.runResult?.error || null,
+        error: compactForSummary(result.error || result.runResult?.error || null),
+        stage: compactForSummary(lastProgressEvent?.stage || result.stage || null),
+        output,
+        stdoutExcerpt: failureExcerpt(result.stdout || ''),
+        stderrExcerpt: failureExcerpt(result.stderr || ''),
+        runResult: boundedRunResult(result.runResult),
+        precache: compactForSummary(result.precache || null),
+        install: compactForSummary(result.install || null),
+        preload: compactForSummary(result.preload || null),
+        progress: compactForSummary(result.progress || null),
+        artifacts: {
+          ...artifactPaths,
+          networkEvents: { count: networkEvents.length, path: artifactPaths.network },
+        },
+      };
+      await artifactWriter.close({
         stdout: result.stdout || '',
         stderr: result.stderr || '',
-        precache: result.precache || null,
-        install: result.install || null,
-        preload: result.preload || null,
-        progress: result.progress || null,
-        networkEvents: result.networkEvents || [],
-      })}\n`);
+        stdoutBytes: result.stdoutBytes,
+        stderrBytes: result.stderrBytes,
+        networkEvents,
+        runResult: result.runResult || null,
+        summary,
+      });
+      process.stdout.write(`${JSON.stringify(summary)}\n`);
+      if (result.stdout) process.stdout.write(result.stdout);
+      if (result.stderr) process.stderr.write(result.stderr);
       process.exitCode = result.exitCode === null ? 1 : result.exitCode;
     } finally {
       await browser.close();
     }
+  } catch (error) {
+    const runId = lastProgressEvent?.runId || `runner-${Date.now()}`;
+    try {
+      const artifactWriter = artifactWriterPromise
+        ? await artifactWriterPromise
+        : await createCITGMArtifactWriter({
+            rootDir: process.env.NACELLE_CITGM_ARTIFACT_DIR,
+            module: options.module,
+            runId,
+          });
+      const errorText = String(error?.stack || error);
+      const summary = {
+        type: 'citgm-terminal',
+        runId: compactForSummary(runId),
+        module: compactForSummary(options.module),
+        citgmVersion: compactForSummary(options.citgmVersion),
+        browser: options.browserName,
+        exitCode: null,
+        timedOut: false,
+        error: compactForSummary(errorText),
+        stage: compactForSummary(lastProgressEvent?.stage || 'runner-failure'),
+        output: outputSummary({}, lastProgressEvent),
+        stdoutExcerpt: '',
+        stderrExcerpt: failureExcerpt(serverError),
+        runResult: null,
+        precache: null,
+        install: null,
+        preload: null,
+        progress: compactForSummary(lastProgressEvent || null),
+        artifacts: {
+          ...artifactWriter.paths,
+          networkEvents: { count: 0, path: artifactWriter.paths.network },
+        },
+      };
+      await artifactWriter.close({ summary });
+      process.stdout.write(`${JSON.stringify(summary)}\n`);
+    } catch {
+      // Preserve the original runner error if failure-artifact persistence also fails.
+    }
+    throw error;
   } finally {
     server.kill('SIGTERM');
     if (serverError && server.exitCode !== 0) process.stderr.write(serverError);

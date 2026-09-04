@@ -85,6 +85,12 @@ function closedError() {
   return createIpcError(IPC_ERROR_CODES.CLOSED, 'IPC channel is closed');
 }
 
+function workerMessagingError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
 function canStructuredClone(value, scope) {
   if (typeof scope.structuredClone !== 'function') return;
   try {
@@ -792,6 +798,14 @@ export function createScopedIpcEndpoint(nativePort, {
     if (closed) return;
     port.postMessage({ channel: 'bnh-user-ipc', runId, childId, direction: outgoingDirection, sequence: ++sequence, type, payload });
   };
+  // Harness-owned metadata must share the transport but not the guest IPC
+  // sequence.  In particular, a terminal control frame must not wait for a
+  // bookkeeping message that is intentionally filtered from guest listeners.
+  const sendInternal = (payload) => {
+    if (closed) return false;
+    port.postMessage({ channel: 'bnh-user-ipc', runId, childId, direction: outgoingDirection, type: 'message', internal: true, payload });
+    return true;
+  };
 
   const handleRequest = (payload) => {
     const record = handles.get(payload?.handleId);
@@ -821,8 +835,10 @@ export function createScopedIpcEndpoint(nativePort, {
   const receive = (frame) => {
     if (closed) return;
     if (frame?.channel !== 'bnh-user-ipc' || frame.runId !== runId || frame.childId !== childId || frame.direction !== incomingDirection) return;
-    if (!Number.isInteger(frame.sequence) || frame.sequence <= lastReceived) return;
-    lastReceived = frame.sequence;
+    if (frame.internal !== true) {
+      if (!Number.isInteger(frame.sequence) || frame.sequence <= lastReceived) return;
+      lastReceived = frame.sequence;
+    }
     if (frame.type === 'handle-request') {
       handleRequest(frame.payload);
       return;
@@ -893,6 +909,7 @@ export function createScopedIpcEndpoint(nativePort, {
       callback?.(null);
       return true;
     },
+    sendInternal,
     sendAsync(value, transferList) {
       return new Promise((resolve, reject) => {
         endpoint.send(value, transferList, (error) => error ? reject(error) : resolve());
@@ -1273,8 +1290,30 @@ export function createMessagingPrimitives(scope = globalThis) {
     SHARE_ENV,
     MessagePort: nodeMessagePortClass,
     isMainThread: true,
+    threadId: 0,
     parentPort: null,
     workerData: undefined,
+    postMessageToThread(threadId, value, transferList, timeout) {
+      if (typeof transferList === 'number' && timeout === undefined) {
+        timeout = transferList;
+        transferList = [];
+      }
+      if (timeout !== undefined && (!Number.isFinite(timeout) || timeout < 0)) {
+        return Promise.reject(workerMessagingError('ERR_OUT_OF_RANGE', 'The value of "timeout" is out of range. It must be >= 0.'));
+      }
+      if (Number(threadId) === 0) {
+        return Promise.reject(workerMessagingError('ERR_WORKER_MESSAGING_SAME_THREAD', 'Cannot send a message to the same thread'));
+      }
+      const target = [...scope.__BNH_BROWSER_WORKERS__ || []]
+        .find((candidate) => Number(candidate.threadId) === Number(threadId));
+      if (!target) return Promise.reject(workerMessagingError('ERR_WORKER_MESSAGING_FAILED', 'Cannot find the destination thread or listener'));
+      try {
+        target.postMessage({ __bnhThreadMessage: true, value, source: 0 }, transferList);
+        return Promise.resolve();
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    },
     ...createMessagePortHelpers(),
     markAsUncloneable,
     markAsUntransferable,

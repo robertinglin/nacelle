@@ -41,6 +41,38 @@ function skipComment(source, index) {
   return end < 0 ? source.length : end + 2;
 }
 
+function skipTemplateExpression(source, index) {
+  let depth = 1;
+  while (index < source.length) {
+    const character = source[index];
+    const next = source[index + 1];
+    if (character === '\\') {
+      index += 2;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      index = skipQuoted(source, index, character);
+      continue;
+    }
+    if (character === '`') {
+      index = skipTemplate(source, index);
+      continue;
+    }
+    if (character === '/' && (next === '/' || next === '*')) {
+      index = skipComment(source, index);
+      continue;
+    }
+    if (character === '{') {
+      depth += 1;
+    } else if (character === '}') {
+      depth -= 1;
+      if (depth === 0) return index + 1;
+    }
+    index += 1;
+  }
+  return source.length;
+}
+
 function skipTemplate(source, index) {
   index += 1;
   while (index < source.length) {
@@ -49,6 +81,10 @@ function skipTemplate(source, index) {
       continue;
     }
     if (source[index] === '`') return index + 1;
+    if (source[index] === '$' && source[index + 1] === '{') {
+      index = skipTemplateExpression(source, index + 2);
+      continue;
+    }
     index += 1;
   }
   return source.length;

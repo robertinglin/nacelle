@@ -47,6 +47,23 @@ test.describe('browser ESM loader', () => {
     expect(result.stdout).toContain('esm entry completed');
   });
 
+  test('exposes the default export of a JSON ESM import', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import irregularPlurals from './irregular-plurals.json' with { type: 'json' };
+      assert.deepStrictEqual(irregularPlurals, { person: 'people', mouse: 'mice' });
+      process.stdout.write('json default completed');
+    `, {
+      entryPath: '/node/esm/json-entry.mjs',
+      files: {
+        '/node/esm/irregular-plurals.json': JSON.stringify({ person: 'people', mouse: 'mice' }),
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('json default completed');
+  });
+
   test('resolves dynamic imports of builtin modules inside ESM', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const fs = await import('fs');
@@ -56,6 +73,27 @@ test.describe('browser ESM loader', () => {
 
     await expectPass(expect, result);
     expect(result.stdout).toContain('dynamic builtin completed');
+  });
+
+  test('routes dynamic imports created by eval through the virtual module loader', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      (async () => {
+        const dynamicImport = eval('(url) => import(url)');
+        const loaded = await dynamicImport('./loaded.mjs');
+        assert.strictEqual(loaded.answer, 42);
+        process.stdout.write('eval dynamic import completed');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      entryPath: '/node/esm/eval-dynamic-import.cjs',
+      files: { '/node/esm/loaded.mjs': 'export const answer = 42;' },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('eval dynamic import completed');
   });
 
   test('rewrites minified static imports with no whitespace around from', async ({ harnessPage }) => {
@@ -89,6 +127,76 @@ test.describe('browser ESM loader', () => {
 
     await expectPass(expect, result);
     expect(result.stdout).toContain('package builtin completed');
+  });
+
+  test('preserves conditional package imports and ESM named exports', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { marker } from 'conditional-esm-package';
+      assert.strictEqual(marker, 'node-condition');
+      process.stdout.write('conditional ESM package completed');
+    `, {
+      entryPath: '/node/conditional-entry.mjs',
+      files: {
+        '/node/node_modules/conditional-esm-package/package.json': JSON.stringify({
+          type: 'module',
+          imports: {
+            '#runtime': {
+              node: './node-runtime.js',
+              default: './default-runtime.js',
+            },
+          },
+          exports: { '.': './index.js' },
+        }),
+        '/node/node_modules/conditional-esm-package/index.js': "export { marker } from '#runtime';",
+        '/node/node_modules/conditional-esm-package/node-runtime.js': "export const marker = 'node-condition';",
+        '/node/node_modules/conditional-esm-package/default-runtime.js': "export const marker = 'default-condition';",
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('conditional ESM package completed');
+  });
+
+  test('preserves named exports through dynamic conditional ESM imports', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      const module = await import('dynamic-conditional-package');
+      assert.deepStrictEqual(module.supportsColor, { level: 0 });
+      assert.deepStrictEqual(module.supportsColorNamed, { level: 0 });
+      process.stdout.write('dynamic conditional ESM package completed');
+    `, {
+      entryPath: '/node/dynamic-conditional-entry.mjs',
+      files: {
+        '/node/node_modules/dynamic-conditional-package/package.json': JSON.stringify({
+          type: 'module',
+          imports: {
+            '#supports-color': {
+              node: './node-supports-color.js',
+              default: './browser-supports-color.js',
+            },
+          },
+          exports: './source/index.js',
+        }),
+        '/node/dynamic-conditional-entry.mjs': `
+          import assert from 'node:assert/strict';
+          const module = await import('dynamic-conditional-package');
+          assert.deepStrictEqual(module.supportsColor, { level: 0 });
+          assert.deepStrictEqual(module.supportsColorNamed, { level: 0 });
+          process.stdout.write('dynamic conditional ESM package completed');
+        `,
+        '/node/node_modules/dynamic-conditional-package/source/index.js': `
+          import supportsColor from '#supports-color';
+          const { stdout } = supportsColor;
+          export { stdout as supportsColor, stdout as supportsColorNamed };
+        `,
+        '/node/node_modules/dynamic-conditional-package/node-supports-color.js': 'export default { stdout: { level: 0 } };',
+        '/node/node_modules/dynamic-conditional-package/browser-supports-color.js': 'export default { stdout: { level: 3 } };',
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('dynamic conditional ESM package completed');
   });
 
   test('loads a cyclic ESM graph without deadlocking URL materialization', async ({ harnessPage }) => {
@@ -129,5 +237,82 @@ test.describe('browser ESM loader', () => {
 
     await expectPass(expect, result);
     expect(result.stdout).toContain('hashbang esm completed');
+  });
+
+  test('defers unknown extensions to a registered ESM loader hook', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { registerHooks } from 'node:module';
+
+      const registration = registerHooks({
+        resolve(specifier, context, nextResolve) {
+          if (specifier === './virtual.ts') {
+            return { url: 'file:///node/esm/virtual.ts', format: 'module', shortCircuit: true };
+          }
+          return nextResolve(specifier, context);
+        },
+        load(url, context, nextLoad) {
+          if (url === 'file:///node/esm/virtual.ts') {
+            return { format: 'module', source: 'export const marker = "hooked ts";', shortCircuit: true };
+          }
+          return nextLoad(url, context);
+        },
+      });
+
+      const module = await import('./virtual.ts');
+      assert.strictEqual(module.marker, 'hooked ts');
+      registration.deregister();
+      await assert.rejects(import('./unhandled.ts'), { code: 'ERR_UNKNOWN_FILE_EXTENSION' });
+      process.stdout.write('unknown extension hook completed');
+    `, {
+      entryPath: '/node/esm/loader-hook-entry.mjs',
+      files: { '/node/esm/unhandled.ts': 'export const marker = "not handled";' },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('unknown extension hook completed');
+  });
+
+  test('lets an async module.register load hook transform an unknown extension', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { register } from 'node:module';
+
+      register('/node/unknown-extension-loader.mjs', import.meta.url);
+      const loaded = await import('./typed-source.ts');
+      assert.strictEqual(loaded.answer, 42);
+      process.stdout.write('unknown extension async loader completed');
+    `, {
+      entryPath: '/node/unknown-extension-entry.mjs',
+      files: {
+        '/node/unknown-extension-loader.mjs': `
+          export async function resolve(specifier, context, nextResolve) {
+            return nextResolve(specifier, context);
+          }
+          export async function load(url, context, nextLoad) {
+            if (!url.endsWith('/typed-source.ts')) return nextLoad(url, context);
+            const loaded = await nextLoad(url, { ...context, format: 'module' });
+            // Node permits nextLoad() to return either text or a byte buffer;
+            // the harness VFS intentionally exposes raw file bytes. A loader
+            // must accept both representations before transforming source.
+            const source = typeof loaded.source === 'string'
+              ? loaded.source
+              : new TextDecoder().decode(loaded.source);
+            return {
+              format: 'module',
+              shortCircuit: true,
+              source: source.replace(
+              'export const answer: number = 42',
+              'export const answer = 42',
+            ),
+            };
+          }
+        `,
+        '/node/typed-source.ts': 'export const answer: number = 42;',
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('unknown extension async loader completed');
   });
 });

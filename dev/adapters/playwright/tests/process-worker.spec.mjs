@@ -8,6 +8,93 @@ async function openRuntime(page) {
 }
 
 test.describe('browser-native worker process boundary', () => {
+  test('shares bytes in both raw and descriptor-shaped worker VFS entries', async ({ page }) => {
+    await openRuntime(page);
+    const result = await page.evaluate(async () => {
+      const { prepareWorkerVfs } = await import('/runtime/process.js');
+      const bytes = new Uint8Array([1, 2, 3]);
+      const prepared = prepareWorkerVfs({
+        files: {
+          '/node/raw.js': bytes,
+          '/node/descriptor.js': { data: bytes, mode: 0o755 },
+        },
+        artifacts: [{ path: '/node/raw.js', bytes }],
+      }, {
+        crossOriginIsolated: true,
+        SharedArrayBuffer,
+      });
+      return {
+        raw: prepared.files['/node/raw.js'].buffer instanceof SharedArrayBuffer,
+        descriptor: prepared.files['/node/descriptor.js'].data.buffer instanceof SharedArrayBuffer,
+        artifact: prepared.artifacts[0].bytes.buffer instanceof SharedArrayBuffer,
+        sourceUnchanged: bytes.buffer instanceof ArrayBuffer,
+      };
+    });
+
+    expect(result).toEqual({ raw: true, descriptor: true, artifact: true, sourceUnchanged: true });
+  });
+
+  test('terminates a worker after ordered natural completion', async ({ page }) => {
+    await openRuntime(page);
+    const result = await page.evaluate(async () => {
+      const { createBrowserProcess } = await import('/runtime/process.js');
+      let terminationCount = 0;
+      let cleanupResolve;
+      const cleanup = new Promise((resolve) => { cleanupResolve = resolve; });
+      const fakeWorker = {
+        listeners: new Map(),
+        on(name, listener) {
+          const set = this.listeners.get(name) || [];
+          set.push(listener);
+          this.listeners.set(name, set);
+          return this;
+        },
+        postMessage(message) {
+          const frame = {
+            channel: 'bnh-process-control',
+            key: message.key,
+            runId: message.runId,
+            childId: message.childId,
+          };
+          queueMicrotask(() => message.controlPort.postMessage({ ...frame, type: 'ready' }));
+          queueMicrotask(() => message.controlPort.postMessage({
+            ...frame,
+            type: 'terminal',
+            status: 'exited',
+            kind: 'natural',
+            code: 0,
+            signal: null,
+            forced: false,
+            lastUserSequence: 0,
+          }));
+          message.controlPort.onmessage = (event) => {
+            if (event.data?.type !== 'cleanup') return;
+            message.controlPort.postMessage({ ...frame, type: 'worker-closed' });
+            cleanupResolve();
+          };
+          message.controlPort.start?.();
+        },
+        terminate() {
+          terminationCount += 1;
+          return true;
+        },
+      };
+      const child = createBrowserProcess({
+        scope: globalThis,
+        workerFactory: () => fakeWorker,
+        run: () => {},
+        argv: ['node', 'entry.js'],
+      });
+      const terminal = await child.wait();
+      await cleanup;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return { terminal, terminationCount };
+    });
+
+    expect(result.terminal).toMatchObject({ status: 'exited', kind: 'natural', code: 0 });
+    expect(result.terminationCount).toBe(1);
+  });
+
   test('keeps worker IPC/output FIFO and emits one terminal lifecycle', async ({ page }) => {
     await openRuntime(page);
     const result = await page.evaluate(async () => {

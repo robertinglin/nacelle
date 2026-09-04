@@ -1,5 +1,5 @@
 import {
-  expandShellWord,
+  expandShellWordAsync,
   literalShellWord,
   parseShellScript,
   rawShellWord,
@@ -9,9 +9,9 @@ import { resolveNodeVersionProfile } from '../versions/index.js';
 const DEFAULT_NODE_VERSION = resolveNodeVersionProfile('lts').runtimeVersion;
 
 const BUILTINS = new Set([
-  ':', '[', 'alias', 'basename', 'cat', 'cd', 'command', 'cp', 'cut', 'dirname', 'echo', 'env', 'export',
+  ':', '.', '[', 'alias', 'basename', 'cat', 'cd', 'command', 'cp', 'cut', 'dirname', 'echo', 'env', 'export',
   'false', 'find', 'grep', 'head', 'ls', 'mkdir', 'mv', 'printenv', 'printf', 'ps', 'pwd', 'realpath', 'rm',
-  'rmdir', 'sed', 'sort', 'tail', 'tee', 'test', 'touch', 'tr', 'true', 'type', 'umask', 'uniq', 'unset', 'wc', 'which',
+  'rmdir', 'sed', 'sort', 'source', 'tail', 'tee', 'test', 'touch', 'tr', 'true', 'type', 'umask', 'uniq', 'unset', 'wc', 'which',
 ]);
 
 const GLOB_PATTERN = /[*?\[\]{}()!@]/;
@@ -60,7 +60,13 @@ async function fileIs(fs, pathname, type = 'file') {
 }
 
 async function expandWord(word, context, { pathname = false } = {}) {
-  const expanded = expandShellWord(word, context.env, context.lastStatus);
+  const expanded = await expandShellWordAsync(word, context.env, context.lastStatus, context.runSubstitution
+    ? async (command) => {
+      const nested = await context.runSubstitution(command);
+      if (nested?.stderr) context.onStderr?.(nested.stderr);
+      return nested;
+    }
+    : undefined);
   if (pathname || !expanded.glob || !GLOB_PATTERN.test(expanded.value) || !context.fs.glob) {
     return [expanded.value];
   }
@@ -82,7 +88,7 @@ async function expandWords(words, context) {
 async function resolveCommand(name, context) {
   if (BUILTINS.has(name)) return { type: 'builtin', name };
   if (name === 'node' || name === 'nodejs' || name === '/browser/node') return { type: 'node', name };
-  if (name === 'npm' || name === 'npx') return { type: 'npm', name };
+  if (name === 'npm' || name === 'npx' || name === 'yarn' || name === 'yarnpkg') return { type: 'npm', name };
   if (name === 'sh' || name === 'bash' || name === '/bin/sh' || name === '/bin/bash') return { type: 'shell', name };
 
   const candidates = [];
@@ -94,7 +100,14 @@ async function resolveCommand(name, context) {
     }
   }
   for (const pathname of candidates) {
-    if (await fileIs(context.fs, pathname)) return { type: 'external', path: pathname, name };
+    if (await fileIs(context.fs, pathname)) {
+      const commandName = pathname.slice(pathname.lastIndexOf('/') + 1);
+      // PATH lookup must preserve Node command identity. A virtual install can
+      // expose node through node_modules/.bin, but package scripts still
+      // invoke the Node child lifecycle (including ESM format selection).
+      if (commandName === 'node' || commandName === 'nodejs') return { type: 'node', name };
+      return { type: 'external', path: pathname, name };
+    }
   }
   return null;
 }
@@ -556,7 +569,7 @@ async function runFileUtility(name, args, input, context) {
   return null;
 }
 
-async function runBuiltin(name, args, input, context, runProgram) {
+async function runBuiltin(name, args, input, context, runProgram, options) {
   if (name === ':' || name === 'true') return result(0);
   if (name === 'false') return result(1);
   if (name === 'echo') return runEcho(args);
@@ -576,6 +589,34 @@ async function runBuiltin(name, args, input, context, runProgram) {
     shellState.previousCwd = shellState.cwd;
     shellState.cwd = pathname;
     return result(0);
+  }
+  if (name === '.' || name === 'source') {
+    const script = args[0];
+    if (!script) return commandError(name, 'filename argument required');
+    let source;
+    try { source = String(await context.fs.readFile(shellPath(script, context.cwd))); }
+    catch { return commandError(name, `${script}: No such file or directory`); }
+
+    const shellState = context.shellState || context;
+    const stdout = [];
+    const stderr = [];
+    const nested = await runShellScript(source, {
+      ...options,
+      args: args.slice(1),
+      cwd: shellState.cwd,
+      env: shellState.env,
+      fs: context.fs,
+      stdin: input,
+      signal: context.signal,
+      timeout: context.timeout,
+      onNetwork: context.onNetwork,
+      onStdout: (chunk) => stdout.push(String(chunk)),
+      onStderr: (chunk) => stderr.push(String(chunk)),
+    });
+    shellState.cwd = nested.cwd;
+    for (const key of Object.keys(shellState.env)) delete shellState.env[key];
+    Object.assign(shellState.env, nested.env);
+    return result(nested.code, stdout.join(''), stderr.join(''));
   }
   if (name === 'export') {
     const shellState = context.shellState || context;
@@ -703,9 +744,9 @@ async function runNode(args, input, context, options) {
   if (args[index] === '--') index += 1;
   const script = args[index];
   if (!script) return commandError('node', 'no script specified');
-  return options.runCommand({
-    entry: shellPath(script, context.cwd), argv: args.slice(index + 1), cwd: context.cwd,
-    env: context.env, stdin: input, signal: context.signal, timeout: context.timeout,
+  return options.runNode({
+    script: shellPath(script, context.cwd), args: args.slice(index + 1), input,
+    cwd: context.cwd, env: context.env, signal: context.signal, timeout: context.timeout,
     onNetwork: context.onNetwork,
     onStdout: context.onStdout, onStderr: context.onStderr,
   });
@@ -748,15 +789,49 @@ async function runNpm(name, args, input, context, options) {
   }
   const meaningfulArgs = args.filter((arg) => !['--silent', '--loglevel=silent'].includes(arg));
   if (meaningfulArgs[0] === '--version' || meaningfulArgs[0] === '-v') return result(0, '10.0.0-browser\n');
+  const isYarn = name === 'yarn' || name === 'yarnpkg';
   const isTest = meaningfulArgs[0] === 'test';
-  if ((!['run', 'run-script'].includes(meaningfulArgs[0]) && !isTest)
-    || (!isTest && !meaningfulArgs[1])) {
-    return commandError('npm', 'only npm run is supported by the browser shell');
+  const isRun = ['run', 'run-script'].includes(meaningfulArgs[0]);
+  const isInstall = ['install', 'i', 'add'].includes(meaningfulArgs[0]);
+  if (isYarn && isInstall) {
+    if (typeof options.npmInstall !== 'function') return commandError(name, 'package installation is unavailable');
+    const specs = meaningfulArgs.slice(1).filter((arg) => !arg.startsWith('-'));
+    try {
+      return result((await options.npmInstall({
+        specs,
+        cwd: context.cwd,
+        env: context.env,
+        stdin: input,
+        signal: context.signal,
+        timeout: context.timeout,
+      }))?.code ?? 1);
+    } catch (error) {
+      return commandError(name, error.message || String(error));
+    }
+  }
+  if (isYarn && meaningfulArgs[0] === 'link') {
+    if (typeof options.npmLink !== 'function') return commandError(name, 'package linking is unavailable');
+    try {
+      return result((await options.npmLink({
+        packages: meaningfulArgs.slice(1).filter((arg) => !arg.startsWith('-')),
+        cwd: context.cwd,
+        env: context.env,
+      }))?.code ?? 1);
+    } catch (error) {
+      return commandError(name, error.message || String(error));
+    }
+  }
+  if (isYarn) {
+    if (!isTest && !meaningfulArgs[0]) return commandError(name, 'script name is required');
+  } else if ((!isRun && !isTest) || (!isTest && !meaningfulArgs[1])) {
+    return commandError(name, 'only npm run is supported by the browser shell');
   }
   if (typeof options.npmRun !== 'function') return commandError('npm', 'npm execution is unavailable');
-  const scriptName = isTest ? 'test' : meaningfulArgs[1];
+  const scriptName = isTest ? 'test' : isRun ? meaningfulArgs[1] : meaningfulArgs[0];
   const separator = meaningfulArgs.indexOf('--');
-  const scriptArgs = separator >= 0 ? meaningfulArgs.slice(separator + 1) : isTest ? [] : meaningfulArgs.slice(2);
+  const scriptArgs = separator >= 0
+    ? meaningfulArgs.slice(separator + 1)
+    : isTest ? [] : meaningfulArgs.slice(isRun ? 2 : 1);
   const stdout = [];
   const stderr = [];
   try {
@@ -781,19 +856,19 @@ async function runNpm(name, args, input, context, options) {
     });
     const code = child && typeof child === 'object' && 'exit' in child
       ? await child.exit
-      : child?.code;
+      : Object.prototype.hasOwnProperty.call(child || {}, 'code') ? child.code : 1;
     const res = result(code ?? 1, stdout.join(''), stderr.join(''));
     if (context.onStdout || context.onStderr) res.streamed = true;
     return res;
   } catch (error) {
-    return commandError('npm', error.message || String(error));
+    return commandError(name, error.message || String(error));
   }
 }
 
 async function runProgram(name, args, input, context, options) {
   const resolved = await resolveCommand(name, context);
   if (!resolved) return commandError(name, 'command not found', 127);
-  if (resolved.type === 'builtin') return runBuiltin(resolved.name, args, input, context, (childName, childArgs, childInput, childContext) => runProgram(childName, childArgs, childInput, childContext, options));
+  if (resolved.type === 'builtin') return runBuiltin(resolved.name, args, input, context, (childName, childArgs, childInput, childContext) => runProgram(childName, childArgs, childInput, childContext, options), options);
   if (resolved.type === 'node') return runNode(args, input, context, options);
   if (resolved.type === 'npm') return runNpm(resolved.name, args, input, context, options);
   if (resolved.type === 'shell') return runShell(resolved.name, args, input, context, options);
@@ -918,6 +993,19 @@ export async function runShellScript(command, options) {
     lastStatus: 0,
     fs: options.fs,
     onNetwork: options.onNetwork,
+  };
+  state.runSubstitution = async (nestedCommand) => {
+    const stdout = [];
+    const stderr = [];
+    const nested = await runShellScript(nestedCommand, {
+      ...options,
+      args: [],
+      cwd: state.cwd,
+      env: state.env,
+      onStdout: (chunk) => stdout.push(String(chunk)),
+      onStderr: (chunk) => stderr.push(String(chunk)),
+    });
+    return { ...nested, stdout: stdout.join(''), stderr: stderr.join('') };
   };
   const finalPipeline = pipelines.at(-1);
   const extraArgs = Array.isArray(options.args) ? options.args : [];

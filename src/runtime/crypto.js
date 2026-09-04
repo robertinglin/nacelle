@@ -778,11 +778,113 @@ function hmacDigest(algorithm, key, value) {
   return digest(outerInput);
 }
 
-export function createSecretKeyShim(BufferClass) {
-  return (value) => ({
-    type: 'secret',
-    key: BufferClass.from(value),
+function cloneKeyRecord(value) {
+  return Object.fromEntries(Object.entries(value || {}).filter(([, item]) => item !== undefined));
+}
+
+function base64Url(bytes) {
+  return base64(bytes).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
+}
+
+function keyObjectType(jwk, fallback) {
+  if (fallback) return fallback;
+  return jwk?.d !== undefined || jwk?.priv !== undefined ? 'private' : 'public';
+}
+
+function asymmetricKeyType(jwk) {
+  if (jwk?.kty === 'RSA') return 'rsa';
+  if (jwk?.kty === 'EC') return 'ec';
+  if (jwk?.kty === 'OKP') return String(jwk.crv || '').toLowerCase();
+  return undefined;
+}
+
+function asymmetricKeyDetails(jwk) {
+  if (jwk?.kty === 'EC' && jwk.crv) {
+    return { namedCurve: ({ 'P-256': 'prime256v1', 'P-384': 'P-384', 'P-521': 'P-521' })[jwk.crv] || jwk.crv };
+  }
+  return undefined;
+}
+
+/** Synchronous Node KeyObject surface for browser-compatible key data. */
+export class BrowserKeyObject {
+  constructor({ type, jwk, key, der, pem, BufferClass }) {
+    this.type = type;
+    this._BufferClass = BufferClass;
+    this._jwk = jwk ? cloneKeyRecord(jwk) : undefined;
+    this._key = key ? BufferClass.from(key) : undefined;
+    this._der = der ? BufferClass.from(der) : undefined;
+    this._pem = typeof pem === 'string' ? pem : undefined;
+    this.asymmetricKeyType = asymmetricKeyType(this._jwk);
+    this.asymmetricKeyDetails = asymmetricKeyDetails(this._jwk);
+    if (this._key) Object.defineProperty(this, 'key', { configurable: false, enumerable: false, value: this._key });
+  }
+
+  get [Symbol.toStringTag]() { return 'KeyObject'; }
+
+  export(options = {}) {
+    const format = options?.format;
+    if (this.type === 'secret') {
+      if (format === 'jwk') return { kty: 'oct', k: base64Url(new Uint8Array(this._key)) };
+      if (format === undefined || format === 'buffer') return this._BufferClass.from(this._key);
+    } else if (format === 'jwk' && this._jwk) {
+      return cloneKeyRecord(this._jwk);
+    } else if (format === 'pem' && this._pem) {
+      return this._pem;
+    } else if ((format === 'der' || format === undefined) && this._der) {
+      return this._BufferClass.from(this._der);
+    }
+    throw new UnsupportedWebCapabilityError(
+      'crypto.KeyObject.export',
+      'this browser runtime supports synchronous JWK and imported PEM/DER representations, but not converting browser keys to OpenSSL formats',
+    );
+  }
+
+  equals(other) {
+    if (!(other instanceof BrowserKeyObject) || this.type !== other.type) return false;
+    try {
+      return JSON.stringify(this.export({ format: 'jwk' })) === JSON.stringify(other.export({ format: 'jwk' }));
+    } catch {
+      const left = this._der || this._key;
+      const right = other._der || other._key;
+      return Boolean(left && right && left.length === right.length && left.every((value, index) => value === right[index]));
+    }
+  }
+}
+
+function pemBytes(value, BufferClass) {
+  const text = typeof value === 'string' ? value : BufferClass.from(value).toString('utf8');
+  const body = text.replace(/-----BEGIN [^-]+-----/g, '').replace(/-----END [^-]+-----/g, '').replace(/[\r\n\s]/g, '');
+  return BufferClass.from(body, 'base64');
+}
+
+function keyObjectFromInput(value, type, BufferClass) {
+  const options = value && typeof value === 'object' && !ArrayBuffer.isView(value)
+    && !isArrayBuffer(value) && !Object.hasOwn(value, 'byteLength') ? value : { key: value };
+  const format = options.format || (typeof options.key === 'string' ? 'pem' : 'der');
+  if (format === 'jwk') {
+    if (!options.key || typeof options.key !== 'object' || Array.isArray(options.key)) {
+      throw new TypeError('The "key" property must be a JSON Web Key object');
+    }
+    return new BrowserKeyObject({ type: keyObjectType(options.key, type), jwk: options.key, BufferClass });
+  }
+  if (format === 'pem') {
+    const pem = typeof options.key === 'string' ? options.key : BufferClass.from(options.key).toString('utf8');
+    return new BrowserKeyObject({ type, pem, der: pemBytes(pem, BufferClass), BufferClass });
+  }
+  if (format === 'der') return new BrowserKeyObject({ type, der: options.key, BufferClass });
+  throw new TypeError(`The "format" property must be one of: pem, der, jwk. Received ${format}`);
+}
+
+export function createKeyObjectContract(BufferClass) {
+  return Object.freeze({
+    KeyObject: BrowserKeyObject,
+    createPublicKey: (value) => keyObjectFromInput(value, 'public', BufferClass),
+    createPrivateKey: (value) => keyObjectFromInput(value, 'private', BufferClass),
   });
+}
+
+export function createSecretKeyShim(BufferClass) {
+  return (value) => new BrowserKeyObject({ type: 'secret', key: value, BufferClass });
 }
 
 export function createHmacShim(BufferClass, processObject, scope = globalThis) {

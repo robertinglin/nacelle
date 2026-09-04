@@ -17,6 +17,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
   let proxySequence = 0;
   let exitCode = 0;
   let signalCode = null;
+  let processStateSource;
   const processExitSignal = {};
   const remoteHandles = new Map();
   const proxyRequests = new Map();
@@ -310,11 +311,21 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       forced,
       lastUserSequence: userSequence,
       error: errorRecord(error),
+      runtimeState: processStateSource?.__bnhRuntimeState
+        || processStateSource?.__bnhChildActivity
+        || null,
     });
-    // Keep the user port alive for one turn. MessagePort has independent
-    // delivery from the control port, so closing it synchronously can discard
-    // user messages that were accepted before the terminal frame.
-    setTimeout(() => { user?.close(); control?.close(); self.close(); }, 0);
+    // The parent requests cleanup only after it has observed all user frames
+    // covered by lastUserSequence. Closing at that handshake preserves IPC
+    // delivery while releasing the worker's VFS/module graph promptly.
+  }
+
+  function closeAfterCleanup() {
+    if (!terminalSent) return;
+      user?.close();
+      sendControl('worker-closed');
+      control?.close();
+      self.close();
   }
 
   function start(message) {
@@ -323,6 +334,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     key = message.key;
     identity = message.identity;
     const process = makeEmitter();
+    processStateSource = process;
     const pendingMessages = [];
     let pendingMessageFlushQueued = false;
     const flushPendingMessages = () => {
@@ -410,6 +422,15 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         callback?.(null);
         return true;
       },
+      __bnhSendInternal(value) {
+        if (disconnected) return false;
+        try {
+          user.postMessage({ channel: USER, runId: identity.runId, childId: identity.childId, direction: 'child-to-parent', type: 'message', internal: true, payload: value });
+          return true;
+        } catch {
+          return false;
+        }
+      },
       disconnect() {
         if (disconnected) return false;
         disconnected = true;
@@ -460,6 +481,8 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       if (frame?.channel !== CONTROL || frame.key !== key || frame.runId !== identity.runId || frame.childId !== identity.childId) return;
       if (frame.type === 'disconnect') {
         if (!disconnected) { disconnected = true; process.connected = false; emitProcess('disconnect'); }
+      } else if (frame.type === 'cleanup') {
+        closeAfterCleanup();
       } else if (frame.type === 'signal') {
         if (terminalSent) return;
         const handled = emitProcess(frame.signal);

@@ -17,6 +17,32 @@ function runtimeFor(nodeVersion) {
   return { profile, runtime };
 }
 
+function createRemoteNpmCache(context) {
+  const cache = new BrowserNpmCache({ globalObject: globalThis });
+  const request = (resource) => context.process.__bnhProxyRequest('request', {
+    __bnhNpmCache: true,
+    ...resource,
+  });
+  cache.getMetadata = async (name) => {
+    const result = await request({ type: 'metadata', name });
+    return result?.metadata || null;
+  };
+  cache.getTarball = async (key) => {
+    const result = await request({ type: 'tarball', key });
+    if (!result?.bytes) return null;
+    return result.bytes instanceof Uint8Array ? result.bytes : new Uint8Array(result.bytes);
+  };
+  cache.getUnpackedPackage = async (name, version) => {
+    const result = await request({ type: 'package-entries', name, version });
+    if (!result?.entries) return null;
+    return result.entries.map((entry) => ({
+      ...entry,
+      data: entry.data instanceof Uint8Array ? entry.data : entry.data ? new Uint8Array(entry.data) : entry.data,
+    }));
+  };
+  return cache;
+}
+
 export async function runProcessEntry(context) {
   const sourceDescriptor = context.vfs;
   const proxyOperations = new Set(sourceDescriptor?.proxy?.operations || []);
@@ -59,13 +85,16 @@ export async function runProcessEntry(context) {
   }
   const { profile, runtime } = runtimeFor(descriptor.nodeVersion);
   installProcessContract(context.process, { nodeProfile: profile });
-  if (descriptor.npmCache) {
+  if (descriptor.npmCache?.rpc) {
+    globalThis.__BNH_NPM_CACHE__ = createRemoteNpmCache(context);
+  } else if (descriptor.npmCache) {
     const cache = new BrowserNpmCache({ globalObject: globalThis });
-    cache.memoryMeta = new Map(Object.entries(descriptor.npmCache.metadata || {}));
-    cache.memoryTarballs = new Map(Object.entries(descriptor.npmCache.tarballs || {}).map(([key, bytes]) => [
-      key,
-      bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes),
-    ]));
+    for (const [key, value] of Object.entries(descriptor.npmCache.metadata || {})) {
+      cache.setMemoryMetadata(key, value);
+    }
+    for (const [key, bytes] of Object.entries(descriptor.npmCache.tarballs || {})) {
+      cache.setMemoryTarball(key, bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+    }
     globalThis.__BNH_NPM_CACHE__ = cache;
   } else {
     delete globalThis.__BNH_NPM_CACHE__;
@@ -80,11 +109,13 @@ export async function runProcessEntry(context) {
     runId: context.process.runId,
     capabilities: descriptor.capabilities,
     proxy: descriptor.proxy,
+    vfsBackend: descriptor.vfsBackend,
     virtualNetwork: remoteVirtualNetwork
       ? { shared: true, network: remoteVirtualNetwork.network }
       : descriptor.virtualNetwork,
   });
-  await runtime.mount(descriptor.files, { symlinks: descriptor.symlinks });
+  if (descriptor.vfsBackend) await runtime.mount({});
+  else await runtime.mount(descriptor.files, { symlinks: descriptor.symlinks });
   let code;
   try {
     code = await runtime.executeEntry(
@@ -126,9 +157,18 @@ export async function runProcessEntry(context) {
   // process.exitCode instead of the bootstrap default of zero.
   if (context.process && Number.isInteger(code)) context.process.exitCode = code;
   if (descriptor.capabilities.ipc.enabled && context.process.connected) {
+    const runtimeState = {
+      exitCode: context.process.exitCode,
+      runtimeCode: code,
+      childActivity: context.process.__bnhChildActivity || null,
+    };
+    context.process.__bnhRuntimeState = runtimeState;
+    const sendRuntimeState = context.process.__bnhSendInternal || context.process.send;
+    await sendRuntimeState.call(context.process, { type: 'bnh-runtime-state', state: runtimeState });
     const declared = descriptor.capabilities.vfs.mounts.some((mount) => mount.artifacts?.length);
     const artifacts = declared ? runtime.exportArtifacts() : { version: 1, artifacts: [] };
-    await context.process.send({ type: 'bnh-artifacts', artifacts });
+    const sendInternal = context.process.__bnhSendInternal || context.process.send;
+    await sendInternal.call(context.process, { type: 'bnh-artifacts', artifacts });
   }
   return code;
 }

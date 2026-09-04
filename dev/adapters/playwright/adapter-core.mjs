@@ -8,6 +8,7 @@ import { chromium, firefox, webkit } from 'playwright';
 const browserTypes = { chromium, firefox, webkit };
 const dependencyPattern = /(?:require\s*\(\s*|from\s+|import\s*\(\s*|new\s+Worker\s*\(\s*|fork\s*\(\s*)['"](\.\.?\/[^'"]+)['"]/g;
 const BROWSER_LAUNCH_RETRY_DELAY_MS = 100;
+const CHROMIUM_RUNTIME_ARGS = ['--js-flags=--max-old-space-size=8192'];
 
 function browserLaunchErrorText(error) {
   const message = error?.stack || error?.message || String(error);
@@ -23,13 +24,17 @@ export function isTransientBrowserLaunchFailure(error, browserName) {
 }
 
 export async function launchBrowser(browserType, browserName, { retryDelayMs = BROWSER_LAUNCH_RETRY_DELAY_MS } = {}) {
+  const launchOptions = {
+    headless: true,
+    ...(browserName === 'chromium' ? { args: CHROMIUM_RUNTIME_ARGS } : {}),
+  };
   try {
-    return await browserType.launch({ headless: true });
+    return await browserType.launch(launchOptions);
   } catch (initialError) {
     if (!isTransientBrowserLaunchFailure(initialError, browserName)) throw initialError;
     await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
     try {
-      return await browserType.launch({ headless: true });
+      return await browserType.launch(launchOptions);
     } catch (retryError) {
       const combined = new Error(
         `${browserName} launch failed after one transient-startup retry\n` +
@@ -323,7 +328,7 @@ export async function collectBundle(request) {
   };
 }
 
-export async function createAdapter() {
+export async function createAdapter({ onProgress = null } = {}) {
   const browserName = process.env.BNH_BROWSER || 'chromium';
   if (!browserTypes[browserName]) {
     throw new Error(`unsupported BNH_BROWSER=${browserName}; expected chromium, firefox, or webkit`);
@@ -334,6 +339,7 @@ export async function createAdapter() {
   let reusablePage = null;
   let reusablePageReady = false;
   let reusableBindingInstalled = false;
+  let reusableProgressBindingInstalled = false;
   let activeBundle = null;
   let server = null;
   let serverURL = null;
@@ -431,6 +437,7 @@ export async function createAdapter() {
         reusablePage = null;
         reusablePageReady = false;
         reusableBindingInstalled = false;
+        reusableProgressBindingInstalled = false;
       }
       context = await browser.newContext();
       page = await context.newPage();
@@ -439,6 +446,7 @@ export async function createAdapter() {
         reusablePage = page;
         reusablePageReady = false;
         reusableBindingInstalled = false;
+        reusableProgressBindingInstalled = false;
       }
     }
     const consoleLines = [];
@@ -456,6 +464,12 @@ export async function createAdapter() {
       if (reusePage) reusableBindingInstalled = true;
     } else {
       activeBundle = bundle;
+    }
+    if (onProgress && (!reusePage || !reusableProgressBindingInstalled)) {
+      await page.exposeBinding('__bnhReportProgress', async (_source, event) => {
+        try { onProgress(event); } catch { /* progress cannot affect test execution */ }
+      });
+      if (reusePage) reusableProgressBindingInstalled = true;
     }
     let discardPage = false;
     try {
@@ -483,6 +497,7 @@ export async function createAdapter() {
       const bridgeRequest = {
         schemaVersion: 1,
         entry: bundle.entry,
+        browser: browserName,
         capabilities: request.capabilities,
         proxy: request.proxy,
         fixtures: request.fixtures,
@@ -507,6 +522,7 @@ export async function createAdapter() {
           bundleBytes: bundle.totalBytes,
           omittedFiles: bundle.omitted,
         },
+        progress: onProgress ? { binding: '__bnhReportProgress' } : null,
       };
       const bridgeResult = await page.evaluate(async (input) => {
         const bridge = globalThis.__BROWSER_NODE_HARNESS__;
@@ -571,6 +587,7 @@ export async function createAdapter() {
           reusablePage = null;
           reusablePageReady = false;
           reusableBindingInstalled = false;
+          reusableProgressBindingInstalled = false;
         }
       }
     }
@@ -605,6 +622,7 @@ export async function createAdapter() {
       reusablePage = null;
       reusablePageReady = false;
       reusableBindingInstalled = false;
+      reusableProgressBindingInstalled = false;
     }
     await browser.close();
   }

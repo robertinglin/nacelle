@@ -141,10 +141,14 @@ export function createProgressReporter({ binding, runId, maxPending = DEFAULT_MA
       });
     },
     async flush() {
-      while (activityTimers.size || pendingActivity.size || draining) {
-        if (activityTimers.size) await new Promise((resolve) => setTimeout(resolve, 110));
-        if (draining) await draining;
-      }
+      // Flushing is part of the terminal handoff. Do not make a caller wait
+      // for the coalescing window: publish the bounded aggregate immediately
+      // and let any already-queued timer become a no-op. Progress observation
+      // must never race a caller's execution deadline.
+      activityTimers.clear();
+      for (const pending of pendingActivity.values()) push(pending);
+      pendingActivity.clear();
+      if (draining) await draining;
     },
   };
 }

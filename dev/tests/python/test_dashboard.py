@@ -191,6 +191,20 @@ class DashboardTests(unittest.TestCase):
             )
 
             db.record_event(
+                "adapter progress · execution/output-activity · stream=stdout bytes=4 chunks=1",
+                run_id="run-1",
+                kind="runner",
+                status="progress",
+                attempt_id="canonical-target-run-1",
+            )
+            active_target = next(
+                runner for runner in dashboard_snapshot(db)["active_runners"]
+                if runner["attempt_id"] == "canonical-target-run-1"
+            )
+            self.assertEqual(active_target["status"], "progress")
+            self.assertIn("output-activity", active_target["message"])
+
+            db.record_event(
                 "oracle baseline finished",
                 run_id="run-1",
                 kind="runner",

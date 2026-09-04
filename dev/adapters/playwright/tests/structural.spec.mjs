@@ -72,9 +72,9 @@ test.describe('browser runtime test contracts', () => {
     expect(citgm).toContain('processArgv');
     expect(citgm).toContain('networkEvents');
     expect(citgm).toContain('outputCounters');
-    expect(citgm).toContain('materialize: false');
     expect(citgm).toContain('cacheUnpacked: false');
-    expect(citgm).toContain('The materialized VFS is the authoritative package tree');
+    expect(citgm).toContain('candidate-install-runs-on-demand-in-active-child');
+    expect(citgm).not.toContain('preloadNpm.install');
     expect(citgm).toContain('installStats = {');
     expect(citgm).toContain('npmCache.clearMemory()');
   });

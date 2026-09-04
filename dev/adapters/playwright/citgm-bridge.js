@@ -171,6 +171,36 @@ function createFetchTransport(host, port, loadCachedProject) {
 
 function createBrowserProxyAdapter(loadCachedProject) {
   return {
+    async request(request = {}) {
+      if (request.__bnhNpmCache !== true) return null;
+      if (request.type === 'metadata' && request.name) {
+        const metadata = await npmCache.getMetadata(String(request.name));
+        return metadata ? { metadata } : null;
+      }
+      if (request.type === 'tarball' && request.key) {
+        const bytes = await npmCache.getTarball(String(request.key));
+        return bytes ? { bytes } : null;
+      }
+      if (request.type === 'package-entries' && request.name && request.version) {
+        const entries = npmCache.getUnpackedPackage(String(request.name), String(request.version));
+        return entries ? { entries } : null;
+      }
+      if (request.type === 'set-metadata' && request.name && request.metadata !== undefined) {
+        await npmCache.setMetadata(String(request.name), request.metadata);
+        return { stored: true };
+      }
+      if (request.type === 'set-tarball' && request.key && request.bytes) {
+        const bytes = request.bytes instanceof Uint8Array
+          ? request.bytes
+          : new Uint8Array(request.bytes);
+        await npmCache.setTarball(String(request.key), bytes, {
+          name: String(request.name || ''),
+          version: String(request.version || ''),
+        });
+        return { stored: true };
+      }
+      return null;
+    },
     resolve() {
       // The transport uses the original hostname from client._connectOptions;
       // this address only gives the virtual socket a routable placeholder.

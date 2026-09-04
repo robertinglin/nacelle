@@ -17,6 +17,49 @@ function runtimeFor(nodeVersion) {
   return { profile, runtime };
 }
 
+function createRemoteNpmCache(context) {
+  const cache = new BrowserNpmCache({ globalObject: globalThis });
+  const request = (resource) => context.process.__bnhProxyRequest('request', {
+    __bnhNpmCache: true,
+    ...resource,
+  });
+  cache.getMetadata = async (name) => {
+    const result = await request({ type: 'metadata', name });
+    return result?.metadata || null;
+  };
+  cache.getTarball = async (key) => {
+    const result = await request({ type: 'tarball', key });
+    if (!result?.bytes) return null;
+    return result.bytes instanceof Uint8Array ? result.bytes : new Uint8Array(result.bytes);
+  };
+  cache.getUnpackedPackage = async (name, version) => {
+    const result = await request({ type: 'package-entries', name, version });
+    if (!result?.entries) return null;
+    return result.entries.map((entry) => ({
+      ...entry,
+      data: entry.data instanceof Uint8Array ? entry.data : entry.data ? new Uint8Array(entry.data) : entry.data,
+    }));
+  };
+  // A worker may need to download a package after it has started. Publish
+  // newly fetched cache records to the owning page, but do not retain a
+  // second worker-local copy of the tarball or unpacked package graph.
+  cache.setMetadata = async (name, metadata) => {
+    await request({ type: 'set-metadata', name, metadata });
+  };
+  cache.setTarball = async (key, bytes, meta = {}) => {
+    const value = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    await request({
+      type: 'set-tarball',
+      key,
+      bytes: value,
+      name: meta.name || '',
+      version: meta.version || '',
+    });
+  };
+  cache.setUnpackedPackage = () => {};
+  return cache;
+}
+
 export async function runProcessEntry(context) {
   const setRuntimePhase = (phase) => {
     if (context.process) {

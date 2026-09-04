@@ -949,7 +949,42 @@ export function createVmModule(scope = globalThis) {
 
     runInThisContext(options = {}) {
       getRunInContextArgs(options);
-      return (scope.eval || eval)(this.code);
+      const dynamicImportBinding = `__bnhVmDynamicImport${nextScriptDynamicImportId++}`;
+      const hasDynamicImport = /\bimport\s*\(/u.test(this.code);
+      const source = hasDynamicImport
+        ? rewriteScriptDynamicImports(this.code, dynamicImportBinding)
+        : this.code;
+      if (hasDynamicImport) {
+        const dynamicImport = (specifier) => {
+          if (typeof this.options.importModuleDynamically === 'function') {
+            return Promise.resolve(this.options.importModuleDynamically(specifier, this));
+          }
+          const activeProcess = scope.process;
+          if (typeof activeProcess?.__bnhModuleImport === 'function') {
+            const filename = this.options.filename;
+            const importer = typeof filename === 'string' && filename.startsWith('/')
+              ? filename
+              : `/node/${filename}`;
+            return Promise.resolve(activeProcess.__bnhModuleImport(
+              specifier,
+              importer,
+              undefined,
+              activeProcess,
+            ));
+          }
+          return Promise.reject(vmError(
+            'ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING',
+            'A dynamic import callback was not specified',
+          ));
+        };
+        Object.defineProperty(scope, dynamicImportBinding, {
+          configurable: true,
+          enumerable: false,
+          value: dynamicImport,
+          writable: false,
+        });
+      }
+      return (scope.eval || eval)(source);
     }
   }
 

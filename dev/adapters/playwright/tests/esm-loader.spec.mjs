@@ -86,6 +86,22 @@ test.describe('browser ESM loader', () => {
     expect(result.stderr).toContain('esm child diagnostic');
   });
 
+  test('routes deferred eval imports from an ESM module through the virtual loader', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      const dynamicImport = eval('(url) => import(url)');
+      const loaded = await dynamicImport('./loaded.mjs');
+      assert.strictEqual(loaded.answer, 43);
+      process.stdout.write('esm eval dynamic import completed');
+    `, {
+      entryPath: '/node/esm/eval-dynamic-import.mjs',
+      files: { '/node/esm/loaded.mjs': 'export const answer = 43;' },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('esm eval dynamic import completed');
+  });
+
   test('rewrites minified static imports with no whitespace around from', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       import marker from './minified.mjs';

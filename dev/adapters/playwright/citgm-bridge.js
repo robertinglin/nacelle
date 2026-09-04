@@ -222,13 +222,25 @@ function createBrowserProxyAdapter(loadCachedProject) {
           bodyBytes: cachedBody,
         };
       }
-      return browserFetch(target, {
+      const response = await browserFetch(target, {
         method: request.method || 'GET',
         headers: request.headers,
         body: request.body,
         signal: request.signal,
         redirect: 'follow',
       });
+      const headers = {};
+      for (const [name, value] of response.headers || []) headers[name] = value;
+      // Proxy calls can cross an isolated child boundary. Do not return a
+      // live Response/stream object that cannot survive structured clone;
+      // materialize the normal HTTP response as its serializable wire shape.
+      return {
+        url: response.url || target,
+        status: response.status,
+        statusText: response.statusText || '',
+        headers,
+        bodyBytes: new Uint8Array(await response.arrayBuffer()),
+      };
     },
     resolve() {
       // The transport uses the original hostname from client._connectOptions;

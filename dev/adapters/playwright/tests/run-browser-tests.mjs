@@ -73,6 +73,7 @@ const testFiles = process.env.BNH_BROWSER_TEST_FILES
     'tests/node-test-loader-boundaries.spec.mjs',
     'tests/esm-loader.spec.mjs',
     'tests/async-primitives.spec.mjs',
+    'tests/als-scheduling-proof.spec.mjs',
     'tests/missing-primitives.spec.mjs',
     'tests/platform-primitives.spec.mjs',
     'tests/path-relative.spec.mjs',

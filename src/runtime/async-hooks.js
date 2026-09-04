@@ -537,11 +537,62 @@ function runWithPromiseScope(promise, callback) {
 
 const taskHookTargets = new WeakMap();
 
+function wrapQueueMicrotask(target) {
+  const wrapped = function patchedQueueMicrotask(callback) {
+    if (typeof callback !== 'function' || !isUserCodeActive()) {
+      return target.call(this, callback);
+    }
+    const resource = {};
+    const triggerAsyncId = executionId;
+    const asyncId = newAsyncId('Microtask', triggerAsyncId, resource);
+    target.call(this, () => {
+      try {
+        return runInScope(asyncId, callback, this, []);
+      } finally {
+        const record = resources.get(asyncId);
+        if (record) {
+          record.destroyed = true;
+          queueDestroy(asyncId);
+        }
+      }
+    });
+  };
+  Object.defineProperty(wrapped, '__bnhWrappedQueueMicrotask', { value: target });
+  return wrapped;
+}
+
+const queueMicrotaskScopes = new WeakSet();
+
 function installTaskHooks(scope) {
   if (!scope) return;
   // The runtime timer facade already creates one AsyncResource for each
   // timeout, interval, and immediate. Wrapping those functions here would
   // emit duplicate Timeout nodes and corrupt trigger-graph ordering.
+  //
+  // One realm hosts many virtual children. Their lifecycles keep assigning
+  // scope.queueMicrotask (per-child context bridges) and restoring timer
+  // snapshots over it with Object.assign, so a one-time wrapper is silently
+  // clobbered and guest microtasks lose their async context. Install an
+  // accessor that wraps every future assignment instead.
+  if (!queueMicrotaskScopes.has(scope)) {
+    try {
+      queueMicrotaskScopes.add(scope);
+      let currentQueueMicrotask = wrapQueueMicrotask(scope.queueMicrotask);
+      Object.defineProperty(scope, 'queueMicrotask', {
+        configurable: true,
+        get() { return currentQueueMicrotask; },
+        set(nextQueueMicrotask) {
+          currentQueueMicrotask = typeof nextQueueMicrotask === 'function'
+            && !Object.prototype.hasOwnProperty.call(nextQueueMicrotask, '__bnhWrappedQueueMicrotask')
+            ? wrapQueueMicrotask(nextQueueMicrotask)
+            : nextQueueMicrotask;
+        },
+      });
+      return;
+    } catch {
+      queueMicrotaskScopes.delete(scope);
+    }
+  }
 
   const originalQueueMicrotask = scope.queueMicrotask;
   if (typeof originalQueueMicrotask === 'function') {

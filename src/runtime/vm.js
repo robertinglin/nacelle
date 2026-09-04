@@ -887,9 +887,13 @@ export function createVmModule(scope = globalThis) {
           }
           const activeProcess = context.process || scope.process;
           if (typeof activeProcess?.__bnhModuleImport === 'function') {
+            const filename = this.options.filename;
+            const importer = typeof filename === 'string' && filename.startsWith('/')
+              ? filename
+              : `/node/${filename}`;
             return Promise.resolve(activeProcess.__bnhModuleImport(
               specifier,
-              this.options.filename,
+              importer,
               undefined,
               activeProcess,
             ));

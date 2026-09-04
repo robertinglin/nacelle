@@ -173,7 +173,7 @@ test('nested CommonJS eval importers use the virtual HTTP loader', async ({ harn
         const dynamicImport = eval('(url) => import(url)');
         dynamicImport(process.env.TARGET_URL)
           .then((module) => process.stdout.write(String(module.answer)))
-          .catch((error) => { console.error(error.stack); process.exitCode = 1; });
+          .catch((error) => { console.error(error); process.exitCode = 1; });
       `,
     },
     env: { TARGET_URL: 'unused-by-parent' },
@@ -218,7 +218,7 @@ test('VM scripts route dynamic imports through the virtual HTTP loader', async (
         const dynamicImport = vm.runInNewContext('(url) => import(url)', { process });
         dynamicImport(process.env.TARGET_URL)
           .then((module) => process.stdout.write(String(module.answer)))
-          .catch((error) => { console.error(error.stack); process.exitCode = 1; });
+          .catch((error) => { console.error(error); process.exitCode = 1; });
       `,
     },
     env: { TARGET_URL: 'unused-by-parent' },

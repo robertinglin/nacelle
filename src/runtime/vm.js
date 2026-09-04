@@ -579,7 +579,20 @@ function rewriteScriptDynamicImports(source, bindingName) {
         && text[index - 1] !== '.'
         && !isIdentifierPart(text[index + 6])) {
         let callIndex = index + 6;
-        while (/\s/u.test(text[callIndex] || '')) callIndex += 1;
+        for (;;) {
+          while (/\s/u.test(text[callIndex] || '')) callIndex += 1;
+          if (text.startsWith('/*', callIndex)) {
+            const end = text.indexOf('*/', callIndex + 2);
+            callIndex = end < 0 ? text.length : end + 2;
+            continue;
+          }
+          if (text.startsWith('//', callIndex)) {
+            callIndex += 2;
+            while (callIndex < text.length && text[callIndex] !== '\n' && text[callIndex] !== '\r') callIndex += 1;
+            continue;
+          }
+          break;
+        }
         if (text[callIndex] === '(') {
           result += bindingName;
           index += 6;

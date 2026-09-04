@@ -145,6 +145,48 @@ test('ESM children route dynamic HTTP imports through the virtual network', asyn
   });
 });
 
+test('ESM children route comment-separated dynamic imports through the virtual network', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const { spawn } = require('node:child_process');
+    const http = require('node:http');
+    const server = http.createServer((_request, response) => {
+      response.setHeader('content-type', 'text/javascript');
+      response.end('export const answer = 50;');
+    });
+    server.listen(0, '127.0.0.1', () => {
+      const target = 'http://127.0.0.1:' + server.address().port + '/index.mjs';
+      const child = spawn(process.execPath, ['/node/comment-import-child.mjs'], {
+        env: { TARGET_URL: target },
+      });
+      let output = '';
+      let errorOutput = '';
+      child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+      child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+      child.once('close', (code, signal) => {
+        server.close(() => process.stdout.write(JSON.stringify({ code, signal, output, errorOutput })));
+      });
+    });
+  `, {
+    capabilities,
+    files: {
+      '/node/comment-import-child.mjs': `
+        const loaded = await import /* preserve valid comment-separated syntax */ (process.env.TARGET_URL);
+        process.stdout.write(String(loaded.answer));
+      `,
+    },
+    env: { TARGET_URL: 'unused-by-parent' },
+  });
+
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.timedOut, JSON.stringify(result)).not.toBe(true);
+  expect(JSON.parse(result.stdout)).toEqual({
+    code: 0,
+    signal: null,
+    output: '50',
+    errorOutput: '',
+  });
+});
+
 test('nested CommonJS eval importers use the virtual HTTP loader', async ({ harnessPage }) => {
   const result = await harnessPage.run(`
     const { spawn } = require('node:child_process');

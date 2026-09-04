@@ -47,10 +47,16 @@ function responseText(response) {
 
 test.describe('browser-native virtual HTTP compatibility', () => {
   test('routes Node-shaped requests to an in-memory server and accepts an Agent', async () => {
+    const { http: baseHttp } = createHttpCompatibility(globalThis);
     const { http } = createHttpCompatibility(globalThis);
     const server = http.createServer(async (request, response) => {
       const body = await requestBody(request);
       response.writeHead(201, { 'x-request-method': request.method });
+      baseHttp.OutgoingMessage.prototype.setHeader.call(
+        response,
+        'Set-Cookie',
+        ['first=one; Path=/', 'second=two; Path=/'],
+      );
       response.end(`${request.url}|${request.headers['x-client']}|${body}`);
     });
     await listen(server, 0, '127.0.0.1');
@@ -68,6 +74,7 @@ test.describe('browser-native virtual HTTP compatibility', () => {
 
     expect(response.statusCode).toBe(201);
     expect(response.headers['x-request-method']).toBe('POST');
+    expect(response.headers['set-cookie']).toEqual(['first=one; Path=/', 'second=two; Path=/']);
     await expect(responseText(response)).resolves.toBe('/echo?mode=virtual|present|browser body');
     expect(server).toBeInstanceOf(http.Server);
     expect(agent.keepAlive).toBe(true);
@@ -98,6 +105,28 @@ test.describe('browser-native virtual HTTP compatibility', () => {
     const fallback = await get(http, 'data:text/plain,fallback');
     await expect(responseText(fallback)).resolves.toBe('fetch fallback');
     expect(fetchCalls).toEqual(['data:text/plain,fallback']);
+    await close(server);
+  });
+
+  test('runs implicit header hooks before ending a response', async () => {
+    const { http } = createHttpCompatibility(globalThis);
+    const server = http.createServer((_request, response) => {
+      const writeHead = response.writeHead;
+      response.writeHead = function onHeadersWriteHead(...args) {
+        this.setHeader('x-implicit-header-hook', 'ran');
+        return writeHead.apply(this, args);
+      };
+      response.end('body');
+    });
+    await listen(server, 0, '127.0.0.1');
+
+    const response = await get(http, {
+      host: '127.0.0.1',
+      port: server.address().port,
+      path: '/implicit-headers',
+    });
+    expect(response.headers['x-implicit-header-hook']).toBe('ran');
+    await expect(responseText(response)).resolves.toBe('body');
     await close(server);
   });
 

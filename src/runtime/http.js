@@ -50,7 +50,10 @@ const continueExpression = /(?:^|\W)100-continue(?:$|\W)/i;
 const CRLF = '\r\n';
 const kIncomingMessage = Symbol('IncomingMessage');
 const kSkipPendingData = Symbol('SkipPendingData');
-const kOutgoingHeaders = Symbol('outgoingHeaders');
+// HTTP compatibility instances can be created per virtual process, while
+// middleware may retain the shared built-in OutgoingMessage prototype. Use a
+// runtime-wide slot so those Node-compatible surfaces share header state.
+const kOutgoingHeaders = Symbol.for('bnh.http.outgoingHeaders');
 const kOutgoingSocket = Symbol('outgoingSocket');
 const kOutgoingHighWaterMark = Symbol('outgoingHighWaterMark');
 const outgoingMessageState = new WeakMap();
@@ -978,6 +981,7 @@ function validateHttpsTicketKeys(keys, BufferClass) {
 }
 
 function httpsCertificateNames(value, scope) {
+  if (value === undefined || value === null) return [];
   if (Array.isArray(value)) {
     return value.flatMap((entry) => httpsCertificateNames(entry?.buf || entry, scope));
   }
@@ -1923,12 +1927,9 @@ class VirtualServerResponse extends Writable {
     this.socket = request.socket;
     this.connection = request.connection;
     this._chunks = [];
-    Object.defineProperty(this, '_headers', {
-      configurable: true,
-      enumerable: true,
-      writable: true,
-      value: new Map(),
-    });
+    // Use the same header store as OutgoingMessage so middleware that calls
+    // http.OutgoingMessage.prototype.setHeader() updates this response too.
+    this[kOutgoingHeaders] = new Map();
     this._completeResponse = complete;
     this._flushResponse = flush;
     this._headersFlushed = false;
@@ -1936,31 +1937,16 @@ class VirtualServerResponse extends Writable {
   }
 
   setHeader(name, value) {
-    if (this.headersSent) throw new Error('Cannot set headers after they are sent');
-    validateHeaderName(name);
-    validateHeaderValue(name, value);
-    const lowerName = String(name).toLowerCase();
-    if (lowerName === 'set-cookie') {
-      const values = Array.isArray(value) ? value.map((item) => String(item)) : [String(value)];
-      const existing = this._headers.get(lowerName);
-      this._headers.set(lowerName, existing === undefined
-        ? values
-        : [...(Array.isArray(existing) ? existing : [existing]), ...values]);
-      return this;
-    }
-    this._headers.set(lowerName, normalizeHeaderValue(value));
-    return this;
+    return OutgoingMessage.prototype.setHeader.call(this, name, value);
   }
 
-  getHeader(name) { return this._headers.get(String(name).toLowerCase()); }
-  getHeaders() { return headersObject(this._headers); }
-  getHeaderNames() { return [...this._headers.keys()]; }
-  hasHeader(name) { return this._headers.has(String(name).toLowerCase()); }
+  getHeader(name) { return OutgoingMessage.prototype.getHeader.call(this, name); }
+  getHeaders() { return OutgoingMessage.prototype.getHeaders.call(this); }
+  getHeaderNames() { return OutgoingMessage.prototype.getHeaderNames.call(this); }
+  hasHeader(name) { return OutgoingMessage.prototype.hasHeader.call(this, name); }
 
   removeHeader(name) {
-    if (this.headersSent) throw new Error('Cannot remove headers after they are sent');
-    this._headers.delete(String(name).toLowerCase());
-    return this;
+    return OutgoingMessage.prototype.removeHeader.call(this, name);
   }
 
   writeHead(statusCode, statusMessage, headers) {
@@ -2056,6 +2042,10 @@ class VirtualServerResponse extends Writable {
 
   flushHeaders() {
     if (this._headersFlushed) return this;
+    // ServerResponse.end() and the first write implicitly call writeHead in
+    // Node.  Keep that lifecycle point observable to middleware such as
+    // on-headers, which uses the call to install final response headers.
+    if (!this.headersSent) this._implicitHeader();
     this.headersSent = true;
     this._headersFlushed = true;
     this._responseBody = this._flushResponse?.({
@@ -2072,6 +2062,7 @@ class VirtualServerResponse extends Writable {
   }
 
   end(...args) {
+    if (!this.headersSent) this._implicitHeader();
     this.headersSent = true;
     return Writable.prototype.end.apply(this, args);
   }
@@ -2079,7 +2070,10 @@ class VirtualServerResponse extends Writable {
   destroy(error) {
     if (this._responseBody) this._responseBody._bnhTerminated = true;
     this._responseBody?.close();
-    return super.destroy(error);
+    // VirtualServerResponse presents the OutgoingMessage prototype for the
+    // HTTP response surface, but completing the response stream must not use
+    // OutgoingMessage.destroy(): that method destroys the shared connection.
+    return Writable.prototype.destroy.call(this, error);
   }
 
   _finalizeResponse(callback) {
@@ -2245,8 +2239,16 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
       headers['content-length'] = String(result.body?.byteLength || 0);
     }
     const statusMessage = result.statusMessage || STATUS_CODES[result.statusCode] || '';
+    const headerLines = [];
+    for (const [name, value] of Object.entries(headers)) {
+      if (name.toLowerCase() === 'set-cookie' && Array.isArray(value)) {
+        for (const cookie of value) headerLines.push(`${name}: ${cookie}\r\n`);
+      } else {
+        headerLines.push(`${name}: ${value}\r\n`);
+      }
+    }
     const headerText = `HTTP/1.1 ${result.statusCode} ${statusMessage}\r\n`
-      + Object.entries(headers).map(([name, value]) => `${name}: ${value}\r\n`).join('')
+      + headerLines.join('')
       + '\r\n';
     const encoder = scope.TextEncoder || TextEncoder;
     const headerBytes = new encoder().encode(headerText);
@@ -2785,6 +2787,7 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask, ow
       this.keepAliveTimeout = 5000;
       this.maxHeadersCount = null;
       this._bound = null;
+      this._handle = null;
       this._tcpResource = null;
       this._taskRelease = null;
       this._taskTracker = trackTask;
@@ -2842,11 +2845,16 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask, ow
     listen(...args) {
       const { options, callback } = serverListenOptions(args);
       if (callback) this.once('listening', callback);
-      schedule(scope, () => this._runInOwnerContext(() => {
-        if (this.listening) return;
-        try {
+      if (this.listening) return this;
+      try {
+        this._runInOwnerContext(() => {
           const bound = registry.bind(this, protocol, options);
           this._bound = bound;
+          // Node exposes its active listening handle to consumers that need
+          // to distinguish an auto-created server from an already-closed
+          // one (for example, HTTP test clients that close ephemeral
+          // servers) as soon as listen() returns.
+          this._handle = bound.rawServer || bound;
           this._tcpResource = new AsyncResource('TCPSERVERWRAP');
           this._taskRelease = this._unrefRequested ? null : trackTask?.() || null;
           this._closeRequested = false;
@@ -2859,10 +2867,10 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask, ow
             if (this._tcpResource) this._tcpResource.runInAsyncScope(emitListening, this);
             else emitListening();
           }));
-        } catch (error) {
-          this.emit('error', error);
-        }
-      }));
+        });
+      } catch (error) {
+        schedule(scope, () => this._runInOwnerContext(() => this.emit('error', error)));
+      }
       return this;
     }
 
@@ -2882,6 +2890,7 @@ function createServerClass(protocol, scope, registry, BufferClass, trackTask, ow
       this._taskRelease?.();
       this._taskRelease = null;
       this._bound = null;
+      this._handle = null;
       this._listening = false;
       this._ownerProcess?._bnhHttpServers?.delete(this);
       this[kConnectionsCheckingInterval]._destroyed = true;
@@ -3907,7 +3916,15 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
         for (const line of headerLines) {
           const separatorIndex = line.indexOf(':');
           if (separatorIndex < 0) continue;
-          headers[line.slice(0, separatorIndex).trim().toLowerCase()] = line.slice(separatorIndex + 1).trim();
+          const name = line.slice(0, separatorIndex).trim().toLowerCase();
+          const value = line.slice(separatorIndex + 1).trim();
+          if (name === 'set-cookie') {
+            if (headers[name] === undefined) headers[name] = [value];
+            else if (Array.isArray(headers[name])) headers[name].push(value);
+            else headers[name] = [headers[name], value];
+          } else {
+            headers[name] = value;
+          }
         }
         const contentLength = Number(headers['content-length'] || 0);
         const bodyStart = headerEnd + separator.length;
@@ -3935,14 +3952,17 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       this._rawRequestSent = true;
       const parsed = new scope.URL(this._url);
       const path = `${parsed.pathname || '/'}${parsed.search || ''}`;
+      const body = concatenate(this._chunks);
       const headers = new Map(this._headers);
       if (!headers.has('host')) headers.set('host', parsed.host);
       if (!headers.has('connection')) headers.set('connection', 'close');
+      if (body.byteLength && !headers.has('content-length') && !headers.has('transfer-encoding')) {
+        headers.set('content-length', String(body.byteLength));
+      }
       const headerText = `${this.method} ${path} HTTP/1.1\r\n`
         + [...headers].map(([name, value]) => `${name}: ${value}\r\n`).join('')
         + '\r\n';
       const headerBytes = new (scope.TextEncoder || TextEncoder)().encode(headerText);
-      const body = concatenate(this._chunks);
       socket.write(appendBytes(headerBytes, body));
     }
 
@@ -4286,14 +4306,19 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
           const parsedConnectionURL = typeof scope.URL === 'function' && this._url
             ? new scope.URL(this._url)
             : null;
+          // `path` belongs to the HTTP request line. Do not pass it to a
+          // TCP agent as a pipe name; only an explicit socketPath requests a
+          // pipe connection.
+          const { path: _requestPath, pathname: _requestPathname, ...socketOptions } = this._options;
           const connectionOptions = {
-            ...this._options,
+            ...socketOptions,
             host: this.host || parsedConnectionURL?.hostname || 'localhost',
             hostname: this.host || parsedConnectionURL?.hostname || 'localhost',
             port: this._options.port || (parsedConnectionURL?.port
               ? Number(parsedConnectionURL.port)
               : this.protocol === DEFAULT_HTTPS_PROTOCOL ? 443 : 80),
           };
+          if (this._options.socketPath !== undefined) connectionOptions.path = this._options.socketPath;
           socket = usesCreateSocket
             ? createConnection.call(this._agent, this, connectionOptions, connectionCallback)
             : createConnection.call(this._agent, connectionOptions, connectionCallback);
@@ -4315,7 +4340,7 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
 
       let operation;
       try {
-        if (this._proxy) {
+        if (this._proxy && proxySupports(this._proxy, 'request')) {
           operation = this._proxy.request(proxyRequestOptions(this._url, {
             ...init,
             timeout: this.timeout,

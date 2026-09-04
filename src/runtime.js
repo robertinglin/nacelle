@@ -29,6 +29,7 @@ import {
   createAsyncHooksModule,
   isPromiseHandled,
   isPromiseRejectionReported,
+  registerAsyncCompletion,
   runAsyncGenerator,
   setPromiseRejectionObserver,
 } from './runtime/async-hooks.js';
@@ -2452,6 +2453,14 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
   }\n//# sourceURL=${sourceURL}`;
   const bindProcess = processOverride && !hasTopLevelCommonJsProcessBinding(sourceText);
   const bindAsync = transformedAsyncSource.transformed;
+  const asyncRunner = bindAsync
+    ? (generatorFunction, thisArg, args) => runAsyncGenerator(
+      generatorFunction,
+      thisArg,
+      args,
+      processOverride?._bnhTaskTracker,
+    )
+    : null;
   if (moduleWrapper) {
     let prefix = String(moduleWrapper[0]).replace('__dirname) {', '__dirname, __bnhImport) {');
     if (bindProcess) prefix = prefix.replace('__bnhImport) {', '__bnhImport, process) {');
@@ -2467,12 +2476,16 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
       commonJsValues[5],
     ];
     if (bindProcess) values.push(processOverride);
-    if (bindAsync) values.push(runAsyncGenerator);
+    if (bindAsync) values.push(asyncRunner);
     const previousUserCode = globalThis.__bnhUserCode;
+    const previousActiveProcess = globalThis.__bnhActiveProcess;
     globalThis.__bnhUserCode = true;
+    if (processOverride) globalThis.__bnhActiveProcess = processOverride;
     try {
       return wrapped(...values);
     } finally {
+      if (previousActiveProcess === undefined) delete globalThis.__bnhActiveProcess;
+      else globalThis.__bnhActiveProcess = previousActiveProcess;
       if (previousUserCode === undefined) delete globalThis.__bnhUserCode;
       else globalThis.__bnhUserCode = previousUserCode;
     }
@@ -2486,13 +2499,17 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
   // Promise-hook compatibility needs to distinguish test code from the
   // runtime's own lifecycle promises.
   const previousUserCode = globalThis.__bnhUserCode;
+  const previousActiveProcess = globalThis.__bnhActiveProcess;
   globalThis.__bnhUserCode = true;
+  if (processOverride) globalThis.__bnhActiveProcess = processOverride;
   try {
     const values = [...commonJsValues, commonJsValues[5] || ((specifier) => import(specifier))];
     if (bindProcess) values.push(processOverride);
-    if (bindAsync) values.push(runAsyncGenerator);
+    if (bindAsync) values.push(asyncRunner);
     return wrapped(...values);
   } finally {
+    if (previousActiveProcess === undefined) delete globalThis.__bnhActiveProcess;
+    else globalThis.__bnhActiveProcess = previousActiveProcess;
     if (previousUserCode === undefined) delete globalThis.__bnhUserCode;
     else globalThis.__bnhUserCode = previousUserCode;
   }
@@ -2795,11 +2812,11 @@ function moduleSynchronousEsmSource(source, filename = '/node/index.mjs') {
     return result;
   };
   transformed = transformed.replace(
-    /(^|[;\n])\s*import\s*([\s\S]*?)\s*from\s*(['\"])([^'\"]+)\3\s*;?/g,
+    /(^|[;\n])[ \t]*import[ \t]*([\s\S]*?)[ \t]*from[ \t]*(['\"])([^'\"]+)\3[ \t]*;?/g,
     (_, prefix, clause, quote, specifier) => `${prefix}${importBindings(clause, `require(${JSON.stringify(specifier)})`, clause.trim().startsWith('*'))}`,
   );
   transformed = transformed.replace(
-    /(^|[;\n])\s*import\s+(['\"])([^'\"]+)\2\s*;?/g,
+    /(^|[;\n])[ \t]*import[ \t]+(['\"])([^'\"]+)\2[ \t]*;?/g,
     (_, prefix, quote, specifier) => `${prefix}require(${JSON.stringify(specifier)});`,
   );
   transformed = transformed.replace(/\bconst\s+(require|exports|module)\s*=/g, 'var $1 =');
@@ -2810,10 +2827,78 @@ function moduleSynchronousEsmSource(source, filename = '/node/index.mjs') {
   if (defaultDeclarations.length) {
     transformed += `\n${defaultDeclarations.map((name) => `module.exports.default = ${name};`).join('\n')}`;
   }
-  transformed = transformed.replace(
-    /(^|[;\n])\s*export\s+default\s+(?!async\s+function\b|function\b|class\b)([^;]+);?/g,
-    (_, prefix, expression) => `${prefix}Object.defineProperty(module.exports, '__esModule', { value: true, enumerable: true }); module.exports.default = (${expression});`,
-  );
+  const findDefaultExpressionEnd = (text, start) => {
+    let roundDepth = 0;
+    let curlyDepth = 0;
+    let squareDepth = 0;
+    let quote = null;
+    let escaped = false;
+    let lineComment = false;
+    let blockComment = false;
+    for (let index = start; index < text.length; index += 1) {
+      const character = text[index];
+      const next = text[index + 1];
+      if (lineComment) {
+        if (character === '\n') lineComment = false;
+        continue;
+      }
+      if (blockComment) {
+        if (character === '*' && next === '/') {
+          blockComment = false;
+          index += 1;
+        }
+        continue;
+      }
+      if (quote) {
+        if (escaped) escaped = false;
+        else if (character === '\\') escaped = true;
+        else if (character === quote) quote = null;
+        continue;
+      }
+      if (character === '/' && next === '/') {
+        lineComment = true;
+        index += 1;
+        continue;
+      }
+      if (character === '/' && next === '*') {
+        blockComment = true;
+        index += 1;
+        continue;
+      }
+      if (character === '"' || character === "'" || character === '`') {
+        quote = character;
+        continue;
+      }
+      if (character === '(') roundDepth += 1;
+      else if (character === ')') roundDepth = Math.max(0, roundDepth - 1);
+      else if (character === '{') curlyDepth += 1;
+      else if (character === '}') curlyDepth = Math.max(0, curlyDepth - 1);
+      else if (character === '[') squareDepth += 1;
+      else if (character === ']') squareDepth = Math.max(0, squareDepth - 1);
+      else if (character === ';' && roundDepth === 0 && curlyDepth === 0 && squareDepth === 0) return index;
+    }
+    return text.length;
+  };
+  const defaultExpressionPattern = /(^|[;\n])[ \t]*export[ \t]+default[ \t]+(?!async[ \t]+function\b|function\b|class\b)/gm;
+  const defaultExpressionReplacements = [];
+  for (const match of transformed.matchAll(defaultExpressionPattern)) {
+    const expressionStart = match.index + match[0].length;
+    const expressionEnd = findDefaultExpressionEnd(transformed, expressionStart);
+    const expression = transformed.slice(expressionStart, expressionEnd).trim();
+    if (!expression) continue;
+    const exportStart = match.index + match[1].length;
+    defaultExpressionReplacements.push({
+      start: exportStart,
+      end: expressionEnd + (transformed[expressionEnd] === ';' ? 1 : 0),
+      value: `${match[1]}Object.defineProperty(module.exports, '__esModule', { value: true, enumerable: true }); module.exports.default = (${expression});`,
+    });
+  }
+  for (let index = defaultExpressionReplacements.length - 1; index >= 0; index -= 1) {
+    const replacement = defaultExpressionReplacements[index];
+    transformed = transformed.slice(0, replacement.start)
+      + replacement.value
+      + transformed.slice(replacement.end);
+  }
   transformed = transformed.replace(
     /(^|[;\n])\s*export\s+(const|let|var)\s+([$_A-Za-z][$_\w]*)\s*=\s*([^;\n]+);?/g,
     (_, prefix, declaration, name, expression) => `${prefix}${declaration} ${name} = ${expression}; module.exports.${name} = ${name};`,
@@ -4666,6 +4751,13 @@ export function createRuntime({
     if (runtimePackageType(entryPath) === 'module') return true;
     if (entryPath.includes('/node_modules/')) return false;
     return execArgv.some((argument) => String(argument) === '--experimental-default-type=module');
+  }
+
+  function isRequireEsmEnabled(processObj) {
+    const execArgv = processObj?.execArgv || [];
+    if (execArgv.some((argument) => String(argument) === '--no-experimental-require-module')) return false;
+    if (execArgv.some((argument) => String(argument) === '--experimental-require-module')) return true;
+    return resolvedProfile.features?.require_module === true;
   }
 
   function makeBuiltins(processObject, runtimeRequire, diagnosticsChannels, runtimeOptions, performancePrimitives, trackTask, stdout, stderr, readSource, sourcePath, runtimeFetchRef) {
@@ -6662,6 +6754,10 @@ export function createRuntime({
           let stopOptions = false;
           for (let index = 0; index < rawArgs.length; index += 1) {
             const argument = rawArgs[index];
+            if (script !== null) {
+              afterScript.push(argument);
+              continue;
+            }
             if (!stopOptions && argument === '--') { stopOptions = true; continue; }
             if (!stopOptions && (argument === '--report-directory' || argument.startsWith('--report-directory='))) {
               reportDirectory = argument.includes('=') ? argument.slice(argument.indexOf('=') + 1) : rawArgs[++index];
@@ -6753,9 +6849,14 @@ export function createRuntime({
           const moduleEvalPath = normalizePath(`.bnh-child-${id}.mjs`, cwd);
           const moduleEntry = moduleInput || importPreloads.length > 0;
           if (importPreloads.length > 0 && evalCode !== null) moduleInput = true;
+          // A script launched with --require must remain the main module. A
+          // synthetic wrapper would make require.main point at the wrapper,
+          // which changes the observable Node entry-point contract for CLIs
+          // such as Mocha. Preloads are loaded by the child bootstrap below;
+          // eval-with-preload still needs a synthetic source entry.
           const entryPath = moduleEntry && evalCode !== null
             ? moduleEvalPath
-            : evalCode !== null || preloads.length ? `/node/.bnh-child-${id}.js` : mainPath;
+            : evalCode !== null ? `/node/.bnh-child-${id}.js` : mainPath;
           const commandName = executable.split('/').pop();
           const versionOnly = (commandName === 'node' || commandName === 'nodejs' || executable === processObject.execPath)
             && script === null && evalCode === null
@@ -6770,7 +6871,7 @@ export function createRuntime({
             source = moduleEntry
               ? `${importPreloads.map((item) => `import ${JSON.stringify(item)};`).join('\n')}\n${moduleInput ? evalCode : expression}`
               : `${preloads.map((item) => `require(${JSON.stringify(normalizePath(item, cwd))});`).join('\n')}\n${expression}`;
-          } else if (preloads.length) {
+          } else if (preloads.length && !script) {
             source = `${preloads.map((item) => `require(${JSON.stringify(normalizePath(item, cwd))});`).join('\n')}\nrequire(${JSON.stringify(mainPath)});`;
           } else if (interactive) {
             source = moduleInput
@@ -7368,12 +7469,16 @@ export function createRuntime({
               if (commandName === 'npm') {
                 child.spawn({ file, args });
                 scope.queueMicrotask(() => child.emit('spawn'));
-                runNpmChild(prepared, ownerProcess, options).then((result) => {
-                  if (result.stdout) {
+                runNpmChild(prepared, ownerProcess, {
+                  ...options,
+                  onStdout: writeStdout,
+                  onStderr: writeStderr,
+                }).then((result) => {
+                  if (result.stdout && !result.forwarded) {
                     stdout += result.stdout;
                     writeStdout(result.stdout);
                   }
-                  if (result.stderr) {
+                  if (result.stderr && !result.forwarded) {
                     stderr += result.stderr;
                     writeStderr(result.stderr);
                   }
@@ -7405,12 +7510,16 @@ export function createRuntime({
                   argv: [prepared.entryPath, ...prepared.commandArgs.slice(1)],
                   executionArgv: [prepared.entryPath, ...prepared.commandArgs.slice(1)],
                 };
-                runNpmChild(npmPrepared, ownerProcess, options).then((result) => {
-                  if (result.stdout) {
+                runNpmChild(npmPrepared, ownerProcess, {
+                  ...options,
+                  onStdout: writeStdout,
+                  onStderr: writeStderr,
+                }).then((result) => {
+                  if (result.stdout && !result.forwarded) {
                     stdout += result.stdout;
                     writeStdout(result.stdout);
                   }
-                  if (result.stderr) {
+                  if (result.stderr && !result.forwarded) {
                     stderr += result.stderr;
                     writeStderr(result.stderr);
                   }
@@ -7493,29 +7602,15 @@ export function createRuntime({
                 if (result.status !== 0 || result.process?._exitRequested?.() || result.process?._bnhIsExited?.()) {
                   finish(terminalCode, terminalSignal);
                 }
-              } else if (!result.pending) {
-                if (result.stdoutChunks?.length) {
-                  const complete = result.stdoutChunks.join('');
-                  const missing = stdoutEmitted && complete.endsWith(stdout)
-                    ? complete.slice(0, complete.length - stdout.length)
-                    : complete;
-                  stdout = complete;
-                  if (missing) writeStdout(missing);
-                }
-                if (result.stderrChunks?.length) {
-                  const complete = result.stderrChunks.join('');
-                  const missing = stderrEmitted && complete.endsWith(stderr)
-                    ? complete.slice(0, complete.length - stderr.length)
-                    : complete;
-                  stderr = complete;
-                  if (missing) writeStderr(missing);
-                }
-                if (stdout && !stdoutEmitted) writeStdout(stdout);
-                if (stderr && !stderrEmitted) writeStderr(stderr);
-                finish(terminalCode, terminalSignal);
-              } else if (result.process) {
-                result.process.once?.('exit', (code, signal) => {
-                  if (result.stdoutChunks?.length) {
+              } else if (!result.pending && !result.process) {
+                // A spawned child must not emit exit/close until the caller
+                // has had a chance to attach listeners. The synchronous
+                // compatibility evaluator can already know that the child
+                // has no referenced work, but defer the outer ChildProcess
+                // completion to the next microtask just as the native
+                // child_process boundary does.
+                scope.queueMicrotask(() => {
+                  if (!stdioInherited(1) && result.stdoutChunks?.length) {
                     const complete = result.stdoutChunks.join('');
                     const missing = stdoutEmitted && complete.endsWith(stdout)
                       ? complete.slice(0, complete.length - stdout.length)
@@ -7523,7 +7618,7 @@ export function createRuntime({
                     stdout = complete;
                     if (missing) writeStdout(missing);
                   }
-                  if (result.stderrChunks?.length) {
+                  if (!stdioInherited(2) && result.stderrChunks?.length) {
                     const complete = result.stderrChunks.join('');
                     const missing = stderrEmitted && complete.endsWith(stderr)
                       ? complete.slice(0, complete.length - stderr.length)
@@ -7531,8 +7626,30 @@ export function createRuntime({
                     stderr = complete;
                     if (missing) writeStderr(missing);
                   }
-                  if (stdout && !stdoutEmitted) writeStdout(stdout);
-                  if (stderr && !stderrEmitted) writeStderr(stderr);
+                  if (!stdioInherited(1) && stdout && !stdoutEmitted) writeStdout(stdout);
+                  if (!stdioInherited(2) && stderr && !stderrEmitted) writeStderr(stderr);
+                  finish(terminalCode, terminalSignal);
+                });
+              } else if (result.process) {
+                result.process.once?.('exit', (code, signal) => {
+                  if (!stdioInherited(1) && result.stdoutChunks?.length) {
+                    const complete = result.stdoutChunks.join('');
+                    const missing = stdoutEmitted && complete.endsWith(stdout)
+                      ? complete.slice(0, complete.length - stdout.length)
+                      : complete;
+                    stdout = complete;
+                    if (missing) writeStdout(missing);
+                  }
+                  if (!stdioInherited(2) && result.stderrChunks?.length) {
+                    const complete = result.stderrChunks.join('');
+                    const missing = stderrEmitted && complete.endsWith(stderr)
+                      ? complete.slice(0, complete.length - stderr.length)
+                      : complete;
+                    stderr = complete;
+                    if (missing) writeStderr(missing);
+                  }
+                  if (!stdioInherited(1) && stdout && !stdoutEmitted) writeStdout(stdout);
+                  if (!stdioInherited(2) && stderr && !stderrEmitted) writeStderr(stderr);
                   scope.queueMicrotask(() => {
                     const finalSignal = result.process?.getSignal?.() || signal || null;
                     const finalCode = finalSignal
@@ -7574,9 +7691,6 @@ export function createRuntime({
             let directory = path.dirname(importer || '/node/index.js');
             while (true) {
               const packageBase = path.join(directory, 'node_modules', source);
-              for (const candidate of moduleCandidates(packageBase)) {
-                try { readSource(candidate); return candidate; } catch { /* ignore */ }
-              }
               if (!cjsPackageEntryCache.has(packageBase)) {
                 let packageEntry = null;
                 const packageManifest = `${packageBase}/package.json`;
@@ -7597,6 +7711,12 @@ export function createRuntime({
                 for (const candidate of moduleCandidates(packageEntry)) {
                   try { readSource(candidate); return candidate; } catch { /* ignore */ }
                 }
+              }
+              // A package manifest's main entry takes precedence over the
+              // package-root extension probes. Packages may ship an
+              // index.mjs alongside a CommonJS main for require callers.
+              for (const candidate of moduleCandidates(packageBase)) {
+                try { readSource(candidate); return candidate; } catch { /* ignore */ }
               }
               if (directory === '/' || directory === '.' || directory === '') break;
               directory = path.dirname(directory);
@@ -7819,7 +7939,7 @@ export function createRuntime({
           const text = typeof source === 'string' ? source : new TextDecoder().decode(bytes);
           const esmEntry = entryPath.startsWith('data:') || isEsmModule(entryPath, processObj)
             || (isMain && hasStaticEsmSyntax(text));
-          const allowRequireEsm = processObj?.execArgv?.some((argument) => String(argument) === '--experimental-require-module');
+          const allowRequireEsm = isRequireEsmEnabled(processObj);
           if (esmEntry && !isMain && !allowRequireEsm) {
             if (esmGraphHasTopLevelAwait(entryPath)) throw requireAsyncModuleError(entryPath, parentImport);
             throw requireEsmError(entryPath, parentImport, fromEval);
@@ -8321,12 +8441,16 @@ export function createRuntime({
             const releaseGlobalProcess = () => {
               if (scope.process === childProc.processObject) scope.process = previousState.process;
             };
+            const releaseGlobalConsole = () => {
+              if (scope.console === childProc.processObject._bnhConsole) scope.console = previousState.console;
+            };
             const originalChildExit = childProc.processObject.exit;
             childProc.processObject.exit = (code = 0) => {
               try {
                 return originalChildExit(code);
               } finally {
                 releaseGlobalProcess();
+                releaseGlobalConsole();
               }
             };
             const originalMarkExited = childProc.processObject._markExited;
@@ -8335,6 +8459,7 @@ export function createRuntime({
                 return originalMarkExited?.(...args);
               } finally {
                 releaseGlobalProcess();
+                releaseGlobalConsole();
               }
             };
             childProc.processObject._bnhReleaseGlobalProcess = releaseGlobalProcess;
@@ -8551,8 +8676,7 @@ export function createRuntime({
                 && !hasIpcListeners
                 && !hasPendingTasks
                 && !childProc.processObject._bnhHasPendingAbortWorker?.()) {
-                childProc.processObject._emitBeforeExit?.();
-                childProc.processObject._markExited?.();
+                tryExitChild();
               }
             } catch (error) {
               if (compileCacheState?.primaryAction === 'initialized'
@@ -8569,7 +8693,9 @@ export function createRuntime({
               } else {
                 let detail;
                 try { detail = error?.stack || String(error); } catch { detail = Object.prototype.toString.call(error); }
-                stderrArr.push(`${detail}\n`);
+                const message = `${detail}\n`;
+                stderrArr.push(message);
+                options.onStderr?.(message);
               }
               if (abortOnUncaughtException) childProc.processObject._bnhAbort?.('SIGABRT');
               else childProc.processObject.exit(1);
@@ -8586,6 +8712,11 @@ export function createRuntime({
                 // until the child exits so native async continuations do not
                 // observe the parent process object.
                 scope.process = childProc.processObject;
+              }
+              if (!options.asyncLifecycle || childProc?.processObject?._bnhIsExited?.()) {
+                scope.console = previousState.console;
+              } else {
+                scope.console = childProc.processObject._bnhConsole;
               }
               scope.require = previousState.require;
               scope.global = previousState.global;
@@ -8871,6 +9002,20 @@ export function createRuntime({
                   onStderr?.(chunk);
                 },
               });
+              const forwardReturnedOutput = (value, target, callback) => {
+                const returned = normalizeOutputChunk(value);
+                if (!returned) return;
+                const streamed = target.join('');
+                if (streamed === returned || streamed.endsWith(returned)) return;
+                const missing = returned.startsWith(streamed)
+                  ? returned.slice(streamed.length)
+                  : returned;
+                if (!missing) return;
+                target.push(missing);
+                callback?.(missing);
+              };
+              forwardReturnedOutput(result.stdout, stdout, onStdout);
+              forwardReturnedOutput(result.stderr, stderr, onStderr);
               const complete = (code, signalValue) => ({
                 code: signalValue ? null : code ?? result.status ?? 1,
                 stdout: stdout.join(''),
@@ -9045,7 +9190,13 @@ export function createRuntime({
               }),
               nodeVersion: resolvedProfile.runtimeVersion,
             });
-            return { code: result.code, stdout: stdout.join(''), stderr: stderr.join(''), streamed: Boolean(stdout.length || stderr.length) };
+            return {
+              code: result.code,
+              stdout: stdout.join(''),
+              stderr: stderr.join(''),
+              streamed: Boolean(stdout.length || stderr.length),
+              forwarded: Boolean(scriptOptions.onStdout || scriptOptions.onStderr),
+            };
           };
 
           const runPackageScript = async (scriptName, scriptOptions = {}) => {
@@ -9062,6 +9213,7 @@ export function createRuntime({
             const lifecycle = [`pre${scriptName}`, scriptName, `post${scriptName}`];
             const stdout = [];
             const stderr = [];
+            let forwarded = false;
             for (const name of lifecycle) {
               const result = await runScriptBody(name, packageJson, {
                 ...scriptOptions,
@@ -9069,9 +9221,16 @@ export function createRuntime({
               });
               stdout.push(result.stdout);
               stderr.push(result.stderr);
-              if (result.code !== 0) return { code: result.code, stdout: stdout.join(''), stderr: stderr.join(''), streamed: true };
+              forwarded ||= result.forwarded;
+              if (result.code !== 0) return {
+                code: result.code,
+                stdout: stdout.join(''),
+                stderr: stderr.join(''),
+                streamed: true,
+                forwarded,
+              };
             }
-            return { code: 0, stdout: stdout.join(''), stderr: stderr.join(''), streamed: true };
+            return { code: 0, stdout: stdout.join(''), stderr: stderr.join(''), streamed: true, forwarded };
           };
 
           if (command.name === '--version' || command.name === '-v'
@@ -9119,6 +9278,8 @@ export function createRuntime({
               stdin: prepared.stdin,
               signal: childOptions.signal,
               timeout: childOptions.timeout,
+              onStdout: childOptions.onStdout,
+              onStderr: childOptions.onStderr,
             });
           }
 
@@ -9469,8 +9630,11 @@ export function createRuntime({
             processObject.stdin = injectedStdin || processObject.stdin;
           }
           installProcessStdinSurface(processObject.stdin);
+          let injectedExitEventEmitted = false;
           processObject.exit = (code) => {
             processObject.exitCode = Number(code) || 0;
+            if (injectedExitEventEmitted) return;
+            injectedExitEventEmitted = true;
             processObject.emit('exit', processObject.exitCode);
             if (typeof injectedProcess.exit === 'function') return injectedProcess.exit(code);
           };
@@ -10797,8 +10961,7 @@ export function createRuntime({
       }
       const resolvedURL = resolvedResult?.url || pathToFileURL(resolveFile(specifier, importer, processObj)).href;
       let resolved = resolvedURL.startsWith('file:') ? fileURLToPath(resolvedURL) : resolvedURL;
-      if (isRuntimeEsmModule(resolved, processObj.execArgv)
-        && processObj.execArgv?.some((argument) => String(argument) === '--experimental-require-module')) {
+      if (isRuntimeEsmModule(resolved, processObj.execArgv) && isRequireEsmEnabled(processObj)) {
         const cachedNamespace = getEsmNamespace(resolved, processObj);
         if (cachedNamespace) {
           if (!Object.hasOwn(cachedNamespace, 'default') || Object.hasOwn(cachedNamespace, '__esModule')) {
@@ -10964,12 +11127,8 @@ export function createRuntime({
         release();
         throw error;
       }
-      return Promise.resolve(importPromise).finally(() => {
-        // Native Node gives the caller's continuation a turn to create its
-        // actual handle (for example, Next's forked dev server) before an
-        // otherwise-idle process can exit.
-        nativeSetTimeout(release, 0);
-      });
+      const importResult = Promise.resolve(importPromise);
+      return registerAsyncCompletion(importResult, release);
     };
     const activateModuleRegistration = (registration) => {
       if (registration.activation) return registration.activation;
@@ -11241,24 +11400,16 @@ export function createRuntime({
       if (isRuntimeEsmModule(entry, processObject.execArgv)) await esmLoader.import(entry, entry, {}, undefined, processObject);
       else loadModule(entry, entry);
       await Promise.resolve();
-      let idleRounds = 0;
       while (!options.isCancelled?.() && !options.signal?.aborted && !processObject._exitRequested?.()) {
         const activeTimers = processObject._timers || timerHandles;
         if (pending === 0 && !hasReferencedRuntimeTimers(activeTimers) && !hasLiveVirtualProcess()
           && !hasReferencedIpc() && !hasReferencedWorkerParentPort()) {
-          idleRounds += 1;
-          // Browser fetch, worker, and rejection events settle on later task turns.
-          // Four turns cover those deliveries while keeping short-lived runs
-          // from paying the browser's minimum timer delay repeatedly.
-          if (idleRounds >= 4) {
-            if (processObject._emitBeforeExit?.()) {
-              idleRounds = 0;
-              continue;
-            }
-            break;
-          }
-        } else {
-          idleRounds = 0;
+          // Node exits when no referenced work remains. beforeExit is the
+          // lifecycle signal that gives listeners one chance to create more
+          // work; any such work is observed by the predicates above on the
+          // next iteration.
+          if (!processObject._emitBeforeExit?.()) break;
+          continue;
         }
         await new Promise((resolve) => {
           const handle = nativeSetTimeout(resolve, 0);
@@ -11440,8 +11591,15 @@ export function createRuntime({
         }]),
       );
       const workerIsolation = executionIsolation === 'worker';
+      const proxyOperations = proxyCapability.adapter
+        ? typeof proxyCapability.adapter === 'function' || typeof proxyCapability.adapter.handle === 'function'
+          ? ['request', 'connect', 'send', 'resolve', 'tls']
+          : ['request', 'connect', 'send', 'resolve', 'tls'].filter((operation) => (
+              typeof proxyCapability.adapter[operation] === 'function'
+            ))
+        : [];
       const spawnProxy = workerIsolation && proxyCapability.adapter
-        ? { ...capabilities.manifest.proxy, rpc: true }
+        ? { ...capabilities.manifest.proxy, operations: proxyOperations, rpc: true }
         : proxyCapability.adapter ? proxyCapability : capabilities.manifest.proxy;
       const childExecArgv = [];
       const valueTakingFlags = new Set(['--import', '--experimental-loader', '--loader', '--require', '--input-type']);

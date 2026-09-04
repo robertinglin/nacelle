@@ -89,6 +89,41 @@ test('reports the Node-like synchronous ERR_REQUIRE_ESM boundary', async ({ harn
   expect(child.stderr).toContain('Instead either rename cjs.js to end in .cjs, change the requiring code to use dynamic import() which is available in all CommonJS modules, or change "type": "module" to "type": "commonjs" in /node/package-type-module/package.json to treat all .js files as CommonJS (using .mjs for all ES modules instead).');
 });
 
+test('supports synchronous require of an ESM graph when the Node profile enables it', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const { spawnSync } = require('node:child_process');
+    const child = spawnSync(process.execPath, ['/node/cjs-requires-esm.js'], { encoding: 'utf8' });
+    process.stdout.write(JSON.stringify({ status: child.status, signal: child.signal, stdout: child.stdout, stderr: child.stderr }));
+  `, {
+    files: {
+      '/node/cjs-requires-esm.js': `
+        const value = require('./package-type-module/synchronous.js');
+        const packageValue = require('demo-package');
+        if (value.default !== 'default' || value.named !== 'named' || packageValue !== 'main') process.exit(1);
+        process.stdout.write(JSON.stringify({ ...value, packageValue }));
+      `,
+      '/node/package-type-module/synchronous.js': `
+        import first from './first.js';
+        import second from './second.js';
+        export const named = first.value + second;
+        export default 'default';
+      `,
+      '/node/package-type-module/first.js': "export default { value: (() => { return 'na'; })() };",
+      '/node/package-type-module/second.js': "export default 'med';",
+      '/node/package-type-module/package.json': '{"type":"module"}',
+      '/node/node_modules/demo-package/package.json': '{"type":"module","main":"entry.cjs"}',
+      '/node/node_modules/demo-package/entry.cjs': "module.exports = 'main';",
+      '/node/node_modules/demo-package/index.mjs': "export default 'wrong';",
+    },
+  });
+
+  await expectPass(expect, result);
+  const child = JSON.parse(result.stdout);
+  expect(child.status).toBe(0);
+  expect(child.signal).toBe(null);
+  expect(JSON.parse(child.stdout)).toEqual({ __esModule: true, default: 'default', named: 'named', packageValue: 'main' });
+});
+
 test('keeps the owning process environment in a same-realm native ESM graph', async ({ harnessPage }) => {
   const result = await harnessPage.run(`
     const assert = require('node:assert/strict');

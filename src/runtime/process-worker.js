@@ -67,6 +67,8 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     const source = processStateSource;
     const nodeTest = source?.__bnhNodeTestState;
     const activity = source?.__bnhChildActivity;
+    const uncaught = source?.__bnhUncaughtException;
+    const exitRequest = source?.__bnhExitRequest;
     const boundedList = (value) => Array.isArray(value)
       ? { count: value.length, first: value[0] == null ? null : String(value[0]).slice(0, 128), last: value.at(-1) == null ? null : String(value.at(-1)).slice(0, 128) }
       : null;
@@ -146,6 +148,15 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
               stack: task.stack == null ? null : String(task.stack).slice(0, 160),
             }))
           : [],
+      } : null,
+      uncaughtException: uncaught ? {
+        name: String(uncaught.name || 'Error').slice(0, 64),
+        message: String(uncaught.message || uncaught).slice(0, 1024),
+        code: uncaught.code == null ? null : String(uncaught.code).slice(0, 64),
+      } : null,
+      exitRequest: exitRequest ? {
+        code: Number(exitRequest.code) || 0,
+        stack: String(exitRequest.stack || '').slice(0, 1024),
       } : null,
       phase: source?.__bnhRuntimePhase ? String(source.__bnhRuntimePhase).slice(0, 64) : null,
     };
@@ -411,9 +422,10 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       forced,
       lastUserSequence: userSequence,
       error: errorRecord(error),
-      runtimeState: processStateSource?.__bnhRuntimeState
-        || processStateSource?.__bnhNodeTestState
-        || compactRuntimeState(),
+      // Terminal diagnostics cross a worker boundary and must stay bounded.
+      // The process may retain a raw internal snapshot for its own IPC, but
+      // callers receive the compact summary with recent activity and phase.
+      runtimeState: compactRuntimeState(),
     });
     // Keep the user port alive for one turn. MessagePort has independent
     // delivery from the control port, so closing it synchronously can discard
@@ -449,6 +461,17 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         throw error;
       }
     };
+    // Node exposes the IPC transport as process.channel in forked children.
+    // Keep the channel identity separate from the user-facing process
+    // emitter, while retaining the ref/unref controls used by child-process
+    // implementations to coordinate their liveness.
+    let channelRefed = true;
+    const channel = {
+      get connected() { return !disconnected; },
+      ref() { channelRefed = true; return channel; },
+      unref() { channelRefed = false; return channel; },
+      hasRef() { return channelRefed; },
+    };
     process.stdin = makeEmitter();
     process.stdin.readable = true;
     process.stdin.isTTY = false;
@@ -473,6 +496,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       env: { ...identity.env },
       argv: [...identity.argv],
       connected: true,
+      channel,
       exitCode: 0,
       __bnhProxyRequest: requestProxy,
       __bnhReportRuntimeState: sendRuntimeState,
@@ -519,6 +543,23 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         }
         callback?.(null);
         return true;
+      },
+      __bnhSendInternal(value) {
+        if (disconnected) return false;
+        try {
+          user.postMessage({
+            channel: USER,
+            runId: identity.runId,
+            childId: identity.childId,
+            direction: 'child-to-parent',
+            type: 'message',
+            internal: true,
+            payload: value,
+          });
+          return true;
+        } catch {
+          return false;
+        }
       },
       disconnect() {
         if (disconnected) return false;

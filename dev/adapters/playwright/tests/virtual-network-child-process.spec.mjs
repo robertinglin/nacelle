@@ -145,6 +145,48 @@ test('ESM children route dynamic HTTP imports through the virtual network', asyn
   });
 });
 
+test('ESM children route comment-separated dynamic imports through the virtual network', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const { spawn } = require('node:child_process');
+    const http = require('node:http');
+    const server = http.createServer((_request, response) => {
+      response.setHeader('content-type', 'text/javascript');
+      response.end('export const answer = 50;');
+    });
+    server.listen(0, '127.0.0.1', () => {
+      const target = 'http://127.0.0.1:' + server.address().port + '/index.mjs';
+      const child = spawn(process.execPath, ['/node/comment-import-child.mjs'], {
+        env: { TARGET_URL: target },
+      });
+      let output = '';
+      let errorOutput = '';
+      child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+      child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+      child.once('close', (code, signal) => {
+        server.close(() => process.stdout.write(JSON.stringify({ code, signal, output, errorOutput })));
+      });
+    });
+  `, {
+    capabilities,
+    files: {
+      '/node/comment-import-child.mjs': `
+        const loaded = await import /* preserve valid comment-separated syntax */ (process.env.TARGET_URL);
+        process.stdout.write(String(loaded.answer));
+      `,
+    },
+    env: { TARGET_URL: 'unused-by-parent' },
+  });
+
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.timedOut, JSON.stringify(result)).not.toBe(true);
+  expect(JSON.parse(result.stdout)).toEqual({
+    code: 0,
+    signal: null,
+    output: '50',
+    errorOutput: '',
+  });
+});
+
 test('nested CommonJS eval importers use the virtual HTTP loader', async ({ harnessPage }) => {
   const result = await harnessPage.run(`
     const { spawn } = require('node:child_process');
@@ -170,10 +212,17 @@ test('nested CommonJS eval importers use the virtual HTTP loader', async ({ harn
     capabilities,
     files: {
       '/node/eval-import-child.cjs': `
-        const dynamicImport = eval('(url) => import(url)');
-        dynamicImport(process.env.TARGET_URL)
+        const createDynamicImporter = require('/node/eval-import-helper.cjs');
+        createDynamicImporter(process.env.TARGET_URL)
           .then((module) => process.stdout.write(String(module.answer)))
           .catch((error) => { console.error(error); process.exitCode = 1; });
+      `,
+      '/node/eval-import-helper.cjs': `
+        const { URL } = require('node:url');
+        function createDynamicImporter(url) {
+          return eval('(target) => import(target)')(new URL(url));
+        }
+        module.exports = createDynamicImporter;
       `,
     },
     env: { TARGET_URL: 'unused-by-parent' },
@@ -216,7 +265,7 @@ test('VM scripts route dynamic imports through the virtual HTTP loader', async (
       '/node/vm-import-child.cjs': `
         const vm = require('node:vm');
         const dynamicImport = vm.runInNewContext('eval("(url) => import(url)")', { process });
-        dynamicImport(process.env.TARGET_URL)
+        Promise.resolve().then(() => dynamicImport(process.env.TARGET_URL))
           .then((module) => process.stdout.write(String(module.answer)))
           .catch((error) => { console.error(error); process.exitCode = 1; });
       `,
@@ -230,6 +279,372 @@ test('VM scripts route dynamic imports through the virtual HTTP loader', async (
     code: 0,
     signal: null,
     output: '43',
+    errorOutput: '',
+  });
+});
+
+test('VM scripts evaluated in the current context route dynamic imports through the virtual HTTP loader', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const { spawn } = require('node:child_process');
+    const http = require('node:http');
+    const server = http.createServer((_request, response) => {
+      response.setHeader('content-type', 'text/javascript');
+      response.end('export const answer = 45;');
+    });
+    server.listen(0, '127.0.0.1', () => {
+      const target = 'http://127.0.0.1:' + server.address().port + '/index.mjs';
+      const child = spawn(process.execPath, ['/node/vm-this-context-import-child.cjs'], {
+        env: { TARGET_URL: target },
+      });
+      let output = '';
+      let errorOutput = '';
+      child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+      child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+      child.once('close', (code, signal) => {
+        server.close(() => process.stdout.write(JSON.stringify({ code, signal, output, errorOutput })));
+      });
+    });
+  `, {
+    capabilities,
+    files: {
+      '/node/vm-this-context-import-child.cjs': `
+        const vm = require('node:vm');
+        const dynamicImport = vm.runInThisContext('eval("(url) => import(url)")');
+        dynamicImport(process.env.TARGET_URL)
+          .then((module) => process.stdout.write(String(module.answer)))
+          .catch((error) => { console.error(error); process.exitCode = 1; });
+      `,
+    },
+    env: { TARGET_URL: 'unused-by-parent' },
+  });
+
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.timedOut, JSON.stringify(result)).not.toBe(true);
+  expect(JSON.parse(result.stdout)).toEqual({
+    code: 0,
+    signal: null,
+    output: '45',
+    errorOutput: '',
+  });
+});
+
+test('VM Script dynamic imports use the owning process loader by default', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const { spawn } = require('node:child_process');
+    const http = require('node:http');
+    const server = http.createServer((_request, response) => {
+      response.setHeader('content-type', 'text/javascript');
+      response.end('export const answer = 48;');
+    });
+    server.listen(0, '127.0.0.1', () => {
+      const target = 'http://127.0.0.1:' + server.address().port + '/index.mjs';
+      const child = spawn(process.execPath, ['/node/vm-script-import-child.cjs'], {
+        env: { TARGET_URL: target },
+      });
+      let output = '';
+      let errorOutput = '';
+      child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+      child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+      child.once('close', (code, signal) => {
+        server.close(() => process.stdout.write(JSON.stringify({ code, signal, output, errorOutput })));
+      });
+    });
+  `, {
+    capabilities,
+    files: {
+      '/node/vm-script-import-child.cjs': `
+        const vm = require('node:vm');
+        const script = new vm.Script(
+          'import(process.env.TARGET_URL).then((module) => process.stdout.write(String(module.answer))).catch((error) => { console.error(error); process.exitCode = 1; })',
+          { filename: '/node/vm-script-import-child.cjs' },
+        );
+        script.runInNewContext({ process });
+      `,
+    },
+    env: { TARGET_URL: 'unused-by-parent' },
+  });
+
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.timedOut, JSON.stringify(result)).not.toBe(true);
+  expect(JSON.parse(result.stdout)).toEqual({
+    code: 0,
+    signal: null,
+    output: '48',
+    errorOutput: '',
+  });
+});
+
+test('VM Script dynamic import callbacks expose a module namespace', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const { spawn } = require('node:child_process');
+    const child = spawn(process.execPath, ['/node/vm-script-callback-child.cjs']);
+    let output = '';
+    let errorOutput = '';
+    child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+    child.once('close', (code, signal) => process.stdout.write(JSON.stringify({ code, signal, output, errorOutput })));
+  `, {
+    capabilities,
+    files: {
+      '/node/vm-script-callback-child.cjs': `
+        const vm = require('node:vm');
+        (async () => {
+          const context = vm.createContext({ process });
+          const dependency = new vm.SourceTextModule('export const answer = 49;', { context });
+          await dependency.link(() => {});
+          await dependency.evaluate();
+          const script = new vm.Script(
+            'import("virtual").then((module) => process.stdout.write(String(module.answer)))',
+            { filename: '/node/vm-script-callback-child.cjs', importModuleDynamically: () => dependency },
+          );
+          await script.runInContext(context);
+        })().catch((error) => { console.error(error); process.exitCode = 1; });
+      `,
+    },
+  });
+
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.timedOut, JSON.stringify(result)).not.toBe(true);
+  expect(JSON.parse(result.stdout)).toEqual({
+    code: 0,
+    signal: null,
+    output: '49',
+    errorOutput: '',
+  });
+});
+
+test('VM compileFunction routes comment-separated dynamic imports through its callback', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    (async () => {
+      const assert = require('node:assert');
+      const vm = require('node:vm');
+      const compiled = vm.compileFunction(
+        'return import(/* loader comment */ "./vm-compile-dependency.mjs");',
+        [],
+        {
+          filename: '/node/vm-compile-entry.cjs',
+          importModuleDynamically: (specifier) => process.__bnhModuleImport(
+            specifier,
+            '/node/vm-compile-entry.cjs',
+            undefined,
+            process,
+          ),
+        },
+      );
+      const namespace = await compiled();
+      assert.strictEqual(namespace.answer, 57);
+      process.stdout.write('vm compileFunction import completed');
+    })().catch((error) => { console.error(error); process.exitCode = 1; });
+  `, {
+    files: {
+      '/node/vm-compile-dependency.mjs': 'export const answer = 57;',
+    },
+  });
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.timedOut, JSON.stringify(result)).not.toBe(true);
+  expect(result.stdout).toContain('vm compileFunction import completed');
+});
+
+test('VM SourceTextModule routes comment-separated dynamic imports through the virtual HTTP loader', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const { spawn } = require('node:child_process');
+    const http = require('node:http');
+    const server = http.createServer((_request, response) => {
+      response.setHeader('content-type', 'text/javascript');
+      response.end('export const answer = 51;');
+    });
+    server.listen(0, '127.0.0.1', () => {
+      const target = 'http://127.0.0.1:' + server.address().port + '/index.mjs';
+      const child = spawn(process.execPath, ['/node/vm-source-text-module-import-child.cjs'], {
+        env: { TARGET_URL: target },
+      });
+      let output = '';
+      let errorOutput = '';
+      child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+      child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+      child.once('close', (code, signal) => {
+        server.close(() => process.stdout.write(JSON.stringify({ code, signal, output, errorOutput })));
+      });
+    });
+  `, {
+    capabilities,
+    files: {
+      '/node/vm-source-text-module-import-child.cjs': `
+        const vm = require('node:vm');
+        (async () => {
+          const sourceModule = new vm.SourceTextModule(
+            'const loaded = await import /* preserve valid comment-separated syntax */ (process.env.TARGET_URL);\\n'
+              + 'export const answer = loaded.answer;',
+            {
+              context: vm.createContext({ process }),
+              importModuleDynamically: (specifier) => process.__bnhModuleImport(
+                specifier,
+                '/node/vm-source-text-module-import-child.cjs',
+                undefined,
+                process,
+              ),
+            },
+          );
+          await sourceModule.link(() => { throw new Error('unexpected static dependency'); });
+          await sourceModule.evaluate();
+          process.stdout.write(String(sourceModule.namespace.answer));
+        })().catch((error) => { console.error(error); process.exitCode = 1; });
+      `,
+    },
+    env: { TARGET_URL: 'unused-by-parent' },
+  });
+
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.timedOut, JSON.stringify(result)).not.toBe(true);
+  expect(JSON.parse(result.stdout)).toEqual({
+    code: 0,
+    signal: null,
+    output: '51',
+    errorOutput: '',
+  });
+});
+
+test('Function-constructed imports use the owning CommonJS module loader', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const { spawn } = require('node:child_process');
+    const http = require('node:http');
+    const server = http.createServer((_request, response) => {
+      response.setHeader('content-type', 'text/javascript');
+      response.end('export const answer = 46;');
+    });
+    server.listen(0, '127.0.0.1', () => {
+      const target = 'http://127.0.0.1:' + server.address().port + '/index.mjs';
+      const child = spawn(process.execPath, ['/node/function-import-child.cjs'], {
+        env: { TARGET_URL: target },
+      });
+      let output = '';
+      let errorOutput = '';
+      child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+      child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+      child.once('close', (code, signal) => {
+        server.close(() => process.stdout.write(JSON.stringify({ code, signal, output, errorOutput })));
+      });
+    });
+  `, {
+    capabilities,
+    files: {
+      '/node/function-import-child.cjs': `
+        const dynamicImport = new Function(
+          'specifier',
+          'return import(specifier)',
+        );
+        dynamicImport(process.env.TARGET_URL)
+          .then((module) => process.stdout.write(String(module.answer)))
+          .catch((error) => { console.error(error); process.exitCode = 1; });
+      `,
+    },
+    env: { TARGET_URL: 'unused-by-parent' },
+  });
+
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.timedOut, JSON.stringify(result)).not.toBe(true);
+  expect(JSON.parse(result.stdout)).toEqual({
+    code: 0,
+    signal: null,
+    output: '46',
+    errorOutput: '',
+  });
+});
+
+test('VM Function imports use the owner when a sandbox has a process-shaped object', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const { spawn } = require('node:child_process');
+    const http = require('node:http');
+    const server = http.createServer((_request, response) => {
+      response.setHeader('content-type', 'text/javascript');
+      response.end('export const answer = 47;');
+    });
+    server.listen(0, '127.0.0.1', () => {
+      const target = 'http://127.0.0.1:' + server.address().port + '/index.mjs';
+      const child = spawn(process.execPath, ['/node/vm-sandbox-function-import-child.cjs'], {
+        env: { TARGET_URL: target },
+      });
+      let output = '';
+      let errorOutput = '';
+      child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+      child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+      child.once('close', (code, signal) => {
+        server.close(() => process.stdout.write(JSON.stringify({ code, signal, output, errorOutput })));
+      });
+    });
+  `, {
+    capabilities,
+    files: {
+      '/node/vm-sandbox-function-import-child.cjs': `
+        const vm = require('node:vm');
+        const sandbox = { process: { env: process.env } };
+        const dynamicImport = vm.runInNewContext(
+          'new Function("specifier", "return import(specifier)")',
+          sandbox,
+        );
+        dynamicImport(process.env.TARGET_URL)
+          .then((module) => process.stdout.write(String(module.answer)))
+          .catch((error) => { console.error(error); process.exitCode = 1; });
+      `,
+    },
+    env: { TARGET_URL: 'unused-by-parent' },
+  });
+
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.timedOut, JSON.stringify(result)).not.toBe(true);
+  expect(JSON.parse(result.stdout)).toEqual({
+    code: 0,
+    signal: null,
+    output: '47',
+    errorOutput: '',
+  });
+});
+
+test('ESM imports preserve deferred import callbacks from CommonJS dependencies', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const { spawn } = require('node:child_process');
+    const http = require('node:http');
+    const server = http.createServer((_request, response) => {
+      response.setHeader('content-type', 'text/javascript');
+      response.end('export const answer = 44;');
+    });
+    server.listen(0, '127.0.0.1', () => {
+      const target = 'http://127.0.0.1:' + server.address().port + '/index.mjs';
+      const child = spawn(process.execPath, ['/node/esm-cjs-import-child.mjs'], {
+        env: { TARGET_URL: target },
+      });
+      let output = '';
+      let errorOutput = '';
+      child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+      child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+      child.once('close', (code, signal) => {
+        server.close(() => process.stdout.write(JSON.stringify({ code, signal, output, errorOutput })));
+      });
+    });
+  `, {
+    capabilities,
+    files: {
+      '/node/esm-cjs-import-child.mjs': `
+        const deferred = await import('/node/node_modules/deferred-import/index.js');
+        const loaded = await deferred.default(process.env.TARGET_URL);
+        process.stdout.write(String(loaded.answer));
+      `,
+      '/node/node_modules/deferred-import/package.json': '{"name":"deferred-import","main":"index.js"}',
+      '/node/node_modules/deferred-import/index.js': `
+        module.exports = function load(url) {
+          return eval('(target) => import(target)')(url);
+        };
+      `,
+    },
+    env: { TARGET_URL: 'unused-by-parent' },
+  });
+
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.timedOut, JSON.stringify(result)).not.toBe(true);
+  expect(JSON.parse(result.stdout)).toEqual({
+    code: 0,
+    signal: null,
+    output: '44',
     errorOutput: '',
   });
 });

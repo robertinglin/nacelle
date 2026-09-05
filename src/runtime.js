@@ -876,6 +876,60 @@ function normalizeOutputChunk(value) {
   return String(value);
 }
 
+// Stdio objects in a same-realm virtual process are callback-backed rather
+// than instances of the browser Writable implementation. Node consumers are
+// nevertheless allowed to use the Writable contract on them (notably
+// cork/uncork around a reporter update). Preserve that contract without
+// changing the underlying output endpoint or its owner context.
+function installProcessWritableCorkSurface(stream) {
+  if (!stream || typeof stream.write !== 'function') return;
+  if (typeof stream.cork === 'function' && typeof stream.uncork === 'function') return;
+  let corked = 0;
+  const pending = [];
+  const outputWrite = stream.write;
+  const write = function write(value, encoding, callback) {
+    if (typeof encoding === 'function') {
+      callback = encoding;
+      encoding = undefined;
+    }
+    if (corked > 0) {
+      pending.push({ value, encoding, callback });
+      return true;
+    }
+    return outputWrite.call(this, value, encoding, callback);
+  };
+  stream.write = write;
+  Object.defineProperties(stream, {
+    cork: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() {
+        corked += 1;
+        return this;
+      },
+    },
+    uncork: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value() {
+        if (corked > 0) corked -= 1;
+        if (corked === 0 && pending.length) {
+          const queued = pending.splice(0);
+          for (const item of queued) this.write(item.value, item.encoding, item.callback);
+        }
+        return this;
+      },
+    },
+    writableCorked: {
+      configurable: true,
+      enumerable: true,
+      get: () => corked,
+    },
+  });
+}
+
 function createTestReportersModule(processObject) {
   class LcovReporter extends Transform {
     constructor(options) {
@@ -1015,6 +1069,7 @@ function installProcessStdoutIterableSurface(stream, processObject) {
     if (typeof callback === 'function') callback();
     return result;
   };
+  installProcessWritableCorkSurface(stream);
 
   const readable = new Readable({ read() {}, readable: false });
   const iterablePrototype = Object.create(Object.getPrototypeOf(stream));
@@ -1526,6 +1581,7 @@ function installProcessStderrSocketSurface(stream, processObject) {
     if (typeof callback === 'function') callback();
     return result;
   };
+  installProcessWritableCorkSurface(stream);
 
   const readable = new Readable({ read() {}, readable: false });
 
@@ -2407,6 +2463,30 @@ function rewriteCommonJsDynamicImports(source) {
     while (index < text.length) {
       const character = text[index];
       const next = text[index + 1];
+      // A direct eval in a CommonJS module shares the module's lexical
+      // environment.  Rewrite literal eval bodies at the same source
+      // boundary as ordinary dynamic imports so import() keeps the owning
+      // Node loader and its lifecycle/task tracking.  This is deliberately
+      // limited to literal source; indirect/dynamic eval retains native
+      // semantics and cannot be safely associated with this module.
+      if (text.startsWith('eval', index)
+        && !isIdentifierPart(text[index - 1])
+        && !isIdentifierPart(text[index + 4])) {
+        let literalStart = index + 4;
+        while (/\s/u.test(text[literalStart] || '')) literalStart += 1;
+        if (text[literalStart] === '(') {
+          literalStart += 1;
+          while (/\s/u.test(text[literalStart] || '')) literalStart += 1;
+          if (text[literalStart] === '\'' || text[literalStart] === '"') {
+            result += text.slice(index, literalStart);
+            index = literalStart;
+            const quoted = copyQuoted(text[literalStart]);
+            const body = quoted.slice(1, -1);
+            result += quoted[0] + rewriteCommonJsDynamicImports(body) + quoted.slice(-1);
+            continue;
+          }
+        }
+      }
       if (character === '\'' || character === '"') {
         result += copyQuoted(character);
         continue;
@@ -2434,7 +2514,20 @@ function rewriteCommonJsDynamicImports(source) {
         && text[index - 1] !== '.'
         && !isIdentifierPart(text[index + 6])) {
         let callIndex = index + 6;
-        while (/\s/u.test(text[callIndex] || '')) callIndex += 1;
+        for (;;) {
+          while (/\s/u.test(text[callIndex] || '')) callIndex += 1;
+          if (text.startsWith('/*', callIndex)) {
+            const end = text.indexOf('*/', callIndex + 2);
+            callIndex = end < 0 ? text.length : end + 2;
+            continue;
+          }
+          if (text.startsWith('//', callIndex)) {
+            callIndex += 2;
+            while (callIndex < text.length && text[callIndex] !== '\n' && text[callIndex] !== '\r') callIndex += 1;
+            continue;
+          }
+          break;
+        }
         if (text[callIndex] === '(') {
           result += '__bnhImport';
           index += 6;
@@ -2486,6 +2579,28 @@ function hasTopLevelCommonJsProcessBinding(source) {
     || /(?:^|[;\n])\s*(?:const|let|var)\s*[({[][^;\n}]*\bprocess\b/m.test(masked);
 }
 
+function createGuestFunctionConstructor(NativeFunction, processOverride, sourceURL) {
+  const GuestFunction = function guestFunctionConstructor(...args) {
+    const body = args.length ? String(args.at(-1)) : '';
+    if (!/\bimport\s*\(/u.test(body)) return Reflect.construct(NativeFunction, args);
+    const parameters = args.slice(0, -1);
+    const rewritten = rewriteCommonJsDynamicImports(body);
+    const compiled = Reflect.construct(NativeFunction, ['__bnhImport', ...parameters, rewritten]);
+    const importModule = (specifier, options) => processOverride.__bnhModuleImport(
+      specifier,
+      sourceURL,
+      options,
+      processOverride,
+    );
+    return function guestFunction(...values) {
+      return compiled.call(this, importModule, ...values);
+    };
+  };
+  Object.setPrototypeOf(GuestFunction, NativeFunction);
+  GuestFunction.prototype = NativeFunction.prototype;
+  return GuestFunction;
+}
+
 function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = null, processOverride = null) {
   // npm bin shims are executable text files and commonly start with a
   // shebang, which JavaScript's Function constructor cannot parse.
@@ -2525,9 +2640,21 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
     const previousActiveProcess = globalThis.__bnhActiveProcess;
     globalThis.__bnhUserCode = true;
     if (processOverride) globalThis.__bnhActiveProcess = processOverride;
+    const previousFunction = globalThis.Function;
+    // Install the guest Function constructor for every CommonJS evaluation
+    // owned by a virtual process.  A module can construct a function from a
+    // string whose dynamic import is therefore invisible to the source
+    // rewriter (for example, `new Function('return import(specifier)')`).
+    // The constructor delegates unchanged to the native Function for all
+    // other bodies, so this preserves ordinary Function semantics while
+    // keeping deferred imports inside the owning module loader.
+    if (processOverride?.__bnhModuleImport) {
+      globalThis.Function = createGuestFunctionConstructor(previousFunction, processOverride, sourceURL);
+    }
     try {
       return wrapped(...values);
     } finally {
+      globalThis.Function = previousFunction;
       if (previousActiveProcess === undefined) delete globalThis.__bnhActiveProcess;
       else globalThis.__bnhActiveProcess = previousActiveProcess;
       if (previousUserCode === undefined) delete globalThis.__bnhUserCode;
@@ -2546,12 +2673,19 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
   const previousActiveProcess = globalThis.__bnhActiveProcess;
   globalThis.__bnhUserCode = true;
   if (processOverride) globalThis.__bnhActiveProcess = processOverride;
+  const previousFunction = globalThis.Function;
+  // See the module-wrapper path above: dynamic import syntax may only exist
+  // in a string compiled after this CommonJS evaluation has returned.
+  if (processOverride?.__bnhModuleImport) {
+    globalThis.Function = createGuestFunctionConstructor(previousFunction, processOverride, sourceURL);
+  }
   try {
     const values = [...commonJsValues, commonJsValues[5] || ((specifier) => import(specifier))];
     if (bindProcess) values.push(processOverride);
     if (bindAsync) values.push(asyncRunner);
     return wrapped(...values);
   } finally {
+    globalThis.Function = previousFunction;
     if (previousActiveProcess === undefined) delete globalThis.__bnhActiveProcess;
     else globalThis.__bnhActiveProcess = previousActiveProcess;
     if (previousUserCode === undefined) delete globalThis.__bnhUserCode;
@@ -4578,7 +4712,7 @@ export function createRuntime({
   nodeVersion,
   nodeProfile,
   wasmBaseUrl,
-} = {}) {
+  } = {}) {
   const scope = globalObject;
   const runtimeQueueMicrotask = typeof scope.queueMicrotask === 'function'
     ? scope.queueMicrotask.bind(scope)
@@ -4646,23 +4780,40 @@ export function createRuntime({
   // case or requiring a pre-populated cache.
   function createVfsUpdateBridge() {
     const channel = createMessageChannel(scope);
-    const pendingPaths = new Set();
+    const pendingBatches = [];
     let fullSyncPending = false;
     let flushScheduled = false;
+    const queuePathBatch = (paths) => {
+      const previous = pendingBatches.at(-1);
+      if (previous?.kind === 'paths') {
+        for (const pathValue of paths) previous.paths.add(pathValue);
+        return;
+      }
+      pendingBatches.push({ kind: 'paths', paths: new Set(paths) });
+    };
     const flush = () => {
       flushScheduled = false;
       if (fullSyncPending) {
         fullSyncPending = false;
-        pendingPaths.clear();
+        pendingBatches.length = 0;
         channel.port1.postMessage({ action: 'sync', state: vfs.exportState?.() });
         return;
       }
-      const changes = [];
-      for (const pathValue of pendingPaths) {
-        changes.push(vfs.describe?.(pathValue) || { path: pathValue, type: 'remove' });
+      for (const batch of pendingBatches.splice(0)) {
+        if (batch.kind === 'delta') {
+          channel.port1.postMessage({
+            action: 'delta',
+            removed: batch.removed,
+            changes: batch.changes,
+          });
+          continue;
+        }
+        const changes = [];
+        for (const pathValue of batch.paths) {
+          changes.push(vfs.describe?.(pathValue) || { path: pathValue, type: 'remove' });
+        }
+        if (changes.length) channel.port1.postMessage({ action: 'delta', changes });
       }
-      pendingPaths.clear();
-      if (changes.length) channel.port1.postMessage({ action: 'delta', changes });
     };
     const schedule = () => {
       if (flushScheduled) return;
@@ -4672,12 +4823,22 @@ export function createRuntime({
     const unsubscribe = vfs.subscribeMutations?.((update) => {
       if (update.action === 'sync') {
         fullSyncPending = true;
-        pendingPaths.clear();
+        pendingBatches.length = 0;
         schedule();
         return;
       }
-      for (const pathValue of update.paths || []) pendingPaths.add(pathValue);
-      if (update.path) pendingPaths.add(update.path);
+      if (update.action === 'change-set') {
+        pendingBatches.push({
+          kind: 'delta',
+          removed: Array.isArray(update.removed) ? update.removed : [],
+          changes: Array.isArray(update.changes) ? update.changes : [],
+        });
+        schedule();
+        return;
+      }
+      const paths = [...(update.paths || [])];
+      if (update.path) paths.push(update.path);
+      if (paths.length) queuePathBatch(paths);
       schedule();
     });
     return {
@@ -4924,7 +5085,7 @@ export function createRuntime({
     return resolvedProfile.features?.require_module === true;
   }
 
-  function makeBuiltins(processObject, runtimeRequire, diagnosticsChannels, runtimeOptions, performancePrimitives, trackTask, stdout, stderr, readSource, sourcePath, runtimeFetchRef) {
+  function makeBuiltins(processObject, runtimeRequire, diagnosticsChannels, runtimeOptions, performancePrimitives, trackTask, stdout, stderr, readSource, sourcePath, runtimeFetchRef, workerTransport) {
     const fs = vfs.fs;
     const cjsPackageEntryCache = new Map();
     const cjsPackageConfigCache = new Map();
@@ -5285,7 +5446,10 @@ export function createRuntime({
         this.paths = [];
       }
       Module.prototype.require = function require(name) {
-        return moduleApi._load(name, this.filename || sourcePath, false, processObj);
+        // Preserve the actual parent module object. Loaders such as
+        // proxyquire inspect module.parent and pass that object back through
+        // Module._load; reducing it to a filename loses the CommonJS graph.
+        return moduleApi._load(name, this, false, processObj);
       };
       Object.defineProperties(Module.prototype, {
         isPreloading: {
@@ -5726,6 +5890,9 @@ export function createRuntime({
             const error = new Error(`Cannot find module '${name}'`);
             error.code = 'MODULE_NOT_FOUND';
             throw error;
+          }
+          if (typeof ownerProcess?.__bnhSyncModuleLoader === 'function') {
+            return ownerProcess.__bnhSyncModuleLoader(name, parent, isMain);
           }
           return runtimeRequire(
             name,
@@ -6172,9 +6339,10 @@ export function createRuntime({
       }
       return tracked;
     };
-    const notifyClusterListening = runtimeOptions.clusterWorker && typeof processObject.send === 'function'
+    const sendWorkerMessage = workerTransport?.send || processObject.send;
+    const notifyClusterListening = runtimeOptions.clusterWorker && typeof sendWorkerMessage === 'function'
       ? (address) => {
-          return processObject.send({ type: 'bnh-cluster-listening', address });
+          return sendWorkerMessage({ type: 'bnh-cluster-listening', address });
         }
       : undefined;
     let cluster;
@@ -6187,6 +6355,7 @@ export function createRuntime({
       currentProcess: () => scope.process,
       runInProcessContext: (owner, callback) => {
         const previousProcess = scope.process;
+        const previousActiveProcess = scope.__bnhActiveProcess;
         const previousTimers = {
           setTimeout: scope.setTimeout,
           clearTimeout: scope.clearTimeout,
@@ -6201,6 +6370,8 @@ export function createRuntime({
           return callback();
         } finally {
           Object.assign(scope, previousTimers);
+          if (previousActiveProcess === undefined) delete scope.__bnhActiveProcess;
+          else scope.__bnhActiveProcess = previousActiveProcess;
           scope.process = previousProcess;
         }
       },
@@ -6220,9 +6391,15 @@ export function createRuntime({
       processOwner: processObject,
       runInProcessContext: (owner, callback) => {
         const previous = scope.process;
+        const previousActiveProcess = scope.__bnhActiveProcess;
         scope.process = owner;
+        scope.__bnhActiveProcess = owner;
         try { return callback(); }
-        finally { scope.process = previous; }
+        finally {
+          if (previousActiveProcess === undefined) delete scope.__bnhActiveProcess;
+          else scope.__bnhActiveProcess = previousActiveProcess;
+          scope.process = previous;
+        }
       },
     });
     const internalBindingContract = createBrowserInternalBindings({
@@ -6232,8 +6409,8 @@ export function createRuntime({
       trackTask,
       clusterGroupId: runtimeOptions.clusterGroupId,
       onWorkerMessage: (message) => {
-        if (!options.workerThread || typeof processObject?.send !== 'function') return;
-        processObject.send({ __bnhInternalWorkerMessage: message?.type });
+        if (!options.workerThread || typeof sendWorkerMessage !== 'function') return;
+        sendWorkerMessage({ __bnhInternalWorkerMessage: message?.type });
       },
     });
     internalBindingContract.bindings.constants.os.signals = Object.freeze({
@@ -6979,7 +7156,8 @@ export function createRuntime({
               .filter(([, value]) => value !== undefined),
           );
           const nodeOptions = tokenizeShell(env.NODE_OPTIONS || '', env);
-          const rawArgs = [...nodeOptions, ...(Array.isArray(args) ? args : [])].map(String);
+          const childExecArgv = Array.isArray(options?.execArgv) ? options.execArgv : [];
+          const rawArgs = [...nodeOptions, ...childExecArgv, ...(Array.isArray(args) ? args : [])].map(String);
           const preloads = [];
           const importPreloads = [];
           let evalCode = null;
@@ -7333,6 +7511,9 @@ export function createRuntime({
             stdoutExcerpt: '',
             stderrExcerpt: '',
             terminal: null,
+            ipcMessageCount: 0,
+            ipcMessageTypes: [],
+            ipcError: null,
             error: null,
           };
           // Keep the live process handle out of serialized activity records,
@@ -7392,6 +7573,7 @@ export function createRuntime({
           const runInOwnerContext = (callback) => {
             const previous = {
               process: scope.process,
+              activeProcess: scope.__bnhActiveProcess,
               setTimeout: scope.setTimeout,
               clearTimeout: scope.clearTimeout,
               setInterval: scope.setInterval,
@@ -7401,16 +7583,20 @@ export function createRuntime({
               queueMicrotask: scope.queueMicrotask,
             };
             scope.process = ownerProcess;
+            scope.__bnhActiveProcess = ownerProcess;
             if (ownerProcess._bnhTimerContext) Object.assign(scope, ownerProcess._bnhTimerContext);
             try {
               return callback();
             } finally {
+              if (previous.activeProcess === undefined) delete scope.__bnhActiveProcess;
+              else scope.__bnhActiveProcess = previous.activeProcess;
               Object.assign(scope, previous);
             }
           };
           const runInChildContext = (callback) => {
             const previous = {
               process: scope.process,
+              activeProcess: scope.__bnhActiveProcess,
               setTimeout: scope.setTimeout,
               clearTimeout: scope.clearTimeout,
               setInterval: scope.setInterval,
@@ -7421,10 +7607,13 @@ export function createRuntime({
             };
             const childOwner = childProcess?.processObject || childProcess;
             scope.process = childOwner || scope.process;
+            if (childOwner) scope.__bnhActiveProcess = childOwner;
             if (childOwner?._bnhTimerContext) Object.assign(scope, childOwner._bnhTimerContext);
             try {
               return callback();
             } finally {
+              if (previous.activeProcess === undefined) delete scope.__bnhActiveProcess;
+              else scope.__bnhActiveProcess = previous.activeProcess;
               Object.assign(scope, previous);
             }
           };
@@ -7671,6 +7860,12 @@ export function createRuntime({
                   code: childTerminal.error.code || null,
                 } : null,
               } : null;
+              // Preserve the worker's already-bounded terminal diagnostics in
+              // the complete child-output artifact.  The compact progress
+              // summary still selects only bounded fields, but dropping this
+              // state makes an ESM child that exits during bootstrap
+              // indistinguishable from a silent successful child.
+              activityRecord.runtimeState = childTerminal?.runtimeState || null;
               activityRecord.error = error ? {
                 name: String(error.name || 'Error').slice(0, 64),
                 code: error.code || null,
@@ -7972,6 +8167,23 @@ export function createRuntime({
                   ipc.processHandle = processHandle;
                   processHandle.on('message', (value, handle) => {
                     if (value?.type === 'bnh-artifacts') return;
+                    activityRecord.ipcMessageCount += 1;
+                    const messageType = value?.type ?? value?.ava?.type;
+                    const boundedMessageType = messageType == null ? null : String(messageType).slice(0, 96);
+                    if (boundedMessageType && !activityRecord.ipcMessageTypes.includes(boundedMessageType)
+                      && activityRecord.ipcMessageTypes.length < 8) {
+                      activityRecord.ipcMessageTypes.push(boundedMessageType);
+                    }
+                    const messageError = value?.err ?? value?.ava?.err;
+                    if (boundedMessageType && /error|exception|failed/i.test(boundedMessageType) && messageError) {
+                      activityRecord.ipcError = {
+                        type: boundedMessageType,
+                        name: String(messageError.name || 'Error').slice(0, 64),
+                        message: String(messageError.message || messageError).slice(0, 512),
+                        stack: String(messageError.stack || '').slice(0, 1024),
+                        code: messageError.code == null ? null : String(messageError.code).slice(0, 64),
+                      };
+                    }
                     emitChildMessage(value, handle);
                   });
                   processHandle.on('spawn', () => {
@@ -8171,7 +8383,7 @@ export function createRuntime({
               // downloading optional assets at runtime.
               if (packageSubpath) {
                 const packageTarget = path.join(packageBase, packageSubpath);
-                const packageCandidate = commonJsFileCandidates(packageTarget)
+                const packageCandidate = commonJsModuleCandidates(packageTarget)
                   .find((candidate) => vfs.files.has(candidate));
                 if (packageCandidate) return packageCandidate;
                 if (directory === '/' || directory === '.' || directory === '') break;
@@ -8217,6 +8429,26 @@ export function createRuntime({
             const indexCandidate = commonJsModuleCandidates(path.join(base, 'index'))
               .find((pathname) => vfs.files.has(pathname));
             if (indexCandidate) return indexCandidate;
+          }
+          // A relative or absolute directory request follows the CommonJS
+          // package main contract before falling back to index.*.  Keep this
+          // in the synchronous child resolver as well as the normal loader;
+          // package tools commonly use Module._load during a sync entry.
+          const packageManifest = path.join(base, 'package.json');
+          try {
+            const packageSource = readSource(packageManifest);
+            const packageConfig = JSON.parse(typeof packageSource === 'string'
+              ? packageSource
+              : new TextDecoder().decode(packageSource));
+            if (typeof packageConfig.main === 'string') {
+              const mainBase = path.resolve(base, packageConfig.main);
+              for (const candidate of moduleCandidates(mainBase)) {
+                try { readSource(candidate); return candidate; } catch { /* ignore */ }
+              }
+            }
+          } catch { /* no package manifest or invalid directory request */ }
+          for (const candidate of moduleCandidates(path.join(base, 'index'))) {
+            try { readSource(candidate); return candidate; } catch { /* ignore */ }
           }
           if (addonsDisabled(processObj) || isNativeAddonBuildPath(base)) return nativeAddonPath(base);
           return base;
@@ -8357,7 +8589,22 @@ export function createRuntime({
           const basename = path.basename(entryPath);
           const message = `require() of ES Module ${entryPath} from ${parentImport} not supported.\n`;
           const packagePath = path.join(path.dirname(entryPath), 'package.json');
-          const detail = fromEval
+          // A direct eval() inherits the caller's local require function, so
+          // the nested load can arrive here after the original call-site flag
+          // has been lost. Recover that observable Node diagnostic from the
+          // actual CommonJS parent rather than emitting the less useful direct
+          // require wording for an eval-originated load.
+          let evalCaller = Boolean(fromEval);
+          if (!evalCaller && parentImport && !String(parentImport).startsWith('node:')) {
+            try {
+              const parentSource = readSource(parentImport);
+              const parentText = typeof parentSource === 'string'
+                ? parentSource
+                : new TextDecoder().decode(parentSource);
+              evalCaller = /\beval\s*\(/u.test(parentText);
+            } catch { /* retain the direct-require diagnostic */ }
+          }
+          const detail = evalCaller
             ? `Instead either rename ${basename} to end in .cjs, change the requiring code to use dynamic import() which is available in all CommonJS modules, or change "type": "module" to "type": "commonjs" in ${packagePath} to treat all .js files as CommonJS (using .mjs for all ES modules instead).`
             : `Instead change the require of ${basename} in ${parentImport} to a dynamic import() which is available in all CommonJS modules.`;
           const error = new Error(`${message}${detail}`);
@@ -8745,7 +8992,46 @@ export function createRuntime({
                   options.onStderr?.(value);
                 }, () => () => {});
             childProc.processObject._bnhVirtualChild = true;
+            // A same-realm child has no worker control port to carry network
+            // telemetry. When the caller requested it, forward the child's
+            // bounded network lifecycle events through the same sink used by
+            // worker-backed children. This is observational only and never
+            // participates in child completion.
+            if (typeof options.onNetwork === 'function') {
+              childProc.processObject.__bnhNetworkEvent = options.onNetwork;
+            }
             childProc.processObject.__bnhModuleApiFactory = () => createModuleApi(childProc.processObject);
+            // Keep Module._load inside a synchronous virtual child on the
+            // child's moduleState cache. The normal runtime loader has a
+            // separate async cache, which would make module.parent null for
+            // packages loaded by CommonJS tooling such as proxyquire.
+            childProc.processObject.__bnhSyncModuleLoader = (name, parent, isMain = false) => {
+              const importer = typeof parent === 'object' && parent !== null
+                ? parent.filename || entryPath
+                : String(parent || entryPath);
+              const builtin = builtinName(name);
+              if (BUILTIN_NAMES.includes(builtin)) {
+                if (builtin === 'module') return createModuleApi(childProc.processObject, (value) => stderrArr.push(value));
+                if (builtin === 'process') return childProc.processObject;
+                if (builtin === 'stream/web' && syncStreamWebApi) return syncStreamWebApi;
+                return runtimeRequire(name, importer, childProc.processObject);
+              }
+              const resolved = resolveFileSync(name, importer, childProc.processObject);
+              return loadModuleSync(
+                resolved,
+                importer,
+                childProc.processObject,
+                scope,
+                Buffer,
+                stderrArr,
+                undefined,
+                moduleState,
+                Boolean(isMain),
+                compileCacheState,
+                false,
+                syncStreamWebApi,
+              );
+            };
             if (typeof processObject.__bnhModuleResolve === 'function') {
               childProc.processObject.__bnhModuleResolve = processObject.__bnhModuleResolve;
             }
@@ -8812,12 +9098,20 @@ export function createRuntime({
             if (prepared.reportOnSignal) childProc.processObject.report.reportOnSignal = true;
             if (prepared.reportOnUncaughtException) childProc.processObject.report.reportOnUncaughtException = true;
             const childTaskReleases = new Set();
+            const childTaskRecords = new Map();
+            let childTaskSequence = 0;
+            const publishChildLifecycle = () => {
+              childProc.processObject.__bnhRuntimeLifecycle = {
+                pending: childTaskReleases.size,
+                tasks: [...childTaskRecords.values()].slice(-8),
+              };
+            };
             const nativeQueueMicrotask = runtimeQueueMicrotask;
             // A same-realm child has to drain the current Promise/microtask
             // turn before its implicit beforeExit check. Node runs all
             // already-queued promise reactions before deciding that a
             // process is idle; checking from a microtask can otherwise close
-            // a child between two `await` continuations and lose its final
+            // a child between two await continuations and lose its final
             // stdout. Use the host timer surface so this check is not itself
             // registered as child work.
             const nativeSetTimeout = scope.__BNH_NATIVE_TIMERS__?.setTimeout
@@ -8847,15 +9141,24 @@ export function createRuntime({
             };
             const childTrackTask = (label = null) => {
               const release = trackTask(label);
+              const taskId = ++childTaskSequence;
+              childTaskRecords.set(taskId, {
+                id: taskId,
+                label: label == null ? null : String(label).slice(0, 128),
+                stack: String(new Error().stack || '').split('\n')[2]?.trim().slice(0, 160) || null,
+              });
               let released = false;
               const releaseChildTask = () => {
                 if (released) return;
                 released = true;
                 childTaskReleases.delete(releaseChildTask);
+                childTaskRecords.delete(taskId);
                 release();
+                publishChildLifecycle();
                 if (childTaskReleases.size === 0) tryExitChild();
               };
               childTaskReleases.add(releaseChildTask);
+              publishChildLifecycle();
               return releaseChildTask;
             };
             // VFS promise helpers are shared by the runtime and same-realm
@@ -8918,15 +9221,43 @@ export function createRuntime({
               processOwner: childProc.processObject,
               runInProcessContext: (owner, callback) => {
                 const previousProcess = scope.process;
+                const previousActiveProcess = scope.__bnhActiveProcess;
                 scope.process = owner;
+                scope.__bnhActiveProcess = owner;
                 try { return callback(); }
-                finally { scope.process = previousProcess; }
+                finally {
+                  if (previousActiveProcess === undefined) delete scope.__bnhActiveProcess;
+                  else scope.__bnhActiveProcess = previousActiveProcess;
+                  scope.process = previousProcess;
+                }
               },
             });
             childProc.processObject._bnhHasPendingTasks = () => childTaskReleases.size > 0;
             childProc.processObject._bnhTryExit = () => tryExitChild();
+            let childContextResource = null;
+            const runInChildAsyncContext = (callback) => {
+              if (!childContextResource) {
+                const previousProcess = scope.process;
+                const previousActiveProcess = scope.__bnhActiveProcess;
+                scope.process = childProc.processObject;
+                scope.__bnhActiveProcess = childProc.processObject;
+                try {
+                  // A same-realm child is still a separate Node process for
+                  // async-context purposes. Use the runtime root as the
+                  // trigger so request-local stores are not borrowed from the
+                  // parent that happened to launch this child.
+                  childContextResource = new AsyncResource('PROCESSWRAP', { triggerAsyncId: 1 });
+                } finally {
+                  if (previousActiveProcess === undefined) delete scope.__bnhActiveProcess;
+                  else scope.__bnhActiveProcess = previousActiveProcess;
+                  scope.process = previousProcess;
+                }
+              }
+              return childContextResource.runInAsyncScope(callback, childProc.processObject);
+            };
             childProc.processObject._bnhRunInContext = (callback) => {
               const previousProcess = scope.process;
+              const previousActiveProcess = scope.__bnhActiveProcess;
               const previousConsole = scope.console;
               const previousTimers = {
                 setTimeout: scope.setTimeout,
@@ -8938,13 +9269,16 @@ export function createRuntime({
                 queueMicrotask: scope.queueMicrotask,
               };
               scope.process = childProc.processObject;
+              scope.__bnhActiveProcess = childProc.processObject;
               if (childProc.processObject._bnhConsole) scope.console = childProc.processObject._bnhConsole;
               if (childProc.processObject._bnhTimerContext) Object.assign(scope, childProc.processObject._bnhTimerContext);
               try {
-                return callback();
+                return runInChildAsyncContext(callback);
               } finally {
                 Object.assign(scope, previousTimers);
                 scope.console = previousConsole;
+                if (previousActiveProcess === undefined) delete scope.__bnhActiveProcess;
+                else scope.__bnhActiveProcess = previousActiveProcess;
                 scope.process = previousProcess;
               }
             };
@@ -9248,21 +9582,50 @@ export function createRuntime({
                 if (prepared.source === null) {
                   childProc.processObject.__bnhModuleIsPreloading = true;
                   try {
-                    for (const preload of prepared.preloads) {
-                      loadModuleSync(normalizePath(preload, cwd), entryPath, childProc.processObject, scope, Buffer, stderrArr, undefined, moduleState, false, compileCacheState, false, syncStreamWebApi);
-                    }
+                    runInChildAsyncContext(() => {
+                      for (const preload of prepared.preloads) {
+                        loadModuleSync(normalizePath(preload, cwd), entryPath, childProc.processObject, scope, Buffer, stderrArr, undefined, moduleState, false, compileCacheState, false, syncStreamWebApi);
+                      }
+                    });
                   } finally {
                     childProc.processObject.__bnhModuleIsPreloading = false;
                   }
                 }
                 const childSource = prepared.source === null ? undefined
                   : prepared.source.replace(/\bawait\s+(?:import|__bnhImport)\s*\(/g, 'require(');
-                loadModuleSync(entryPath, entryPath, childProc.processObject, scope, Buffer, stderrArr, childSource, moduleState, true, compileCacheState, false, syncStreamWebApi);
+                runInChildAsyncContext(() => loadModuleSync(
+                  entryPath,
+                  entryPath,
+                  childProc.processObject,
+                  scope,
+                  Buffer,
+                  stderrArr,
+                  childSource,
+                  moduleState,
+                  true,
+                  compileCacheState,
+                  false,
+                  syncStreamWebApi,
+                ));
                 if (prepared.executionArgv.some((value) => String(value) === '--test')) {
                   for (const extraPath of prepared.afterScript.filter((value) => String(value).endsWith('.js'))) {
-                    loadModuleSync(normalizePath(extraPath, prepared.cwd), entryPath, childProc.processObject, scope, Buffer, stderrArr, undefined, moduleState, true, compileCacheState, false, syncStreamWebApi);
+                    runInChildAsyncContext(() => loadModuleSync(
+                      normalizePath(extraPath, prepared.cwd),
+                      entryPath,
+                      childProc.processObject,
+                      scope,
+                      Buffer,
+                      stderrArr,
+                      undefined,
+                      moduleState,
+                      true,
+                      compileCacheState,
+                      false,
+                      syncStreamWebApi,
+                    ));
                   }
                 }
+                childProc.processObject.__bnhNodeTestSourceLoaded?.();
                 if (prepared.buildSnapshot && prepared.snapshotBlobPath) {
                   fs.writeFileSync(
                     prepared.snapshotBlobPath,
@@ -9402,11 +9765,15 @@ export function createRuntime({
           // child's module evaluation and terminal frame.
           const workerIsolation = Boolean(
             options.ipc
-            || options.asyncLifecycle
             || esmExecutionDepth > 0
             || processObject.__bnhEsmNested,
           );
-          const snapshot = vfs.snapshot();
+          // The child process boundary owns the transferred/shared bytes. A
+          // copied snapshot here needlessly duplicates the complete virtual
+          // filesystem before prepareWorkerVfs can share it with the child
+          // realm. Keep the snapshot as a view of the current VFS, matching
+          // runtime.spawn() and worker_threads.Worker().
+          const snapshot = vfs.snapshot({ copy: false });
           const files = Object.fromEntries(
             snapshot.artifacts.map(({ path, bytes }) => [path, bytes]),
           );
@@ -9638,7 +10005,7 @@ export function createRuntime({
             recent: [],
           };
           childActivity.recent ||= [];
-          const runVirtualCommandInternal = ({ entry, argv, cwd, commandEnv, stdin, signal, timeout, onStdout, onStderr }) => {
+          const runVirtualCommandInternal = ({ entry, argv, cwd, commandEnv, stdin, signal, timeout, onNetwork, onStdout, onStderr }) => {
             const isNodeExecutable = (pathname) => /(?:^|\/)node(?:js)?$/.test(String(pathname));
             const commandName = String(entry).split('/').pop();
             if (['npm', 'yarn', 'yarnpkg'].includes(commandName)) {
@@ -9655,6 +10022,7 @@ export function createRuntime({
                   signal,
                   timeout,
                   stdin: stdin,
+                  onNetwork,
                   onStdout: (value) => {
                     streamedOutput = true;
                     onStdout?.(value);
@@ -9737,6 +10105,7 @@ export function createRuntime({
               const result = runPreparedSync(prepared, {
                 asyncLifecycle: true,
                 encoding: 'utf8',
+                onNetwork,
                 onStdout: (value) => {
                   const chunk = normalizeOutputChunk(value);
                   stdout.push(chunk);
@@ -9768,11 +10137,17 @@ export function createRuntime({
                   const terminalError = result.process?.terminalRecord?.error
                     || result.process?.terminal?.error
                     || result.process?.__bnhUncaughtException;
-                  const detail = terminalError?.stack || terminalError?.message
-                    || `child exited with code ${finalCode} (runtime exitCode=${result.process?.exitCode ?? 'unknown'})`;
-                  const message = `${detail}\n`;
-                  stderr.push(message);
-                  onStderr?.(message);
+                  // A non-zero exitCode is observable through the child
+                  // status; Node does not synthesize a stderr diagnostic for
+                  // a script that intentionally sets process.exitCode.
+                  if (terminalError) {
+                    const detail = terminalError.stack || terminalError.message || String(terminalError);
+                    const message = `${detail}\n`;
+                    if (!stderr.join('').includes(message)) {
+                      stderr.push(message);
+                      onStderr?.(message);
+                    }
+                  }
                 }
                 return {
                   code: finalCode,
@@ -9825,6 +10200,55 @@ export function createRuntime({
                 streamed: Boolean((onStdout && stdout) || (onStderr && stderr)),
               });
             }
+            // `node script` is a real child launch.  If the script is ESM (or
+            // has an ESM loader registered), preserve that format at this
+            // boundary instead of sending it through the synchronous
+            // CommonJS evaluator.  This matters for async loader hooks and
+            // top-level await used by ordinary package lifecycle scripts.
+            if ((entry === processObject.execPath || isNodeExecutable(entry))
+              && Array.isArray(argv) && typeof argv[0] === 'string' && !argv[0].startsWith('-')) {
+              const prepared = prepareChild(entry, argv, {
+                cwd,
+                env: commandEnv,
+                input: stdin,
+                signal,
+                timeout,
+              }, ownerProcess);
+              const stdout = [];
+              const stderr = [];
+              const complete = (code, signalValue) => ({
+                code: signalValue ? null : code ?? 1,
+                stdout: stdout.join(''),
+                stderr: stderr.join(''),
+                streamed: Boolean(stdout.length || stderr.length),
+              });
+              if (isRuntimeEsmModule(prepared.entryPath, prepared.executionArgv)) {
+                const processHandle = runPreparedESM(prepared, {
+                  signal,
+                  timeout,
+                  asyncLifecycle: true,
+                }, (value) => {
+                  const chunk = normalizeOutputChunk(value);
+                  stdout.push(chunk);
+                  onStdout?.(chunk);
+                }, (value) => {
+                  const chunk = normalizeOutputChunk(value);
+                  stderr.push(chunk);
+                  onStderr?.(chunk);
+                });
+                return processHandle.wait().then(
+                  (terminal) => complete(terminal.code, terminal.signal),
+                  (error) => {
+                    const message = `${error?.stack || error?.message || error}\n`;
+                    if (!stderr.length) {
+                      stderr.push(message);
+                      onStderr?.(message);
+                    }
+                    return complete(1, null);
+                  },
+                );
+              }
+            }
             // A shell's `node script.js` command is a real child launch. Run
             // the script through the same prepared-process path as spawn so
             // its exit, output, and pending lifecycle are observed directly;
@@ -9862,12 +10286,16 @@ export function createRuntime({
                   const terminalError = result.process?.terminalRecord?.error
                     || result.process?.terminal?.error
                     || result.process?.__bnhUncaughtException;
-                  const detail = terminalError?.stack || terminalError?.message
-                    || `child exited with code ${finalCode} (runtime exitCode=${result.process?.exitCode ?? 'unknown'})`;
-                  const message = `${detail}\n`;
-                  if (!stderr.join('').includes(message)) {
-                    stderr.push(message);
-                    onStderr?.(message);
+                  // A non-zero exitCode is observable through the child
+                  // status; Node does not synthesize a stderr diagnostic for
+                  // a script that intentionally sets process.exitCode.
+                  if (terminalError) {
+                    const detail = terminalError.stack || terminalError.message || String(terminalError);
+                    const message = `${detail}\n`;
+                    if (!stderr.join('').includes(message)) {
+                      stderr.push(message);
+                      onStderr?.(message);
+                    }
                   }
                 }
                 return {
@@ -10084,6 +10512,7 @@ export function createRuntime({
                 stdin: nodeOptions.input,
                 signal: nodeOptions.signal,
                 timeout: nodeOptions.timeout,
+                onNetwork: nodeOptions.onNetwork,
                 onStdout: nodeOptions.onStdout,
                 onStderr: nodeOptions.onStderr,
               });
@@ -10188,6 +10617,7 @@ export function createRuntime({
                 stdin: commandOptions.stdin,
                 signal: commandOptions.signal,
                 timeout: commandOptions.timeout,
+                onNetwork: commandOptions.onNetwork || scriptOptions.onNetwork,
                 onStdout: commandOptions.onStdout,
                 onStderr: commandOptions.onStderr,
               }),
@@ -10302,9 +10732,13 @@ export function createRuntime({
             const spec = positionalArguments()[0];
             if (!spec) return { code: 1, stdout: '', stderr: 'npm error package name is required\n' };
             const resolved = await resolvePackage(spec);
+            const manifest = await resolved.npm.fetchPackageVersionMetadata(
+              resolved.parsed.name,
+              resolved.version,
+            );
             const document = {
-              ...(resolved.doc || {}),
-              name: resolved.doc?.name || resolved.parsed.name,
+              ...manifest,
+              name: manifest?.name || resolved.parsed.name,
               version: resolved.version,
               ...(resolved.metadata['dist-tags'] ? { 'dist-tags': resolved.metadata['dist-tags'] } : {}),
             };
@@ -10751,6 +11185,12 @@ export function createRuntime({
           let injectedExitEventEmitted = false;
           processObject.exit = (code) => {
             processObject.exitCode = Number(code) || 0;
+            const exitRequest = {
+              code: processObject.exitCode,
+              stack: String(new Error().stack || '').split('\n').slice(1, 6).join('\n').slice(0, 1024),
+            };
+            processObject.__bnhExitRequest = exitRequest;
+            if (injectedProcess) injectedProcess.__bnhExitRequest = exitRequest;
             if (injectedExitEventEmitted) return;
             injectedExitEventEmitted = true;
             processObject.emit('exit', processObject.exitCode);
@@ -10899,6 +11339,23 @@ export function createRuntime({
     const createRuntimeWorker = typeof scope.Worker === 'function'
       ? createWorkerFactory(scope, { bootstrap: WORKER_BOOTSTRAP })
       : undefined;
+    // A worker thread communicates through worker_threads.parentPort. The
+    // transport is still needed by the harness, but Node does not expose the
+    // child_process IPC identity (send/channel/connected/disconnect) on the
+    // worker thread's process object. Keep bound private capabilities for the
+    // parentPort implementation before removing that child-only surface.
+    const workerParentSend = options.workerThread && typeof processObject.send === 'function'
+      ? processObject.send.bind(processObject)
+      : null;
+    const workerParentDisconnect = options.workerThread && typeof processObject.disconnect === 'function'
+      ? processObject.disconnect.bind(processObject)
+      : null;
+    if (options.workerThread) {
+      delete processObject.send;
+      delete processObject.channel;
+      delete processObject.connected;
+      delete processObject.disconnect;
+    }
     const workerThreadParentPort = options.workerThread
       ? (() => {
           const parentPort = new EventEmitter();
@@ -10975,7 +11432,7 @@ export function createRuntime({
               queuePendingMessageFlush();
             }
           });
-          parentPort.postMessage = (value, transferList) => processObject.send(value, transferList);
+          parentPort.postMessage = (value, transferList) => workerParentSend?.(value, transferList);
           parentPort.start = () => parentPort;
           parentPort.ref = () => parentPort;
           parentPort.unref = () => parentPort;
@@ -10989,7 +11446,7 @@ export function createRuntime({
           });
           parentPort.close = () => {
             processObject.removeListener('message', onMessage);
-            processObject.disconnect?.();
+            workerParentDisconnect?.();
           };
           return parentPort;
         })()
@@ -11143,7 +11600,15 @@ export function createRuntime({
       if (ownerProcess._bnhNextWorkerThreadId === undefined) ownerProcess._bnhNextWorkerThreadId = 1;
       const threadId = ownerProcess._bnhNextWorkerThreadId++;
       const [source, workerOptions = {}] = args;
-      const worker = typeof source === 'string'
+      // Node's Worker constructor accepts either a path string or a file URL
+      // for a module entrypoint. Both forms identify a virtual VFS module in
+      // this runtime and must use the same isolated child process boundary;
+      // passing a file URL to the browser-native Worker would ask the browser
+      // to fetch an inaccessible host file instead of loading the mounted
+      // module.
+      const isVirtualEntrypoint = typeof source === 'string'
+        || (source && typeof source === 'object' && typeof source.href === 'string');
+      const worker = isVirtualEntrypoint
         ? createBrowserWorker(source, workerOptions, threadId, ownerProcess)
         : createRuntimeWorker(...args);
       if (worker.stdout === undefined) worker.stdout = new Readable({ read() {} });
@@ -11451,7 +11916,7 @@ export function createRuntime({
             };
             processObject.on('message', onResult);
             try {
-              processObject.send({
+              workerParentSend?.({
                 __bnhThreadMessageRequest: {
                   requestId,
                   source: workerThreads.threadId,
@@ -11496,6 +11961,7 @@ export function createRuntime({
       (pathname) => vfs.read(pathname),
       entry,
       runtimeFetchRef,
+      { send: workerParentSend },
     );
     reportExecutePhase('builtins-ready');
     if (options.workerThread || String(options.entry || '').startsWith('/node/.bnh-worker-eval-')) {
@@ -11845,6 +12311,14 @@ export function createRuntime({
       const npmProxyUrl = npmProxyOrigin && isNpmRegistryRequest
         ? `${npmProxyOrigin}/__npm_proxy__/${encodeURIComponent(target)}`
         : null;
+      const hasGrantedProxy = proxyCapability?.mode === 'proxy'
+        && proxyCapability.enabled === true
+        && proxyCapability.capabilityGranted === true
+        && proxyCapability.adapter;
+      const networkGrant = capabilities?.manifest?.network;
+      const hasGrantedNativeNetwork = targetOrigin
+        && networkGrant?.origins?.includes(targetOrigin)
+        && networkGrant.methods.includes(method);
       const canCacheNpmRequest = method === 'GET' && npmRegistryOrigins.has(targetOrigin)
         && typeof scope.caches?.open === 'function';
       let npmCachePromise;
@@ -11883,7 +12357,7 @@ export function createRuntime({
       };
       const fetchNetwork = () => {
         if (httpClientFetch) return fetchWithTelemetry('browser-native', () => nativeFetch(input, init));
-        if (npmProxyUrl) {
+        if (npmProxyUrl && !hasGrantedProxy && !hasGrantedNativeNetwork) {
           // npm registry responses are cross-origin and many registry routes do
           // not opt into CORS. Use the same-origin download proxy when the
           // runtime is hosted in a browser, while keeping the guest URL in the
@@ -11898,9 +12372,7 @@ export function createRuntime({
         if (useEnvProxy && proxyUrl && /^https?:/i.test(target)) {
           return fetchWithTelemetry('http-proxy', () => virtualProxyFetch(input, init, proxyUrl));
         }
-        const networkGrant = capabilities?.manifest?.network;
-        if (targetOrigin && networkGrant?.origins?.includes(targetOrigin)
-          && networkGrant.methods.includes(method)) {
+        if (hasGrantedNativeNetwork) {
           // This is the browser-native egress route granted to the guest. It
           // is required by stock tools such as Next.js' own WASM downloader
           // and does not rewrite or intercept the guest request.
@@ -11921,92 +12393,128 @@ export function createRuntime({
       };
       const holdForResponseBody = (response) => {
         const body = response?.body;
-        // Buffered virtual responses are already complete when resolved, and
-        // responses without a stream body need no hold at all.
-        if (!body || typeof body.pipeTo !== 'function' || response.__bnhBufferedBody === true) {
+        // Buffered virtual responses are already complete when resolved, so
+        // the fetch task releases immediately; a guest that never consumes
+        // such a body would otherwise pin the child forever.
+        if (!body || response.__bnhBufferedBody === true) {
           releaseFetch();
           return response;
         }
-        // Keep the child alive only while the guest is still consuming the
-        // body. Every consumption entry point a guest can reach — pipeTo,
-        // manual readers, async iteration, and the buffered response methods —
-        // must release the fetch task when it settles; a body consumed through
-        // only one of them would otherwise block the child lifecycle forever.
-        let released = false;
-        const releaseOnce = () => {
-          if (released) return;
-          released = true;
-          releaseFetch();
+        const originalPipeTo = body.pipeTo;
+        let restored = false;
+        const restorePipeTo = () => {
+          if (restored) return;
+          restored = true;
+          try { body.pipeTo = originalPipeTo; } catch { /* host streams may be sealed */ }
         };
-        const wrapSettling = (owner, name) => {
+        if (typeof originalPipeTo === 'function') {
           try {
-            const original = owner[name];
-            if (typeof original !== 'function') return;
-            owner[name] = (...args) => {
+            body.pipeTo = (...args) => {
               let result;
               try {
-                result = original.apply(owner, args);
+                result = originalPipeTo.apply(body, args);
               } catch (error) {
-                releaseOnce();
+                releaseFetch();
+                restorePipeTo();
                 throw error;
               }
-              return Promise.resolve(result).finally(releaseOnce);
+              return Promise.resolve(result).finally(() => {
+                releaseFetch();
+                restorePipeTo();
+              });
             };
           } catch {
-            releaseOnce();
+            // Some host streams expose a read-only pipeTo; reader and
+            // convenience-method hooks below still provide terminal release.
           }
-        };
-        wrapSettling(body, 'pipeTo');
-        wrapSettling(response, 'text');
-        wrapSettling(response, 'json');
-        wrapSettling(response, 'arrayBuffer');
-        wrapSettling(response, 'blob');
-        wrapSettling(response, 'formData');
-        try {
-          const originalGetReader = body.getReader;
-          if (typeof originalGetReader === 'function') {
-            body.getReader = (...args) => {
-              const reader = originalGetReader.apply(body, args);
-              try {
-                Promise.resolve(reader.closed).catch(() => {}).finally(releaseOnce);
-              } catch {
-                releaseOnce();
-              }
-              return reader;
-            };
-          }
-        } catch {
-          releaseOnce();
         }
-        try {
-          const originalIterator = body[Symbol.asyncIterator];
-          if (typeof originalIterator === 'function') {
-            body[Symbol.asyncIterator] = () => {
-              const iterator = originalIterator.call(body);
-              return {
-                next: (...args) => Promise.resolve(iterator.next(...args)).then(
-                  (result) => {
-                    if (!result || result.done) releaseOnce();
-                    return result;
-                  },
-                  (error) => {
-                    releaseOnce();
-                    throw error;
-                  },
-                ),
-                return: (value) => {
-                  releaseOnce();
-                  return iterator.return ? iterator.return(value) : Promise.resolve({ done: true, value });
-                },
-                throw: (error) => {
-                  releaseOnce();
-                  return iterator.throw ? iterator.throw(error) : Promise.reject(error);
-                },
-              };
-            };
+        // Node's HTTP adapter consumes a fetch response with a reader rather
+        // than pipeTo(). Keep the process referenced until the standard
+        // ReadableStream reader reaches EOF, errors, or is cancelled. The
+        // task tracker is intentionally settled at the body terminal event;
+        // releasing it when headers arrive lets a live child exit while its
+        // response is still being delivered.
+        const originalGetReader = body.getReader;
+        if (typeof originalGetReader === 'function') {
+          try {
+            Object.defineProperty(body, 'getReader', {
+              configurable: true,
+              value(...args) {
+                let reader;
+                try {
+                  reader = originalGetReader.apply(this, args);
+                } catch (error) {
+                  releaseFetch();
+                  throw error;
+                }
+                const originalRead = reader?.read;
+                if (typeof originalRead === 'function') {
+                  reader.read = (...readArgs) => {
+                    let result;
+                    try {
+                      result = originalRead.apply(reader, readArgs);
+                    } catch (error) {
+                      releaseFetch();
+                      throw error;
+                    }
+                    return Promise.resolve(result).then((item) => {
+                      if (item?.done) releaseFetch();
+                      return item;
+                    }, (error) => {
+                      releaseFetch();
+                      throw error;
+                    });
+                  };
+                }
+                const originalCancel = reader?.cancel;
+                if (typeof originalCancel === 'function') {
+                  reader.cancel = (...cancelArgs) => {
+                    let result;
+                    try {
+                      result = originalCancel.apply(reader, cancelArgs);
+                    } catch (error) {
+                      releaseFetch();
+                      throw error;
+                    }
+                    return Promise.resolve(result).finally(() => releaseFetch());
+                  };
+                }
+                return reader;
+              },
+            });
+          } catch {
+            // Host stream methods can be non-configurable. pipeTo and the
+            // convenience-method hooks above remain valid fallbacks.
           }
-        } catch {
-          releaseOnce();
+        }
+        // Native Response convenience methods consume the body without
+        // going through the public ReadableStream#pipeTo hook. Release the
+        // process fetch task after those standard consumption paths settle;
+        // otherwise a normal response.text()/json() leaves the virtual child
+        // referenced forever even though the body has been fully consumed.
+        for (const name of ['arrayBuffer', 'blob', 'formData', 'json', 'text']) {
+          const method = response?.[name];
+          if (typeof method !== 'function') continue;
+          try {
+            Object.defineProperty(response, name, {
+              configurable: true,
+              value(...args) {
+                let result;
+                try {
+                  result = method.apply(this, args);
+                } catch (error) {
+                  releaseFetch();
+                  throw error;
+                }
+                return Promise.resolve(result).finally(() => {
+                  releaseFetch();
+                });
+              },
+            });
+          } catch {
+            // Some host Response implementations expose non-configurable
+            // methods; the stream hook above remains the fallback there.
+          }
         }
         return response;
       };
@@ -12409,6 +12917,14 @@ export function createRuntime({
         has: (pathname) => vfs.files.has(pathname),
         get: (pathname) => vfs.read(pathname),
       },
+      // Loader hooks and remote ESM imports use the same live VFS/network
+      // seams as CommonJS and fetch. Keeping these callbacks on the owning
+      // runtime also lets isolated child loaders inherit the owner's bridge.
+      // VFS exposes raw module bytes through read(); keep the source opaque so
+      // loader hooks receive the same string/byte representations as Node's
+      // load pipeline rather than failing at an adapter-only method boundary.
+      readSource: (pathname) => vfs.read(pathname),
+      fetchModule: (url, init) => runtimeFetchRef.current(url, init),
       builtins,
       globalObject: scope,
       evaluateCommonJS: (specifier, importer, processOverride) => loadModule(
@@ -12823,12 +13339,23 @@ export function createRuntime({
         ? {
             connect: (request) => proxyCapability.connect(request),
             send: (request) => proxyCapability.send(request),
+            bindTcp: typeof proxyCapability.adapter.bindTcp === 'function'
+              ? (request) => proxyCapability.adapter.bindTcp(request)
+              : undefined,
+            unbindTcp: typeof proxyCapability.adapter.unbindTcp === 'function'
+              ? (request) => proxyCapability.adapter.unbindTcp(request)
+              : undefined,
           }
         : undefined;
       const preserveSharedNetwork = context.virtualNetwork?.shared === true;
       const inheritedNetwork = context.virtualNetwork?.network;
-      if (proxyTransport) virtualNetwork = createVirtualNetwork({ transport: proxyTransport });
-      else if (preserveSharedNetwork) virtualNetwork = inheritedNetwork || getSharedVirtualNetwork(scope);
+      // An inherited network owns the process-local listener registry. Keep
+      // it when crossing an IPC child boundary so bind/accept traffic can
+      // return through the parent bridge; its transport also carries any
+      // outbound proxy hooks supplied by that boundary.
+      if (preserveSharedNetwork && inheritedNetwork) virtualNetwork = inheritedNetwork;
+      else if (proxyTransport) virtualNetwork = createVirtualNetwork({ transport: proxyTransport });
+      else if (preserveSharedNetwork) virtualNetwork = getSharedVirtualNetwork(scope);
       else virtualNetwork = replaceSharedVirtualNetwork(scope);
       dnsModule = createBrowserDns({ proxy: proxyCapability, network: virtualNetwork });
       scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ = 0;
@@ -12977,6 +13504,14 @@ export function createRuntime({
           entry,
           execArgv: childExecArgv,
           proxy: spawnProxy,
+          // Same-realm children must inherit the owning process' network
+          // registry, including a registry that is itself bridged to the
+          // parent browser realm. A structured-cloned worker cannot carry
+          // that live object, so worker children keep the shared marker and
+          // establish their own remote bridge in process-entry.
+          virtualNetwork: !workerIsolation && proxyCapability.adapter
+            ? { shared: true, network: virtualNetwork }
+            : { shared: true },
           networkTelemetry: typeof options.onNetwork === 'function',
         },
         stdout: capabilities.output.stdout,
@@ -13005,7 +13540,7 @@ export function createRuntime({
       capabilities.output.on('data', outputListener);
       let artifacts = {};
       let runtimeState = null;
-      worker.on('message', (message) => {
+      worker.on('internalMessage', (message) => {
         if (message?.type === 'bnh-artifacts') artifacts = message.artifacts || {};
         if (message?.type === 'bnh-runtime-state') runtimeState = message.state || null;
       });
@@ -13029,6 +13564,10 @@ export function createRuntime({
         capabilities.output.off('data', outputListener);
         stdout.end();
         stderr.end();
+        // The control-port terminal frame carries the bounded runtime
+        // summary. Prefer it over the optional user IPC snapshot, which may
+        // contain the internal mutable activity records.
+        const finalRuntimeState = terminal.runtimeState || runtimeState || null;
         child.structuredResult = {
           runId: runSpec.runId,
           outcome: terminal.status === 'exited' && terminal.code === 0
@@ -13049,7 +13588,8 @@ export function createRuntime({
             // boundary. The runtime-state IPC message is retained for
             // compatibility, but may arrive after terminal on independent
             // MessagePorts.
-            runtime_state: runtimeState || terminal.runtimeState || null,
+            runtime_state: finalRuntimeState,
+            childActivity: finalRuntimeState?.childActivity || null,
             child_outputs: worker.childOutputs || [],
           },
           artifacts,

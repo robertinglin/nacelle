@@ -57,7 +57,7 @@ export interface NacelleHarnessRequest {
     binding: '__bnhReportProgress';
   } | null;
   output?: {
-    binding: '__bnhRecordOutput';
+    binding: '__bnhReportOutput';
   } | null;
 }
 

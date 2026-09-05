@@ -376,6 +376,19 @@ export function createModuleLoader({
 
   const defaultResolve = (specifier, importer, conditions = ['node', 'import']) => {
     const resolved = resolve(specifier, importer, conditions);
+    // Node's default ESM resolver rejects a missing file before the load
+    // phase and exposes the file URL on ERR_MODULE_NOT_FOUND. A resolve hook
+    // can use that error to map a source spelling such as `./entry.js` to an
+    // existing TypeScript file; returning the missing path would skip that
+    // hook opportunity and turn the later load into an opaque VFS ENOENT.
+    if (resolved.startsWith('/') && !hasFile(resolved)) {
+      const error = packageError(
+        'ERR_MODULE_NOT_FOUND',
+        `Cannot find module '${resolved}' imported from '${importer}'`,
+      );
+      error.url = fileURL(resolved);
+      throw error;
+    }
     return {
       url: isBuiltinSpecifier(resolved) || resolved.startsWith('node:')
         ? `node:${builtinName(resolved)}`
@@ -444,9 +457,19 @@ export function createModuleLoader({
     const value = resolved.endsWith('.wasm') || resolved.endsWith('.node')
       ? read(resolved, resolved).value
       : readTextFile(resolved);
+    // Node's default ESM loader exposes file source as a Buffer: it is still
+    // the raw byte source, but its standard toString() decodes UTF-8.  Keep
+    // that representation for load hooks.  A plain Uint8Array has different
+    // public behavior (comma-joined numeric output), which breaks otherwise
+    // Node-compatible hooks that consume result.source.toString().
+    const source = typeof value === 'string' || value === undefined || value === null
+      ? value
+      : builtins?.buffer?.Buffer?.from
+        ? builtins.buffer.Buffer.from(value)
+        : value;
     return {
       format: context?.format ?? (resolved.endsWith('.json') ? 'json' : moduleFormat(resolved)),
-      source: value,
+      source,
     };
   };
 
@@ -1625,7 +1648,8 @@ export function createModuleLoader({
         rewritten = `${rewritten.slice(0, replacement.start)}${replacement.replacement}${rewritten.slice(replacement.end)}`;
       }
     }
-    if (/\bimport\s*\(/.test(rewritten)) {
+    const dynamicImport = /\bimport\s*(?:(?:\/\*[\s\S]*?\*\/|\/\/[^\r\n]*(?:\r\n|\r|\n|$))\s*)*\(/g;
+    if (dynamicImport.test(rewritten)) {
       const token = register((dynamicSpecifier, options) => {
         const pending = globalObject.process?.__bnhModuleRegistrationPromises;
         const load = () => importModule(dynamicSpecifier, importer, {}, options, processOverride);
@@ -1643,7 +1667,7 @@ export function createModuleLoader({
           (error) => { release?.(); throw error; },
         );
       });
-      rewritten = rewritten.replace(/\bimport\s*\(/g, `globalThis[${quote(registryName)}][${quote(token)}](`);
+      rewritten = rewritten.replace(dynamicImport, `globalThis[${quote(registryName)}][${quote(token)}](`);
     }
     if (/\bimport\.meta\.resolve\b/.test(rewritten)) {
       const token = register((specifier) => {

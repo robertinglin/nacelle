@@ -5,6 +5,7 @@ import process from 'node:process';
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { firefox, chromium } from 'playwright';
+import { allocateHostPort } from './host-port.mjs';
 import {
   CITGM_ARTIFACT_ROOT,
   compactRunResult,
@@ -12,6 +13,7 @@ import {
   persistCitgmArtifacts,
   persistTerminalSummary,
 } from './citgm-artifacts.mjs';
+import { launchBrowser } from './adapter-core.mjs';
 import { formatProgressLine } from './progress-protocol.mjs';
 
 const adapterRoot = path.dirname(new URL(import.meta.url).pathname);
@@ -60,18 +62,6 @@ function parseArgs(rawArgs) {
   return { browserName, citgmVersion, timeoutMs, module, citgmArgs };
 }
 
-async function allocatePort() {
-  return await new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address();
-      const port = typeof address === 'object' && address ? address.port : null;
-      server.close((error) => error ? reject(error) : resolve(port));
-    });
-  });
-}
-
 async function waitForServer(url, server) {
   const deadline = Date.now() + 10_000;
   let lastError = '';
@@ -110,7 +100,7 @@ function outputCountsFromProgress(progressEvents, stdout, stderr) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const port = await allocatePort();
+  const port = await allocateHostPort();
   const server = spawn(process.execPath, ['server.js', '--host', '127.0.0.1', '--port', String(port)], {
     cwd: adapterRoot,
     env: { ...process.env, BNH_WORKTREE: adapterRoot },
@@ -120,11 +110,16 @@ async function main() {
   const progressEvents = [];
   server.stderr.setEncoding('utf8');
   server.stderr.on('data', (chunk) => { serverError += chunk; });
+  const loopbackServers = new Map();
+  const loopbackSockets = new Map();
+  let nextLoopbackId = 1;
+  let nextLoopbackSocketId = 1;
 
   try {
     const url = `http://127.0.0.1:${port}/citgm.html`;
   await waitForServer(url, server);
-  const browser = await browserTypes[options.browserName].launch({ headless: true });
+  const browser = await launchBrowser(browserTypes[options.browserName], options.browserName);
+  let browserCdp = null;
   try {
     const page = await browser.newPage();
       page.setDefaultTimeout(0);
@@ -145,6 +140,7 @@ async function main() {
           await mkdir(path.dirname(file), { recursive: true });
           await appendFile(file, value, 'utf8');
         }).catch(() => {});
+        return traceWrites;
       };
       const latestTraceSources = (runId) => {
         const source = traceSources.get(String(runId)) || {};
@@ -157,18 +153,67 @@ async function main() {
       };
       await page.exposeBinding('__bnhReportProgress', async (_source, event) => {
         progressEvents.push(event);
-        queueTrace(event?.runId, 'progress.jsonl', `${JSON.stringify(event)}\n`);
+        await queueTrace(event?.runId, 'progress.jsonl', `${JSON.stringify(event)}\n`);
         try { process.stderr.write(formatProgressLine(event)); } catch { /* diagnostics cannot affect the run */ }
       });
       await page.exposeBinding('__bnhReportNetwork', async (_source, payload) => {
-        networkEventCount += 1;
-        queueTrace(payload?.runId, 'network.jsonl', `${JSON.stringify(payload?.event || payload)}\n`);
+        const events = Array.isArray(payload?.events) ? payload.events : [payload];
+        for (const item of events) {
+          networkEventCount += 1;
+          await queueTrace(item?.runId, 'network.jsonl', `${JSON.stringify(item?.event || item)}\n`);
+        }
       });
       await page.exposeBinding('__bnhReportOutput', async (_source, payload) => {
-        const stream = payload?.stream === 'stderr' ? 'stderr' : 'stdout';
-        queueTrace(payload?.runId, `${stream}.log`, String(payload?.text || ''));
+        const events = Array.isArray(payload?.events) ? payload.events : [payload];
+        for (const item of events) {
+          const stream = item?.stream === 'stderr' ? 'stderr' : 'stdout';
+          await queueTrace(item?.runId, `${stream}.log`, String(item?.text || ''));
+        }
+      });
+      await page.exposeBinding('__bnhFetchExternal', async (_source, request = {}) => {
+        const response = await fetch(String(request.url || ''), {
+          method: String(request.method || 'GET'),
+          headers: request.headers || {},
+          body: request.body === undefined ? undefined : Uint8Array.from(request.body),
+          redirect: 'follow',
+        });
+        return {
+          url: response.url,
+          status: response.status,
+          statusText: response.statusText,
+          headers: Object.fromEntries(response.headers.entries()),
+          bodyBytes: [...new Uint8Array(await response.arrayBuffer())],
+        };
       });
       page.on('crash', () => { browserDiagnostics.push({ event: 'page-crash' }); });
+      if (options.browserName === 'chromium') {
+        try {
+          browserCdp = await browser.newBrowserCDPSession();
+          await browserCdp.send('Target.setDiscoverTargets', { discover: true });
+          browserCdp.on('Target.targetCrashed', (payload) => {
+            browserDiagnostics.push({
+              event: 'browser-target-crashed',
+              targetId: String(payload?.targetId || '').slice(0, 128) || null,
+              status: String(payload?.status || '').slice(0, 64) || null,
+              errorCode: Number.isInteger(payload?.errorCode) ? payload.errorCode : null,
+            });
+          });
+        } catch {
+          // Browser-level CDP diagnostics are optional and must not affect the run.
+        }
+        try {
+          const cdp = await page.context().newCDPSession(page);
+          cdp.on('Target.targetCrashed', (payload) => {
+            browserDiagnostics.push({
+              event: 'target-crashed',
+              status: String(payload?.status || '').slice(0, 64) || null,
+              errorCode: Number.isInteger(payload?.errorCode) ? payload.errorCode : null,
+            });
+          });
+        } catch {
+          // CDP diagnostics are optional and must not affect the run.
+        }
+      }
       page.on('pageerror', (error) => {
         browserDiagnostics.push({
           event: 'page-error',
@@ -177,6 +222,64 @@ async function main() {
         });
       });
       browser.on('disconnected', () => { browserDiagnostics.push({ event: 'browser-disconnected' }); });
+      const deliverLoopback = (id, event, value) => page.evaluate(({ id: targetId, event: targetEvent, value: targetValue }) => {
+        return globalThis.__BNH_EXTERNAL_TCP_DELIVER__?.(targetId, targetEvent, targetValue) || false;
+      }, { id: String(id), event, value });
+      await page.exposeBinding('__bnhOpenLoopback', async (_source, request = {}) => {
+        const id = String(nextLoopbackId++);
+        const server = net.createServer((socket) => {
+          const socketId = `${id}:${nextLoopbackSocketId++}`;
+          loopbackSockets.set(socketId, socket);
+          let delivery = deliverLoopback(id, 'connect', {
+            listenerId: id,
+            socketId,
+            remoteAddress: socket.remoteAddress,
+            remotePort: socket.remotePort,
+            localAddress: socket.localAddress,
+            localPort: socket.localPort,
+          });
+          socket.on('data', (chunk) => {
+            delivery = Promise.resolve(delivery).then(() => deliverLoopback(socketId, 'data', [...chunk]));
+          });
+          socket.on('end', () => {
+            delivery = Promise.resolve(delivery).then(() => deliverLoopback(socketId, 'end'));
+          });
+          socket.on('close', () => {
+            loopbackSockets.delete(socketId);
+            delivery = Promise.resolve(delivery).then(() => deliverLoopback(socketId, 'close'));
+          });
+          socket.on('error', () => {});
+        });
+        await new Promise((resolve, reject) => {
+          server.once('error', reject);
+          server.listen(Number(request.port), String(request.address || '127.0.0.1'), resolve);
+        });
+        loopbackServers.set(id, server);
+        return { id };
+      });
+      await page.exposeBinding('__bnhWriteLoopback', async (_source, request = {}) => {
+        const socket = loopbackSockets.get(String(request.id));
+        if (!socket) return false;
+        if (request.operation === 'data') {
+          socket.write(Uint8Array.from(request.bytes || []));
+        } else if (request.operation === 'end') {
+          socket.end();
+        } else if (request.operation === 'close') {
+          socket.destroy();
+        }
+        return true;
+      });
+      await page.exposeBinding('__bnhCloseLoopback', async (_source, request = {}) => {
+        const id = String(request.id);
+        loopbackServers.get(id)?.close();
+        loopbackServers.delete(id);
+        for (const [socketId, socket] of loopbackSockets) {
+          if (socketId.startsWith(`${id}:`)) {
+            socket.destroy();
+            loopbackSockets.delete(socketId);
+          }
+        }
+      });
       process.stdout.write('Starting browser-side CITGM execution...\n');
       let result;
       try {
@@ -321,9 +424,12 @@ async function main() {
       if (stderr) process.stderr.write(stderr);
       process.stdout.write(`${JSON.stringify(primary)}\n`);
       process.exitCode = result.exitCode === null ? 1 : result.exitCode;
-    } finally {
+      } finally {
+      await browserCdp?.detach?.().catch?.(() => {});
+      for (const socket of loopbackSockets.values()) socket.destroy();
+      for (const server of loopbackServers.values()) server.close();
       await browser.close();
-    }
+      }
   } finally {
     server.kill('SIGTERM');
     if (serverError && server.exitCode !== 0) process.stderr.write(serverError);

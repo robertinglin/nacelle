@@ -174,4 +174,61 @@ test.describe('runtime builtin network integration', () => {
     expect(result.code, result.stderr).toBe(0);
   });
 
+  test('uses a granted live proxy for registry fetches after cache misses', async () => {
+    const calls = [];
+    let sameOriginProxyCalls = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      sameOriginProxyCalls += 1;
+      return new Response('unexpected same-origin proxy request', { status: 404 });
+    };
+    const runtime = createRuntime();
+    const proxyCapabilities = {
+      ...capabilities,
+      proxy: { mode: 'proxy', enabled: true, capability: { proxy: true } },
+    };
+    try {
+      await runtime.reset({
+        runId: 'runtime-network-live-registry',
+        capabilities: proxyCapabilities,
+        proxy: {
+          mode: 'proxy',
+          enabled: true,
+          capability: { proxy: true },
+          adapter: {
+            request(request) {
+              calls.push(request);
+              return { status: 200, body: '{"source":"live-proxy"}' };
+            },
+          },
+        },
+      });
+      await runtime.mount({ '/node/network.js': `
+        (async () => {
+          const response = await fetch('https://registry.npmjs.org/contract-package');
+          process.stdout.write(JSON.stringify({ status: response.status, body: await response.text() }));
+        })().catch((error) => { console.error(error); process.exitCode = 1; });
+      ` });
+      const output = [];
+      const errorOutput = [];
+      const code = await runtime.executeEntry('/node/network.js', {}, (value) => output.push(value), (value) => errorOutput.push(value));
+
+      expect(code, JSON.stringify({ code, output, errorOutput, calls, sameOriginProxyCalls })).toBe(0);
+      expect(sameOriginProxyCalls).toBe(0);
+      expect(JSON.parse(output.join(''))).toEqual({ status: 200, body: '{"source":"live-proxy"}' });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        operation: 'request',
+        target: 'https://registry.npmjs.org/contract-package',
+        method: 'GET',
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      await runtime.reset({
+        runId: 'runtime-network-live-registry-cleanup',
+        capabilities,
+      });
+    }
+  });
+
 });

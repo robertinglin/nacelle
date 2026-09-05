@@ -41,6 +41,34 @@ function skipComment(source, index) {
   return end < 0 ? source.length : end + 2;
 }
 
+function skipTemplateExpression(source, index) {
+  let depth = 1;
+  while (index < source.length) {
+    const character = source[index];
+    const next = source[index + 1];
+    if (character === '\\') {
+      index += 2;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      index = skipQuoted(source, index, character);
+      continue;
+    }
+    if (character === '`') {
+      index = skipTemplate(source, index);
+      continue;
+    }
+    if (character === '/' && (next === '/' || next === '*')) {
+      index = skipComment(source, index);
+      continue;
+    }
+    if (character === '{') depth += 1;
+    else if (character === '}' && --depth === 0) return index + 1;
+    index += 1;
+  }
+  return source.length;
+}
+
 function skipTemplate(source, index) {
   index += 1;
   while (index < source.length) {
@@ -49,6 +77,10 @@ function skipTemplate(source, index) {
       continue;
     }
     if (source[index] === '`') return index + 1;
+    if (source[index] === '$' && source[index + 1] === '{') {
+      index = skipTemplateExpression(source, index + 2);
+      continue;
+    }
     index += 1;
   }
   return source.length;
@@ -151,9 +183,8 @@ function matchingToken(tokens, index, opening, closing) {
   return -1;
 }
 
-function rewriteForAwaitLoops(source) {
-  const tokens = tokenize(source);
-  const asyncGeneratorBodies = [];
+function asyncGeneratorBodyRanges(tokens) {
+  const ranges = [];
   for (let index = 0; index < tokens.length - 2; index += 1) {
     const isFunctionGenerator = tokens[index].value === 'async'
       && tokens[index + 1].value === 'function'
@@ -161,11 +192,23 @@ function rewriteForAwaitLoops(source) {
     const isMethodGenerator = tokens[index].value === 'async'
       && tokens[index + 1].value === '*';
     if (!isFunctionGenerator && !isMethodGenerator) continue;
-    const bodyIndex = tokens.findIndex((token, tokenIndex) => tokenIndex > index && token.value === '{');
-    if (bodyIndex < 0) continue;
+    const parameterStart = index + (isFunctionGenerator ? 3 : 2);
+    const parameterIndex = tokens.findIndex((token, tokenIndex) => (
+      tokenIndex >= parameterStart && token.value === '('
+    ));
+    if (parameterIndex < 0) continue;
+    const parameterEnd = matchingToken(tokens, parameterIndex, '(', ')');
+    const bodyIndex = parameterEnd < 0 ? -1 : parameterEnd + 1;
+    if (bodyIndex < 0 || tokens[bodyIndex]?.value !== '{') continue;
     const bodyEnd = matchingToken(tokens, bodyIndex, '{', '}');
-    if (bodyEnd >= 0) asyncGeneratorBodies.push({ start: bodyIndex, end: bodyEnd });
+    if (bodyEnd >= 0) ranges.push({ start: bodyIndex, end: bodyEnd });
   }
+  return ranges;
+}
+
+function rewriteForAwaitLoops(source) {
+  const tokens = tokenize(source);
+  const asyncGeneratorBodies = asyncGeneratorBodyRanges(tokens);
   const names = new Set(tokens.filter((token) => token.value !== '<literal>').map((token) => token.value));
   const replacements = [];
   let sequence = 0;
@@ -361,11 +404,14 @@ function asyncFunctionCandidates(source) {
       });
     }
   }
+  const asyncGeneratorBodies = asyncGeneratorBodyRanges(tokens);
   const forAwaitPrefix = [0];
   const superPrefix = [0];
   for (let index = 0; index < tokens.length; index += 1) {
     forAwaitPrefix.push(forAwaitPrefix[index]
-      + (tokens[index].value === 'for' && tokens[index + 1]?.value === 'await' ? 1 : 0));
+      + (tokens[index].value === 'for'
+        && tokens[index + 1]?.value === 'await'
+        && !asyncGeneratorBodies.some(({ start, end }) => index > start && index < end) ? 1 : 0));
     superPrefix.push(superPrefix[index] + (tokens[index].value === 'super' ? 1 : 0));
   }
   for (const candidate of candidates) {
@@ -374,7 +420,19 @@ function asyncFunctionCandidates(source) {
       - forAwaitPrefix[candidate.bodyTokenStart] > 0
       || superPrefix[candidate.bodyTokenEnd + 1] - superPrefix[candidate.bodyTokenStart] > 0;
   }
+  for (const candidate of candidates) {
+    // Only lower async functions whose body actually contains an await. A
+    // native async function with no suspension point already works in the
+    // CommonJS wrapper; lowering it would change its observable constructor
+    // and Object.prototype.toString identity for no runtime benefit.
+    candidate.containsAwait = tokenize(source.slice(candidate.bodyStart, candidate.bodyEnd))
+      .some((token) => token.value === 'await');
+  }
   return { candidates, unsupported };
+}
+
+function removeToken(source, start, end, tokenStart, tokenEnd) {
+  return `${source.slice(start, tokenStart)}${source.slice(tokenEnd, end)}`;
 }
 
 function awaitOperandEnd(tokens, awaitIndex) {
@@ -382,10 +440,43 @@ function awaitOperandEnd(tokens, awaitIndex) {
   const consumePrimary = () => {
     const token = tokens[index];
     if (!token) return index;
+    if (token.value === 'async' && tokens[index + 1]?.value === 'function') {
+      index += 1;
+      consumePrimary();
+      return index;
+    }
+    if (token.value === 'function') {
+      index += 1;
+      if (tokens[index]?.value === '*') index += 1;
+      if (isIdentifierStart(tokens[index]?.value?.[0])) index += 1;
+      if (tokens[index]?.value === '(') {
+        const parametersEnd = matchingToken(tokens, index, '(', ')');
+        index = parametersEnd < 0 ? tokens.length : parametersEnd + 1;
+      }
+      if (tokens[index]?.value === '{') {
+        const bodyEnd = matchingToken(tokens, index, '{', '}');
+        index = bodyEnd < 0 ? tokens.length : bodyEnd + 1;
+      }
+      return index;
+    }
     if (['!', '~', '+', '-'].includes(token.value)
       || ['typeof', 'void', 'delete', 'await', 'new'].includes(token.value)) {
       index += 1;
       consumePrimary();
+      return index;
+    }
+    if (token.value === 'function') {
+      index += 1;
+      if (tokens[index]?.value === '*') index += 1;
+      if (isIdentifierStart(tokens[index]?.value?.[0])) index += 1;
+      if (tokens[index]?.value === '(') {
+        const parametersEnd = matchingToken(tokens, index, '(', ')');
+        index = parametersEnd < 0 ? tokens.length : parametersEnd + 1;
+      }
+      if (tokens[index]?.value === '{') {
+        const bodyEnd = matchingToken(tokens, index, '{', '}');
+        index = bodyEnd < 0 ? tokens.length : bodyEnd + 1;
+      }
       return index;
     }
     if (token.value === '(' || token.value === '[' || token.value === '{') {
@@ -399,11 +490,22 @@ function awaitOperandEnd(tokens, awaitIndex) {
   consumePrimary();
   while (index < tokens.length) {
     const value = tokens[index].value;
-    if (value === '.' || value === '?.') {
+    if (value === '.') {
       // Private fields are tokenized as '.', '#', and the field name.
       // Consume the whole member just like a normal dot property so an
       // awaited private-field access remains valid after rewriting.
       index += tokens[index + 1]?.value === '#' ? 3 : 2;
+      continue;
+    }
+    if (value === '?.') {
+      if (tokens[index + 1]?.value === '(' || tokens[index + 1]?.value === '[') {
+        const opening = tokens[index + 1].value;
+        const closing = opening === '(' ? ')' : ']';
+        const close = matchingToken(tokens, index + 1, opening, closing);
+        index = close < 0 ? tokens.length : close + 1;
+      } else {
+        index += 2;
+      }
       continue;
     }
     if (value === '[' || value === '(') {
@@ -501,7 +603,7 @@ function replaceAwaitExpressions(source) {
     if (token.value !== 'await') continue;
     const previous = tokens[index - 1]?.value;
     const next = tokens[index + 1]?.value;
-    if (previous === '.' || previous === '?.' || next === ':') continue;
+    if (previous === '.' || previous === '?.' || previous === 'for' || next === ':') continue;
     spans.push({ start: token.start, end: awaitOperandEnd(tokens, index), token });
   }
   const outerSpans = spans.filter((span) => !spans.some((parent) => (
@@ -533,7 +635,9 @@ function applyReplacements(source, replacements) {
 }
 
 function transformCandidates(source, candidates, bindingName) {
-  const transformableCandidates = candidates.filter((candidate) => !candidate.containsUnsupportedSyntax);
+  const transformableCandidates = candidates.filter((candidate) => (
+    !candidate.containsUnsupportedSyntax && candidate.containsAwait
+  ));
   const outerCandidates = [];
   const active = [];
   for (const candidate of [...transformableCandidates].sort((left, right) => (
@@ -551,10 +655,13 @@ function transformCandidates(source, candidates, bindingName) {
     const rawBody = source.slice(bodyStart, bodyEnd);
     const transformedNested = transformAsyncSource(rawBody, bindingName).source;
     const body = replaceAwaitExpressions(transformedNested);
-    // Keep the async marker on the generated function. The body still routes
-    // through the runtime generator bridge for task tracking, but callers must
-    // observe the standard AsyncFunction constructor/toString identity.
-    const header = source.slice(candidate.start, candidate.headerEnd);
+    // The generator bridge is the async function's implementation. Retaining
+    // the native async marker here would make the bridge's thenable pass
+    // through an additional intrinsic Promise assimilation boundary, so
+    // AsyncLocalStorage continuations would no longer follow the bridge's
+    // resource. The generated function must therefore be plain while the
+    // bridge provides the Promise-returning Node behavior.
+    const header = removeToken(source, candidate.start, candidate.headerEnd, candidate.start, candidate.asyncEnd);
     if (candidate.kind === 'function' || candidate.kind === 'method') {
       return {
         start: candidate.start,
@@ -566,7 +673,7 @@ function transformCandidates(source, candidates, bindingName) {
       return {
         start: candidate.start,
         end: candidate.bodyEnd,
-        value: `${header}{ return ${bindingName}(function* () {${body}}, this, arguments); }`,
+        value: `${header}${bindingName}(function* () {${body}}, this, arguments)`,
       };
     }
     return {
@@ -579,12 +686,25 @@ function transformCandidates(source, candidates, bindingName) {
 }
 
 export function transformAsyncSource(source, preferredBinding = '__bnhAsync') {
-  const text = rewriteForAwaitLoops(String(source));
+  const originalText = String(source);
+  // `rewriteForAwaitLoops()` lowers `for await` to a generator protocol. The
+  // lowered source no longer contains the original `await` token, but its
+  // enclosing async function still needs lowering. Keep the pre-rewrite
+  // candidate metadata so the async-identity optimization does not leave a
+  // native async function containing the generated `yield` expressions.
+  const originalCandidates = asyncFunctionCandidates(originalText).candidates;
+  const text = rewriteForAwaitLoops(originalText);
   const names = new Set(text.match(/\b[$A-Z_a-z][$\w]*\b/gu) || []);
   let bindingName = preferredBinding;
   while (names.has(bindingName)) bindingName = `${preferredBinding}$`;
   const { candidates } = asyncFunctionCandidates(text);
-  if (!candidates.some((candidate) => !candidate.containsUnsupportedSyntax)) {
+  for (let index = 0; index < candidates.length; index += 1) {
+    const original = originalCandidates[index];
+    candidates[index].containsAwait = original
+      ? tokenize(originalText.slice(original.bodyStart, original.bodyEnd)).some((token) => token.value === 'await')
+      : tokenize(text.slice(candidates[index].bodyStart, candidates[index].bodyEnd)).some((token) => token.value === 'await');
+  }
+  if (!candidates.some((candidate) => !candidate.containsUnsupportedSyntax && candidate.containsAwait)) {
     return { source: text, transformed: false, bindingName };
   }
   return {

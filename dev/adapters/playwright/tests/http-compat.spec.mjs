@@ -80,7 +80,11 @@ test.describe('browser-native http compatibility', () => {
       const http = require('node:http');
       const net = require('node:net');
 
-      const server = http.createServer((_request, response) => response.end('raw-body'));
+      const server = http.createServer((_request, response) => {
+        response.setHeader('transfer-encoding', 'chunked');
+        response.write('raw-body');
+        response.end();
+      });
       await new Promise((resolve, reject) => {
         server.once('error', reject);
         server.listen(0, '127.0.0.1', resolve);
@@ -99,7 +103,110 @@ test.describe('browser-native http compatibility', () => {
           socket.once('close', () => resolve(output));
         });
         assert.match(wire, /^HTTP\\/1\\.1 200 /);
-        assert.match(wire, /\\r\\n\\r\\nraw-body$/);
+        assert.match(wire, /\\r\\n\\r\\n8\\r\\nraw-body\\r\\n0\\r\\n\\r\\n$/);
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    `);
+  });
+
+  test('keeps pipelined raw HTTP requests on a reusable connection', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'raw-net-http-keep-alive', `
+      const assert = require('node:assert');
+      const http = require('node:http');
+      const net = require('node:net');
+
+      let requests = 0;
+      const server = http.createServer((_request, response) => {
+        requests += 1;
+        response.end('response-' + requests);
+      });
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+
+      try {
+        const wire = await new Promise((resolve, reject) => {
+          const socket = net.connect(server.address().port, '127.0.0.1');
+          let output = '';
+          socket.setEncoding('utf8');
+          socket.on('data', (chunk) => { output += chunk; });
+          socket.once('connect', () => {
+            socket.write('GET /one HTTP/1.1\\r\\nHost: localhost\\r\\n\\r\\n');
+            socket.write('GET /two HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n');
+          });
+          socket.once('error', reject);
+          socket.once('close', () => resolve(output));
+        });
+        assert.strictEqual(requests, 2);
+        assert.strictEqual((wire.match(/HTTP\\/1\\.1 200 OK/g) || []).length, 2);
+        assert.ok(wire.includes('response-1'));
+        assert.ok(wire.includes('response-2'));
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    `);
+  });
+
+  test('routes IPv6 loopback fetches to the virtual HTTP server', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'ipv6-loopback-http', `
+      const assert = require('node:assert');
+      const http = require('node:http');
+
+      const server = http.createServer((_request, response) => response.end('ipv6-ok'));
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '::1', resolve);
+      });
+
+      try {
+        const response = await fetch('http://[::1]:' + server.address().port + '/');
+        assert.strictEqual(response.status, 200);
+        assert.strictEqual(await response.text(), 'ipv6-ok');
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    `);
+  });
+
+  test('uses Node socket port errors for invalid HTTP listen ports', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'invalid-http-listen-port', `
+      const assert = require('node:assert');
+      const http = require('node:http');
+
+      for (const port of ['hello-world', '1234hello']) {
+        const server = http.createServer();
+        assert.throws(() => server.listen({ port }), (error) => error.code === 'ERR_SOCKET_BAD_PORT');
+      }
+    `);
+  });
+
+  test('rejects a missing HTTP/1.1 Host header before dispatching the request', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'raw-net-http-host', `
+      const assert = require('node:assert');
+      const http = require('node:http');
+      const net = require('node:net');
+
+      const server = http.createServer(() => {
+        assert.fail('a request without Host must not reach the handler');
+      });
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+
+      try {
+        const wire = await new Promise((resolve, reject) => {
+          const socket = net.connect(server.address().port, '127.0.0.1');
+          let output = '';
+          socket.setEncoding('utf8');
+          socket.on('data', (chunk) => { output += chunk; });
+          socket.once('connect', () => socket.end('GET / HTTP/1.1\\r\\nConnection: close\\r\\n\\r\\n'));
+          socket.once('error', reject);
+          socket.once('close', () => resolve(output));
+        });
+        assert.match(wire, /^HTTP\\/1\\.1 400 Bad Request/);
       } finally {
         await new Promise((resolve) => server.close(resolve));
       }
@@ -166,6 +273,58 @@ test.describe('browser-native http compatibility', () => {
         assert.strictEqual(response.status, 200);
         assert.strictEqual(response.headers.get('content-type'), 'application/json');
         assert.strictEqual(await response.text(), '[{"hello":"world"}],{"a":42}]');
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    `);
+  });
+
+  test('destroys the response socket before starting a replacement request', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'request-destroy-reconnect', `
+      const assert = require('node:assert');
+      const http = require('node:http');
+
+      let requests = 0;
+      const server = http.createServer((_request, response) => {
+        requests += 1;
+        response.setHeader('transfer-encoding', 'chunked');
+        response.write('first');
+        if (requests === 1) {
+          setTimeout(() => {
+            if (!response.destroyed) response.end('late');
+          }, 25);
+        } else {
+          response.end('second');
+        }
+      });
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+
+      try {
+        await new Promise((resolve, reject) => {
+          const request = http.get('http://localhost:' + server.address().port, (response) => {
+            response.once('error', () => {});
+            response.once('data', () => {
+              request.destroy();
+              resolve();
+            });
+          });
+          request.once('error', reject);
+        });
+        const body = await new Promise((resolve, reject) => {
+          const request = http.get('http://localhost:' + server.address().port, (response) => {
+            let output = '';
+            response.setEncoding('utf8');
+            response.on('data', (chunk) => { output += chunk; });
+            response.once('end', () => resolve(output));
+            response.once('error', reject);
+          });
+          request.once('error', reject);
+        });
+        assert.strictEqual(requests, 2);
+        assert.strictEqual(body, 'firstsecond');
       } finally {
         await new Promise((resolve) => server.close(resolve));
       }
@@ -409,6 +568,111 @@ test.describe('browser-native http compatibility', () => {
         assert.ok(result.error.name === 'TimeoutError' || result.error.code === 'ETIMEDOUT');
       } finally {
         globalThis.fetch = originalFetch;
+      }
+    `);
+  });
+
+  test('aborting an async piped response permits a replacement request', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'async-piped-request-destroy-reconnect', `
+      const assert = require('node:assert');
+      const http = require('node:http');
+      const { Readable, finished } = require('node:stream');
+
+      const sendStream = (source, response) => {
+        let sourceOpen = true;
+        finished(source, { readable: true, writable: false }, () => { sourceOpen = false; });
+        finished(response, (error) => {
+          if (sourceOpen && error) source.destroy();
+        });
+        source.pipe(response);
+      };
+
+      let requests = 0;
+      const server = http.createServer(async (_request, response) => {
+        requests += 1;
+        const source = new Readable({ read() {} });
+        const reply = {
+          raw: response,
+          sent: false,
+          send(payload) {
+            this.sent = true;
+            sendStream(payload, this.raw);
+            return this;
+          },
+          then(fulfilled, rejected) {
+            if (this.sent) {
+              fulfilled();
+              return;
+            }
+            finished(this.raw, (error) => error ? rejected?.(error) : fulfilled());
+          },
+        };
+        response.setHeader('transfer-encoding', 'chunked');
+        source.push('first');
+        reply.send(source);
+        if (requests === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          source.push('late');
+          source.push(null);
+        } else {
+          source.push('second');
+          source.push(null);
+        }
+        return reply;
+      });
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+
+      try {
+        const port = server.address().port;
+        const warmup = http.createServer((_request, response) => {
+          setTimeout(() => response.end('late'), 25);
+        });
+        await new Promise((resolve, reject) => {
+          warmup.once('error', reject);
+          warmup.listen(0, '127.0.0.1', resolve);
+        });
+        try {
+          await new Promise((resolve, reject) => {
+            const request = http.get('http://localhost:' + warmup.address().port);
+            request.once('error', (error) => {
+              assert.strictEqual(error.code, 'ECONNRESET');
+              resolve();
+            });
+            setTimeout(() => request.destroy(), 1);
+          });
+        } finally {
+          await new Promise((resolve) => warmup.close(resolve));
+        }
+        await new Promise((resolve, reject) => {
+          const request = http.get('http://localhost:' + port, (response) => {
+            response.once('error', () => {});
+            response.once('data', (chunk) => {
+              assert.strictEqual(chunk.toString(), 'first');
+              setTimeout(() => {
+                request.destroy();
+                resolve();
+              }, 1);
+            });
+          });
+          request.once('error', reject);
+        });
+        const body = await new Promise((resolve, reject) => {
+          const request = http.get('http://localhost:' + port, (response) => {
+            let output = '';
+            response.setEncoding('utf8');
+            response.on('data', (chunk) => { output += chunk; });
+            response.once('end', () => resolve(output));
+            response.once('error', reject);
+          });
+          request.once('error', reject);
+        });
+        assert.strictEqual(requests, 2);
+        assert.strictEqual(body, 'firstsecond');
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
       }
     `);
   });

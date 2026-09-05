@@ -551,7 +551,7 @@ console.log('[FS] ' + message);
         badge: 'tsc v5.5.4',
         tag: 'Official tsc',
         scriptName: 'build:tsc',
-        command: "mkdir -p dist && tsc src/main.ts src/global.d.ts --outDir dist && node dist/main.js && cat dist/result.txt",
+        command: "mkdir -p dist && tsc --project tsconfig.json && node dist/main.js && cat dist/result.txt",
         note: "Official Microsoft TypeScript compiler transpiles full AST with standard CommonJS/ES2022 output per tsconfig.",
       },
       all: {
@@ -559,7 +559,7 @@ console.log('[FS] ' + message);
         badge: 'All Compilers',
         tag: 'Comparison Mode',
         scriptName: 'build:all',
-        command: "mkdir -p dist && node build-node.js && vite build --entry src/main.ts --out dist/vite.js && tsc src/main.ts src/global.d.ts --outDir dist && node dist/main.js && cat dist/result.txt",
+        command: "mkdir -p dist && node build-node.js && vite build --entry src/main.ts --out dist/vite.js && tsc --project tsconfig.json && node dist/main.js && cat dist/result.txt",
         note: "Executes all three compiler engines sequentially to produce a side-by-side comparison matrix.",
       },
     };
@@ -593,7 +593,9 @@ function transformTypeScript(source, id = 'src/main.ts') {
     return \`var \${name} = /* @__PURE__ */ ((e) => {\\n\${lines.join('\\n')}\\n  return e;\\n})({});\`;
   });
   code = code.replace(/<[A-Za-z_$][\\w$,\\s]*>(?=\\s*\\()/g, '');
-  code = code.replace(/:\\s*[A-Za-z_$][\\w$]*(?:<[^>\\n]+>)?(?:\\[\\])?(?=\\s*[,)=;{])/g, '');
+  // Keep object properties such as path: pathname; only known built-in or
+  // PascalCase type names are safe to remove without a full TypeScript parser.
+  code = code.replace(/:\\s*(?:string|number|boolean|any|unknown|never|void|object|[A-Z][A-Za-z_$][\\w$]*)(?:<[^>\\n]+>)?(?:\\[\\])?(?=\\s*[,)=;{])/g, '');
   code = code.replace(/\\s+as\\s+[A-Za-z_$][\\w$]*(?:<[^>\\n]+>)?(?:\\[\\])?/g, '');
   code = code.replace(/([A-Za-z_$][\\w$]*)!\\s*(?=[,.;)=])/g, '$1');
   code = code.split('\\n').filter((line, i, arr) => line.trim() || (i > 0 && arr[i - 1].trim())).join('\\n');

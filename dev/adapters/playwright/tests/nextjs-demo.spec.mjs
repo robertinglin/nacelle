@@ -175,6 +175,7 @@ test.describe('Next.js 16 App Router browser demo', () => {
     await previewText('h1').toBe('About the Next.js runtime');
     await page.locator('.btn-route[data-route="/api/hello"]').click();
     await previewText('body').toContain('Hello from a native Next.js route');
+    await page.evaluate(() => window.__bnhStopNextApp?.());
 
     const expectedConsoleErrorFragments = [
       // The readiness probe polls / through the Service Worker gateway while

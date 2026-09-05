@@ -4030,15 +4030,9 @@ export function createVfs(options = {}) {
 
   const trackedPromises = Object.fromEntries(Object.entries(promises).map(([name, operation]) => {
     if (typeof operation !== 'function') return [name, operation];
-    return [name, (...args) => {
+    return [name, async (...args) => {
       const release = taskTracker?.();
-      let pending;
-      try {
-        pending = operation(...args);
-      } catch (error) {
-        release?.();
-        throw error;
-      }
+      let turn;
       // Real filesystem I/O yields to the event loop. An unbroken chain of
       // in-memory completions starves timers and keeps WeakRef targets alive
       // for the entire trace/build, eventually exhausting the browser heap.
@@ -4050,13 +4044,14 @@ export function createVfs(options = {}) {
             resolve();
           }, 0));
         }
-        const turn = ioTurn;
-        pending = Promise.resolve(pending).then(
-          (value) => turn.then(() => value),
-          (error) => turn.then(() => { throw error; }),
-        );
+        turn = ioTurn;
       }
-      return Promise.resolve(pending).finally(() => release?.());
+      try {
+        if (turn) await turn;
+        return await operation(...args);
+      } finally {
+        release?.();
+      }
     }];
   }));
 

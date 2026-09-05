@@ -121,17 +121,19 @@ process.exitCode = child.status ?? 1;
   });
 
   await check('zlib', async () => {
-    const node = await createNode();
-    const result = await processResult(await node.execute(`
-      const zlib = require('node:zlib');
-      zlib.deflate('payload', (deflateError, compressed) => {
-        if (deflateError) throw deflateError;
-        zlib.inflate(compressed, (inflateError, output) => {
-          if (inflateError) throw inflateError;
-          process.stdout.write(output.toString());
+    const node = await createNode({
+      '/node/zlib-callback.js': `
+        const zlib = require('node:zlib');
+        zlib.deflate('payload', (deflateError, compressed) => {
+          if (deflateError) throw deflateError;
+          zlib.inflate(compressed, (inflateError, output) => {
+            if (inflateError) throw inflateError;
+            process.stdout.write(output.toString());
+          });
         });
-      });
-    `));
+      `,
+    });
+    const result = await processResult(await node.bash('node zlib-callback.js'));
     return { pass: result.code === 0 && result.stdout === 'payload', code: result.code, actual: result.stdout, expected: 'payload', stderr: result.stderr };
   });
 

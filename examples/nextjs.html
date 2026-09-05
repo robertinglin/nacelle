@@ -665,6 +665,17 @@ export default nextConfig;
     let launching = false;
     let readinessController = null;
 
+    const stopNextApp = () => {
+      readinessController?.abort();
+      const processHandle = activeProcess;
+      activeProcess = null;
+      try {
+        void processHandle?.kill();
+      } catch {}
+    };
+    window.__bnhStopNextApp = stopNextApp;
+    window.addEventListener('pagehide', () => { void stopNextApp(); }, { once: true });
+
     async function waitForNextServer(port = 3000, signal) {
       const deadline = Date.now() + 90000;
       let lastError;

@@ -1394,11 +1394,12 @@ function wrapBufferResult(uint8Arr, BufferClass) {
   return uint8Arr;
 }
 
-function operation(value, format, mode, BufferClass, scope, optionsOrCallback, callback) {
+function operation(value, format, mode, BufferClass, scope, optionsOrCallback, callback, trackTask) {
   const done = typeof callback === 'function'
     ? callback
     : typeof optionsOrCallback === 'function' ? optionsOrCallback : undefined;
   const options = typeof optionsOrCallback === 'object' && optionsOrCallback !== null ? optionsOrCallback : {};
+  const releaseTask = trackTask?.('zlib');
 
   const execute = async () => {
     const streamFormat = typeof format === 'function' ? format(value, scope) : format;
@@ -1424,11 +1425,13 @@ function operation(value, format, mode, BufferClass, scope, optionsOrCallback, c
   };
 
   const result = execute();
-  if (typeof done !== 'function') return result.then((output) => wrapBufferResult(output, BufferClass));
-  return result.then(
-    (output) => done(null, wrapBufferResult(output, BufferClass)),
-    (error) => done(mode === 'decompress' ? zlibDataError(error) : error),
-  );
+  const settled = typeof done !== 'function'
+    ? result.then((output) => wrapBufferResult(output, BufferClass))
+    : result.then(
+      (output) => done(null, wrapBufferResult(output, BufferClass)),
+      (error) => done(mode === 'decompress' ? zlibDataError(error) : error),
+    );
+  return settled.finally(() => releaseTask?.());
 }
 
 function syncUnavailable(kind, method, value) {
@@ -1484,7 +1487,7 @@ function createProperty(Constructor, bufferClass, scope) {
   return (options) => new Constructor(options, bufferClass, scope);
 }
 
-export function createZlibShim(scope, BufferClass) {
+export function createZlibShim(scope, BufferClass, fallbackTrackTask) {
   const nativeScope = Object.create(scope);
   Object.defineProperties(nativeScope, {
     Blob: { value: scope.Blob },
@@ -1492,16 +1495,21 @@ export function createZlibShim(scope, BufferClass) {
     CompressionStream: { value: scope.CompressionStream },
     DecompressionStream: { value: scope.DecompressionStream },
   });
+  const getTaskTracker = () => {
+    const owner = scope.__bnhActiveProcess || scope.process;
+    return owner?._bnhTaskTracker || fallbackTrackTask;
+  };
+  const runOperation = (...args) => operation(...args, getTaskTracker());
   const zlib = {
     constants,
     codes,
     crc32: (data, value) => crc32(data, value, scope),
-    gzip: (value, callback) => operation(value, 'gzip', 'compress', BufferClass, nativeScope, callback),
-    gunzip: (value, callback) => operation(value, 'gzip', 'decompress', BufferClass, nativeScope, callback),
-    deflate: (value, callback) => operation(value, 'deflate', 'compress', BufferClass, nativeScope, callback),
-    inflate: (value, callback) => operation(value, 'deflate', 'decompress', BufferClass, nativeScope, callback),
-    deflateRaw: (value, callback) => operation(value, 'deflate-raw', 'compress', BufferClass, nativeScope, callback),
-    inflateRaw: (value, callback) => operation(value, 'deflate-raw', 'decompress', BufferClass, nativeScope, callback),
+    gzip: (value, callback) => runOperation(value, 'gzip', 'compress', BufferClass, nativeScope, callback, undefined),
+    gunzip: (value, callback) => runOperation(value, 'gzip', 'decompress', BufferClass, nativeScope, callback, undefined),
+    deflate: (value, callback) => runOperation(value, 'deflate', 'compress', BufferClass, nativeScope, callback, undefined),
+    inflate: (value, callback) => runOperation(value, 'deflate', 'decompress', BufferClass, nativeScope, callback, undefined),
+    deflateRaw: (value, callback) => runOperation(value, 'deflate-raw', 'compress', BufferClass, nativeScope, callback, undefined),
+    inflateRaw: (value, callback) => runOperation(value, 'deflate-raw', 'decompress', BufferClass, nativeScope, callback, undefined),
     Inflate,
     createInflate: createProperty(Inflate, BufferClass, nativeScope),
     Deflate,
@@ -1518,8 +1526,8 @@ export function createZlibShim(scope, BufferClass) {
     createInflateRaw: createProperty(InflateRaw, BufferClass, nativeScope),
     BrotliCompress,
     BrotliDecompress,
-    brotliCompress: (value, optionsOrCallback, callback) => operation(value, 'br', 'compress', BufferClass, nativeScope, optionsOrCallback, callback),
-    brotliDecompress: (value, optionsOrCallback, callback) => operation(value, 'br', 'decompress', BufferClass, nativeScope, optionsOrCallback, callback),
+    brotliCompress: (value, optionsOrCallback, callback) => runOperation(value, 'br', 'compress', BufferClass, nativeScope, optionsOrCallback, callback),
+    brotliDecompress: (value, optionsOrCallback, callback) => runOperation(value, 'br', 'decompress', BufferClass, nativeScope, optionsOrCallback, callback),
     createBrotliCompress: createProperty(BrotliCompress, BufferClass, nativeScope),
     createBrotliDecompress: createProperty(BrotliDecompress, BufferClass, nativeScope),
     ZstdCompress,
@@ -1532,7 +1540,7 @@ export function createZlibShim(scope, BufferClass) {
     deflateRawSync: (value, options) => wrapBufferResult(wasmZlibDeflate(value, options, 'deflate-raw'), BufferClass),
     inflateRawSync: (value, options) => wrapBufferResult(wasmZlibInflate(value, options, 'deflate-raw'), BufferClass),
     inflateSync: (value, options) => wrapBufferResult(wasmZlibInflate(value, options), BufferClass),
-    unzip: (value, optionsOrCallback, callback) => operation(value, (input, targetScope) => unzipFormat(input, targetScope), 'decompress', BufferClass, scope, optionsOrCallback, callback),
+    unzip: (value, optionsOrCallback, callback) => runOperation(value, (input, targetScope) => unzipFormat(input, targetScope), 'decompress', BufferClass, scope, optionsOrCallback, callback),
     unzipSync: (value, options) => {
       const input = toUint8Array(value);
       const output = input[0] === 0x1f && input[1] === 0x8b
@@ -1542,8 +1550,8 @@ export function createZlibShim(scope, BufferClass) {
     },
     brotliCompressSync: (value, options) => wrapBufferResult(wasmBrotliCompress(value, options), BufferClass),
     brotliDecompressSync: (value, options) => wrapBufferResult(wasmBrotliDecompress(value, options), BufferClass),
-    zstdCompress: (value, optionsOrCallback, callback) => operation(value, 'zstd', 'compress', BufferClass, nativeScope, optionsOrCallback, callback),
-    zstdDecompress: (value, optionsOrCallback, callback) => operation(value, 'zstd', 'decompress', BufferClass, nativeScope, optionsOrCallback, callback),
+    zstdCompress: (value, optionsOrCallback, callback) => runOperation(value, 'zstd', 'compress', BufferClass, nativeScope, optionsOrCallback, callback),
+    zstdDecompress: (value, optionsOrCallback, callback) => runOperation(value, 'zstd', 'decompress', BufferClass, nativeScope, optionsOrCallback, callback),
     zstdCompressSync: (value, options) => wrapBufferResult(wasmZstdCompress(value, options), BufferClass),
     zstdDecompressSync: (value, options) => wrapBufferResult(wasmZstdDecompress(value, options), BufferClass),
   };

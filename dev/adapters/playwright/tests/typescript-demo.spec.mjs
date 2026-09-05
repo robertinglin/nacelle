@@ -130,7 +130,7 @@ test.describe('TypeScript multi-compiler browser demo', () => {
     await expect(status).toHaveText(/compiled via tsc v5.5.4/, { timeout: 25000 });
     await expect(exitStatus).toHaveText('exit 0');
     const tscEmitted = await compiled.textContent();
-    expect(tscEmitted).toMatch(/\bvar user\s*=/);
+    expect(tscEmitted).toMatch(/\b(?:var|const) user\s*=/);
     expect(tscEmitted).toContain("require('node:fs')");
     expect(tscEmitted).not.toContain('interface User');
     expect(tscEmitted).not.toContain(': User');
@@ -147,7 +147,7 @@ test.describe('TypeScript multi-compiler browser demo', () => {
 
     await expect(nodeCol).toContainText('Ada Lovelace');
     await expect(viteCol).toContainText('[vite:esbuild]');
-    await expect(tscCol).toContainText(/\bvar user\s*=/);
+    await expect(tscCol).toContainText(/\b(?:var|const) user\s*=/);
 
     // 5. Test Switching Presets (Generics & Enums)
     await page.locator('.btn-preset[data-preset="enums"]').click();
@@ -156,7 +156,21 @@ test.describe('TypeScript multi-compiler browser demo', () => {
 
     await expect(nodeCol).toContainText('TaskStatus');
     await expect(viteCol).toContainText('TaskStatus');
-    await expect(tscCol).toContainText('var TaskStatus');
+    await expect(tscCol).toContainText(/\b(?:var|const) TaskStatus/);
+
+    // The async preset exercises object properties whose values look like
+    // identifiers and String.prototype.endsWith under the configured target.
+    await page.locator('.btn-preset[data-preset="async"]').click();
+    await expect(status).toHaveText(/all 3 compiled/, { timeout: 25000 });
+    await page.locator('.engine-tab[data-engine="vite"]').click();
+    await expect(status).toHaveText(/compiled via Vite \(esbuild\)/, { timeout: 25000 });
+    await expect(exitStatus).toHaveText('exit 0');
+    await expect(resultCaption).toContainText('Analyzed src/main.ts');
+
+    await page.locator('.engine-tab[data-engine="tsc"]').click();
+    await expect(status).toHaveText(/compiled via tsc v5\.5\.4/, { timeout: 25000 });
+    await expect(exitStatus).toHaveText('exit 0');
+    await expect(resultCaption).toContainText('Analyzed src/main.ts');
 
     expect(consoleErrors).toEqual([]);
     expect(pageErrors).toEqual([]);

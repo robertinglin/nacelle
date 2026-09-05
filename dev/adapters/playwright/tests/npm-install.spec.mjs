@@ -444,7 +444,12 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     await npm.install(['first@1.0.0', 'second@1.0.0'], { cwd: '/node', concurrency: 8 });
 
     expect(vfs.files.has('/node/node_modules/shared/package.json')).toBe(true);
-    expect(vfs.files.has('/node/node_modules/second/node_modules/shared/package.json')).toBe(true);
+    // Either parent can finish first and claim the hoisted location.
+    for (const [parent, version] of [['first', '1.0.0'], ['second', '2.0.0']]) {
+      const nested = `/node/node_modules/${parent}/node_modules/shared/package.json`;
+      const manifest = vfs.files.has(nested) ? nested : '/node/node_modules/shared/package.json';
+      expect(JSON.parse(vfs.readSource(manifest)).version).toBe(version);
+    }
   });
 
   test('BrowserNpmCache saves, retrieves, and clears metadata and tarballs', async () => {

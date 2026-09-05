@@ -6720,7 +6720,7 @@ export function createRuntime({
       })(),
       'util/types': utilTypes,
       worker_threads: { ...createBrowserIO(scope), isMainThread: true, parentPort: null, workerData: undefined },
-      zlib: createZlibShimModule(scope, Buffer), perf_hooks: performancePrimitives.perfHooks, v8,
+      zlib: createZlibShimModule(scope, Buffer, trackTask), perf_hooks: performancePrimitives.perfHooks, v8,
       async_hooks: asyncHooks,
       diagnostics_channel: diagnosticsChannels,
       test: nodeTest,

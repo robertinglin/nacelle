@@ -1,3 +1,4 @@
+Error.stackTraceLimit = 40; // TEMP-DIAG
 import { EventEmitter } from './events.js';
 import { Readable, Writable } from './streams.js';
 import { resolveEncodingOps } from './buffer.js';
@@ -350,12 +351,11 @@ function truncateDescriptor(value) {
   return value;
 }
 
-function decode(value, encoding) {
+function decode(value, encoding, copy = true) {
   if (Array.isArray(value)) return Uint8Array.from(value);
-  // Worker descriptors already arrive as isolated Uint8Arrays. Re-copying
-  // the complete mounted Node tree here doubles the browser memory required
-  // by every virtual child before its entry module can start.
-  if (value instanceof Uint8Array) return value;
+  // Public filesystem writes own their data. Only the internal worker mount
+  // path may reuse already-isolated snapshot bytes.
+  if (value instanceof Uint8Array) return copy ? new Uint8Array(value) : value;
   if (value instanceof ArrayBuffer) return new Uint8Array(value.slice(0));
   if (ArrayBuffer.isView(value)) {
     return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
@@ -727,6 +727,8 @@ export function createVfs(options = {}) {
   const directories = backend.directories instanceof Set ? backend.directories : new Set(['/']);
   const symlinks = backend.symlinks instanceof Map ? backend.symlinks : new Map();
   const metadata = new Map();
+  const sourceVersions = new WeakMap();
+  let nextSourceVersion = 0;
   let taskTracker = typeof options.trackTask === 'function' ? options.trackTask : null;
   let activeRequestTracker = null;
   if (!directories.has('/')) directories.add('/');
@@ -927,16 +929,6 @@ export function createVfs(options = {}) {
     }
   }
 
-  function trackStreamLifecycle(stream, label) {
-    const release = taskTracker?.(label);
-    if (typeof release !== 'function') return;
-    let released = false;
-    stream.once('close', () => {
-      if (released) return;
-      released = true;
-      release();
-    });
-  }
 
   function describePath(pathValue) {
     const path = resolvePath(pathValue);
@@ -1121,10 +1113,17 @@ export function createVfs(options = {}) {
     if (directories.has(path) || symlinks.has(path)) throw isDirectory(path, operation);
     const previous = files.get(path);
     const bytes = decode(value, encoding);
-    setFileBytes(path, append && previous ? new Uint8Array([...previous, ...bytes]) : bytes);
+    if (append && previous) {
+      const combined = new Uint8Array(previous.byteLength + bytes.byteLength);
+      combined.set(previous);
+      combined.set(bytes, previous.byteLength);
+      setFileBytes(path, combined);
+    } else setFileBytes(path, bytes);
     metadataFor(path);
     notify(path, previous ? 'change' : 'rename');
-    emitMutation({ action: 'change', path, type: 'file', bytes: new Uint8Array(files.get(path)), mode: metadata.get(path)?.mode });
+    if (mutationListeners.size) {
+      emitMutation({ action: 'change', path, type: 'file', bytes: new Uint8Array(files.get(path)), mode: metadata.get(path)?.mode });
+    }
     return mount;
   }
 
@@ -2708,7 +2707,7 @@ export function createVfs(options = {}) {
     const virtualExecutable = pathValue === VIRTUAL_EXECUTABLE_PATH;
     const highWaterMark = options.highWaterMark ?? options.bufferSize ?? 64 * 1024;
     const autoDestroy = options.autoClose !== false;
-    const streamOptions = { highWaterMark, autoDestroy };
+    const streamOptions = { highWaterMark, autoDestroy, emitClose: options.emitClose };
     const stream = target || new Readable(streamOptions);
     if (target) Object.assign(stream, new Readable(streamOptions));
     else Object.setPrototypeOf(stream, ReadStream.prototype);
@@ -2730,7 +2729,6 @@ export function createVfs(options = {}) {
     stream._fsClosed = false;
     stream._fsPerformingIO = false;
     stream._fsIoWaiters = [];
-    trackStreamLifecycle(stream, 'fs.ReadStream');
     stream._fsCloseWith = typeof fsApi?.close === 'function'
       ? (fd, callback) => {
         const closeFn = fsApi.close;
@@ -3095,6 +3093,7 @@ export function createVfs(options = {}) {
     const streamOptions = {
       highWaterMark: options.highWaterMark,
       autoDestroy,
+      emitClose: options.emitClose,
       decodeStrings: true,
       final(callback) {
         callback();
@@ -3139,7 +3138,6 @@ export function createVfs(options = {}) {
       enumerable: false,
       value: true,
     });
-    trackStreamLifecycle(stream, 'fs.WriteStream');
     stream._destroyHook = WriteStream.prototype._destroy;
     const destroy = stream.destroy.bind(stream);
     stream.destroy = (error, callback) => {
@@ -3346,7 +3344,7 @@ export function createVfs(options = {}) {
     return mount;
   }
 
-  function seedEntry(root, entry, value) {
+  function seedEntry(root, entry, value, copyBuffers = true) {
     const entryValue = value && typeof value === 'object' && !(value instanceof ArrayBuffer) && !ArrayBuffer.isView(value)
       ? value
       : { data: value };
@@ -3382,13 +3380,13 @@ export function createVfs(options = {}) {
       }
     }
     if (files.has(path) && directories.has(path)) throw invalidPath();
-    files.set(path, decode(entryValue.data ?? entryValue.bytes ?? entryValue.content ?? entryValue));
+    files.set(path, decode(entryValue.data ?? entryValue.bytes ?? entryValue.content ?? entryValue, undefined, copyBuffers));
     if (entryValue.mode !== undefined) metadataFor(path).mode = modeValue(entryValue.mode);
   }
 
-  function seedTree(root, tree) {
+  function seedTree(root, tree, copyBuffers = true) {
     const entries = tree instanceof Map ? tree : Object.entries(tree || {});
-    for (const [entry, value] of entries) seedEntry(root, entry, value);
+    for (const [entry, value] of entries) seedEntry(root, entry, value, copyBuffers);
   }
 
   function mount(tree, config = {}, thirdConfig) {
@@ -3403,7 +3401,7 @@ export function createVfs(options = {}) {
       fixtureTree = tree.files ?? tree.tree ?? tree.fixtures ?? {};
     }
     const mountRecord = declareMount(mountConfig);
-    seedTree(mountRecord.path, fixtureTree);
+    seedTree(mountRecord.path, fixtureTree, mountConfig.copyBuffers !== false);
     for (const [link, target] of mountConfig.symlinks || []) {
       const linkPath = normalizePath(link, mountRecord.path);
       if (!isWithin(linkPath, mountRecord.path)) throw denied(linkPath, 'mount');
@@ -4095,6 +4093,33 @@ export function createVfs(options = {}) {
       // operation so callers can inspect or export an addon fixture safely.
       if (path.endsWith('.node') && files.has(path)) unsupportedNativeAddon(path);
       return readBytes(path);
+    },
+    // Text/source and version seams do not expose mutable backing buffers.
+    // All writes replace those buffers, including writes through hard links.
+    readSource(pathValue) {
+      const path = resolvePath(resolve(pathValue));
+      access(path, 'open');
+      if (directories.has(path)) throw isDirectory(path, 'open');
+      const bytes = files.get(path);
+      if (bytes === undefined) throw missing(path, 'open');
+      if (path.endsWith('.node')) unsupportedNativeAddon(path);
+      // Worker snapshots may share storage; browser TextDecoder requires unshared input.
+      const sourceBytes = typeof SharedArrayBuffer !== 'undefined' && bytes.buffer instanceof SharedArrayBuffer
+        ? new Uint8Array(bytes)
+        : bytes;
+      return new TextDecoder().decode(sourceBytes);
+    },
+    fileVersion(pathValue) {
+      const path = resolvePath(resolve(pathValue));
+      access(path, 'open');
+      const bytes = files.get(path);
+      if (bytes === undefined) return undefined;
+      let version = sourceVersions.get(bytes);
+      if (version === undefined) {
+        version = ++nextSourceVersion;
+        sourceVersions.set(bytes, version);
+      }
+      return version;
     },
     readDescriptor: readDescriptorAsync,
     readFile,

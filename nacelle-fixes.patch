@@ -1,0 +1,4036 @@
+diff --git a/dev/adapters/playwright/citgm-cache.mjs b/dev/adapters/playwright/citgm-cache.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..e9a57637215260d8d09c0270989d861e6863959e
+--- /dev/null
++++ b/dev/adapters/playwright/citgm-cache.mjs
+@@ -0,0 +1,17 @@
++/**
++ * Describe npm cache access for a browser child without cloning the parent's
++ * in-memory package graph across a worker boundary. Cache contents are an
++ * optimization; a child must retain the normal registry/artifact fetch path
++ * so installs remain valid after the child has started.
++ */
++export function npmCacheSnapshot(cache) {
++  const snapshot = { metadata: {}, tarballs: {} };
++  if (cache?.artifactManifest && cache?.artifactBaseUrl) {
++    snapshot.artifact = {
++      baseUrl: cache.artifactBaseUrl.href,
++      metadata: cache.artifactManifest.metadata || {},
++      tarballs: cache.artifactManifest.tarballs || {},
++    };
++  }
++  return snapshot;
++}
+diff --git a/dev/adapters/playwright/citgm-capture.mjs b/dev/adapters/playwright/citgm-capture.mjs
+index 232c030d5ac4d27cb41fe731657853cda170e2f6..bfa058bd17861ce387a680098b77c023b3f1683e 100644
+--- a/dev/adapters/playwright/citgm-capture.mjs
++++ b/dev/adapters/playwright/citgm-capture.mjs
+@@ -28,8 +28,8 @@ export function createSerializedCaptureQueue(bindings = globalThis) {
+     const state = stateFor(name);
+     state.scheduled = false;
+     if (state.running || state.pending.length === 0) return state.running || Promise.resolve();
+-    const payloads = state.pending.splice(0);
+-    const waiters = state.waiters.splice(0);
++    const payloads = state.pending.splice(0, batchSize);
++    const waiters = state.waiters.splice(0, batchSize);
+     state.running = Promise.resolve().then(async () => {
+       try {
+         const binding = bindings?.[name];
+diff --git a/dev/adapters/playwright/host-port.mjs b/dev/adapters/playwright/host-port.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d4befcd3e38222ea3c85e77bc30a208d8c82cfe1
+--- /dev/null
++++ b/dev/adapters/playwright/host-port.mjs
+@@ -0,0 +1,26 @@
++import net from 'node:net';
++
++// The browser-local virtual TCP allocator owns this range. Host-side adapter
++// listeners must stay outside it because guest servers are exposed on the
++// same numeric loopback port to real browsers.
++export const VIRTUAL_TCP_PORT_MIN = 41000;
++export const VIRTUAL_TCP_PORT_MAX = 60000;
++
++export function isHostPortAvailableForVirtualNetwork(port) {
++  return port < VIRTUAL_TCP_PORT_MIN || port > VIRTUAL_TCP_PORT_MAX;
++}
++
++export async function allocateHostPort() {
++  for (;;) {
++    const port = await new Promise((resolve, reject) => {
++      const server = net.createServer();
++      server.once('error', reject);
++      server.listen(0, '127.0.0.1', () => {
++        const address = server.address();
++        const value = typeof address === 'object' && address ? address.port : null;
++        server.close((error) => error ? reject(error) : resolve(value));
++      });
++    });
++    if (Number.isInteger(port) && isHostPortAvailableForVirtualNetwork(port)) return port;
++  }
++}
+diff --git a/dev/adapters/playwright/result-artifacts.mjs b/dev/adapters/playwright/result-artifacts.mjs
+index 3b829887d3116df1a1f6fee434b2165a23ab1f0a..5bf11790d3ffc265556df6354dce62573c6ece78 100644
+--- a/dev/adapters/playwright/result-artifacts.mjs
++++ b/dev/adapters/playwright/result-artifacts.mjs
+@@ -108,6 +108,8 @@ function writeJsonLine(stream, value) {
+ }
+ 
+ async function finishStream(stream) {
++  if (stream.errored) throw stream.errored;
++  if (stream.writableFinished) return;
+   const completion = once(stream, 'finish');
+   stream.end();
+   await completion;
+@@ -134,57 +136,30 @@ export async function createCITGMArtifactWriter({ rootDir, module, runId } = {})
+     stderr: createWriteStream(paths.stderr),
+   };
+   const outputWritten = { stdout: false, stderr: false };
++  const streams = [progressStream, networkStream, ...Object.values(outputStreams)];
++  let streamFailure;
++  // Open/write errors may arrive before a caller queues the first write, or
++  // after write() returned true. Keep an error observer for the whole lifetime.
++  for (const stream of streams) stream.on('error', error => { streamFailure ||= error; });
+   let writeChain = Promise.resolve();
+   let closed = false;
+-
+-  const append = (stream, value) => {
++  const appendBytes = (stream, bytes) => {
+     if (closed) return writeChain;
+-    const line = `${JSON.stringify(value, jsonReplacer())}\n`;
+     writeChain = writeChain.then(() => new Promise((resolve, reject) => {
+-      const cleanup = () => {
+-        stream.off('error', onError);
+-        stream.off('drain', onDrain);
+-      };
+-      const complete = () => {
+-        cleanup();
+-        resolve();
+-      };
+-      const onError = (error) => {
+-        cleanup();
+-        reject(error);
+-      };
+-      const onDrain = complete;
+-      stream.once('error', onError);
+-      if (stream.write(line)) complete();
+-      else stream.once('drain', onDrain);
++      if (streamFailure) { reject(streamFailure); return; }
++      stream.write(bytes, error => error ? reject(error) : resolve());
+     }));
++    // Callers may intentionally fire-and-forget capture writes. Preserve the
++    // rejection for close(), without causing a host unhandled rejection.
++    writeChain.catch(() => {});
+     return writeChain;
+   };
+-
++  const append = (stream, value) => appendBytes(stream, `${JSON.stringify(value, jsonReplacer())}\n`);
+   const appendOutput = (streamName, value) => {
+     const stream = outputStreams[streamName];
+     if (!stream || closed) return writeChain;
+     outputWritten[streamName] = true;
+-    const bytes = asBytes(value);
+-    writeChain = writeChain.then(() => new Promise((resolve, reject) => {
+-      const cleanup = () => {
+-        stream.off('error', onError);
+-        stream.off('drain', onDrain);
+-      };
+-      const complete = () => {
+-        cleanup();
+-        resolve();
+-      };
+-      const onError = (error) => {
+-        cleanup();
+-        reject(error);
+-      };
+-      const onDrain = complete;
+-      stream.once('error', onError);
+-      if (stream.write(bytes)) complete();
+-      else stream.once('drain', onDrain);
+-    }));
+-    return writeChain;
++    return appendBytes(stream, asBytes(value));
+   };
+ 
+   return {
+@@ -202,18 +177,22 @@ export async function createCITGMArtifactWriter({ rootDir, module, runId } = {})
+       if (closed) return paths;
+       for (const event of networkEvents) append(networkStream, event);
+       closed = true;
+-      await writeChain;
+-      await Promise.all([
+-        outputWritten.stdout ? Promise.resolve() : writeFile(paths.stdout, asBytes(stdoutBytes, stdout)),
+-        outputWritten.stderr ? Promise.resolve() : writeFile(paths.stderr, asBytes(stderrBytes, stderr)),
+-        writeFile(paths.runResult, `${JSON.stringify(runResult, jsonReplacer(), 2)}\n`, 'utf8'),
+-        writeFile(paths.summary, `${JSON.stringify(summary, jsonReplacer(), 2)}\n`, 'utf8'),
+-        writeFile(paths.terminalSummary, `${JSON.stringify(summary, jsonReplacer(), 2)}\n`, 'utf8'),
+-        finishStream(progressStream),
+-        finishStream(networkStream),
+-        finishStream(outputStreams.stdout),
+-        finishStream(outputStreams.stderr),
+-      ]);
++      try {
++        await writeChain;
++        await Promise.all(streams.map(finishStream));
++        if (streamFailure) throw streamFailure;
++        // Finish even unused output streams before writing fallbacks: their
++        // asynchronous open('w') must not truncate a completed fallback file.
++        await Promise.all([
++          outputWritten.stdout ? Promise.resolve() : writeFile(paths.stdout, asBytes(stdoutBytes, stdout)),
++          outputWritten.stderr ? Promise.resolve() : writeFile(paths.stderr, asBytes(stderrBytes, stderr)),
++          writeFile(paths.runResult, `${JSON.stringify(runResult, jsonReplacer(), 2)}\n`, 'utf8'),
++          writeFile(paths.summary, `${JSON.stringify(summary, jsonReplacer(), 2)}\n`, 'utf8'),
++          writeFile(paths.terminalSummary, `${JSON.stringify(summary, jsonReplacer(), 2)}\n`, 'utf8'),
++        ]);
++      } finally {
++        for (const stream of streams) if (!stream.destroyed) stream.destroy();
++      }
+       return paths;
+     },
+   };
+diff --git a/dev/adapters/playwright/server.js b/dev/adapters/playwright/server.js
+index 44ebdbe489b71def07dccb6c7035da45cf90aa9c..9a2b9f00bea8c55640672005b1ee5d0a2bc7b0dd 100644
+--- a/dev/adapters/playwright/server.js
++++ b/dev/adapters/playwright/server.js
+@@ -1,14 +1,12 @@
+ import fs from 'node:fs';
+ import http from 'node:http';
+-import path from 'node:path';
+ import process from 'node:process';
+-import { URL } from 'node:url';
++import { browserAssetPath, browserAssetContentType, harnessPage } from './static-assets.mjs';
+ 
+ const args = process.argv.slice(2);
+ let port = 3000;
+ let host = '127.0.0.1';
+ const root = process.env.BNH_WORKTREE || process.cwd();
+-const runtimeRoot = path.resolve(root, '../../..');
+ for (let i = 0; i < args.length; i++) {
+   if (args[i] === '--port' && i + 1 < args.length) {
+     port = parseInt(args[i + 1], 10);
+@@ -18,37 +16,25 @@ for (let i = 0; i < args.length; i++) {
+   }
+ }
+ 
+-const mimeTypes = {
+-  '.html': 'text/html',
+-  '.js': 'application/javascript',
+-  '.mjs': 'application/javascript',
+-  '.json': 'application/json',
+-  '.css': 'text/css',
+-  '.svg': 'image/svg+xml',
+-  '.wasm': 'application/wasm',
+-  '.png': 'image/png',
+-};
+-
+-function staticFilePath(pathname) {
+-  const normalized = path.posix.normalize(pathname);
+-  if (normalized.startsWith('/wasm/')) {
+-    return path.join(runtimeRoot, 'src', normalized.slice(1));
+-  }
+-  return path.join(root, normalized);
+-}
+-
+ const server = http.createServer((req, res) => {
+-  const parsedUrl = new URL(req.url, 'http://localhost');
+-  let pathname = parsedUrl.pathname || '/';
+-  if (pathname === '/') pathname = '/harness.html';
+-  const filePath = staticFilePath(pathname);
+-  const ext = path.extname(filePath).toLowerCase();
+-  const contentType = mimeTypes[ext] || 'application/octet-stream';
++  let relative, filePath;
++  try {
++    ({ relative, absolute: filePath } = browserAssetPath(req.url || '/', root));
++  } catch (error) {
++    res.writeHead(400, { 'Content-Type': 'text/plain' });
++    res.end(error.message);
++    return;
++  }
++  const contentType = browserAssetContentType(relative);
+ 
+   fs.readFile(filePath, (err, data) => {
++    if (err?.code === 'ENOENT' && relative === 'harness.html') {
++      err = null;
++      data = harnessPage;
++    }
+     if (err) {
+       res.writeHead(404, { 'Content-Type': 'text/plain' });
+-      res.end('Not Found: ' + pathname);
++      res.end('Not Found: ' + relative);
+     } else {
+       res.writeHead(200, {
+         'Content-Type': contentType,
+diff --git a/dev/adapters/playwright/static-assets.mjs b/dev/adapters/playwright/static-assets.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4dcc8b877328ce32385d704e4679dead4ae0f533
+--- /dev/null
++++ b/dev/adapters/playwright/static-assets.mjs
+@@ -0,0 +1,28 @@
++import path from 'node:path';
++
++export const harnessPage = '<!doctype html><script type="module" src="/target-bridge.example.js"></script>';
++
++/** Resolve browser test assets against canonical source, never a stale copy. */
++export function browserAssetPath(requestURL, adapterRoot) {
++  let pathname;
++  try { pathname = decodeURIComponent(new URL(requestURL, 'http://localhost').pathname); }
++  catch { throw new Error(`unsafe browser test path: ${requestURL}`); }
++  const relative = pathname === '/' ? 'harness.html' : pathname.replace(/^\/+/, '');
++  const sourceAsset = relative === 'runtime.js' || relative === 'index.js'
++    || ['runtime/', 'versions/', 'wasm/'].some(prefix => relative.startsWith(prefix));
++  const root = sourceAsset ? path.resolve(adapterRoot, '../../../src') : path.resolve(adapterRoot);
++  const absolute = path.resolve(root, relative);
++  if (absolute !== root && !absolute.startsWith(`${root}${path.sep}`)) {
++    throw new Error(`unsafe browser test path: ${requestURL}`);
++  }
++  return { relative, absolute };
++}
++
++export function browserAssetContentType(filename) {
++  return ({
++    '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
++    '.mjs': 'text/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8',
++    '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.wasm': 'application/wasm',
++    '.png': 'image/png',
++  })[path.extname(filename).toLowerCase()] || 'application/octet-stream';
++}
+diff --git a/dev/adapters/playwright/tests/citgm-capture.spec.mjs b/dev/adapters/playwright/tests/citgm-capture.spec.mjs
+index 4440f4dae28ff77ff1054089600058ef4e240c8d..11fa195dc451c60b9eb0a8978205cc54e3f9804d 100644
+--- a/dev/adapters/playwright/tests/citgm-capture.spec.mjs
++++ b/dev/adapters/playwright/tests/citgm-capture.spec.mjs
+@@ -49,3 +49,16 @@ test('keeps worker npm cache descriptors fetchable without cloning package conte
+     tarballs: { 'pkg-tarball:large-package@1.0.0': 'tarballs/large.tgz' },
+   });
+ });
++
++test('a slow capture binding receives bounded batches without dropping payloads', async () => {
++  const received = [], sizes = [];
++  const queue = createSerializedCaptureQueue({ capture: async payload => {
++    const batch = payload.events || [payload]; sizes.push(batch.length);
++    await new Promise(resolve => setTimeout(resolve, 1));
++    received.push(...batch.map(x => x.index));
++  } });
++  for (let index = 0; index < 257; index += 1) queue('capture', { index });
++  await queue.flush();
++  assert.ok(sizes.every(size => size <= 32), JSON.stringify(sizes));
++  assert.deepEqual(received, Array.from({ length: 257 }, (_, index) => index));
++});
+diff --git a/dev/adapters/playwright/tests/host-port.spec.mjs b/dev/adapters/playwright/tests/host-port.spec.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..e142f3faf65a74e3427b08ef0971c4e6d7193f21
+--- /dev/null
++++ b/dev/adapters/playwright/tests/host-port.spec.mjs
+@@ -0,0 +1,17 @@
++import assert from 'node:assert/strict';
++import { test } from 'playwright/test';
++import {
++  allocateHostPort,
++  isHostPortAvailableForVirtualNetwork,
++  VIRTUAL_TCP_PORT_MAX,
++  VIRTUAL_TCP_PORT_MIN,
++} from '../host-port.mjs';
++
++test('keeps host adapter ports separate from guest virtual TCP ports', async () => {
++  assert.equal(isHostPortAvailableForVirtualNetwork(VIRTUAL_TCP_PORT_MIN), false);
++  assert.equal(isHostPortAvailableForVirtualNetwork(VIRTUAL_TCP_PORT_MAX), false);
++  assert.equal(isHostPortAvailableForVirtualNetwork(VIRTUAL_TCP_PORT_MIN - 1), true);
++  assert.equal(isHostPortAvailableForVirtualNetwork(VIRTUAL_TCP_PORT_MAX + 1), true);
++  const port = await allocateHostPort();
++  assert.equal(isHostPortAvailableForVirtualNetwork(port), true);
++});
+diff --git a/dev/adapters/playwright/tests/result-artifacts.spec.mjs b/dev/adapters/playwright/tests/result-artifacts.spec.mjs
+index 0eea20f8f0a2395fca89f26af1c7a0abc11d3df1..f54cf7a14d7d3b5cff1c346c8a0cd414b7e6d072 100644
+--- a/dev/adapters/playwright/tests/result-artifacts.spec.mjs
++++ b/dev/adapters/playwright/tests/result-artifacts.spec.mjs
+@@ -1,5 +1,5 @@
+ import assert from 'node:assert/strict';
+-import { mkdtemp, readFile } from 'node:fs/promises';
++import { mkdtemp, readFile, mkdir, rm } from 'node:fs/promises';
+ import os from 'node:os';
+ import path from 'node:path';
+ import test from 'node:test';
+@@ -89,3 +89,14 @@ test('CITGM artifacts retain output already received before a browser failure',
+   assert.equal(await readFile(writer.paths.stdout, 'utf8'), 'partial stdout\n');
+   assert.equal(await readFile(writer.paths.stderr, 'utf8'), 'error\n');
+ });
++
++
++test('asynchronous artifact open failures reject capture and still close resources', async () => {
++  const rootDir = await mkdtemp(path.join(os.tmpdir(), 'bnh-artifacts-error-'));
++  await mkdir(path.join(rootDir, 'run-module', 'stdout.log'), { recursive: true });
++  const writer = await createCITGMArtifactWriter({ rootDir, module: 'module', runId: 'run' });
++  try {
++    await assert.rejects(writer.recordOutput('stdout', 'data'), { code: 'EISDIR' });
++    await assert.rejects(writer.close(), { code: 'EISDIR' });
++  } finally { await rm(rootDir, { recursive: true, force: true }); }
++});
+diff --git a/dev/adapters/playwright/tests/run-browser-tests.mjs b/dev/adapters/playwright/tests/run-browser-tests.mjs
+index 82f095f8a4f0ac8509c3d89e2ad291e9838abd58..e4418d8db72e1359f7cf2080a4b6043d122a5d2c 100644
+--- a/dev/adapters/playwright/tests/run-browser-tests.mjs
++++ b/dev/adapters/playwright/tests/run-browser-tests.mjs
+@@ -4,43 +4,17 @@ import { createServer } from 'node:http';
+ import path from 'node:path';
+ import process from 'node:process';
+ import { fileURLToPath } from 'node:url';
++import { browserAssetPath, browserAssetContentType, harnessPage } from '../static-assets.mjs';
+ 
+ const adapterRoot = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
+-const runtimeRoot = path.resolve(adapterRoot, '../../..');
+-const harnessPage = '<!doctype html><script type="module" src="/target-bridge.example.js"></script>';
+-
+-function safePath(value) {
+-  const relative = value === '/' || value === '/harness.html' ? 'harness.html' : value.slice(1);
+-  const absolute = path.resolve(adapterRoot, relative);
+-  if (absolute !== adapterRoot && !absolute.startsWith(`${adapterRoot}${path.sep}`)) {
+-    throw new Error(`unsafe browser test path: ${value}`);
+-  }
+-  return { relative, absolute };
+-}
+-
+-function contentType(relative) {
+-  if (relative.endsWith('.html')) return 'text/html; charset=utf-8';
+-  if (relative.endsWith('.json')) return 'application/json; charset=utf-8';
+-  return 'text/javascript; charset=utf-8';
+-}
+-
+ const server = createServer(async (request, response) => {
+   try {
+-    const { relative, absolute } = safePath(request.url || '/');
++    const { relative, absolute } = browserAssetPath(request.url || '/', adapterRoot);
+     let body;
+     if (relative === 'harness.html') body = harnessPage;
+-    else {
+-      try {
+-        body = await readFile(absolute);
+-      } catch (error) {
+-        if (error?.code !== 'ENOENT' || !relative.startsWith('wasm/')) throw error;
+-        // Browser runtime modules resolve core WASM beside the runtime asset.
+-        // Keep the test server's /wasm path consistent with the CITGM server.
+-        body = await readFile(path.join(runtimeRoot, 'src', relative));
+-      }
+-    }
++    else body = await readFile(absolute);
+     response.writeHead(200, {
+-      'content-type': contentType(relative),
++      'content-type': browserAssetContentType(relative),
+       'Cross-Origin-Opener-Policy': 'same-origin',
+       'Cross-Origin-Embedder-Policy': 'require-corp',
+       'Service-Worker-Allowed': '/',
+diff --git a/dev/adapters/playwright/tests/static-assets.spec.mjs b/dev/adapters/playwright/tests/static-assets.spec.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..02d80cb49540e92f9595a59817c5df5ca290c389
+--- /dev/null
++++ b/dev/adapters/playwright/tests/static-assets.spec.mjs
+@@ -0,0 +1,29 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++import fs from 'node:fs';
++import path from 'node:path';
++import { fileURLToPath } from 'node:url';
++import { browserAssetPath, browserAssetContentType } from '../static-assets.mjs';
++const adapterRoot = fileURLToPath(new URL('../', import.meta.url));
++
++test('browser harness serves canonical sources and their relative dependency graph', () => {
++  const pending = ['/runtime.js', '/index.js'];
++  const seen = new Set();
++  while (pending.length) {
++    const request = pending.pop(); if (seen.has(request)) continue; seen.add(request);
++    const { absolute } = browserAssetPath(request, adapterRoot);
++    assert.ok(fs.existsSync(absolute), `${request} -> ${absolute}`);
++    const source = fs.readFileSync(absolute, 'utf8');
++    for (const match of source.matchAll(/(?:from\s*|import\s*)['"](\.[^'"]+\.m?js)['"]/g)) {
++      pending.push(new URL(match[1], `http://localhost${request}`).pathname);
++    }
++  }
++  assert.ok(seen.size > 40, `only ${seen.size} modules checked`);
++  assert.equal(browserAssetPath('/runtime.js', adapterRoot).absolute, path.resolve(adapterRoot, '../../../src/runtime.js'));
++});
++
++test('browser harness uses WebAssembly MIME type and rejects encoded path escapes', () => {
++  assert.equal(browserAssetContentType('engine.wasm'), 'application/wasm');
++  assert.throws(() => browserAssetPath('/runtime/%2e%2e%2f%2e%2e%2foutside.js', adapterRoot), /unsafe/);
++  assert.throws(() => browserAssetPath('/%zz', adapterRoot), /unsafe/);
++});
+diff --git a/dev/tests/runtime/runtime/async-transform.mjs b/dev/tests/runtime/runtime/async-transform.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..becfa232b14ca756632dde5918b6ed9f44b1c11f
+--- /dev/null
++++ b/dev/tests/runtime/runtime/async-transform.mjs
+@@ -0,0 +1,85 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++import { transformAsyncSource } from '../../../../src/runtime/async-transform.js';
++
++function runGenerator(generatorFactory) {
++  const iterator = generatorFactory();
++  return new Promise((resolve, reject) => {
++    const step = (method, value) => {
++      let result;
++      try {
++        result = iterator[method](value);
++      } catch (error) {
++        reject(error);
++        return;
++      }
++      if (result.done) {
++        resolve(result.value);
++        return;
++      }
++      Promise.resolve(result.value).then(
++        (nextValue) => step('next', nextValue),
++        (error) => step('throw', error),
++      );
++    };
++    step('next');
++  });
++}
++
++test('keeps awaited function expression calls syntactically valid', async () => {
++  const source = `
++    async function invoke() {
++      return await function ({ value }) {
++        return value;
++      }({ value: 7 });
++    }
++    invoke();
++  `;
++  const transformed = transformAsyncSource(source).source;
++  const invoke = new Function('__bnhAsync', `${transformed}; return invoke;`)(
++    (generatorFactory) => runGenerator(generatorFactory),
++  );
++
++  assert.equal(await invoke(), 7);
++});
++
++test('keeps awaited optional calls syntactically valid', async () => {
++  const source = `
++    async function invoke(callback, value) {
++      return await callback?.(value);
++    }
++    invoke((input) => input, 9);
++  `;
++  const transformed = transformAsyncSource(source).source;
++  const invoke = new Function('__bnhAsync', `${transformed}; return invoke;`)(
++    (generatorFactory) => runGenerator(generatorFactory),
++  );
++
++  assert.equal(await invoke((input) => input, 9), 9);
++});
++
++test('keeps async function boundaries intact across nested template literals', async () => {
++  const source = `
++    async function invoke(value) {
++      const message = \`${'${value ? `nested ${value}` : "fallback"}'}\`;
++      return await Promise.resolve(message);
++    }
++    invoke('value');
++  `;
++  const transformed = transformAsyncSource(source).source;
++  const invoke = new Function('__bnhAsync', `${transformed}; return invoke;`)(
++    (generatorFactory) => runGenerator(generatorFactory),
++  );
++
++  assert.equal(await invoke('value'), 'nested value');
++});
++
++test('preserves native async identity when no await lowering is needed', () => {
++  const source = 'const invoke = async () => 7;';
++  const transformed = transformAsyncSource(source).source;
++  const invoke = new Function(`${transformed}; return invoke;`)();
++
++  assert.equal(transformed, source);
++  assert.equal(invoke.constructor.name, 'AsyncFunction');
++  assert.equal(Object.prototype.toString.call(invoke), '[object AsyncFunction]');
++});
+diff --git a/dev/tests/runtime/runtime/demo-startup.mjs b/dev/tests/runtime/runtime/demo-startup.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..bb53e595f35b595cb0f4a80348baeb7cd22c11db
+--- /dev/null
++++ b/dev/tests/runtime/runtime/demo-startup.mjs
+@@ -0,0 +1,252 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++import { readFile } from 'node:fs/promises';
++import vm from 'node:vm';
++import { Nacelle, createBrowserNet, createBufferClass } from '../../../../src/index.js';
++import { createVfs } from '../../../../src/runtime/vfs.js';
++import { EventEmitter } from '../../../../src/runtime/events.js';
++
++const hostSetTimeout = globalThis.setTimeout.bind(globalThis);
++const HostPromise = Promise;
++const turn = () => new HostPromise((resolve) => hostSetTimeout(resolve, 0));
++const example = async (name) => (await readFile(new URL(`../../../../examples/${name}.html`, import.meta.url), 'utf8'))
++  .match(/<script type="module">([\s\S]*?)<\/script>/)[1]
++  .replace(/import \{ Nacelle \} from '\/index.js';/, '');
++
++test('many FS watchers share owner cleanup and release both lifecycle listeners', () => {
++  const vfs = createVfs();
++  vfs.mount({ 'app/page.tsx': 'page' }, { path: '/node' });
++  const owner = new EventEmitter();
++  vfs.setWatcherOwner(owner);
++  const watchers = Array.from({ length: 32 }, () => vfs.fs.watch('/node/app'));
++  let closed = 0;
++  for (const watcher of watchers) watcher.on('close', () => { closed += 1; });
++  try {
++    assert.equal(owner.listenerCount('exit'), 1);
++    assert.equal(owner.listenerCount('close'), 1);
++    watchers[0].close();
++    assert.equal(owner.listenerCount('exit'), 1);
++    owner.emit('exit', 0);
++    assert.equal(closed, watchers.length);
++    assert.equal(owner.listenerCount('exit'), 0);
++    assert.equal(owner.listenerCount('close'), 0);
++    // A new generation must get a fresh cleanup pair.
++    const watcher = vfs.fs.watch('/node/app');
++    assert.equal(owner.listenerCount('exit'), 1);
++    watcher.close();
++    assert.equal(owner.listenerCount('exit'), 0);
++    assert.equal(owner.listenerCount('close'), 0);
++  } finally {
++    vfs.reset();
++  }
++});
++
++test('recursive FS watch stays in its subtree and reports relative paths', () => {
++  const vfs = createVfs();
++  vfs.mount({ 'app/nested/page.tsx': 'page', 'app-other/page.tsx': 'other', 'dist/bundle.js': '' }, { path: '/node' });
++  const changes = [];
++  const direct = [];
++  const watcher = vfs.fs.watch('/node/app', { recursive: true }, (type, filename) => changes.push([type, filename]));
++  const nonrecursive = vfs.fs.watch('/node/app', (type, filename) => direct.push([type, filename]));
++  try {
++    vfs.fs.writeFileSync('/node/dist/bundle.js', 'build');
++    vfs.fs.writeFileSync('/node/app-other/page.tsx', 'other update');
++    vfs.fs.writeFileSync('/node/app/nested/page.tsx', 'page update');
++    assert.deepEqual(changes, [['change', 'nested/page.tsx']]);
++    assert.deepEqual(direct, []);
++  } finally {
++    watcher.close();
++    nonrecursive.close();
++  }
++});
++
++async function virtualServer(onConnection) {
++  const node = await Nacelle.create({ gateway: false });
++  const net = createBrowserNet({ network: node._runtime.virtualNetwork, BufferClass: createBufferClass(globalThis) });
++  const server = net.createServer(onConnection);
++  await new HostPromise((resolve) => server.listen(3000, resolve));
++  return { node, server };
++}
++
++test('direct Nacelle.fetch aborts a stalled readiness socket', { timeout: 5000 }, async () => {
++  let accept;
++  let closed;
++  const accepted = new HostPromise((resolve) => { accept = resolve; });
++  const socketClosed = new HostPromise((resolve) => { closed = resolve; });
++  const { node, server } = await virtualServer((socket) => {
++    socket.on('close', closed);
++    accept(); // Deliberately never send an HTTP response.
++  });
++  const controller = new AbortController();
++  try {
++    const request = node.fetch('http://localhost:3000/', { signal: controller.signal });
++    await accepted;
++    const failure = assert.rejects(request, { name: 'AbortError' });
++    controller.abort();
++    await failure;
++    await socketClosed;
++    await assert.rejects(node.fetch('http://localhost:3000/', { signal: controller.signal }), { name: 'AbortError' });
++  } finally {
++    server.close();
++  }
++});
++
++test('an empty virtual HTTP connection is not a successful readiness response', async () => {
++  const { node, server } = await virtualServer((socket) => socket.once('data', () => socket.destroy()));
++  try {
++    await assert.rejects(node.fetch('http://localhost:3000/'), /without a valid response/);
++  } finally {
++    server.close();
++  }
++});
++
++async function rollupPage(node, create = async () => node) {
++  const elements = new Map();
++  const get = (id) => {
++    if (!elements.has(id)) elements.set(id, { addEventListener() {}, classList: { toggle() {}, remove() {} } });
++    return elements.get(id);
++  };
++  const context = vm.createContext({
++    Nacelle: { create },
++    document: { getElementById: get, addEventListener() {} },
++    window: { addEventListener() {} },
++    console: { error() {} },
++    performance,
++    setTimeout: hostSetTimeout,
++  });
++  vm.runInContext(`${await example('webpack')}\nthis.buildDemo = build; this.bundlerSource = bundlerCode;`, context);
++  return { context, get };
++}
++
++function rollupStub() {
++  const calls = [];
++  const node = {
++    npm: { install: async () => { calls.push('install'); } },
++    fs: {
++      writeFile: async () => {},
++      readFile: async () => '{"main.js":"bundle.1234.js","hash":"1234","size":140}',
++    },
++    bash: async (command) => {
++      calls.push(command);
++      return { exit: HostPromise.resolve(0), stdoutText: async () => command === 'node rollup.js' ? '' : 'Event recorded: Sum is 42\n', stderrText: async () => '' };
++    },
++  };
++  return { node, calls };
++}
++
++test('Rollup demo consumes the manifest even when build stdout is empty', async () => {
++  const { node, calls } = rollupStub();
++  const { context, get } = await rollupPage(node);
++  await context.buildDemo();
++  assert.equal(get('global-status').textContent, 'Ready');
++  assert.equal(get('metric-bundle').textContent, 'bundle.1234.js');
++  assert.equal(get('btn-run').disabled, false);
++  assert.deepEqual(calls, ['install', 'node rollup.js', 'node /node/dist/bundle.1234.js']);
++});
++
++test('Rollup demo ignores duplicate clicks during installation and retries failed installs', async () => {
++  const { node, calls } = rollupStub();
++  let release;
++  const gate = new HostPromise((resolve) => { release = resolve; });
++  let attempts = 0;
++  node.npm.install = async () => {
++    attempts += 1;
++    await gate;
++    if (attempts === 1) throw new Error('install failed');
++  };
++  const { context, get } = await rollupPage(node);
++  const first = context.buildDemo();
++  await turn();
++  await context.buildDemo();
++  assert.equal(attempts, 1);
++  release();
++  await first;
++  assert.equal(get('global-status').textContent, 'Build failed');
++  assert.equal(get('btn-run').disabled, false);
++  assert.equal(calls.length, 0);
++  await context.buildDemo();
++  assert.equal(attempts, 2);
++  assert.equal(get('global-status').textContent, 'Ready');
++});
++
++test('Rollup script closes the bundle and returns a failing exit code on generation errors', async () => {
++  const { context } = await rollupPage(rollupStub().node);
++  const node = await Nacelle.create({ gateway: false, files: {
++    '/node/rollup.js': context.bundlerSource,
++    '/node/node_modules/rollup/package.json': '{"main":"index.js"}',
++    '/node/node_modules/rollup/index.js': `exports.rollup = async () => ({
++      generate: async () => { throw new Error('generation failed'); },
++      close: async () => { require('node:fs').writeFileSync('/node/closed', 'yes'); }
++    });`,
++  } });
++  const child = await node.bash('node rollup.js');
++  assert.equal(await child.exit, 1);
++  assert.match(await child.stderrText(), /generation failed/);
++  assert.equal(await node.fs.readFile('/node/closed', 'utf8'), 'yes');
++});
++
++async function nextPage(fetchImpl = async () => ({ ok: true })) {
++  const events = [];
++  const handles = [];
++  const node = {
++    fs: { writeFile: async () => { events.push('write'); } },
++    npm: {
++      install: async () => { events.push('install'); },
++      run: async (_mode, options) => {
++        let exit;
++        const handle = { exit: new HostPromise((resolve) => { exit = resolve; }), kill: async () => { events.push('kill'); exit(0); }, finish: (code) => exit(code) };
++        handles.push(handle);
++        // stdout is allowed to split a word across chunks.
++        options.onStdout('✓ Re');
++        options.onStdout('ady in 656ms\n');
++        return handle;
++      },
++    },
++    fetch: async (...args) => { events.push('fetch'); return fetchImpl(...args); },
++  };
++  const context = vm.createContext({
++    node, activeProcess: null, currentMode: 'dev', files: { 'app/page.tsx': 'page' },
++    serverStatus: {}, urlInput: { value: '/' }, window: { navigateFrame: () => events.push('navigate') },
++    logTerminal() {}, logNetwork() {}, logGuestNetwork() {},
++    setTimeout: hostSetTimeout, clearTimeout, AbortController,
++  });
++  const source = await example('nextjs');
++  const start = source.indexOf('    async function waitForNextServer');
++  const end = source.indexOf("    document.getElementById('btn-dev')", start);
++  assert.ok(start >= 0 && end > start);
++  vm.runInContext(`let launching = false, readinessController = null;\n${source.slice(start, end)}\nthis.launchDemo = launchNextApp;`, context);
++  return { context, events, handles };
++}
++
++test('Next demo probes without relying on banner chunk boundaries and kills before remounting', async () => {
++  const { context, events, handles } = await nextPage();
++  try {
++    await context.launchDemo();
++    await turn();
++    assert.equal(events.filter((event) => event === 'fetch').length, 1);
++    assert.equal(context.serverStatus.className, 'status-dot active');
++    events.length = 0;
++    await context.launchDemo();
++    await turn();
++    assert.equal(events[0], 'kill');
++    assert.ok(events.indexOf('write') > events.indexOf('kill'));
++  } finally {
++    for (const handle of handles) handle.finish(0);
++    await turn();
++  }
++});
++
++test('Next demo cancels readiness and reports a process that exits before serving', async () => {
++  let probeSignal;
++  const { context, handles } = await nextPage((_url, { signal }) => {
++    probeSignal = signal;
++    return new HostPromise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
++  });
++  await context.launchDemo();
++  await turn();
++  assert.ok(probeSignal);
++  handles[0].finish(1);
++  await turn();
++  assert.equal(probeSignal.aborted, true);
++  assert.equal(context.serverStatus.className, 'status-dot error');
++});
+diff --git a/dev/tests/runtime/runtime/patch-crypto-regressions.mjs b/dev/tests/runtime/runtime/patch-crypto-regressions.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..14d647e129272a3671b113123c06c8433242fd09
+--- /dev/null
++++ b/dev/tests/runtime/runtime/patch-crypto-regressions.mjs
+@@ -0,0 +1,40 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++import * as native from 'node:crypto';
++import { generateKeyPairSync, generateKeyPair, createKeyObjectContract, sign, verify } from '../../../../src/runtime/crypto.js';
++
++test('synchronous RSA exports retain odd-length integers and interoperate with native Node', () => {
++  const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 512 });
++  const pub = publicKey.export({ format: 'jwk' });
++  assert.equal(pub.e, 'AQAB');
++  assert.equal(publicKey._bnhRsaMaterial.privateExponent, undefined);
++  const publicNative = native.createPublicKey({ key: pub, format: 'jwk' });
++  const privateNative = native.createPrivateKey({ key: privateKey.export({ format: 'jwk' }), format: 'jwk' });
++  const signature = native.sign('sha256', Buffer.from('rsa export regression'), privateNative);
++  assert.equal(native.verify('sha256', Buffer.from('rsa export regression'), publicNative, signature), true);
++  const der = Buffer.from(publicKey.export({ format: 'der', type: 'spki' }));
++  assert.equal(native.createPublicKey({ key: der, format: 'der', type: 'spki' }).asymmetricKeyDetails.publicExponent, 65537n);
++});
++
++test('asynchronously generated RSA KeyObjects use RSA rather than ECDSA signing', async () => {
++  const { publicKey, privateKey } = await new Promise((resolve, reject) => generateKeyPair('rsa', { modulusLength: 1024 }, (error, pub, priv) => error ? reject(error) : resolve({ publicKey: pub, privateKey: priv })));
++  const signature = await sign('sha256', 'rsa algorithm regression', privateKey);
++  assert.equal(await verify('sha256', 'rsa algorithm regression', publicKey, signature), true);
++  assert.equal(await verify('sha256', 'wrong data', publicKey, signature), false);
++  assert.equal(native.verify('sha256', Buffer.from('rsa algorithm regression'), native.createPublicKey({ key: publicKey.export({ format: 'jwk' }), format: 'jwk' }), signature), true);
++});
++
++test('derived public JWKs do not retain private key fields', () => {
++  const { createPrivateKey, createPublicKey } = createKeyObjectContract(Buffer);
++  const { privateKey } = native.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
++  const input = privateKey.export({ format: 'jwk' });
++  const key = createPrivateKey({ key: input, format: 'jwk' });
++  for (const value of [{ key: input, format: 'jwk' }, key]) {
++    const exported = createPublicKey(value).export({ format: 'jwk' });
++    assert.equal(exported.d, undefined);
++    assert.equal(exported.x, input.x);
++    assert.ok(native.createPublicKey({ key: exported, format: 'jwk' }));
++    assert.throws(() => createPrivateKey({ key: exported, format: 'jwk' }), TypeError);
++  }
++  assert.ok(input.d, 'conversion must not mutate the input');
++});
+diff --git a/dev/tests/runtime/runtime/patch-messaging-regressions.mjs b/dev/tests/runtime/runtime/patch-messaging-regressions.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..e505fa00f990e4e0e4626503c40abadc1c83b3a1
+--- /dev/null
++++ b/dev/tests/runtime/runtime/patch-messaging-regressions.mjs
+@@ -0,0 +1,41 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++import { createMessageChannel } from '../../../../src/runtime/messaging.js';
++
++// Real host MessagePorts exercise structured-clone failure and deferred delivery.
++test('a failed message clone does not leave a phantom pending message on close', () => {
++  const channel = createMessageChannel();
++  try {
++    assert.throws(() => channel.port1.postMessage(() => {}), { name: 'DataCloneError' });
++    channel.port1.close();
++    assert.equal(channel.port1.__bnhIsClosed, true);
++    assert.equal(channel.port2.__bnhIsClosed, true);
++  } finally { channel.raw.port1.close(); channel.raw.port2.close(); }
++});
++
++test('once listeners do not discard additional messages from the deferred queue', async () => {
++  const channel = createMessageChannel();
++  try {
++    channel.port1.postMessage(1); channel.port1.postMessage(2);
++    // A later native message is a FIFO delivery barrier for both adapter events.
++    await new Promise(resolve => { channel.raw.port2.addEventListener('message', function barrier(e) {
++      if (e.data === 2) { channel.raw.port2.removeEventListener('message', barrier); resolve(); }
++    }); });
++    const received = [];
++    channel.port2.once('message', x => received.push(x));
++    channel.port2.once('message', x => received.push(x));
++    assert.deepEqual(received, [1, 2]);
++  } finally { channel.port1.close(); channel.port2.close(); }
++});
++
++test('synchronous message consumption does not redeliver asynchronously', async () => {
++  const channel = createMessageChannel();
++  try {
++    channel.port1.postMessage(42);
++    assert.equal(channel.port2.__bnhReceiveMessage(), 42);
++    assert.equal(channel.port2.__bnhReceiveMessage(), undefined);
++    let delivered = false; channel.port2.on('message', () => { delivered = true; });
++    await new Promise(resolve => channel.raw.port2.addEventListener('message', resolve, { once: true }));
++    assert.equal(delivered, false);
++  } finally { channel.port1.close(); channel.port2.close(); }
++});
+diff --git a/dev/tests/runtime/runtime/patch-regressions.mjs b/dev/tests/runtime/runtime/patch-regressions.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d61b9c6f121083104683d8d8b610eb887af9bcde
+--- /dev/null
++++ b/dev/tests/runtime/runtime/patch-regressions.mjs
+@@ -0,0 +1,323 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++import { Nacelle, createBrowserNet, createBufferClass } from '../../../../src/index.js';
++import { createVfs } from '../../../../src/runtime/vfs.js';
++import { BrowserNpm, satisfiesSemver } from '../../../../src/runtime/npm.js';
++import { runShellScript } from '../../../../src/runtime/shell.js';
++import { parseShellScript } from '../../../../src/runtime/shell-parser.js';
++
++// Keep watchdogs outside the guest's timer/process shims.
++const host = { Promise, setTimeout, clearTimeout };
++async function run(source, files = {}) {
++  const node = await Nacelle.create({ gateway: false, files: {
++    '/node/entry.cjs': source, ...files,
++  } });
++  const controller = new AbortController();
++  const timer = host.setTimeout(() => controller.abort(new Error('regression fixture timed out')), 3000);
++  try {
++    const child = await node.run({ entry: '/node/entry.cjs', timeout: 2500, signal: controller.signal });
++    const code = await child.exit;
++    const stdout = await child.stdoutText();
++    const stderr = await child.stderrText();
++    assert.equal(code, 0, stderr || stdout);
++    return { stdout, stderr, node };
++  } finally { host.clearTimeout(timer); }
++}
++
++const valueFiles = { '/node/value.cjs': 'module.exports = 42;' };
++
++test('child Module._load resolves package subpaths and a nested package main', async () => {
++  const { stdout } = await run(`
++    const { spawnSync } = require('child_process');
++    const c = spawnSync(process.execPath, ['-e', 'console.log(require("fixture/dist/shared/lib/wrapper"))']);
++    if (c.status) throw new Error(String(c.stderr));
++    process.stdout.write(c.stdout);
++  `, {
++    '/node/node_modules/fixture/package.json': '{"name":"fixture","main":"index.js"}',
++    '/node/node_modules/fixture/dist/shared/lib/wrapper.js': `module.exports = require('module')._load('fixture/dist/compiled/value', module);`,
++    '/node/node_modules/fixture/dist/compiled/value/package.json': '{"main":"index.cjs"}',
++    '/node/node_modules/fixture/dist/compiled/value/index.cjs': 'module.exports = 42;',
++  });
++  assert.equal(stdout, '42\n');
++});
++
++test('CommonJS require honors an overridden public Module._resolveFilename', async () => {
++  const { stdout } = await run(`
++    const M = require('module'); const resolve = M._resolveFilename;
++    M._resolveFilename = function (name, ...args) {
++      return resolve.call(this, name === 'alias' ? './value.cjs' : name, ...args);
++    };
++    console.log(require('alias'));
++  `, valueFiles);
++  assert.equal(stdout, '42\n');
++});
++
++test('failed CommonJS and JSON modules do not leave usable cache entries', async () => {
++  const { stdout } = await run(`
++    for (let i = 0; i < 2; i++) try { require('./bad.cjs'); } catch (e) { console.log(e.message); }
++    for (let i = 0; i < 2; i++) try { require('./bad.json'); } catch (e) { console.log(e.name); }
++  `, { '/node/bad.cjs': 'throw new Error("BOOM")', '/node/bad.json': '{bad' });
++  assert.equal(stdout, 'BOOM\nBOOM\nSyntaxError\nSyntaxError\n');
++});
++
++test('Function-created dynamic imports use the virtual module loader', async () => {
++  const { stdout } = await run(`
++    const load = new Function('return import("./value.mjs")');
++    load().then(m => console.log(m.default));
++  `, { '/node/value.mjs': 'export default 42;' });
++  assert.equal(stdout, '42\n');
++});
++
++test('beforeExit follows the complete microtask queue and pending filesystem work', async () => {
++  const { stdout, node } = await run(`
++    let complete = false; let pending = Promise.resolve();
++    for (let i = 0; i < 128; i++) pending = pending.then(() => {});
++    pending.then(() => require('fs').promises.writeFile('/node/manifest.json', '{"ok":true}'))
++      .then(() => { complete = true; });
++    process.once('beforeExit', () => {
++      if (!complete) throw new Error('Unexpected early exit');
++      console.log('COMPLETE');
++    });
++  `);
++  assert.equal(stdout, 'COMPLETE\n');
++  assert.equal(await node.fs.readFile('/node/manifest.json', 'utf8'), '{"ok":true}');
++});
++
++test('beforeExit can schedule new work and is emitted again after it completes', async () => {
++  const { stdout } = await run(`
++    let round = 0;
++    process.on('beforeExit', () => {
++      console.log(++round);
++      if (round < 3) setTimeout(() => {}, 1);
++    });
++  `);
++  assert.equal(stdout, '1\n2\n3\n');
++});
++
++for (const [name, childSource, expected] of [
++  ['child beforeExit work', `process.once('beforeExit', () => setTimeout(() => console.log('LATE'), 1));`, 'LATE\nEXIT 0\n'],
++  ['unresolved user promises', `async function work() { await new Promise(() => {}); console.log('NEVER'); } work(); process.once('beforeExit', () => console.log('IDLE'));`, 'IDLE\nEXIT 0\n'],
++  ['unreferenced child timers', `setInterval(() => console.log('NEVER'), 1000).unref(); console.log('DONE');`, 'DONE\nEXIT 0\n'],
++]) {
++  test(`child lifecycle preserves ${name}`, async () => {
++    const { stdout } = await run(`
++      const c = require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(childSource)}]);
++      c.stdout.on('data', d => process.stdout.write(d));
++      c.on('exit', n => console.log('EXIT', n));
++    `);
++    assert.equal(stdout, expected);
++  });
++}
++
++test('parallel child filesystem requests do not leak sibling lifecycle tokens', async () => {
++  const { stdout } = await run(`
++    for (let i = 0; i < 2; i++) {
++      const c = require('child_process').spawn(process.execPath, ['-e',
++        "require('fs').promises.readFile('/node/value.cjs').then(() => console.log('DONE'))"]);
++      c.stdout.on('data', d => process.stdout.write(d));
++      c.on('exit', n => console.log('EXIT', n));
++    }
++  `, valueFiles);
++  assert.deepEqual(stdout.trim().split('\n').sort(), ['DONE', 'DONE', 'EXIT 0', 'EXIT 0']);
++});
++
++test('unused and autoClose:false file streams do not pin the event loop', async () => {
++  const { stdout } = await run(`
++    const fs = require('fs');
++    fs.createReadStream('/node/value.cjs');
++    const out = fs.createWriteStream('/node/out', { autoClose: false });
++    out.end('done'); out.on('finish', () => console.log('DONE'));
++  `, valueFiles);
++  assert.equal(stdout, 'DONE\n');
++});
++
++test('finished() waits for both sides of a duplex', async () => {
++  const { stdout } = await run(`
++    const { PassThrough, finished } = require('stream'); const s = new PassThrough();
++    s.write('x'); finished(s, e => { if (e) throw e; console.log('FINISHED'); });
++    s.end(); setTimeout(() => { console.log('DRAIN'); s.resume(); }, 5);
++  `);
++  assert.equal(stdout, 'DRAIN\nFINISHED\n');
++});
++
++test('finished() observes errors without explicitly supplied options', async () => {
++  const { stdout } = await run(`
++    const { PassThrough, finished } = require('stream'); const s = new PassThrough();
++    finished(s, e => console.log(e.message)); s.destroy(new Error('BROKEN'));
++  `);
++  assert.equal(stdout, 'BROKEN\n');
++});
++
++test('finished() detects premature closure even when registered late', async () => {
++  const { stdout } = await run(`
++    const { PassThrough, finished } = require('stream'); const s = new PassThrough();
++    s.destroy(); setTimeout(() => finished(s, e => console.log(e.code)), 1);
++  `);
++  assert.equal(stdout, 'ERR_STREAM_PREMATURE_CLOSE\n');
++});
++
++test('public VFS mounts and writes retain their own bytes', () => {
++  const vfs = createVfs();
++  const mounted = Uint8Array.of(1, 2, 3); vfs.mount({ '/node/input': mounted }); mounted[0] = 9;
++  assert.deepEqual([...vfs.fs.readFileSync('/node/input')], [1, 2, 3]);
++  const written = Uint8Array.of(4, 5, 6); vfs.fs.writeFileSync('/node/input', written); written[0] = 9;
++  assert.deepEqual([...vfs.fs.readFileSync('/node/input')], [4, 5, 6]);
++});
++
++test('VFS source versions change on mutation and large appends preserve bytes', () => {
++  const vfs = createVfs(); vfs.mount({ '/node/source': 'first' });
++  const before = vfs.fileVersion('/node/source');
++  assert.equal(vfs.fileVersion('/node/source'), before);
++  vfs.fs.writeFileSync('/node/source', 'second');
++  assert.notEqual(vfs.fileVersion('/node/source'), before);
++  assert.equal(vfs.readSource('/node/source'), 'second');
++  const bytes = new Uint8Array(256 * 1024).fill(7);
++  vfs.fs.appendFileSync('/node/source', bytes);
++  const result = vfs.fs.readFileSync('/node/source');
++  assert.equal(result.length, bytes.length + 6);
++  assert.equal(result.at(-1), 7);
++});
++
++test('npm seeds installed packages without descending into package payloads', async () => {
++  const vfs = createVfs();
++  vfs.mount({
++    '/node/node_modules/pkg/package.json': '{"name":"pkg","version":"1.2.3"}',
++    '/node/node_modules/pkg/dist/deep/file.js': '',
++    '/node/node_modules/pkg/node_modules/dep/package.json': '{"name":"dep","version":"2.0.0"}',
++    '/node/node_modules/@scope/pkg/package.json': '{"name":"@scope/pkg","version":"3.0.0"}',
++  });
++  const visited = []; const entries = vfs.entries.bind(vfs);
++  vfs.entries = p => { visited.push(p); return entries(p); };
++  const npm = new BrowserNpm({ vfs, fetchFn: () => { throw new Error('unexpected network request'); } });
++  await npm.seedInstalledLocations('/node/node_modules');
++  assert.equal(npm.installedLocations.get('/node/node_modules/pkg'), '1.2.3');
++  assert.equal(npm.installedLocations.get('/node/node_modules/pkg/node_modules/dep'), '2.0.0');
++  assert.equal(npm.installedLocations.get('/node/node_modules/@scope/pkg'), '3.0.0');
++  assert.equal(visited.some(p => p.includes('/dist')), false);
++  assert.ok(visited.length <= 6, JSON.stringify(visited));
++});
++
++test('wildcard caret and tilde ranges keep their respective upper bounds', () => {
++  assert.equal(satisfiesSemver('1.9.0', '^1.2.x'), true);
++  assert.equal(satisfiesSemver('2.0.0', '^1.2.x'), false);
++  assert.equal(satisfiesSemver('1.3.0', '~1.2.x'), false);
++  assert.equal(satisfiesSemver('12.1.0', '>=*'), true);
++});
++
++test('npm script streaming one output channel preserves returned output on the other', async () => {
++  const stdout = [], stderr = [];
++  await runShellScript('npm run demo', {
++    cwd: '/node', env: {}, fs: {},
++    onStdout: x => stdout.push(x), onStderr: x => stderr.push(x),
++    npmRun: async (_name, options) => {
++      options.onStdout('streamed\n');
++      return { exit: host.Promise.resolve(0), stdoutText: async () => 'streamed\n', stderrText: async () => 'returned error\n' };
++    },
++  });
++  assert.equal(stdout.join(''), 'streamed\n');
++  assert.equal(stderr.join(''), 'returned error\n');
++});
++
++test('command substitution handles escaped and nested quoted parentheses', async () => {
++  const stdout = [];
++  await runShellScript(String.raw`echo $(printf '\)'); echo "$(printf "%s" "$(printf ')')")"`, {
++    cwd: '/node', env: {}, fs: {}, onStdout: x => stdout.push(x),
++  });
++  assert.equal(stdout.join(''), '\\)\n)\n');
++  assert.throws(() => parseShellScript('echo "$(echo unfinished'), { code: 'ERR_SHELL_SYNTAX' });
++});
++
++for (const [status, method] of [[204, 'GET'], [205, 'GET'], [304, 'GET'], [200, 'HEAD']]) {
++  test(`direct virtual fetch accepts a bodyless ${method} ${status} response`, async () => {
++    const node = await Nacelle.create({ gateway: false });
++    const net = createBrowserNet({ network: node._runtime.virtualNetwork, BufferClass: createBufferClass(globalThis) });
++    const server = net.createServer(socket => socket.once('data', () => socket.end(`HTTP/1.1 ${status} OK\r\nContent-Length: 0\r\n\r\n`)));
++    await new host.Promise(resolve => server.listen(3000, resolve));
++    try {
++      const response = await node.fetch('http://localhost:3000/', { method });
++      assert.equal(response.status, status); assert.equal(await response.text(), '');
++    } finally { server.close(); }
++  });
++}
++
++test('node:test run reports skipped and todo tests without synthetic failures', async () => {
++  const { stdout } = await run(`
++    const runner = require('node:test').run({ files: ['/node/cases.cjs'] });
++    runner.on('test:fail', e => { throw new Error('unexpected failure: ' + e.name); });
++    runner.on('test:summary', e => console.log(JSON.stringify(e.counts)));
++    runner.resume();
++  `, { '/node/cases.cjs': `const test = require('node:test'); test.skip('skip', () => {}); test.todo('todo'); test('ok', () => {});` });
++  const counts = JSON.parse(stdout.trim());
++  assert.equal(counts.failed, 0); assert.equal(counts.passed, 1);
++  assert.equal(counts.skipped, 1); assert.equal(counts.todo, 1);
++});
++
++test('filesystem streams honor emitClose:false without leaking active work', async () => {
++  const { stdout } = await run(`
++    const out = require('fs').createWriteStream('/node/out', { emitClose: false });
++    out.on('close', () => { throw new Error('unexpected close'); });
++    out.on('finish', () => console.log('DONE')); out.end('x');
++  `);
++  assert.equal(stdout, 'DONE\n');
++});
++
++test('source-map lookup and internal test binding use their owning process', async () => {
++  const { stdout } = await run(`
++    console.log(require('module').findSourceMap('missing.js'));
++    console.log(typeof require('internal/test/binding').internalBinding);
++  `);
++  assert.equal(stdout, 'undefined\nfunction\n');
++});
++
++test('an exception from beforeExit propagates a nonzero shell status', async () => {
++  const node = await Nacelle.create({ gateway: false, files: { '/node/fail.cjs': `process.once('beforeExit', () => { throw new Error('Unexpected early exit'); });` } });
++  const child = await node.bash('node /node/fail.cjs');
++  assert.equal(await child.exit, 1);
++  assert.match(await child.stderrText(), /Unexpected early exit/);
++});
++
++test('Function imports accept comments between the keyword and opening parenthesis', async () => {
++  const { stdout } = await run(`new Function('return import /* loader */ ("./value.mjs")')().then(m => console.log(m.default));`, { '/node/value.mjs': 'export default 42;' });
++  assert.equal(stdout, '42\n');
++});
++
++test('guest fetch constructs a valid bodyless response from the virtual HTTP client', async () => {
++  const { stdout } = await run(`
++    const server = require('http').createServer((req, res) => { res.writeHead(204); res.end(); });
++    server.listen(3000, async () => {
++      try { const res = await fetch('http://localhost:3000'); console.log(res.status, JSON.stringify(await res.text())); }
++      finally { server.close(); }
++    });
++  `);
++  assert.equal(stdout, '204 ""\n');
++});
++
++test('fetch response bodies do not retain a token when the caller only reads headers', async () => {
++  const original = globalThis.fetch;
++  const response = new Response('unused finite body');
++  globalThis.fetch = async () => response;
++  try {
++    const { stdout } = await run(`fetch('data:text/plain,fixture').then(r => console.log(r.status));`);
++    assert.equal(stdout, '200\n');
++  } finally { globalThis.fetch = original; }
++});
++
++for (const consumer of ['text', 'reader', 'iterator', 'clone']) {
++  test(`fetch ${consumer} consumption retains pending body I/O until completion`, async () => {
++    const original = globalThis.fetch;
++    const NativeResponse = Response, NativeReadableStream = ReadableStream;
++    globalThis.fetch = async () => new NativeResponse(new NativeReadableStream({ start(controller) {
++      host.setTimeout(() => { controller.enqueue(new TextEncoder().encode('BODY')); controller.close(); }, 15);
++    } }));
++    const consume = {
++      text: `console.log(await response.text());`,
++      reader: `const reader = response.body.getReader(); let text = ''; for (;;) { const part = await reader.read(); if (part.done) break; text += new TextDecoder().decode(part.value); } reader.releaseLock(); console.log(text);`,
++      iterator: `let text = ''; for await (const part of response.body) text += new TextDecoder().decode(part); console.log(text);`,
++      clone: `console.log(await response.clone().text());`,
++    }[consumer];
++    try {
++      const { stdout } = await run(`fetch('data:text/plain,fixture').then(async response => { ${consume} });`);
++      assert.equal(stdout, 'BODY\n');
++    } finally { globalThis.fetch = original; }
++  });
++}
+diff --git a/dev/tests/runtime/runtime/patch-source-regressions.mjs b/dev/tests/runtime/runtime/patch-source-regressions.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..17d4461e529fe1f53f030af39b803ae8fae6803e
+--- /dev/null
++++ b/dev/tests/runtime/runtime/patch-source-regressions.mjs
+@@ -0,0 +1,38 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++import { rewriteDynamicImports } from '../../../../src/runtime/dynamic-imports.js';
++
++for (const source of [
++  `const pattern = /import(foo)/; pattern.source;`,
++  `const pattern = /[}](import)(foo)/; pattern.source;`,
++  `if (true) /import(foo)/.test('importfoo');`,
++  `const value = 10 / 2; const text = 'import(foo)';`,
++  `const pattern = \`raw import(foo) \${/import(foo)/.source}\`;`,
++  `object.import('x'); object.eval('import("x")');`,
++]) {
++  test(`import rewriting preserves non-import source: ${source}`, () => {
++    assert.equal(rewriteDynamicImports(source, '__load'), source);
++  });
++}
++
++test('actual imports survive comments, division and nested template expressions', () => {
++  const source = 'const a = 10 / 2; const b = import /* comment */ ("x"); const c = `prefix ${import("y")}`;';
++  assert.equal(rewriteDynamicImports(source, '__load'), source.replaceAll('import', '__load'));
++});
++
++test('literal eval imports are decoded before rewriting and safely re-encoded', async () => {
++  const source = String.raw`return eval('import(\'fixture\')');`;
++  const rewritten = rewriteDynamicImports(source, '__load');
++  assert.equal(await new Function('__load', rewritten)(async x => x), 'fixture');
++});
++
++for (const source of [
++  `const api = { import(value) { return value; } }; api.import('x');`,
++  `class API { import(value) { return value; } }`,
++  `{ /* block */ } /import(foo)/.test('importfoo');`,
++  `const value = { x: 1 } / 2; import('x');`,
++]) {
++  test(`rewriting distinguishes methods, blocks and expressions: ${source}`, () => {
++    assert.equal(rewriteDynamicImports(source, '__load'), source.replace("; import('x')", "; __load('x')"));
++  });
++}
+diff --git a/dev/tests/runtime/runtime/stream-poll-completion.mjs b/dev/tests/runtime/runtime/stream-poll-completion.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..ecad270530287f98e622f121d9395bed3fcfd74c
+--- /dev/null
++++ b/dev/tests/runtime/runtime/stream-poll-completion.mjs
+@@ -0,0 +1,64 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++import { Readable } from '../../../../src/runtime/streams.js';
++
++const HostPromise = Promise;
++const hostSetTimeout = globalThis.setTimeout.bind(globalThis);
++
++// Next.js's App Router render loop polls the flight stream exactly like
++// this (next/dist/compiled/next-server/app-page.runtime.dev.js): it awaits
++// a promise woken by 'readable'/'end', removes all three wait listeners in
++// its cleanup, reads one chunk, and exits only when readableEnded turns
++// true. A stream that is ended-with-empty-buffer must still surface 'end'
++// to this consumer — deferring because only a 'readable' listener happens
++// to be attached traps the loop in a microtask spin that starves timers.
++async function nextStylePoll(stream, maxReads = 8) {
++  let reads = 0;
++  let chunks = 0;
++  while (!stream.readableEnded) {
++    if (!(stream.readableLength > 0 || stream.readableEnded)) {
++      await new HostPromise((resolve, reject) => {
++        const onDone = () => { cleanup(); resolve(); };
++        const onError = (error) => { cleanup(); reject(error); };
++        function cleanup() {
++          stream.removeListener('readable', onDone);
++          stream.removeListener('end', onDone);
++          stream.removeListener('error', onError);
++        }
++        stream.on('readable', onDone);
++        stream.on('end', onDone);
++        stream.on('error', onError);
++      });
++    }
++    if (stream.read() !== null) chunks += 1;
++    reads += 1;
++    if (reads > maxReads) throw new Error(`poll loop never terminated after ${reads} reads`);
++  }
++  return { reads, chunks };
++}
++
++test('a paused poll-loop consumer drains an ended stream and lets timers fire', async () => {
++  const stream = new Readable({ read() {} });
++  stream.push('chunk1');
++  stream.push(null);
++
++  const watchdog = new HostPromise((_, reject) => {
++    hostSetTimeout(() => reject(new Error('event loop starved: poll never completed')), 3000);
++  });
++  const result = await HostPromise.race([nextStylePoll(stream), watchdog]);
++  assert.equal(result.chunks, 1);
++  assert.ok(result.reads <= 4, `expected a couple of reads, got ${result.reads}`);
++  assert.equal(stream.readableEnded, true);
++});
++
++test('an ended stream with no data still completes the poll loop', async () => {
++  const stream = new Readable({ read() {} });
++  stream.push(null);
++
++  const watchdog = new HostPromise((_, reject) => {
++    hostSetTimeout(() => reject(new Error('event loop starved: empty stream poll never completed')), 3000);
++  });
++  const result = await HostPromise.race([nextStylePoll(stream), watchdog]);
++  assert.equal(result.chunks, 0);
++  assert.equal(stream.readableEnded, true);
++});
+diff --git a/src/index.js b/src/index.js
+index 4baa82522b1c4e0d87aca6faf3954feb0d0d852d..20f945583ae024b1d2c22c943f3eeb9230e60b80 100644
+--- a/src/index.js
++++ b/src/index.js
+@@ -67,7 +67,7 @@ function decodeChunkedHttpBody(bytes) {
+       || bytes[offset + size] !== 13 || bytes[offset + size + 1] !== 10) {
+       throw new TypeError('invalid chunked HTTP response');
+     }
+-    chunks.push(bytes.slice(offset, offset + size));
++    chunks.push(bytes.subarray(offset, offset + size));
+     offset += size + 2;
+   }
+   throw new TypeError('invalid chunked HTTP response');
+@@ -674,61 +674,69 @@ export class Nacelle {
+         chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+       });
+       socket.on('error', (error) => finish(reject, error));
++      // This one-shot HTTP request has no reason to keep the writable half
++      // open after response EOF. Parsing on close must not await a peer RST.
++      socket.once('end', () => socket.destroy());
+       socket.on('close', () => {
+         if (settled) return;
+-        const totalLength = chunks.reduce((acc, c) => acc + c.byteLength, 0);
+-        const combined = new Uint8Array(totalLength);
+-        let offset = 0;
+-        for (const c of chunks) {
+-          combined.set(c, offset);
+-          offset += c.byteLength;
+-        }
+-        let headerEnd = -1;
+-        for (let i = 0; i < combined.byteLength - 3; i += 1) {
+-          if (combined[i] === 13 && combined[i + 1] === 10 && combined[i + 2] === 13 && combined[i + 3] === 10) {
+-            headerEnd = i;
+-            break;
++        try {
++          const totalLength = chunks.reduce((acc, c) => acc + c.byteLength, 0);
++          const combined = new Uint8Array(totalLength);
++          let offset = 0;
++          for (const c of chunks) {
++            combined.set(c, offset);
++            offset += c.byteLength;
+           }
+-        }
+-        let bodyOffset = headerEnd !== -1 ? headerEnd + 4 : combined.byteLength;
+-        if (headerEnd === -1) {
+-          for (let i = 0; i < combined.byteLength - 1; i += 1) {
+-            if (combined[i] === 10 && combined[i + 1] === 10) {
++          let headerEnd = -1;
++          for (let i = 0; i < combined.byteLength - 3; i += 1) {
++            if (combined[i] === 13 && combined[i + 1] === 10 && combined[i + 2] === 13 && combined[i + 3] === 10) {
+               headerEnd = i;
+-              bodyOffset = i + 2;
+               break;
+             }
+           }
+-        }
+-        const headerText = headerEnd !== -1 ? new TextDecoder().decode(combined.subarray(0, headerEnd)) : '';
+-        const rawBody = combined.subarray(bodyOffset);
+-        const lines = headerText.split(/\r?\n/);
+-        const statusMatch = (lines[0] || '').match(/^HTTP\/\d\.\d\s+(\d+)(?:\s+(.*))?$/);
+-        if (!statusMatch) {
+-          finish(reject, new Error('Virtual HTTP connection closed without a valid response'));
+-          return;
+-        }
+-        const status = parseInt(statusMatch[1], 10);
+-        const statusText = statusMatch ? statusMatch[2] || 'OK' : 'OK';
+-        const resHeaders = new Headers();
+-        for (let i = 1; i < lines.length; i += 1) {
+-          const colon = lines[i].indexOf(':');
+-          if (colon !== -1) {
+-            resHeaders.append(lines[i].slice(0, colon).trim(), lines[i].slice(colon + 1).trim());
++          let bodyOffset = headerEnd !== -1 ? headerEnd + 4 : combined.byteLength;
++          if (headerEnd === -1) {
++            for (let i = 0; i < combined.byteLength - 1; i += 1) {
++              if (combined[i] === 10 && combined[i + 1] === 10) {
++                headerEnd = i;
++                bodyOffset = i + 2;
++                break;
++              }
++            }
++          }
++          const headerText = headerEnd !== -1 ? new TextDecoder().decode(combined.subarray(0, headerEnd)) : '';
++          const rawBody = combined.subarray(bodyOffset);
++          const lines = headerText.split(/\r?\n/);
++          const statusMatch = (lines[0] || '').match(/^HTTP\/\d\.\d\s+(\d+)(?:\s+(.*))?$/);
++          if (!statusMatch) {
++            finish(reject, new Error('Virtual HTTP connection closed without a valid response'));
++            return;
+           }
++          const status = parseInt(statusMatch[1], 10);
++          const statusText = statusMatch ? statusMatch[2] || 'OK' : 'OK';
++          const resHeaders = new Headers();
++          for (let i = 1; i < lines.length; i += 1) {
++            const colon = lines[i].indexOf(':');
++            if (colon !== -1) {
++              resHeaders.append(lines[i].slice(0, colon).trim(), lines[i].slice(colon + 1).trim());
++            }
++          }
++          const bodyForbidden = method === 'HEAD' || [204, 205, 304].includes(status);
++          const responseBody = bodyForbidden ? null : /(?:^|\W)chunked(?:$|\W)/i.test(
++            resHeaders.get('transfer-encoding') || '',
++          )
++            ? decodeChunkedHttpBody(rawBody)
++            : rawBody;
++          const ResponseClass = globalThis.Response || this._globalObject.Response;
++          const res = new ResponseClass(responseBody, {
++            status,
++            statusText,
++            headers: resHeaders,
++          });
++          finish(resolve, res);
++        } catch (error) {
++          finish(reject, error);
+         }
+-        const responseBody = /(?:^|\W)chunked(?:$|\W)/i.test(
+-          resHeaders.get('transfer-encoding') || '',
+-        )
+-          ? decodeChunkedHttpBody(rawBody)
+-          : rawBody;
+-        const ResponseClass = globalThis.Response || this._globalObject.Response;
+-        const res = new ResponseClass(responseBody, {
+-          status,
+-          statusText,
+-          headers: resHeaders,
+-        });
+-        finish(resolve, res);
+       });
+       signal?.addEventListener('abort', onAbort, { once: true });
+       if (signal?.aborted) {
+diff --git a/src/runtime.js b/src/runtime.js
+index c166ff8514fc50dec46bcc2836531c0547ad33e6..23b4e37b2098a0d8241e70fec407faf8561481b4 100644
+--- a/src/runtime.js
++++ b/src/runtime.js
+@@ -1,3 +1,4 @@
++import { rewriteDynamicImports } from './runtime/dynamic-imports.js';
+ import { createAssert, inspect as nodeInspect } from './runtime/assert.js';
+ import {
+   createBufferClass,
+@@ -2424,151 +2425,7 @@ const COMMONJS_WRAPPER_PARAMETERS = Object.freeze([
+ ]);
+ 
+ function rewriteCommonJsDynamicImports(source) {
+-  const text = String(source);
+-  const isIdentifierPart = (character) => character !== undefined && /[$\w]/u.test(character);
+-  let index = 0;
+-
+-  const copyQuoted = (quote) => {
+-    let result = quote;
+-    index += 1;
+-    while (index < text.length) {
+-      const character = text[index];
+-      result += character;
+-      index += 1;
+-      if (character === '\\' && index < text.length) {
+-        result += text[index];
+-        index += 1;
+-      } else if (character === quote) {
+-        break;
+-      }
+-    }
+-    return result;
+-  };
+-
+-  const copyComment = () => {
+-    const start = index;
+-    index += 2;
+-    if (text[start + 1] === '/') {
+-      while (index < text.length && text[index] !== '\n' && text[index] !== '\r') index += 1;
+-    } else {
+-      while (index < text.length && !(text[index] === '*' && text[index + 1] === '/')) index += 1;
+-      if (index < text.length) index += 2;
+-    }
+-    return text.slice(start, index);
+-  };
+-
+-  const scanCode = (stopAtBrace = false) => {
+-    let result = '';
+-    let braceDepth = stopAtBrace ? 1 : 0;
+-    while (index < text.length) {
+-      const character = text[index];
+-      const next = text[index + 1];
+-      // A direct eval in a CommonJS module shares the module's lexical
+-      // environment.  Rewrite literal eval bodies at the same source
+-      // boundary as ordinary dynamic imports so import() keeps the owning
+-      // Node loader and its lifecycle/task tracking.  This is deliberately
+-      // limited to literal source; indirect/dynamic eval retains native
+-      // semantics and cannot be safely associated with this module.
+-      if (text.startsWith('eval', index)
+-        && !isIdentifierPart(text[index - 1])
+-        && !isIdentifierPart(text[index + 4])) {
+-        let literalStart = index + 4;
+-        while (/\s/u.test(text[literalStart] || '')) literalStart += 1;
+-        if (text[literalStart] === '(') {
+-          literalStart += 1;
+-          while (/\s/u.test(text[literalStart] || '')) literalStart += 1;
+-          if (text[literalStart] === '\'' || text[literalStart] === '"') {
+-            result += text.slice(index, literalStart);
+-            index = literalStart;
+-            const quoted = copyQuoted(text[literalStart]);
+-            const body = quoted.slice(1, -1);
+-            result += quoted[0] + rewriteCommonJsDynamicImports(body) + quoted.slice(-1);
+-            continue;
+-          }
+-        }
+-      }
+-      if (character === '\'' || character === '"') {
+-        result += copyQuoted(character);
+-        continue;
+-      }
+-      if (character === '/' && (next === '/' || next === '*')) {
+-        result += copyComment();
+-        continue;
+-      }
+-      if (character === '`') {
+-        result += scanTemplate();
+-        continue;
+-      }
+-      if (stopAtBrace) {
+-        if (character === '{') braceDepth += 1;
+-        if (character === '}') {
+-          braceDepth -= 1;
+-          result += character;
+-          index += 1;
+-          if (braceDepth === 0) return result;
+-          continue;
+-        }
+-      }
+-      if (text.startsWith('import', index)
+-        && !isIdentifierPart(text[index - 1])
+-        && text[index - 1] !== '.'
+-        && !isIdentifierPart(text[index + 6])) {
+-        let callIndex = index + 6;
+-        for (;;) {
+-          while (/\s/u.test(text[callIndex] || '')) callIndex += 1;
+-          if (text.startsWith('/*', callIndex)) {
+-            const end = text.indexOf('*/', callIndex + 2);
+-            callIndex = end < 0 ? text.length : end + 2;
+-            continue;
+-          }
+-          if (text.startsWith('//', callIndex)) {
+-            callIndex += 2;
+-            while (callIndex < text.length && text[callIndex] !== '\n' && text[callIndex] !== '\r') callIndex += 1;
+-            continue;
+-          }
+-          break;
+-        }
+-        if (text[callIndex] === '(') {
+-          result += '__bnhImport';
+-          index += 6;
+-          continue;
+-        }
+-      }
+-      result += character;
+-      index += 1;
+-    }
+-    return result;
+-  };
+-
+-  function scanTemplate() {
+-    let result = '`';
+-    index += 1;
+-    while (index < text.length) {
+-      const character = text[index];
+-      if (character === '\\') {
+-        result += character;
+-        index += 1;
+-        if (index < text.length) {
+-          result += text[index];
+-          index += 1;
+-        }
+-      } else if (character === '`') {
+-        result += character;
+-        index += 1;
+-        return result;
+-      } else if (character === '$' && text[index + 1] === '{') {
+-        result += '${';
+-        index += 2;
+-        result += scanCode(true);
+-      } else {
+-        result += character;
+-        index += 1;
+-      }
+-    }
+-    return result;
+-  }
+-
+-  return scanCode();
++  return rewriteDynamicImports(source, '__bnhImport');
+ }
+ 
+ function hasTopLevelCommonJsProcessBinding(source) {
+@@ -2582,7 +2439,7 @@ function hasTopLevelCommonJsProcessBinding(source) {
+ function createGuestFunctionConstructor(NativeFunction, processOverride, sourceURL) {
+   const GuestFunction = function guestFunctionConstructor(...args) {
+     const body = args.length ? String(args.at(-1)) : '';
+-    if (!/\bimport\s*\(/u.test(body)) return Reflect.construct(NativeFunction, args);
++    if (!body.includes('import')) return Reflect.construct(NativeFunction, args);
+     const parameters = args.slice(0, -1);
+     const rewritten = rewriteCommonJsDynamicImports(body);
+     const compiled = Reflect.construct(NativeFunction, ['__bnhImport', ...parameters, rewritten]);
+@@ -2649,7 +2506,7 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
+     // other bodies, so this preserves ordinary Function semantics while
+     // keeping deferred imports inside the owning module loader.
+     if (processOverride?.__bnhModuleImport) {
+-      if (globalThis.__BNH_DISABLE_GUEST_FUNCTION === true) globalThis.Function = createGuestFunctionConstructor(previousFunction, processOverride, sourceURL);
++      if (globalThis.__BNH_DISABLE_GUEST_FUNCTION !== true) globalThis.Function = createGuestFunctionConstructor(previousFunction, processOverride, sourceURL);
+     }
+     try {
+       return wrapped(...values);
+@@ -2677,7 +2534,7 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
+   // See the module-wrapper path above: dynamic import syntax may only exist
+   // in a string compiled after this CommonJS evaluation has returned.
+   if (processOverride?.__bnhModuleImport) {
+-    if (globalThis.__BNH_DISABLE_GUEST_FUNCTION === true) globalThis.Function = createGuestFunctionConstructor(previousFunction, processOverride, sourceURL);
++    if (globalThis.__BNH_DISABLE_GUEST_FUNCTION !== true) globalThis.Function = createGuestFunctionConstructor(previousFunction, processOverride, sourceURL);
+   }
+   try {
+     const values = [...commonJsValues, commonJsValues[5] || ((specifier) => import(specifier))];
+@@ -3419,6 +3276,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
+     else dispatch();
+   };
+   const setTimer = (callback, delay, repeat = false, type = repeat ? 'Timeout' : 'Timeout') => {
++    beforeExitEventEmitted = false;
+     const useImmediateChannel = type === 'Immediate';
+     const resource = new AsyncResource(type);
+     const handle = {
+@@ -3431,7 +3289,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
+       _run: null,
+       _immediateChannel: Boolean(useImmediateChannel),
+       resource,
+-      ref() { this._refed = true; return this; },
++      ref() { this._refed = true; beforeExitEventEmitted = false; return this; },
+       unref() { this._refed = false; return this; },
+       hasRef() { return this._refed; },
+       refresh() {
+@@ -3941,6 +3799,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
+     _bnhIsExited: () => exited,
+     _exitRequested: () => exitRequested,
+     _bnhReleaseTasks: null,
++    _bnhMarkActive: () => { beforeExitEventEmitted = false; },
+     _emitBeforeExit: () => {
+       if (beforeExitEventEmitted || exitRequested || exited) return false;
+       beforeExitEventEmitted = true;
+@@ -5037,7 +4896,7 @@ export function createRuntime({
+     let text = source;
+     if (text === undefined) {
+       try {
+-        const value = readSource(entryPath);
++        const value = vfs.readSource(entryPath);
+         text = typeof value === 'string' ? value : new TextDecoder().decode(value);
+       } catch {
+         return false;
+@@ -5087,16 +4946,16 @@ export function createRuntime({
+ 
+   function makeBuiltins(processObject, runtimeRequire, diagnosticsChannels, runtimeOptions, performancePrimitives, trackTask, stdout, stderr, readSource, sourcePath, runtimeFetchRef, workerTransport) {
+     const fs = vfs.fs;
+-    const cjsPackageEntryCache = new Map();
+     const cjsPackageConfigCache = new Map();
+-    const cjsPackageTypeCache = new Map();
+     const readCjsPackageConfig = (packageBase) => {
+       const manifest = `${packageBase}/package.json`;
+       if (!vfs.files.has(manifest)) return undefined;
+-      if (cjsPackageConfigCache.has(packageBase)) return cjsPackageConfigCache.get(packageBase);
++      const version = vfs.fileVersion(manifest);
++      const cached = cjsPackageConfigCache.get(packageBase);
++      if (cached?.version === version) return cached.config;
+       const source = readSource(manifest);
+       const config = JSON.parse(typeof source === 'string' ? source : new TextDecoder().decode(source));
+-      cjsPackageConfigCache.set(packageBase, config);
++      cjsPackageConfigCache.set(packageBase, { version, config });
+       return config;
+     };
+     const recordPerformanceEntry = performancePrimitives.recordEntry || (() => {});
+@@ -5194,7 +5053,7 @@ export function createRuntime({
+       if (!sourceMapsSupport.nodeModules && sourceURL.includes('/node_modules/')) return undefined;
+       let filename;
+       try {
+-        filename = sourceURL.startsWith('file:') ? fileURLToPath(sourceURL) : normalizePath(sourceURL, processObj.cwd?.() || '/node');
++        filename = sourceURL.startsWith('file:') ? fileURLToPath(sourceURL) : normalizePath(sourceURL, processObject.cwd?.() || '/node');
+       } catch {
+         return undefined;
+       }
+@@ -5523,8 +5382,7 @@ export function createRuntime({
+               if (typeof processObj.__bnhModuleImport === 'function') {
+                 return processObj.__bnhModuleImport(specifier, resolved, options);
+               }
+-              if (typeof esmLoader !== 'undefined') return esmLoader.import(specifier, resolved, {}, options);
+-              return import(specifier, options);
++              throw new Error('The owning process module loader is unavailable');
+             }],
+           currentModuleWrapper,
+           processObj,
+@@ -5586,10 +5444,14 @@ export function createRuntime({
+         const record = { resolve: hooks.resolve, load: hooks.load };
+         registry.push(record);
+         processObj.__bnhModuleHooks = registry;
++        processObj.__bnhModuleHookRevision = (processObj.__bnhModuleHookRevision || 0) + 1;
+         return {
+           deregister() {
+             const index = registry.indexOf(record);
+-            if (index >= 0) registry.splice(index, 1);
++            if (index >= 0) {
++              registry.splice(index, 1);
++              processObj.__bnhModuleHookRevision = (processObj.__bnhModuleHookRevision || 0) + 1;
++            }
+           },
+         };
+       };
+@@ -5817,7 +5679,8 @@ export function createRuntime({
+           // extension/index probing. Do this before the ESM resolver, which
+           // intentionally keeps extensionless relative URLs unresolved.
+           if (request.startsWith('.') || request.startsWith('/')) {
+-            const commonJsResolved = resolveFile(request, importer, processObj);
++            const commonJsResolved = processObj.__bnhModuleResolveRequire?.(request, importer, conditions)
++              || resolveFile(request, importer, processObj);
+             if (vfs.files.has(commonJsResolved)) return commonJsResolved;
+           }
+           if (options?.paths !== undefined && !Array.isArray(options.paths)) {
+@@ -5842,11 +5705,11 @@ export function createRuntime({
+             for (const lookupPath of lookupPaths) {
+               if (typeof lookupPath !== 'string') throw moduleArgumentTypeError('options.paths', 'an array of strings', options.paths);
+               const fakeImporter = path.join(normalizePath(lookupPath, processObj.cwd?.() || '/node'), 'index.js');
+-              candidates.push(esmLoader.resolve(request, fakeImporter, conditions));
++              candidates.push(processObj.__bnhModuleResolveRequire?.(request, fakeImporter, conditions));
+             }
+             resolved = candidates.find((candidate) => candidate && (candidate.startsWith('/') || candidate.startsWith('file:')));
+           } else {
+-            resolved = esmLoader.resolve(request, importer, conditions);
++            resolved = processObj.__bnhModuleResolveRequire?.(request, importer, conditions);
+           }
+         } catch (error) {
+           if (error?.code && error.code !== 'MODULE_NOT_FOUND') throw error;
+@@ -5895,6 +5758,9 @@ export function createRuntime({
+             error.code = 'MODULE_NOT_FOUND';
+             throw error;
+           }
++          if (moduleApi._resolveFilename !== resolveFilename) {
++            name = moduleApi._resolveFilename(name, parent, isMain);
++          }
+           if (typeof ownerProcess?.__bnhSyncModuleLoader === 'function') {
+             return ownerProcess.__bnhSyncModuleLoader(name, parent, isMain);
+           }
+@@ -6413,7 +6279,7 @@ export function createRuntime({
+       trackTask,
+       clusterGroupId: runtimeOptions.clusterGroupId,
+       onWorkerMessage: (message) => {
+-        if (!options.workerThread || typeof sendWorkerMessage !== 'function') return;
++        if (!runtimeOptions.workerThread || typeof sendWorkerMessage !== 'function') return;
+         sendWorkerMessage({ __bnhInternalWorkerMessage: message?.type });
+       },
+     });
+@@ -6717,6 +6583,7 @@ export function createRuntime({
+         targetProcess.emit?.('warning', warning);
+       });
+     };
++    processObject.__bnhEmitInternalTestBindingWarning = emitInternalTestBindingWarning;
+     const internalTestBinding = {
+       // Keep internal/test/binding and the public internalBinding hook on the
+       // same contract so stateful bindings (notably stream_wrap) are shared.
+@@ -8345,128 +8212,38 @@ export function createRuntime({
+         function resolveFileSync(specifier, importer, processObj = null) {
+           const source = String(specifier).replaceAll('\\', '/');
+           if (source.startsWith('data:')) return source;
+-          if (source.startsWith('file:')) return normalizePath(fileURLToPath(source));
+-          if (source.startsWith('#')) {
+-            const resolved = esmLoader.resolveRequire(source, importer);
+-            return resolved.startsWith('file:') ? fileURLToPath(resolved) : resolved;
+-          }
+           const internalName = source.startsWith('node:') ? source.slice(5) : source;
+-          if (internalName.startsWith('internal/')) {
+-            const internalBase = `/node/lib/${internalName}`;
+-            for (const candidate of commonJsFileCandidates(internalBase)) {
+-              try { readSource(candidate); return candidate; } catch { /* ignore */ }
+-            }
+-          }
+-          if (!source.startsWith('.') && !source.startsWith('/')) {
+-            const coreName = source.startsWith('node:') ? source.slice(5) : source;
+-            for (const candidate of commonJsFileCandidates(`/node/lib/${coreName}`)) {
+-              try { readSource(candidate); return candidate; } catch { /* ignore */ }
+-            }
+-            const packageParts = source.split('/');
+-            const packageName = source.startsWith('@')
+-              ? packageParts.slice(0, 2).join('/')
+-              : packageParts[0];
+-            const packageSubpath = packageParts.slice(packageName.split('/').length).join('/');
+-            let directory = path.dirname(importer || '/node/index.js');
+-            while (true) {
+-              const packageBase = path.join(directory, 'node_modules', packageName);
+-              let packageConfig;
+-              try { packageConfig = readCjsPackageConfig(packageBase); } catch { packageConfig = undefined; }
+-              if (packageSubpath && packageConfig?.exports !== undefined && typeof processObj?.__bnhModuleResolve === 'function') {
+-                const exported = processObj.__bnhModuleResolve(source, importer, ['node', 'require']).url;
+-                const exportedPath = exported?.startsWith('file:') ? fileURLToPath(exported) : exported;
+-                const exportedCandidate = typeof exportedPath === 'string'
+-                  ? commonJsFileCandidates(exportedPath).find((candidate) => vfs.files.has(candidate))
+-                  : undefined;
+-                if (exportedCandidate) return exportedCandidate;
+-              }
+-              // A package subpath is resolved relative to the package root;
+-              // it must not be treated as a second package name. This is
+-              // observable for entries such as `pkg/package.json`, which
+-              // many libraries use to derive a sibling directory before
+-              // downloading optional assets at runtime.
+-              if (packageSubpath) {
+-                const packageTarget = path.join(packageBase, packageSubpath);
+-                const packageCandidate = commonJsModuleCandidates(packageTarget)
+-                  .find((candidate) => vfs.files.has(candidate));
+-                if (packageCandidate) return packageCandidate;
+-                if (directory === '/' || directory === '.' || directory === '') break;
+-                directory = path.dirname(directory);
+-                continue;
+-              }
+-              if (!cjsPackageEntryCache.has(packageBase)) {
+-                let packageEntry = null;
+-                if (packageConfig) try {
+-                  const main = typeof packageConfig.main === 'string' ? packageConfig.main : null;
+-                  if (main && !main.startsWith('/')) packageEntry = path.join(packageBase, main);
+-                } catch { /* package directory has no readable manifest */ }
+-                cjsPackageEntryCache.set(packageBase, packageEntry);
+-              }
+-              const packageEntry = cjsPackageEntryCache.get(packageBase);
+-              if (packageEntry) {
+-                const packageCandidate = commonJsFileCandidates(packageEntry).find((candidate) => vfs.files.has(candidate));
+-                if (packageCandidate) return packageCandidate;
+-              }
+-              // A package manifest's main entry takes precedence over the
+-              // package-root extension probes. Packages may ship an
+-              // index.mjs alongside a CommonJS main for require callers.
+-              for (const candidate of commonJsModuleCandidates(packageBase)) {
+-                try { readSource(candidate); return candidate; } catch { /* ignore */ }
+-              }
+-              if (directory === '/' || directory === '.' || directory === '') break;
+-              directory = path.dirname(directory);
+-            }
+-          }
+-          const base = specifier.startsWith('/') ? specifier : normalizePath(specifier, importer ? path.dirname(importer) : '/node');
+-          const candidate = commonJsFileCandidates(base).find((pathname) => vfs.files.has(pathname));
+-          if (candidate) return candidate;
+-          let isDirectory = false;
+-          try { isDirectory = vfs.fs.statSync(base).isDirectory?.() === true; } catch { /* missing path */ }
+-          if (isDirectory) {
+-            let packageConfig;
+-            try { packageConfig = readCjsPackageConfig(base); } catch { packageConfig = undefined; }
+-            if (typeof packageConfig?.main === 'string' && !packageConfig.main.startsWith('/')) {
+-              const packageCandidate = commonJsFileCandidates(path.resolve(base, packageConfig.main))
+-                .find((pathname) => vfs.files.has(pathname));
+-              if (packageCandidate) return packageCandidate;
+-            }
+-            const indexCandidate = commonJsModuleCandidates(path.join(base, 'index'))
++          if (!source.startsWith('.') && !source.startsWith('/') && !source.startsWith('#')) {
++            const candidate = commonJsFileCandidates(`/node/lib/${internalName}`)
+               .find((pathname) => vfs.files.has(pathname));
+-            if (indexCandidate) return indexCandidate;
++            if (candidate) return candidate;
+           }
+-          // A relative or absolute directory request follows the CommonJS
+-          // package main contract before falling back to index.*.  Keep this
+-          // in the synchronous child resolver as well as the normal loader;
+-          // package tools commonly use Module._load during a sync entry.
+-          const packageManifest = path.join(base, 'package.json');
+-          try {
+-            const packageSource = readSource(packageManifest);
+-            const packageConfig = JSON.parse(typeof packageSource === 'string'
+-              ? packageSource
+-              : new TextDecoder().decode(packageSource));
+-            if (typeof packageConfig.main === 'string') {
+-              const mainBase = path.resolve(base, packageConfig.main);
+-              for (const candidate of moduleCandidates(mainBase)) {
+-                try { readSource(candidate); return candidate; } catch { /* ignore */ }
++          const resolveRequire = processObj?.__bnhModuleResolveRequire
++            || processObject.__bnhModuleResolveRequire;
++          if (typeof resolveRequire === 'function') {
++            try {
++              const resolved = resolveRequire(source, importer);
++              return resolved.startsWith('file:') ? fileURLToPath(resolved) : resolved;
++            } catch (error) {
++              // Preserve the runtime's explicit unsupported native-addon seam,
++              // but never turn a missing bare package into an importer-relative
++              // filename (which hides the actual resolution failure).
++              if (error?.code === 'MODULE_NOT_FOUND' && isNativeAddonBuildPath(source)) {
++                return nativeAddonPath(source);
+               }
++              throw error;
+             }
+-          } catch { /* no package manifest or invalid directory request */ }
+-          for (const candidate of moduleCandidates(path.join(base, 'index'))) {
+-            try { readSource(candidate); return candidate; } catch { /* ignore */ }
+           }
+-          if (addonsDisabled(processObj) || isNativeAddonBuildPath(base)) return nativeAddonPath(base);
+-          return base;
++          return resolveFile(source, importer, processObj);
+         }
+         function packageType(entryPath) {
+           let directory = path.dirname(entryPath);
+           for (;;) {
+             if (directory.endsWith('/node_modules')) return 'commonjs';
+-            if (cjsPackageTypeCache.has(directory)) return cjsPackageTypeCache.get(directory);
+             try {
+               const packageConfig = readCjsPackageConfig(directory);
+               if (packageConfig) {
+                 const type = packageConfig.type === 'module' ? 'module' : 'commonjs';
+-                cjsPackageTypeCache.set(directory, type);
+                 return type;
+               }
+             } catch (error) {
+@@ -8550,7 +8327,7 @@ export function createRuntime({
+           return moduleSynchronousEsmSource(source, filename);
+         }
+ 
+-        function esmGraphHasTopLevelAwait(entryPath, seen = new Set()) {
++        function esmGraphHasTopLevelAwait(entryPath, processObj, seen = new Set()) {
+           if (seen.has(entryPath)) return false;
+           seen.add(entryPath);
+           let source;
+@@ -8568,13 +8345,13 @@ export function createRuntime({
+             if (specifier.startsWith('node:')) continue;
+             let dependency;
+             try {
+-              dependency = esmLoader.resolve(specifier, entryPath, ['node', 'import']);
++              dependency = processObj.__bnhModuleResolve(specifier, entryPath, ['node', 'import']);
+             } catch {
+               continue;
+             }
+             if (dependency.startsWith('file:')) dependency = fileURLToPath(dependency);
+             if (dependency.startsWith('node:')) continue;
+-            if (esmGraphHasTopLevelAwait(dependency, seen)) return true;
++            if (esmGraphHasTopLevelAwait(dependency, processObj, seen)) return true;
+           }
+           return false;
+         }
+@@ -8651,7 +8428,7 @@ export function createRuntime({
+                   || value.startsWith('/') && mock.resolved.startsWith(`${value}/`)
+                   || !value.startsWith('/') && mock.resolved.includes(`/node_modules/${value}/`)));
+           };
+-          const registeredMock = moduleMockFor(entryPath);
++          const registeredMock = mockMaps.length ? moduleMockFor(entryPath) : undefined;
+           if (registeredMock?.active) return registeredMock.getCjsValue();
+           moduleState.cache ||= Object.create(null);
+           const cachedModule = moduleState.cache[entryPath];
+@@ -8692,7 +8469,7 @@ export function createRuntime({
+             || (isMain && hasStaticEsmSyntax(text));
+           const allowRequireEsm = isRequireEsmEnabled(processObj);
+           if (esmEntry && !isMain && !allowRequireEsm) {
+-            if (esmGraphHasTopLevelAwait(entryPath)) throw requireAsyncModuleError(entryPath, parentImport);
++            if (esmGraphHasTopLevelAwait(entryPath, processObj)) throw requireAsyncModuleError(entryPath, parentImport);
+             throw requireEsmError(entryPath, parentImport, fromEval);
+           }
+           if (esmEntry) source = synchronousEsmSource(text, entryPath);
+@@ -8757,6 +8534,11 @@ export function createRuntime({
+             if (isMain) activeModuleApi._main = moduleRecord;
+             try {
+               extensionHandler(moduleRecord, entryPath);
++            } catch (error) {
++              delete moduleState.cache[entryPath];
++              const siblings = moduleRecord.parent?.children;
++              if (siblings?.includes(moduleRecord)) siblings.splice(siblings.indexOf(moduleRecord), 1);
++              throw error;
+             } finally {
+               if (isMain) activeModuleApi._main = previousMain;
+             }
+@@ -8866,7 +8648,9 @@ export function createRuntime({
+                 const value = runtimeRequire(name, entryPath);
+                 return settle({ default: value, ...value });
+               }
+-              return settle(esmLoader.import(specifier, entryPath, {}, options, processObj));
++              const error = new Error(`Dynamic import is unavailable for '${specifier}'`);
++              error.code = 'ERR_MODULE_NOT_FOUND';
++              throw error;
+             } catch (error) {
+               release?.();
+               throw error;
+@@ -8888,6 +8672,11 @@ export function createRuntime({
+               activeModuleApi.wrapper,
+               processObj,
+             );
++          } catch (error) {
++            delete moduleState.cache[entryPath];
++            const siblings = moduleRecord.parent?.children;
++            if (siblings?.includes(moduleRecord)) siblings.splice(siblings.indexOf(moduleRecord), 1);
++            throw error;
+           } finally {
+             if (previousActiveProcess === undefined) delete scopeObj.__bnhActiveProcess;
+             else scopeObj.__bnhActiveProcess = previousActiveProcess;
+@@ -9038,6 +8827,7 @@ export function createRuntime({
+             };
+             if (typeof processObject.__bnhModuleResolve === 'function') {
+               childProc.processObject.__bnhModuleResolve = processObject.__bnhModuleResolve;
++              childProc.processObject.__bnhModuleResolveRequire = processObject.__bnhModuleResolveRequire;
+             }
+             if (typeof processObject.__bnhModuleImport === 'function') {
+               const parentModuleImport = processObject.__bnhModuleImport;
+@@ -9129,16 +8919,24 @@ export function createRuntime({
+                 childProc.processObject._bnhRunInContext?.(() => {
+                   if (childProc.processObject._bnhIsExited?.()
+                     || childProc.processObject._exitRequested?.()
+-                    || childProc.processObject._timers?.size
++                    || [...(childProc.processObject._timers || [])].some((timer) => timer.hasRef?.() !== false && timer._refed !== false)
+                     || childProc.processObject._bnhHasPendingTasks?.()
+                     || childProc.processObject._bnhHasPendingAbortWorker?.()) return;
+                   const hasIpcListeners = childProc.processObject.connected
++                    && childProc.processObject.channel?.hasRef?.() !== false
+                     && ['message', 'disconnect'].some((name) => (
+                       childProc.processObject.listeners?.(name)?.some((listener) => !listener._bnhInternal)
+                       ?? childProc.processObject.listenerCount(name) > 0
+                     ));
+                   if (hasIpcListeners) return;
+-                  childProc.processObject._emitBeforeExit?.();
++                  try {
++                    if (childProc.processObject._emitBeforeExit?.()) {
++                      tryExitChild();
++                      return;
++                    }
++                  } catch (error) {
++                    childProc.processObject._bnhDispatchUncaughtException?.(error);
++                  }
+                   childProc.processObject._markExited?.();
+                 });
+               });
+@@ -9146,10 +8944,13 @@ export function createRuntime({
+             const childTrackTask = (label = null) => {
+               const release = trackTask(label);
+               const taskId = ++childTaskSequence;
++              childProc.processObject._bnhMarkActive?.();
++              if (childTaskRecords.size >= 8) childTaskRecords.delete(childTaskRecords.keys().next().value);
+               childTaskRecords.set(taskId, {
+                 id: taskId,
+                 label: label == null ? null : String(label).slice(0, 128),
+-                stack: String(new Error().stack || '').split('\n')[2]?.trim().slice(0, 160) || null,
++                stack: runtimeOptions.traceTaskStacks === true
++                  ? String(new Error().stack || '').split('\n')[2]?.trim().slice(0, 160) || null : null,
+               });
+               let released = false;
+               const releaseChildTask = () => {
+@@ -9165,30 +8966,6 @@ export function createRuntime({
+               publishChildLifecycle();
+               return releaseChildTask;
+             };
+-            // VFS promise helpers are shared by the runtime and same-realm
+-            // child processes. Count a child's asynchronous filesystem work
+-            // in that child's liveness set as well as the parent runtime's
+-            // set, so an async package download cannot be cut off by the
+-            // child's implicit beforeExit check.
+-            const previousVfsTaskTracker = vfs.getTaskTracker?.();
+-            let vfsTaskTrackerRestored = false;
+-            const childVfsTaskTracker = (label = null) => {
+-              const parentRelease = previousVfsTaskTracker?.(label);
+-              const childRelease = childTrackTask(label);
+-              let released = false;
+-              return () => {
+-                if (released) return;
+-                released = true;
+-                childRelease?.();
+-                parentRelease?.();
+-              };
+-            };
+-            vfs.setTaskTracker(childVfsTaskTracker);
+-            const restoreVfsTaskTracker = () => {
+-              if (vfsTaskTrackerRestored) return;
+-              vfsTaskTrackerRestored = true;
+-              vfs.setTaskTracker(previousVfsTaskTracker);
+-            };
+             const childHttpCompatibility = createHttpCompatibility(scope, {
+               Buffer,
+               process: childProc.processObject,
+@@ -9363,8 +9140,7 @@ export function createRuntime({
+               try {
+                 return originalChildExit(code);
+               } finally {
+-                restoreVfsTaskTracker();
+-                releaseGlobalProcess();
++                  releaseGlobalProcess();
+                 releaseGlobalConsole();
+               }
+             };
+@@ -9373,8 +9149,7 @@ export function createRuntime({
+               try {
+                 return originalMarkExited?.(...args);
+               } finally {
+-                restoreVfsTaskTracker();
+-                releaseGlobalProcess();
++                  releaseGlobalProcess();
+                 releaseGlobalConsole();
+               }
+             };
+@@ -9427,7 +9202,7 @@ export function createRuntime({
+               originalReadFileSync = fs.readFileSync;
+               if (prepared.stdin !== undefined || prepared.stdinPath) {
+                 let stdinValue = prepared.stdin;
+-                if (stdinValue === undefined && prepared.stdinPath) stdinValue = readSource(prepared.stdinPath);
++                if (stdinValue === undefined && prepared.stdinPath) stdinValue = vfs.read(prepared.stdinPath);
+                 const stdinBuffer = Buffer.from(stdinValue instanceof Uint8Array ? stdinValue : String(stdinValue ?? ''));
+                 fs.readFileSync = (pathValue, readOptions) => {
+                   if (String(pathValue) === '/dev/stdin') {
+@@ -9638,7 +9413,8 @@ export function createRuntime({
+                   );
+                 }
+               }
+-              hasPendingTimers = Boolean(options.asyncLifecycle && childProc.processObject._timers?.size);
++              hasPendingTimers = Boolean(options.asyncLifecycle
++                && [...(childProc.processObject._timers || [])].some((timer) => timer.hasRef?.() !== false && timer._refed !== false));
+               const hasIpcListeners = Boolean(options.ipc)
+                 && ['message', 'disconnect'].some((name) => childProc.processObject.listeners?.(name)
+                   ?.some((listener) => !listener?._bnhInternal && !listener?.__bnhInternalClusterListener));
+@@ -9742,7 +9518,8 @@ export function createRuntime({
+               stdoutChunks: stdoutArr,
+               stderrChunks: stderrArr,
+               status: childProc.processObject.getSignal?.() ? null : childProc.processObject.getCode(),
+-              pending: hasPendingTimers || hasPendingTasks
++              pending: Boolean(options.asyncLifecycle && !childProc.processObject._bnhIsExited?.())
++                || hasPendingTimers || hasPendingTasks
+                 || childProc.processObject._bnhHasPendingAbortWorker?.() || false,
+               signal: childProc.processObject.getSignal?.() || null,
+               error: timeoutError,
+@@ -11028,26 +10805,34 @@ export function createRuntime({
+     let pending = 0;
+     const pendingTaskRecords = new Map();
+     let nextPendingTaskId = 0;
++    let markTaskActivity = () => {};
++    const traceTaskStacks = options.traceTaskStacks === true;
+     const publishLifecycleState = () => {
+       if (!injectedProcess) return;
+       injectedProcess.__bnhRuntimeLifecycle = {
+         pending,
+-        tasks: [...pendingTaskRecords.values()].slice(-4),
++        tasks: [...pendingTaskRecords.values()],
+       };
+       injectedProcess.__bnhReportRuntimeState?.();
+     };
+     const trackTask = (label = null) => {
+       pending += 1;
++      markTaskActivity();
+       const taskId = ++nextPendingTaskId;
+-      const stackLine = String(new Error().stack || '').split('\n')[2]?.trim().slice(0, 160) || null;
+-      pendingTaskRecords.set(taskId, {
+-        id: taskId,
+-        label: label == null ? null : String(label).slice(0, 128),
+-        stack: stackLine,
+-      });
++      if (injectedProcess) {
++        if (pendingTaskRecords.size >= 4) pendingTaskRecords.delete(pendingTaskRecords.keys().next().value);
++        pendingTaskRecords.set(taskId, {
++          id: taskId,
++          label: label == null ? null : String(label).slice(0, 128),
++          stack: traceTaskStacks ? String(new Error().stack || '').split('\n')[2]?.trim().slice(0, 160) || null : null,
++        });
++      }
+       publishLifecycleState();
++      let released = false;
+       return () => {
+-        pending = Math.max(0, pending - 1);
++        if (released) return;
++        released = true;
++        pending -= 1;
+         pendingTaskRecords.delete(taskId);
+         publishLifecycleState();
+       };
+@@ -11103,23 +10888,29 @@ export function createRuntime({
+       nativeClearInterval(handle);
+       timerHandles.delete(handle);
+     };
+-    const hasReferencedTimers = (handles) => [...handles].some((handle) => {
+-      if (typeof handle?.hasRef === 'function') return handle.hasRef();
+-      return handle?._refed !== false;
+-    });
++    const hasReferencedTimers = (handles) => {
++      for (const handle of handles) {
++        if (typeof handle?.hasRef === 'function' ? handle.hasRef() : handle?._refed !== false) return true;
++      }
++      return false;
++    };
+     // `execute()` owns the timers installed on the browser-global surface,
+     // while the process contract owns timers created through its internal
+     // timer API. Injected and same-realm children can use both surfaces;
+     // treating only one set as authoritative lets a pending child callback
+     // disappear at the lifecycle idle check.
+-    const allRuntimeTimers = () => new Set([
+-      ...timerHandles,
+-      ...(processObject?._timers || []),
+-    ]);
++    function* allRuntimeTimers() {
++      yield* timerHandles;
++      yield* processObject?._timers || [];
++    }
+     const lifecycleWaitTimer = Symbol('bnh.lifecycleWaitTimer');
+-    const hasReferencedRuntimeTimers = (handles) => [...handles]
+-      .some((handle) => !handle?.[lifecycleWaitTimer]
+-        && (typeof handle?.hasRef === 'function' ? handle.hasRef() : handle?._refed !== false));
++    const hasReferencedRuntimeTimers = (handles) => {
++      for (const handle of handles) {
++        if (!handle?.[lifecycleWaitTimer]
++          && (typeof handle?.hasRef === 'function' ? handle.hasRef() : handle?._refed !== false)) return true;
++      }
++      return false;
++    };
+     const hasLiveVirtualProcess = () => {
+       const registry = scope.__BNH_VIRTUAL_PROCESS_REGISTRY__;
+       const currentPid = Number(injectedProcess?.pid);
+@@ -11283,6 +11074,8 @@ export function createRuntime({
+       : fullProcessData;
+     reportExecutePhase('process-bound');
+     const processObject = processData.processObject;
++    markTaskActivity = () => processObject._bnhMarkActive?.();
++    processObject._bnhTaskTracker = trackTask;
+     const childActivity = processObject.__bnhChildActivity ||= {
+       launched: 0,
+       completed: 0,
+@@ -11319,7 +11112,12 @@ export function createRuntime({
+     if (Array.isArray(options.execArgv)) processObject.execArgv = [...options.execArgv];
+     const setTimer = processData.setTimer;
+     const clearTimer = processData.clearTimer;
+-    vfs.setTaskTracker?.(trackTask);
++    const previousVfsTaskTracker = vfs.getTaskTracker?.();
++    const runtimeVfsTaskTracker = (label) => {
++      const owner = scope.__bnhActiveProcess || scope.process;
++      return (owner?._bnhTaskTracker || trackTask)(label);
++    };
++    vfs.setTaskTracker?.(runtimeVfsTaskTracker);
+     vfs.setWarningEmitter?.(processObject.emitWarning?.bind(processObject));
+     vfs.setWatcherOwner?.(processObject);
+     const diagnosticsChannels = createDiagnosticsModule();
+@@ -11962,7 +11760,7 @@ export function createRuntime({
+       trackTask,
+       stdout,
+       stderr,
+-      (pathname) => vfs.read(pathname),
++      (pathname) => vfs.readSource(pathname),
+       entry,
+       runtimeFetchRef,
+       { send: workerParentSend },
+@@ -11995,7 +11793,11 @@ export function createRuntime({
+       const importer = typeof parent === 'string' ? parent : parent?.filename || entry;
+       return BUILTIN_NAMES.includes(builtinName(name)) ? name : esmLoader.resolveRequire(name, importer);
+     };
+-    builtins.module._load = (name, parent) => {
++    const rootResolveFilename = builtins.module._resolveFilename;
++    builtins.module._load = (name, parent, isMain) => {
++      if (builtins.module._resolveFilename !== rootResolveFilename) {
++        name = builtins.module._resolveFilename(name, parent, isMain);
++      }
+       if (String(name).startsWith('file:') && String(name).endsWith('.mjs')) {
+         const error = new Error(`Cannot find module '${name}'`);
+         error.code = 'MODULE_NOT_FOUND';
+@@ -12099,24 +11901,27 @@ export function createRuntime({
+             phase: 'body',
+             status: Number(response.statusCode || 0),
+             bodyBytes: body.byteLength,
+-            bodyExcerpt: new (scope.TextDecoder || TextDecoder)().decode(body).slice(0, 512),
++            bodyExcerpt: new (scope.TextDecoder || TextDecoder)().decode(body.subarray(0, 512)),
+           });
+         } catch {
+           // Network diagnostics must never change HTTP response delivery.
+         }
+-        const result = new scope.Response(body, {
+-          status: response.statusCode,
+-          statusText: response.statusMessage,
+-          headers: response.headers,
+-        });
+-        Object.defineProperty(result, '__bnhURL', { configurable: true, value: url });
+-        // The virtual client buffers the whole body before resolving, so the
+-        // fetch task can release as soon as the response is delivered.
+-        Object.defineProperty(result, '__bnhBufferedBody', { configurable: true, value: true });
+-        if (response._response?.body?._bnhTerminated === true) {
+-          Object.defineProperty(result, '__bnhTerminated', { configurable: true, value: true });
+-        }
+-        resolve(result);
++        try {
++          const bodyless = String(method).toUpperCase() === 'HEAD' || [204, 205, 304].includes(response.statusCode);
++          const result = new scope.Response(bodyless ? null : body, {
++            status: response.statusCode,
++            statusText: response.statusMessage,
++            headers: response.headers,
++          });
++          Object.defineProperty(result, '__bnhURL', { configurable: true, value: url });
++          // The virtual client buffers the whole body before resolving, so the
++          // fetch task can release as soon as the response is delivered.
++          Object.defineProperty(result, '__bnhBufferedBody', { configurable: true, value: true });
++          if (response._response?.body?._bnhTerminated === true) {
++            Object.defineProperty(result, '__bnhTerminated', { configurable: true, value: true });
++          }
++          resolve(result);
++        } catch (error) { reject(error); }
+       });
+     });
+     const virtualHttpFetch = (input, init = {}) => {
+@@ -12395,131 +12200,63 @@ export function createRuntime({
+         fetchTaskReleased = true;
+         releaseFetchTask?.();
+       };
++      const observedBodies = new WeakSet();
++      const observedResponses = new WeakSet();
++      const trackBodyOperation = (operation) => {
++        const release = fetchTracker?.('fetch-body');
++        try { return Promise.resolve(operation()).finally(() => release?.()); }
++        catch (error) { release?.(); throw error; }
++      };
++      const replaceMethod = (target, name, wrap) => {
++        const original = target?.[name];
++        if (typeof original !== 'function') return;
++        try { Object.defineProperty(target, name, { configurable: true, writable: true, value: wrap(original) }); }
++        catch { /* A sealed host object retains its native method. */ }
++      };
++      const observeBody = (body) => {
++        if (!body || observedBodies.has(body)) return body;
++        observedBodies.add(body);
++        replaceMethod(body, 'getReader', original => function (...args) {
++          const reader = original.apply(this, args);
++          for (const name of ['read', 'cancel']) replaceMethod(reader, name, method => function (...values) {
++            return trackBodyOperation(() => method.apply(this, values));
++          });
++          return reader;
++        });
++        for (const name of ['pipeTo', 'cancel']) replaceMethod(body, name, original => function (...args) {
++          return trackBodyOperation(() => original.apply(this, args));
++        });
++        replaceMethod(body, 'pipeThrough', original => function (...args) {
++          return observeBody(original.apply(this, args));
++        });
++        replaceMethod(body, 'tee', original => function (...args) {
++          return original.apply(this, args).map(observeBody);
++        });
++        // Native stream iteration need not call the public getReader method.
++        for (const name of ['values', Symbol.asyncIterator]) replaceMethod(body, name, original => function (...args) {
++          const iterator = original.apply(this, args);
++          for (const step of ['next', 'return', 'throw']) replaceMethod(iterator, step, method => function (...values) {
++            return trackBodyOperation(() => method.apply(this, values));
++          });
++          return iterator;
++        });
++        return body;
++      };
+       const holdForResponseBody = (response) => {
+-        const body = response?.body;
+-        // Buffered virtual responses are already complete when resolved, so
+-        // the fetch task releases immediately; a guest that never consumes
+-        // such a body would otherwise pin the child forever.
+-        if (!body || response.__bnhBufferedBody === true) {
+-          releaseFetch();
+-          return response;
+-        }
+-        const originalPipeTo = body.pipeTo;
+-        let restored = false;
+-        const restorePipeTo = () => {
+-          if (restored) return;
+-          restored = true;
+-          try { body.pipeTo = originalPipeTo; } catch { /* host streams may be sealed */ }
+-        };
+-        if (typeof originalPipeTo === 'function') {
+-          try {
+-            body.pipeTo = (...args) => {
+-              let result;
+-              try {
+-                result = originalPipeTo.apply(body, args);
+-              } catch (error) {
+-                releaseFetch();
+-                restorePipeTo();
+-                throw error;
+-              }
+-              return Promise.resolve(result).finally(() => {
+-                releaseFetch();
+-                restorePipeTo();
+-              });
+-            };
+-          } catch {
+-            // Some host streams expose a read-only pipeTo; reader and
+-            // convenience-method hooks below still provide terminal release.
+-          }
+-        }
+-        // Node's HTTP adapter consumes a fetch response with a reader rather
+-        // than pipeTo(). Keep the process referenced until the standard
+-        // ReadableStream reader reaches EOF, errors, or is cancelled. The
+-        // task tracker is intentionally settled at the body terminal event;
+-        // releasing it when headers arrive lets a live child exit while its
+-        // response is still being delivered.
+-        const originalGetReader = body.getReader;
+-        if (typeof originalGetReader === 'function') {
+-          try {
+-            Object.defineProperty(body, 'getReader', {
+-              configurable: true,
+-              value(...args) {
+-                let reader;
+-                try {
+-                  reader = originalGetReader.apply(this, args);
+-                } catch (error) {
+-                  releaseFetch();
+-                  throw error;
+-                }
+-                const originalRead = reader?.read;
+-                if (typeof originalRead === 'function') {
+-                  reader.read = (...readArgs) => {
+-                    let result;
+-                    try {
+-                      result = originalRead.apply(reader, readArgs);
+-                    } catch (error) {
+-                      releaseFetch();
+-                      throw error;
+-                    }
+-                    return Promise.resolve(result).then((item) => {
+-                      if (item?.done) releaseFetch();
+-                      return item;
+-                    }, (error) => {
+-                      releaseFetch();
+-                      throw error;
+-                    });
+-                  };
+-                }
+-                const originalCancel = reader?.cancel;
+-                if (typeof originalCancel === 'function') {
+-                  reader.cancel = (...cancelArgs) => {
+-                    let result;
+-                    try {
+-                      result = originalCancel.apply(reader, cancelArgs);
+-                    } catch (error) {
+-                      releaseFetch();
+-                      throw error;
+-                    }
+-                    return Promise.resolve(result).finally(() => releaseFetch());
+-                  };
+-                }
+-                return reader;
+-              },
+-            });
+-          } catch {
+-            // Host stream methods can be non-configurable. pipeTo and the
+-            // convenience-method hooks above remain valid fallbacks.
+-          }
+-        }
+-        // Native Response convenience methods consume the body without
+-        // going through the public ReadableStream#pipeTo hook. Release the
+-        // process fetch task after those standard consumption paths settle;
+-        // otherwise a normal response.text()/json() leaves the virtual child
+-        // referenced forever even though the body has been fully consumed.
+-        for (const name of ['arrayBuffer', 'blob', 'formData', 'json', 'text']) {
+-          const method = response?.[name];
+-          if (typeof method !== 'function') continue;
+-          try {
+-            Object.defineProperty(response, name, {
+-              configurable: true,
+-              value(...args) {
+-                let result;
+-                try {
+-                  result = method.apply(this, args);
+-                } catch (error) {
+-                  releaseFetch();
+-                  throw error;
+-                }
+-                return Promise.resolve(result).finally(() => {
+-                  releaseFetch();
+-                });
+-              },
+-            });
+-          } catch {
+-            // Some host Response implementations expose non-configurable
+-            // methods; the stream hook above remains the fallback there.
+-          }
++        // Headers finish the fetch request. Only active body operations own
++        // additional tokens; an unused body or released reader is not work.
++        releaseFetch();
++        if (!response || observedResponses.has(response)) return response;
++        observedResponses.add(response);
++        observeBody(response.body);
++        for (const name of ['arrayBuffer', 'blob', 'bytes', 'formData', 'json', 'text']) {
++          replaceMethod(response, name, original => function (...args) {
++            return trackBodyOperation(() => original.apply(this, args));
++          });
+         }
++        replaceMethod(response, 'clone', original => function (...args) {
++          return holdForResponseBody(original.apply(this, args));
++        });
+         return response;
+       };
+       let result;
+@@ -12679,7 +12416,7 @@ export function createRuntime({
+       }
+       if (name === 'repl') return ensureReplDispose(loadModule('/node/lib/repl.js', importer, false, processObj));
+       if (BUILTIN_NAMES.includes(name)) {
+-        if (name === 'internal/test/binding') emitInternalTestBindingWarning(processObj);
++        if (name === 'internal/test/binding') processObj.__bnhEmitInternalTestBindingWarning?.(processObj);
+         if (name === 'dns') scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ = Math.max(1, Number(scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ || 0));
+         const context = moduleHookContext(importer);
+         const resolved = runModuleHook('resolve', specifier, context, (currentSpecifier) => ({
+@@ -12731,6 +12468,11 @@ export function createRuntime({
+       const resolutionCache = processObj === processObject
+         ? cjsResolutionCache
+         : (processObj.__bnhCjsResolutionCache ||= new Map());
++      const hookRevision = processObj.__bnhModuleHookRevision || 0;
++      if (resolutionCache.hookRevision !== hookRevision) {
++        resolutionCache.clear();
++        resolutionCache.hookRevision = hookRevision;
++      }
+       const requestCacheKey = skipResolve
+         ? null
+         : `${typeof importer === 'string' ? importer : importer?.filename || entry}\x00${String(specifier)}`;
+@@ -12744,7 +12486,7 @@ export function createRuntime({
+             format: specifier.endsWith('.json') ? 'json' : isRuntimeEsmModule(specifier, processObj.execArgv) ? 'module' : 'commonjs',
+           }
+         : runModuleHook('resolve', specifier, context, (currentSpecifier) => {
+-            const candidate = esmLoader.resolve(currentSpecifier, importer, ['node', 'require']);
++            const candidate = esmLoader.resolveRequire(currentSpecifier, importer);
+             if (candidate.startsWith('http:') || candidate.startsWith('https:')) {
+               return { url: candidate, format: 'module' };
+             }
+@@ -12852,34 +12594,41 @@ export function createRuntime({
+       activeModuleApi._main = mainModule;
+       moduleCache[resolved] = module;
+       activeModuleApi._cache = moduleCache;
+-      if (resolved.endsWith('.json')) module.exports = JSON.parse(text);
+-      else {
+-        const require = (name) => loadModule(name, resolved, false, processObj);
+-        require.resolve = (name) => BUILTIN_NAMES.includes(builtinName(name))
+-          ? name
+-          : esmLoader.resolveRequire(name, resolved);
+-        require.main = mainModule;
+-        require.cache = moduleCache;
+-        require.extensions = activeModuleApi._extensions;
+-        module.require = require;
+-        try {
+-          const extensionHandler = activeModuleApi._extensions?.[path.extname(resolved)];
+-          if (typeof extensionHandler === 'function' && loaded?.format !== 'module') {
+-            // CommonJS consumers can replace require.extensions handlers to
+-            // install a module-local require (proxyquire is one example).
+-            // Invoke the active handler at the same boundary as Node's CJS
+-            // loader instead of bypassing it with a direct _compile call.
+-            runInProcessContext(() => extensionHandler(module, resolved));
+-          } else {
+-            runInProcessContext(() => module._compile(
+-              compileText,
+-              resolved,
+-              loaded?.format === 'module' || moduleHasStaticEsmSyntax(compileText) ? 'module' : loaded?.format,
+-            ));
++      try {
++        if (resolved.endsWith('.json')) module.exports = JSON.parse(text);
++        else {
++          const require = (name) => activeModuleApi._load(name, module, false, processObj);
++          require.resolve = (name) => BUILTIN_NAMES.includes(builtinName(name))
++            ? name
++            : activeModuleApi._resolveFilename(name, module, false);
++          require.main = mainModule;
++          require.cache = moduleCache;
++          require.extensions = activeModuleApi._extensions;
++          module.require = require;
++          try {
++            const extensionHandler = activeModuleApi._extensions?.[path.extname(resolved)];
++            if (typeof extensionHandler === 'function' && loaded?.format !== 'module') {
++              // CommonJS consumers can replace require.extensions handlers to
++              // install a module-local require (proxyquire is one example).
++              // Invoke the active handler at the same boundary as Node's CJS
++              // loader instead of bypassing it with a direct _compile call.
++              runInProcessContext(() => extensionHandler(module, resolved));
++            } else {
++              runInProcessContext(() => module._compile(
++                compileText,
++                resolved,
++                loaded?.format === 'module' || moduleHasStaticEsmSyntax(compileText) ? 'module' : loaded?.format,
++              ));
++            }
++          } catch (error) {
++            throw error;
+           }
+-        } catch (error) {
+-          throw error;
+         }
++      } catch (error) {
++        delete moduleCache[resolved];
++        const siblings = module.parent?.children;
++        if (siblings?.includes(module)) siblings.splice(siblings.indexOf(module), 1);
++        throw error;
+       }
+       module.loaded = true;
+       if (loaded?.format === 'module' && module.exports && Object.hasOwn(module.exports, 'default')
+@@ -12924,10 +12673,10 @@ export function createRuntime({
+       // Loader hooks and remote ESM imports use the same live VFS/network
+       // seams as CommonJS and fetch. Keeping these callbacks on the owning
+       // runtime also lets isolated child loaders inherit the owner's bridge.
+-      // VFS exposes raw module bytes through read(); keep the source opaque so
+-      // loader hooks receive the same string/byte representations as Node's
+-      // load pipeline rather than failing at an adapter-only method boundary.
+-      readSource: (pathname) => vfs.read(pathname),
++      // Decode source directly from owned VFS bytes, avoiding a defensive
++      // public read copy for every module. Version tokens invalidate caches.
++      readSource: (pathname) => vfs.readSource(pathname),
++      fileVersion: (pathname) => vfs.fileVersion(pathname),
+       fetchModule: (url, init) => runtimeFetchRef.current(url, init),
+       builtins,
+       globalObject: scope,
+@@ -12944,8 +12693,11 @@ export function createRuntime({
+         (argument) => String(argument) === '--experimental-default-type=module',
+       ) ? 'module' : 'commonjs',
+     });
+-    processObject.__bnhModuleResolve = (specifier, importer) => (
+-      esmLoader.resolveWithHooks(specifier, importer)
++    processObject.__bnhModuleResolve = (specifier, importer, conditions) => (
++      esmLoader.resolveWithHooks(specifier, importer, conditions)
++    );
++    processObject.__bnhModuleResolveRequire = (specifier, importer, conditions) => (
++      esmLoader.resolveRequire(specifier, importer, conditions)
+     );
+     processObject.__bnhModuleImport = (specifier, importer, options, ownerProcess = processObject) => {
+       const release = ownerProcess?._bnhTaskTracker?.() || trackTask();
+@@ -12970,6 +12722,7 @@ export function createRuntime({
+           const hooks = processObject.__bnhModuleHooks || [];
+           hooks.push({ resolve: hook?.resolve, load: hook?.load });
+           processObject.__bnhModuleHooks = hooks;
++          processObject.__bnhModuleHookRevision = (processObject.__bnhModuleHookRevision || 0) + 1;
+         } finally {
+           processObject.__bnhModuleRegistrationLoading = false;
+         }
+@@ -13008,6 +12761,7 @@ export function createRuntime({
+         const hooks = processObject.__bnhModuleHooks || [];
+         hooks.push({ resolve: hook?.resolve, load: hook?.load });
+         processObject.__bnhModuleHooks = hooks;
++        processObject.__bnhModuleHookRevision = (processObject.__bnhModuleHookRevision || 0) + 1;
+       }
+       for (let index = 0; index < execArgv.length; index += 1) {
+         const argument = String(execArgv[index]);
+@@ -13246,23 +13000,20 @@ export function createRuntime({
+       reportExecutePhase('entry-microtask');
+       reportExecutePhase(`lifecycle:p${pending}:t${hasReferencedRuntimeTimers(allRuntimeTimers()) ? 1 : 0}:v${hasLiveVirtualProcess() ? 1 : 0}:i${hasReferencedIpc() ? 1 : 0}:w${hasReferencedWorkerParentPort() ? 1 : 0}`);
+       while (!options.isCancelled?.() && !options.signal?.aborted && !processObject._exitRequested?.()) {
+-        const activeTimers = allRuntimeTimers();
+-        if (pending === 0 && pendingMicrotasks === 0
+-          && !hasReferencedRuntimeTimers(activeTimers) && !hasLiveVirtualProcess()
+-          && !hasReferencedIpc() && !hasReferencedWorkerParentPort()) {
+-          // Node exits when no referenced work remains. beforeExit is the
+-          // lifecycle signal that gives listeners one chance to create more
+-          // work; any such work is observed by the predicates above on the
+-          // next iteration.
+-          if (!processObject._emitBeforeExit?.()) break;
+-          continue;
+-        }
+         await new Promise((resolve) => {
+           const handle = nativeSetTimeout(resolve, 0);
+           if (handle && (typeof handle === 'object' || typeof handle === 'function')) {
+             handle[lifecycleWaitTimer] = true;
+           }
+         });
++        if (options.isCancelled?.() || options.signal?.aborted || processObject._exitRequested?.()) break;
++        if (pending === 0 && pendingMicrotasks === 0
++          && !hasReferencedRuntimeTimers(allRuntimeTimers()) && !hasLiveVirtualProcess()
++          && !hasReferencedIpc() && !hasReferencedWorkerParentPort()) {
++          // Check only after a host turn, including the turn following a
++          // beforeExit listener. Promise continuations can create new handles.
++          if (!processObject._emitBeforeExit?.()) break;
++        }
+       }
+       if (options.isCancelled?.() || options.signal?.aborted) return null;
+       // A worker-backed child reports its logical runtime state through the
+@@ -13292,7 +13043,7 @@ export function createRuntime({
+       return 1;
+     } finally {
+       for (const handle of timerHandles) clearTimer?.(handle);
+-      vfs.setTaskTracker?.(null);
++      if (vfs.getTaskTracker?.() === runtimeVfsTaskTracker) vfs.setTaskTracker?.(previousVfsTaskTracker);
+       if (typeof scope.removeEventListener === 'function') scope.removeEventListener('unhandledrejection', onUnhandledRejection);
+       restorePromiseRejectionObserver();
+       esmLoader.dispose();
+@@ -13398,7 +13149,7 @@ export function createRuntime({
+       }
+       for (const group of groups.values()) {
+         if (Object.keys(group.files).length || group.symlinks.length) {
+-          vfs.mount(group.files, { ...group.mount, symlinks: group.symlinks });
++          vfs.mount(group.files, { ...group.mount, symlinks: group.symlinks, copyBuffers: context.copyBuffers !== false });
+         }
+       }
+       mounted = true;
+diff --git a/src/runtime/async-hooks.js b/src/runtime/async-hooks.js
+index 971fd85b49f9b97e9b5fb68d49e4440e12481691..f641d0198e8c5a2cc253b5c0a1166f0eccd46a4b 100644
+--- a/src/runtime/async-hooks.js
++++ b/src/runtime/async-hooks.js
+@@ -181,7 +181,7 @@ function completeAsyncCompletion(promise) {
+   callback();
+ }
+ 
+-export function runAsyncGenerator(generatorFunction, thisArg, args = [], taskTracker = null) {
++export function runAsyncGenerator(generatorFunction, thisArg, args = []) {
+   let asyncResult;
+   let pendingCompletion;
+   asyncResult = new Promise((resolve, reject) => {
+@@ -212,29 +212,14 @@ export function runAsyncGenerator(generatorFunction, thisArg, args = [], taskTra
+         return;
+       }
+       const yielded = result.value;
+-      const releaseYield = typeof taskTracker === 'function' ? taskTracker() : null;
+-      let yieldReleased = false;
+-      const completeYield = () => {
+-        if (yieldReleased) return;
+-        yieldReleased = true;
+-        releaseYield?.();
+-      };
+       Promise.resolve(yielded).then(
+         (nextValue) => {
+-          try {
+-            advance('next', nextValue);
+-            completeAsyncCompletion(yielded);
+-          } finally {
+-            completeYield();
+-          }
++          advance('next', nextValue);
++          completeAsyncCompletion(yielded);
+         },
+         (error) => {
+-          try {
+-            advance('throw', error);
+-            completeAsyncCompletion(yielded);
+-          } finally {
+-            completeYield();
+-          }
++          advance('throw', error);
++          completeAsyncCompletion(yielded);
+         },
+       );
+     };
+diff --git a/src/runtime/async-transform.js b/src/runtime/async-transform.js
+index 161b5ec167d765a320fb43095389223997d5779e..2478c5f0075a8b0191e22e6b84955c9483aa7516 100644
+--- a/src/runtime/async-transform.js
++++ b/src/runtime/async-transform.js
+@@ -732,7 +732,7 @@ const simpleEscapes = new Map([
+   ['0', '\0'],
+ ]);
+ 
+-function decodeStringLiteral(text) {
++export function decodeStringLiteral(text) {
+   let result = '';
+   for (let index = 0; index < text.length; index += 1) {
+     const character = text[index];
+@@ -760,6 +760,7 @@ function decodeStringLiteral(text) {
+         if (close < 0) return null;
+         const code = text.slice(index + 3, close);
+         if (!/^[0-9a-fA-F]{1,6}$/.test(code)) return null;
++        if (parseInt(code, 16) > 0x10ffff) return null;
+         result += String.fromCodePoint(parseInt(code, 16));
+         index = close;
+         continue;
+@@ -780,7 +781,7 @@ function decodeStringLiteral(text) {
+   return result;
+ }
+ 
+-function encodeStringLiteral(text, quote) {
++export function encodeStringLiteral(text, quote) {
+   let result = '';
+   for (const character of text) {
+     const code = character.codePointAt(0);
+diff --git a/src/runtime/compat.js b/src/runtime/compat.js
+index 0d64e9ead47e7a7b4e89bd9f228ff161c28b967b..cba30cea4e340fed809c159437dbb303fb3fcdd5 100644
+--- a/src/runtime/compat.js
++++ b/src/runtime/compat.js
+@@ -2779,6 +2779,7 @@ export function finished(stream, options, callbackArgument) {
+     const callbackResource = callback ? new AsyncResource('STREAMFINISHED') : null;
+     return new Promise((resolve, reject) => {
+       let settled = false;
++      let cleanupAbort;
+       const readable = options?.readable ?? Boolean(
+         stream?._readableState || stream?.readable === true,
+       );
+@@ -2788,6 +2789,7 @@ export function finished(stream, options, callbackArgument) {
+       const complete = (error = undefined) => {
+         if (settled) return;
+         settled = true;
++        cleanupAbort?.();
+         try {
+           if (options?.cleanup) {
+             stream.off?.('finish', onFinish);
+@@ -2802,11 +2804,15 @@ export function finished(stream, options, callbackArgument) {
+           callbackResource?.emitDestroy();
+         }
+       };
++      let readableFinished = !readable || stream?._readableState?.endEmitted === true;
++      let writableFinished = !writable || stream?._writableState?.finished === true;
+       const onFinish = () => {
+-        if (writable) complete();
++        writableFinished = true;
++        if (readableFinished) complete();
+       };
+       const onEnd = () => {
+-        if (readable) complete();
++        readableFinished = true;
++        if (writableFinished) complete();
+       };
+       const onError = (err) => complete(err || abortError());
+       const onClose = () => {
+@@ -2839,29 +2845,26 @@ export function finished(stream, options, callbackArgument) {
+         stream.on('finish', onFinish);
+         stream.on('end', onEnd);
+         stream.on('close', onClose);
+-        if (options && options.error !== false) {
++        if (options?.error !== false) {
+           stream.on('error', onError);
+         }
+         if (options?.signal?.addEventListener) {
+           const onAbort = () => complete(abortError());
+           if (options.signal.aborted) onAbort();
+-          else options.signal.addEventListener('abort', onAbort, { once: true });
++          else {
++            options.signal.addEventListener('abort', onAbort, { once: true });
++            cleanupAbort = () => options.signal.removeEventListener('abort', onAbort);
++          }
+         }
+         // `finished()` is allowed to observe a stream after its terminal
+         // event was emitted.  This is common when an async reporter awaits
+         // its own output before checking the source stream.  Event listeners
+         // alone would miss that transition and leave the promise pending.
+-        const readableState = stream?._readableState;
+-        const writableState = stream?._writableState;
+-        const readableFinished = !readable
+-          || !readableState && stream.readable !== true
+-          || readableState?.endEmitted
+-          || stream.readable === false;
+-        const writableFinished = !writable
+-          || !writableState && stream.writable !== true
+-          || writableState?.finished
+-          || stream.writable === false;
+-        if (readableFinished && writableFinished) queueMicrotask(() => complete());
++        // A false public readable/writable flag can mean destruction, not
++        // completion. Preserve premature-close and stored error outcomes.
++        if (stream.closed || stream._readableState?.closed || stream._writableState?.closed) {
++          queueMicrotask(onClose);
++        } else if (readableFinished && writableFinished) queueMicrotask(() => complete());
+     } else if (stream && typeof stream.getReader === 'function') {
+       const closedPromise = stream[kIsClosedPromise];
+       if (closedPromise?.promise) {
+diff --git a/src/runtime/crypto.js b/src/runtime/crypto.js
+index 41d6e96c6ca6286ba8f1ff42574c2fa6e83e5e7e..b72199f3370944498df8fec4b6dbc4c2c829a1be 100644
+--- a/src/runtime/crypto.js
++++ b/src/runtime/crypto.js
+@@ -858,6 +858,15 @@ function pemBytes(value, BufferClass) {
+ }
+ 
+ function keyObjectFromInput(value, type, BufferClass) {
++  if (value instanceof BrowserKeyObject) {
++    if (type === 'private' || value.type === 'secret') {
++      throw new TypeError('The key must contain asymmetric key data');
++    }
++    if (value._jwk) return keyObjectFromInput({ key: value._jwk, format: 'jwk' }, type, BufferClass);
++    // Returning private PEM/DER unchanged as a public key would expose private
++    // material. Conversion needs a real parser, not a relabelled KeyObject.
++    throw new UnsupportedWebCapabilityError('crypto.createPublicKey', 'PEM/DER KeyObject conversion is not available');
++  }
+   const options = value && typeof value === 'object' && !ArrayBuffer.isView(value)
+     && !isArrayBuffer(value) && !Object.hasOwn(value, 'byteLength') ? value : { key: value };
+   const format = options.format || (typeof options.key === 'string' ? 'pem' : 'der');
+@@ -865,7 +874,16 @@ function keyObjectFromInput(value, type, BufferClass) {
+     if (!options.key || typeof options.key !== 'object' || Array.isArray(options.key)) {
+       throw new TypeError('The "key" property must be a JSON Web Key object');
+     }
+-    return new BrowserKeyObject({ type: keyObjectType(options.key, type), jwk: options.key, BufferClass });
++    const jwk = cloneKeyRecord(options.key);
++    if (jwk.kty === 'oct' || (type === 'private' && jwk.d === undefined)) {
++      throw new TypeError('The key must contain the requested asymmetric key material');
++    }
++    if (type === 'public') {
++      for (const field of ['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth', 'priv']) delete jwk[field];
++      // Private-key usage restrictions do not apply to the derived public key.
++      delete jwk.key_ops;
++    }
++    return new BrowserKeyObject({ type: keyObjectType(jwk, type), jwk, BufferClass });
+   }
+   if (format === 'pem') {
+     const pem = typeof options.key === 'string' ? options.key : BufferClass.from(options.key).toString('utf8');
+@@ -1294,7 +1312,9 @@ export function aesGcmDecrypt(value, key, iv, options = {}) {
+ }
+ 
+ function normalizeSigningAlgorithm(algorithm, key, options) {
+-  const keyName = isCryptoKey(key) ? key.algorithm.name : virtualKeyPairs.has(key?.key ?? key) ? 'ECDSA' : 'HMAC';
++  const virtualKey = virtualKeyPairs.get(key?.key ?? key);
++  const keyName = isCryptoKey(key) ? key.algorithm.name
++    : virtualKey ? virtualKey.publicKey.algorithm.name : 'HMAC';
+   if (algorithm && typeof algorithm === 'object') {
+     const normalized = { ...algorithm };
+     normalized.name = String(normalized.name).toUpperCase() === 'HMAC' ? 'HMAC' : normalized.name;
+@@ -1329,6 +1349,13 @@ function normalizeSigningAlgorithm(algorithm, key, options) {
+ 
+ async function importSigningKey(key, algorithm, subtle, globalObject, usage) {
+   if (isCryptoKey(key)) return key;
++  const virtualKey = virtualKeyPairs.get(key?.key ?? key);
++  if (virtualKey) {
++    if (usage === 'sign' && virtualKey.encrypted && key?.passphrase !== virtualKey.passphrase) {
++      throw missingPassphraseError();
++    }
++    return usage === 'sign' ? virtualKey.privateKey : virtualKey.publicKey;
++  }
+   if (key instanceof BrowserKeyObject || key?._jwk) {
+     return subtle.importKey(
+       'jwk',
+@@ -1340,13 +1367,6 @@ async function importSigningKey(key, algorithm, subtle, globalObject, usage) {
+       [usage],
+     );
+   }
+-  const virtualKey = virtualKeyPairs.get(key?.key ?? key);
+-  if (virtualKey) {
+-    if (usage === 'sign' && virtualKey.encrypted && key?.passphrase !== virtualKey.passphrase) {
+-      throw missingPassphraseError();
+-    }
+-    return usage === 'sign' ? virtualKey.privateKey : virtualKey.publicKey;
+-  }
+   if (algorithm.name !== 'HMAC') {
+     throw new UnsupportedWebCapabilityError('crypto signing', 'raw keys are supported only for HMAC; import an asymmetric CryptoKey for other algorithms');
+   }
+@@ -1786,6 +1806,7 @@ function rsaKeyJwk(material, privateKey) {
+ }
+ 
+ function rsaKeyObject(material, privateKey) {
++  if (!privateKey) material = { modulus: material.modulus, publicExponent: material.publicExponent };
+   const keyType = privateKey ? 'private' : 'public';
+   const object = { type: keyType, asymmetricKeyType: 'rsa' };
+   Object.defineProperty(object, '_bnhRsaMaterial', { configurable: true, value: material });
+@@ -3318,7 +3339,8 @@ function bigintToBytes(value) {
+     error.code = 'ERR_OUT_OF_RANGE';
+     throw error;
+   }
+-  const encoded = value.toString(16).padStart(2, '0');
++  const hex = value.toString(16);
++  const encoded = hex.length % 2 ? `0${hex}` : hex;
+   const result = new Uint8Array(encoded.length / 2);
+   for (let index = 0; index < result.length; index += 1) {
+     result[index] = Number.parseInt(encoded.slice(index * 2, index * 2 + 2), 16);
+diff --git a/src/runtime/dynamic-imports.js b/src/runtime/dynamic-imports.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..f76147308bcd5a663f8171ef580b2496bdd644a4
+--- /dev/null
++++ b/src/runtime/dynamic-imports.js
+@@ -0,0 +1,161 @@
++import { decodeStringLiteral, encodeStringLiteral } from './async-transform.js';
++
++const expressionPrefixes = new Set([
++  '(', '[', '{', ',', ';', ':', '=', '=>', '!', '?', '&&', '||', '??',
++  '+', '-', '*', '%', '&', '|', '^', '~', '<', '>', 'return', 'throw',
++  'case', 'delete', 'void', 'typeof', 'instanceof', 'in', 'of', 'yield', 'await',
++]);
++const controlHeads = new Set(['if', 'while', 'for', 'with', 'switch', 'catch']);
++const identifierPart = character => character !== undefined && /[$\w\u0080-\uffff]/u.test(character);
++
++/** Route import expressions without editing strings, comments or regex bodies. */
++export function rewriteDynamicImports(source, bindingName, depth = 0) {
++  const text = String(source);
++  if (!text.includes('import') || depth > 64) return text;
++  let index = 0;
++  const quoted = quote => {
++    const start = index++;
++    while (index < text.length) {
++      const character = text[index++];
++      if (character === '\\') index += 1;
++      else if (character === quote) break;
++    }
++    return text.slice(start, index);
++  };
++  const commentEnd = start => {
++    if (text[start + 1] === '/') {
++      let end = start + 2;
++      while (end < text.length && text[end] !== '\n' && text[end] !== '\r') end += 1;
++      return end;
++    }
++    const end = text.indexOf('*/', start + 2);
++    return end < 0 ? text.length : end + 2;
++  };
++  const skipTrivia = start => {
++    let end = start;
++    for (;;) {
++      while (/\s/u.test(text[end] || '')) end += 1;
++      if (text[end] !== '/' || !['/', '*'].includes(text[end + 1])) return end;
++      end = commentEnd(end);
++    }
++  };
++  const regularExpression = () => {
++    const start = index++;
++    let characterClass = false;
++    while (index < text.length) {
++      const character = text[index++];
++      if (character === '\\') index += 1;
++      else if (character === '[') characterClass = true;
++      else if (character === ']') characterClass = false;
++      else if (character === '/' && !characterClass) {
++        while (identifierPart(text[index])) index += 1;
++        break;
++      }
++    }
++    return text.slice(start, index);
++  };
++  const template = () => {
++    let result = '`'; index += 1;
++    while (index < text.length) {
++      const character = text[index];
++      if (character === '\\') { result += text.slice(index, index + 2); index += 2; }
++      else if (character === '`') { result += character; index += 1; break; }
++      else if (character === '$' && text[index + 1] === '{') {
++        result += '${'; index += 2; result += code(true);
++      } else { result += character; index += 1; }
++    }
++    return result;
++  };
++  const isMethodDefinition = open => {
++    // A method named import is a property definition, not an import expression.
++    const saved = index;
++    index = open + 1;
++    let balance = 1;
++    while (index < text.length && balance) {
++      const character = text[index];
++      if (character === "'" || character === '"') quoted(character);
++      else if (character === '`') template();
++      else if (character === '/' && ['/', '*'].includes(text[index + 1])) index = commentEnd(index);
++      else {
++        index += 1;
++        if (character === '(') balance += 1;
++        else if (character === ')') balance -= 1;
++      }
++    }
++    const result = balance === 0 && text[skipTrivia(index)] === '{';
++    index = saved;
++    return result;
++  };
++  const code = (stopAtBrace = false) => {
++    let result = '';
++    let braces = stopAtBrace ? 1 : 0;
++    let previous = '';
++    let expressionStart = true;
++    const parentheses = [];
++    const braceKinds = [];
++    while (index < text.length) {
++      const character = text[index];
++      const next = text[index + 1];
++      if (/\s/u.test(character)) { result += character; index += 1; continue; }
++      if (character === '/' && (next === '/' || next === '*')) {
++        const end = commentEnd(index); result += text.slice(index, end); index = end; continue;
++      }
++      if (character === "'" || character === '"') {
++        result += quoted(character); previous = '<literal>'; expressionStart = false; continue;
++      }
++      if (character === '`') { result += template(); previous = '<literal>'; expressionStart = false; continue; }
++      if (character === '/' && expressionStart) {
++        result += regularExpression(); previous = '<literal>'; expressionStart = false; continue;
++      }
++      if (/[$A-Z_a-z\u0080-\uffff]/u.test(character)) {
++        const start = index++;
++        while (identifierPart(text[index])) index += 1;
++        const word = text.slice(start, index);
++        const open = skipTrivia(index);
++        const property = previous === '.' || previous === '?.';
++        if (word === 'eval' && !property && text[open] === '(') {
++          const literalStart = skipTrivia(open + 1);
++          if (text[literalStart] === "'" || text[literalStart] === '"') {
++            const saved = index; index = literalStart;
++            const literal = quoted(text[literalStart]);
++            const end = index;
++            const decoded = decodeStringLiteral(literal.slice(1, -1));
++            if (text[skipTrivia(end)] === ')' && decoded !== null) {
++              const rewritten = rewriteDynamicImports(decoded, bindingName, depth + 1);
++              result += text.slice(start, literalStart)
++                + literal[0] + encodeStringLiteral(rewritten, literal[0]) + literal.at(-1);
++              previous = '<literal>'; expressionStart = false; continue;
++            }
++            index = saved;
++          }
++        }
++        const methodPosition = ['{', ',', ';', 'static', 'get', 'set', 'async', '*'].includes(previous);
++        const importExpression = word === 'import' && !property && text[open] === '('
++          && !(methodPosition && isMethodDefinition(open));
++        result += importExpression ? bindingName : word;
++        previous = word; expressionStart = expressionPrefixes.has(word); continue;
++      }
++      if (/\d/u.test(character)) {
++        const start = index++;
++        while (/[$\w.]/u.test(text[index] || '')) index += 1;
++        result += text.slice(start, index); previous = '<literal>'; expressionStart = false; continue;
++      }
++      const token = text.slice(index, index + 4).match(/^(?:=>|===|!==|\?\.|\?\?|&&|\|\||\*\*|\+\+|--|<<|>>|\.{3}|.)/su)[0];
++      if (token === '(') parentheses.push(controlHeads.has(previous));
++      if (token === ')') expressionStart = parentheses.pop() === true;
++      else expressionStart = expressionPrefixes.has(token) || token === '/';
++      result += token; index += token.length;
++      if (token === '{') {
++        braces += 1;
++        braceKinds.push(!['=', '(', '[', ',', ':', 'return', 'yield', '?'].includes(previous));
++      } else if (token === '}') {
++        braces -= 1;
++        expressionStart = braceKinds.pop() === true;
++        if (stopAtBrace && braces === 0) return result;
++      }
++      previous = token;
++    }
++    return result;
++  };
++  return code();
++}
+diff --git a/src/runtime/http.js b/src/runtime/http.js
+index 92e2e8f9507e647ec3157acea78204a65bf9d9f5..373b33618027845a44e57de847d019593214270a 100644
+--- a/src/runtime/http.js
++++ b/src/runtime/http.js
+@@ -1190,6 +1190,7 @@ function responseFromBytes(url, statusCode, headers, bytes, scope, socket = null
+     statusText: STATUS_CODES[statusCode] || '',
+     headers,
+     arrayBuffer: async () => body.slice().buffer,
++    __bnhBodyDiagnostic: () => ({ byteLength: body.byteLength, prefix: body.subarray(0, 512) }),
+     body: bodyStream,
+     ok: statusCode >= 200 && statusCode < 300,
+     redirected: false,
+@@ -4998,26 +4999,22 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
+           statusType: typeof (response?.status ?? response?.statusCode),
+           statusValue: String(response?.status ?? response?.statusCode ?? ''),
+         });
+-        // The in-memory virtual network returns a fetch-compatible response
+-        // whose arrayBuffer() is a non-consuming copy. Capture a bounded
+-        // diagnostic body for that path too; the raw response remains in the
+-        // normal network artifact and response delivery is not coupled to
+-        // observability.
+-        if (response?.scope === scope && typeof response?.arrayBuffer === 'function') {
+-          void Promise.resolve(response.arrayBuffer()).then((value) => {
+-            const bytes = new Uint8Array(value || 0);
+-            const decoder = scope.TextDecoder || TextDecoder;
+-            this._ownerProcess?.__bnhNetworkEvent?.({
+-              source: 'guest-http',
+-              method: String(this.method || 'GET'),
+-              url: String(this._url || this.path || ''),
+-              phase: 'body',
+-              transport: 'virtual-network',
+-              status: Number(response?.status ?? response?.statusCode ?? 0),
+-              bodyBytes: bytes.byteLength,
+-              bodyExcerpt: new decoder().decode(bytes).slice(0, 512),
+-            });
+-          }).catch(() => {});
++        // Observe only the bounded prefix. Do not clone/decode the full body
++        // or consume a streaming response merely to produce diagnostics.
++        if (typeof this._ownerProcess?.__bnhNetworkEvent === 'function'
++          && response?.scope === scope && typeof response.__bnhBodyDiagnostic === 'function') {
++          const body = response.__bnhBodyDiagnostic();
++          const decoder = scope.TextDecoder || TextDecoder;
++          this._ownerProcess.__bnhNetworkEvent({
++            source: 'guest-http',
++            method: String(this.method || 'GET'),
++            url: String(this._url || this.path || ''),
++            phase: 'body',
++            transport: 'virtual-network',
++            status: Number(response?.status ?? response?.statusCode ?? 0),
++            bodyBytes: body.byteLength,
++            bodyExcerpt: new decoder().decode(body.prefix),
++          });
+         }
+       } catch {
+         // Network diagnostics must never change HTTP response delivery.
+diff --git a/src/runtime/messaging.js b/src/runtime/messaging.js
+index 47263705d586d0d3f68dcd03c939499ac38c5c0a..8d5a914d75cb67be67e10947710e905a08bbce85 100644
+--- a/src/runtime/messaging.js
++++ b/src/runtime/messaging.js
+@@ -532,7 +532,8 @@ export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePor
+   };
+   const drainDeferredMessages = () => {
+     if (closed || (events.listenerCount('message') === 0 && !assignedOnMessage)) return;
+-    while (deferredMessages.length && !closed) {
++    while (deferredMessages.length && !closed
++      && (events.listenerCount('message') > 0 || assignedOnMessage)) {
+       const deferred = deferredMessages.shift();
+       runInCapturedScope(deferred.scope, () => deliverMessage(deferred.data));
+     }
+@@ -667,9 +668,16 @@ export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePor
+       const [message, transfers] = transferArguments(value, normalizedTransfers);
+       const hasTransfer = Array.isArray(transfers) ? transfers.length > 0 : transfers !== undefined;
+       const messageScope = peerPort ? captureAsyncScope('MESSAGEPORT') : undefined;
++      try {
++        if (transfers === undefined) callNative(nativePort, 'postMessage', message);
++        else callNative(nativePort, 'postMessage', message, transfers);
++      } catch (error) {
++        runInCapturedScope(messageScope, () => {});
++        throw error;
++      }
++      // Native delivery is asynchronous. Publish the peer queue only after
++      // cloning succeeds, or a failed send leaves a phantom pending message.
+       notifyPeerMessage?.(hasTransfer ? undefined : message, hasTransfer, messageScope);
+-      if (transfers === undefined) callNative(nativePort, 'postMessage', message);
+-      else callNative(nativePort, 'postMessage', message, transfers);
+     },
+     close(callback) {
+       if (callback !== undefined && typeof callback !== 'function') {
+@@ -713,6 +721,8 @@ export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePor
+         const queued = queuedMessages.find((entry) => !entry.consumed && !entry.useNative);
+         if (!queued) return undefined;
+         queued.consumed = true;
++        runInCapturedScope(queued.scope, () => {});
++        queued.scope = undefined;
+         return queued.value;
+       },
+     },
+diff --git a/src/runtime/module-loader.js b/src/runtime/module-loader.js
+index 2e72cab613f3ec76384805f51de740cf409802e9..d093ced1a55f4784a982cf76fffa6198205b0ce3 100644
+--- a/src/runtime/module-loader.js
++++ b/src/runtime/module-loader.js
+@@ -248,6 +248,7 @@ export function createModuleLoader({
+   resolveBuiltin,
+   runModuleHook: sharedRunModuleHook,
+   readSource,
++  fileVersion,
+   fetchModule,
+   defaultModuleType = 'commonjs',
+ } = {}) {
+@@ -523,10 +524,14 @@ export function createModuleLoader({
+   const packageConfig = (base) => {
+     const packagePath = posix.join(base, 'package.json');
+     if (!hasFile(packagePath)) return undefined;
+-    if (packageConfigCache.has(packagePath)) return packageConfigCache.get(packagePath);
++    const version = fileVersion?.(packagePath);
++    const cached = packageConfigCache.get(packagePath);
++    if (version !== undefined && cached?.version === version) return cached.config;
+     try {
+-      const config = JSON.parse(sourceText(readTextFile(packagePath)));
+-      packageConfigCache.set(packagePath, config);
++      const source = sourceText(readTextFile(packagePath));
++      if (cached?.source === source) return cached.config;
++      const config = JSON.parse(source);
++      packageConfigCache.set(packagePath, { version, source, config });
+       return config;
+     } catch (cause) {
+       const error = new Error(`Invalid package config '${packagePath}'`);
+@@ -723,7 +728,7 @@ export function createModuleLoader({
+         }
+         break;
+       }
+-      if (directory === '/') break;
++      if (directory === '/' || directory === '.' || directory === '') break;
+       directory = posix.dirname(directory);
+     }
+     const packageResolved = resolvePackage(specifier, importer, conditions);
+@@ -773,7 +778,7 @@ export function createModuleLoader({
+       const directoryCandidateList = requireConditions ? commonJsDirectoryCandidates : directoryCandidates;
+       if (config?.exports !== undefined) {
+         const request = subpath ? `./${subpath}` : '.';
+-        const exportsMap = typeof config.exports === 'string' || Array.isArray(config.exports)
++        const exportsMap = config.exports === null || typeof config.exports === 'string' || Array.isArray(config.exports)
+           ? { '.': config.exports }
+           : Object.keys(config.exports).some((key) => key === '.' || key.startsWith('./'))
+             ? config.exports
+@@ -784,13 +789,18 @@ export function createModuleLoader({
+         if (exported === PACKAGE_TARGET_BLOCKED) {
+           throw packageError('ERR_PACKAGE_PATH_NOT_EXPORTED', `Package subpath '${request}' is not defined`);
+         }
+-        if (exported !== undefined) return exported;
++        if (exported !== undefined) {
++          if (requireConditions && !hasFile(exported)) {
++            throw packageError('MODULE_NOT_FOUND', `Cannot find module '${exported}'`);
++          }
++          return exported;
++        }
+         throw packageError('ERR_PACKAGE_PATH_NOT_EXPORTED', `Package subpath '${request}' is not defined`);
+       }
+       const base = subpath ? posix.join(packageRoot, subpath) : packageRoot;
+       const resolved = resolveFileOrDirectory(base, false, fileCandidateList, directoryCandidateList);
+       if (resolved) return resolved;
+-      if (directory === '/') break;
++      if (directory === '/' || directory === '.' || directory === '') break;
+       directory = posix.dirname(directory);
+     }
+     return undefined;
+@@ -869,7 +879,7 @@ export function createModuleLoader({
+     ) || base;
+   };
+ 
+-  const resolveRequire = (specifier, importer = '/node/index.js') => {
++  const resolveRequire = (specifier, importer = '/node/index.js', conditions = ['node', 'require']) => {
+     const rawValue = String(specifier);
+     const value = rawValue.startsWith('file:') ? fileURLToPath(rawValue) : rawValue;
+     const name = builtinName(value);
+@@ -880,16 +890,15 @@ export function createModuleLoader({
+       throw packageError('ERR_UNKNOWN_BUILTIN_MODULE', `No such built-in module: ${name}`);
+     }
+     if (value.startsWith('#')) {
+-      const imported = resolvePackageImports(value, importer, ['node', 'require']);
++      const imported = resolvePackageImports(value, importer, conditions);
+       if (imported.startsWith('node:') || imported.startsWith('data:')
+         || imported.startsWith('http:') || imported.startsWith('https:')) return imported;
+-      const candidate = resolveFileOrDirectory(imported, false, commonJsFileCandidates, commonJsDirectoryCandidates);
+-      if (candidate) return candidate;
++      if (hasFile(imported)) return imported;
+       throw packageError('MODULE_NOT_FOUND', `Cannot find module '${value}'`);
+     }
+-    if (value.startsWith('data:') || /^[A-Za-z][A-Za-z\d+.-]*:/.test(value)) return resolve(value, importer, ['node', 'require']);
++    if (value.startsWith('data:') || /^[A-Za-z][A-Za-z\d+.-]*:/.test(value)) return resolve(value, importer, conditions);
+     if (!isPathSpecifier(value)) {
+-      const resolved = resolvePackage(value, importer, ['node', 'require']);
++      const resolved = resolvePackage(value, importer, conditions);
+       if (resolved) {
+         const candidate = resolveFileOrDirectory(resolved, false, commonJsFileCandidates, commonJsDirectoryCandidates);
+         if (candidate) return candidate;
+@@ -1918,6 +1927,7 @@ export function createModuleLoader({
+     moduleURL,
+     dispose: () => {
+       delete globalObject[registryName];
++      packageConfigCache.clear();
+       for (const objectURL of generatedObjectURLs) {
+         try { globalObject.URL.revokeObjectURL(objectURL); } catch { /* already revoked */ }
+       }
+diff --git a/src/runtime/node-test.js b/src/runtime/node-test.js
+index fdc96d1ec33ebae1ea0463cbd393ca542ff2968f..846a4ce6ddce9142f2192448991eae891c5c725f 100644
+--- a/src/runtime/node-test.js
++++ b/src/runtime/node-test.js
+@@ -537,6 +537,8 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
+   let testCount = 0;
+   let passCount = 0;
+   let failCount = 0;
++  let skipCount = 0;
++  let todoCount = 0;
+   let testApiUsed = false;
+   let activeRun = null;
+   let runOwnsOutput = false;
+@@ -564,6 +566,7 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
+     if (!activeRun) return;
+     const event = { type, data };
+     runtimeState.streamEvents.push(type);
++    if (runtimeState.streamEvents.length > 64) runtimeState.streamEvents.shift();
+     if (emit) activeRun.stream.emit(type, data);
+     if (push) activeRun.stream.push(event);
+     return event;
+@@ -573,10 +576,14 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
+     runtimeState.completed = testCount;
+     if (result.status === 'fail') failCount += 1;
+     else if (result.status === 'pass') passCount += 1;
++    else if (result.status === 'skip') skipCount += 1;
++    else if (result.status === 'todo') todoCount += 1;
+     if (!activeRun) return;
+-    const passed = result.status === 'pass';
++    const passed = result.status !== 'fail';
+     const data = {
+       name: result.name,
++      ...(result.status === 'skip' ? { skip: true } : {}),
++      ...(result.status === 'todo' ? { todo: true } : {}),
+       nesting: 0,
+       testNumber: testCount,
+       testId: testCount,
+@@ -749,7 +756,7 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
+           }
+           if (testOptions.skip || testOptions.todo) {
+             if (!runOwnsOutput) stdout(`ok - ${label}${testOptions.skip ? ' # SKIP' : ' # TODO'}\n`);
+-            return { name: label, status: testOptions.skip ? 'skip' : 'pass', file };
++            return { name: label, status: testOptions.skip ? 'skip' : 'todo', file };
+           }
+           let planCount = null;
+           const testAbortController = typeof scope.AbortController === 'function'
+@@ -896,12 +903,12 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
+   const mock = globalMock;
+   const run = (options = {}) => {
+     if (activeRun) return activeRun.stream;
+-    runOwnsOutput = true;
+-    const releaseRunTask = trackTask();
+     const streamApi = scope.require('node:stream');
+     const Readable = streamApi?.Readable;
+     if (typeof Readable !== 'function') throw codedError(Error, 'ERR_UNSUPPORTED_NODE_TEST_RUN', 'node:test run requires node:stream.Readable');
+     const stream = new Readable({ objectMode: true, read() {} });
++    runOwnsOutput = true;
++    const releaseRunTask = trackTask();
+     activeRun = {
+       stream,
+       file: null,
+@@ -972,7 +979,7 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
+         emitRunEvent('test:plan', { nesting: 0, count: testCount });
+         for (const [name, count] of [
+           ['tests', testCount], ['suites', 0], ['pass', passCount], ['fail', failCount],
+-          ['cancelled', 0], ['skipped', 0], ['todo', 0],
++          ['cancelled', 0], ['skipped', skipCount], ['todo', todoCount],
+         ]) emitRunEvent('test:diagnostic', { nesting: 0, message: `${name} ${count}`, level: 'info' });
+         emitRunEvent('test:summary', {
+           success: failCount === 0,
+@@ -981,8 +988,8 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
+             failed: failCount,
+             passed: passCount,
+             cancelled: 0,
+-            skipped: 0,
+-            todo: 0,
++            skipped: skipCount,
++            todo: todoCount,
+             topLevel: testCount,
+             suites: 0,
+           },
+diff --git a/src/runtime/npm.js b/src/runtime/npm.js
+index b3e85ca48e382619a45900ad3984b355bc17a2f2..eae5260dd858b7ba1e6c3a3a9d9e3fb40fecdf22 100644
+--- a/src/runtime/npm.js
++++ b/src/runtime/npm.js
+@@ -102,7 +102,7 @@ function wildcardComparator(v, value) {
+   if (!match || ![match[2], match[3], match[4]].some((part) => part && /[xX*]/.test(part))) return undefined;
+   const operator = match[1] || '';
+   const majorPart = match[2];
+-  if (/[xX*]/.test(majorPart)) return operator === '' || operator === '=';
++  if (/[xX*]/.test(majorPart)) return operator !== '<' && operator !== '>';
+   const major = Number(majorPart);
+   const minorPart = match[3];
+   const patchPart = match[4];
+@@ -114,7 +114,7 @@ function wildcardComparator(v, value) {
+     patch: patchPart && wildcardAt !== 'patch' ? Number(patchPart) : 0,
+     prerelease: null,
+   };
+-  const upper = wildcardAt === 'minor'
++  const upper = wildcardAt === 'minor' || operator === '^' && major > 0
+     ? { major: major + 1, minor: 0, patch: 0, prerelease: null }
+     : { major, minor: lower.minor + 1, patch: 0, prerelease: null };
+   const lowerComparison = compareSemver(v, lower);
+@@ -255,6 +255,14 @@ export function parseNpmAlias(range) {
+ /**
+  * Persistent IndexedDB and in-memory cache for NPM package metadata and tarball archives.
+  */
++const parentNodeModulesDir = (directory) => {
++  const packageRoot = directory.endsWith('/node_modules')
++    ? directory.slice(0, -'/node_modules'.length)
++    : directory;
++  const marker = packageRoot.lastIndexOf('/node_modules/');
++  return marker < 0 ? null : `${packageRoot.slice(0, marker)}/node_modules`;
++};
++
+ export class BrowserNpmCache {
+   constructor({ dbName = 'bnh_npm_cache', globalObject = globalThis } = {}) {
+     this.dbName = dbName;
+@@ -653,36 +661,50 @@ export class BrowserNpm {
+     return Object.entries(deps).map(([name, range]) => `${name}@${range}`);
+   }
+ 
+-  async seedInstalledLocations() {
+-    const packageJsonSuffix = '/package.json';
+-    const visit = async (directory) => {
+-      for (const entry of this.vfs?.entries?.(directory) || []) {
+-        const pathname = `${directory.replace(/\/+$/, '')}/${entry.name}`;
+-        if (entry.isDirectory?.()) {
+-          await visit(pathname);
+-          continue;
++  async seedInstalledLocations(nodeModulesDir = '/node/node_modules') {
++    // Inspect package roots, not every file in dist/.next/source trees. Large
++    // frameworks install thousands of non-package directories; walking them
++    // all on every optional dependency install made startup quadratic.
++    const visited = new Set();
++    const entries = (directory) => {
++      try { return this.vfs?.entries?.(directory) || []; }
++      catch (error) { if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return []; throw error; }
++    };
++    const visitPackage = async (packageDir) => {
++      const pathname = `${packageDir}/package.json`;
++      try {
++        const value = this.vfs.fs.readFileSync
++          ? this.vfs.fs.readFileSync(pathname, 'utf8')
++          : await this.vfs.fs.promises.readFile(pathname, 'utf8');
++        const manifest = JSON.parse(typeof value === 'string' ? value : new TextDecoder().decode(value));
++        if (typeof manifest.name === 'string' && typeof manifest.version === 'string') {
++          this.installedLocations.set(packageDir, manifest.version);
++          this.installed.set(manifest.name, manifest.version);
+         }
+-        if (entry.name !== 'package.json' || !pathname.endsWith(packageJsonSuffix)) continue;
+-        const packageDir = pathname.slice(0, -packageJsonSuffix.length);
+-        const marker = packageDir.lastIndexOf('/node_modules/');
+-        if (marker < 0) continue;
+-        const relative = packageDir.slice(marker + '/node_modules/'.length);
+-        const segments = relative.split('/');
+-        if (segments.length !== 1 && !(segments.length === 2 && segments[0].startsWith('@'))) continue;
+-        try {
+-          const bytes = await this.vfs.fs.promises.readFile(pathname);
+-          const text = typeof bytes === 'string' ? bytes : new TextDecoder().decode(bytes);
+-          const manifest = JSON.parse(text);
+-          if (typeof manifest.name === 'string' && typeof manifest.version === 'string') {
+-            this.installedLocations.set(packageDir, manifest.version);
+-            this.installed.set(manifest.name, manifest.version);
++      } catch {
++        this.installedLocations.delete(packageDir);
++      }
++      await visit(`${packageDir}/node_modules`);
++    };
++    const visit = async (directory) => {
++      if (visited.has(directory)) return;
++      visited.add(directory);
++      for (const entry of entries(directory)) {
++        if (!entry.isDirectory?.()) continue;
++        const pathname = `${directory}/${entry.name}`;
++        if (entry.name.startsWith('@')) {
++          for (const scoped of entries(pathname)) {
++            if (scoped.isDirectory?.()) await visitPackage(`${pathname}/${scoped.name}`);
+           }
+-        } catch {
+-          // A malformed or inaccessible manifest is handled by normal loading.
+-        }
++        } else if (!entry.name.startsWith('.')) await visitPackage(pathname);
+       }
+     };
+-    await visit('/node');
++    // Include ancestor node_modules directories used for normal hoisting.
++    let current = nodeModulesDir.replace(/\/+$/, '');
++    while (current) {
++      await visit(current);
++      current = parentNodeModulesDir(current);
++    }
+   }
+ 
+   async install(packageSpecs, {
+@@ -703,19 +725,13 @@ export class BrowserNpm {
+     }
+     const specs = Array.isArray(rawSpecs) ? rawSpecs : [rawSpecs];
+     const targetNodeModules = nodeModulesDir || (cwd.endsWith('/') ? `${cwd}node_modules` : `${cwd}/node_modules`);
+-    await this.seedInstalledLocations();
++    await this.seedInstalledLocations(targetNodeModules);
+     const queue = specs.map((spec) => ({ ...parsePackageSpec(spec), optional: false, nodeModulesDir: targetNodeModules }));
+     const results = [];
+     const visited = new Set();
+     const filesToMount = {};
+ 
+-    const parentNodeModulesDir = (directory) => {
+-      const packageRoot = directory.endsWith('/node_modules')
+-        ? directory.slice(0, -'/node_modules'.length)
+-        : directory;
+-      const marker = packageRoot.lastIndexOf('/node_modules/');
+-      return marker < 0 ? null : `${packageRoot.slice(0, marker)}/node_modules`;
+-    };
++
+ 
+     const dependencyLocation = (name, range, currentNodeModulesDir, currentPackageDir) => {
+       const resolutionRange = parseNpmAlias(range)?.range || range;
+diff --git a/src/runtime/process-entry.js b/src/runtime/process-entry.js
+index 8512b231dfa75b6c274f290deb6e1e47416149c9..dcf720cc9f921d53f255543564d2d47a74fb071b 100644
+--- a/src/runtime/process-entry.js
++++ b/src/runtime/process-entry.js
+@@ -194,9 +194,9 @@ export async function runProcessEntry(context) {
+     );
+     const missingSymlinks = (descriptor.symlinks || []).filter(([path]) => !runtime.vfs.files.has(path));
+     if (Object.keys(missingFiles).length || missingSymlinks.length) {
+-      await runtime.mount(missingFiles, { symlinks: missingSymlinks });
++      await runtime.mount(missingFiles, { symlinks: missingSymlinks, copyBuffers: false });
+     }
+-  } else await runtime.mount(descriptor.files, { symlinks: descriptor.symlinks });
++  } else await runtime.mount(descriptor.files, { symlinks: descriptor.symlinks, copyBuffers: false });
+   const vfsUpdatePort = context.vfsUpdatePort || descriptor.vfsUpdatePort;
+   const onVfsUpdate = (event) => {
+     const update = event?.data ?? event;
+diff --git a/src/runtime/shell-parser.js b/src/runtime/shell-parser.js
+index 55d4c68aa86947b4897842caa9b25c2c9858c4c9..248ffad5b8c48a10d3c44d8e1f7d0b4d77c6ea7c 100644
+--- a/src/runtime/shell-parser.js
++++ b/src/runtime/shell-parser.js
+@@ -31,10 +31,14 @@ function commandSubstitutionEnd(source, start) {
+   for (let index = start + 2; index < source.length; index += 1) {
+     const character = source[index];
+     if (quote) {
+-      if (character === '\\') index += 1;
+-      else if (character === quote) quote = null;
++      if (quote === '"' && character === '\\') index += 1;
++      else if (quote === '"' && character === '$' && source[index + 1] === '(') {
++        index = commandSubstitutionEnd(source, index);
++        if (index < 0) return -1;
++      } else if (character === quote) quote = null;
+       continue;
+     }
++    if (character === '\\') { index += 1; continue; }
+     if (character === "'" || character === '"') {
+       quote = character;
+       continue;
+@@ -100,6 +104,7 @@ export function tokenizeShellScript(command) {
+       }
+       if (character === '$' && source[index + 1] === '(') {
+         const end = commandSubstitutionEnd(source, index);
++      if (end < 0) throw shellSyntaxError('unterminated command substitution');
+         if (end >= 0) {
+           appendCommandSubstitution(parts, source.slice(index + 2, end), true, false);
+           wordStarted = true;
+@@ -125,6 +130,7 @@ export function tokenizeShellScript(command) {
+     if (character === '`') throw shellSyntaxError('command substitution is not supported in npm scripts');
+     if (character === '$' && source[index + 1] === '(') {
+       const end = commandSubstitutionEnd(source, index);
++      if (end < 0) throw shellSyntaxError('unterminated command substitution');
+       if (end >= 0) {
+         appendCommandSubstitution(parts, source.slice(index + 2, end), true, true);
+         wordStarted = true;
+diff --git a/src/runtime/shell.js b/src/runtime/shell.js
+index 44cafe5cdf033d7e5a32d899cfa03376f5f9b1f5..ddf3addf54005b28915e246244ca2c7c330aed52 100644
+--- a/src/runtime/shell.js
++++ b/src/runtime/shell.js
+@@ -812,7 +812,8 @@ async function runNpm(name, args, input, context, options) {
+   const scriptArgs = separator >= 0 ? meaningfulArgs.slice(separator + 1) : isTest ? [] : meaningfulArgs.slice(2);
+   const stdout = [];
+   const stderr = [];
+-  let streamed = false;
++  let streamedStdout = false;
++  let streamedStderr = false;
+   try {
+     const child = await options.npmRun(scriptName, {
+       args: scriptArgs,
+@@ -825,13 +826,13 @@ async function runNpm(name, args, input, context, options) {
+       onStdout: (chunk) => {
+         const text = String(chunk);
+         stdout.push(text);
+-        if (text) streamed = true;
++        if (text && context.onStdout) streamedStdout = true;
+         context.onStdout?.(text);
+       },
+       onStderr: (chunk) => {
+         const text = String(chunk);
+         stderr.push(text);
+-        if (text) streamed = true;
++        if (text && context.onStderr) streamedStderr = true;
+         context.onStderr?.(text);
+       },
+     });
+@@ -855,7 +856,8 @@ async function runNpm(name, args, input, context, options) {
+     // delivered output through it.  Callers use this bit to decide whether
+     // returned stdout/stderr still needs forwarding; marking an empty stream
+     // as streamed loses a valid child result at the shell boundary.
+-    res.streamed = streamed;
++    res.streamedStdout = streamedStdout;
++    res.streamedStderr = streamedStderr;
+     return res;
+   } catch (error) {
+     return commandError('npm', error.message || String(error));
+@@ -957,8 +959,8 @@ async function executeSimple(command, context, options) {
+     stdout: stdoutDestination.kind === 'capture' ? stdoutDestination.text : '',
+     stderr: stderrDestination.kind === 'capture' ? stderrDestination.text : '',
+     pipe: stdoutDestination.kind === 'capture' ? stdoutDestination.text : '',
+-    streamedStdout: Boolean(rawResult?.streamed && shouldStreamStdout),
+-    streamedStderr: Boolean(rawResult?.streamed && shouldStreamStderr),
++    streamedStdout: Boolean((rawResult?.streamedStdout ?? rawResult?.streamed) && shouldStreamStdout),
++    streamedStderr: Boolean((rawResult?.streamedStderr ?? rawResult?.streamed) && shouldStreamStderr),
+   };
+ }
+ 
+@@ -975,7 +977,10 @@ async function executePipeline(pipeline, context, options) {
+     stderr += commandResult.stderr;
+     input = commandResult.pipe;
+     if (isLast && commandResult.streamedStdout) streamedStdout = true;
+-    if (commandResult.streamedStderr) streamedStderr = true;
++    // Forward each command's unstreamed stderr before aggregating a pipeline.
++    // One streaming command must not hide another command's returned errors.
++    if (commandResult.stderr && !commandResult.streamedStderr) options.onStderr?.(commandResult.stderr);
++    if (options.onStderr) streamedStderr = true;
+   }
+   return { code: last.code, stdout: last.stdout, stderr, streamedStdout, streamedStderr };
+ }
+diff --git a/src/runtime/streams.js b/src/runtime/streams.js
+index 124c2d0529863f9c9ba96d6e3b014a6deb6d5b53..ff134089b3b5a9c1186f2d5aeb7f71918b94f405 100644
+--- a/src/runtime/streams.js
++++ b/src/runtime/streams.js
+@@ -1321,13 +1321,11 @@ export class Readable extends EventEmitter {
+   }
+ 
+   _maybeEmitEnd() {
+-    if (this._ended && !this._buffer.length && !this._endEmitted && !this._destroyed) {
+-      if (!this._flowing && this.listenerCount('readable') && !this._readableDispatching
+-        && !this.listenerCount('end')) {
+-        this._scheduleReadable();
+-        return;
+-      }
+-      if (!this._flowing && !this.listenerCount('readable') && !this.listenerCount('end')) return;
++    if (!this._ended || this._buffer.length || this._endEmitted || this._destroyed || this._endScheduled) return;
++    this._endScheduled = true;
++    queueMicrotask(() => {
++      this._endScheduled = false;
++      if (!this._ended || this._buffer.length || this._endEmitted || this._destroyed) return;
+       this._endEmitted = true;
+       this._readableState.endEmitted = true;
+       this.readable = false;
+@@ -1339,7 +1337,7 @@ export class Readable extends EventEmitter {
+           else this._emitClose();
+         }
+       });
+-    }
++    });
+   }
+ 
+   _emitClose() {
+@@ -2515,7 +2513,7 @@ class WritableImpl extends EventEmitter {
+     this._closeEmitted = true;
+     this._writableState.closeEmitted = true;
+     this._writableState.closed = true;
+-    this.emit('close');
++    if (this._writableState.emitClose) this.emit('close');
+   }
+ }
+ 
+diff --git a/src/runtime/vfs.js b/src/runtime/vfs.js
+index 3e4d907f46fe1cabef97c90f203f53cffb107203..6572c05b5538eb63d1232c2cb2277d4c22298f0b 100644
+--- a/src/runtime/vfs.js
++++ b/src/runtime/vfs.js
+@@ -350,12 +350,11 @@ function truncateDescriptor(value) {
+   return value;
+ }
+ 
+-function decode(value, encoding) {
++function decode(value, encoding, copy = true) {
+   if (Array.isArray(value)) return Uint8Array.from(value);
+-  // Worker descriptors already arrive as isolated Uint8Arrays. Re-copying
+-  // the complete mounted Node tree here doubles the browser memory required
+-  // by every virtual child before its entry module can start.
+-  if (value instanceof Uint8Array) return value;
++  // Public filesystem writes own their data. Only the internal worker mount
++  // path may reuse already-isolated snapshot bytes.
++  if (value instanceof Uint8Array) return copy ? new Uint8Array(value) : value;
+   if (value instanceof ArrayBuffer) return new Uint8Array(value.slice(0));
+   if (ArrayBuffer.isView(value)) {
+     return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+@@ -727,6 +726,8 @@ export function createVfs(options = {}) {
+   const directories = backend.directories instanceof Set ? backend.directories : new Set(['/']);
+   const symlinks = backend.symlinks instanceof Map ? backend.symlinks : new Map();
+   const metadata = new Map();
++  const sourceVersions = new WeakMap();
++  let nextSourceVersion = 0;
+   let taskTracker = typeof options.trackTask === 'function' ? options.trackTask : null;
+   let activeRequestTracker = null;
+   if (!directories.has('/')) directories.add('/');
+@@ -927,16 +928,6 @@ export function createVfs(options = {}) {
+     }
+   }
+ 
+-  function trackStreamLifecycle(stream, label) {
+-    const release = taskTracker?.(label);
+-    if (typeof release !== 'function') return;
+-    let released = false;
+-    stream.once('close', () => {
+-      if (released) return;
+-      released = true;
+-      release();
+-    });
+-  }
+ 
+   function describePath(pathValue) {
+     const path = resolvePath(pathValue);
+@@ -1121,10 +1112,17 @@ export function createVfs(options = {}) {
+     if (directories.has(path) || symlinks.has(path)) throw isDirectory(path, operation);
+     const previous = files.get(path);
+     const bytes = decode(value, encoding);
+-    setFileBytes(path, append && previous ? new Uint8Array([...previous, ...bytes]) : bytes);
++    if (append && previous) {
++      const combined = new Uint8Array(previous.byteLength + bytes.byteLength);
++      combined.set(previous);
++      combined.set(bytes, previous.byteLength);
++      setFileBytes(path, combined);
++    } else setFileBytes(path, bytes);
+     metadataFor(path);
+     notify(path, previous ? 'change' : 'rename');
+-    emitMutation({ action: 'change', path, type: 'file', bytes: new Uint8Array(files.get(path)), mode: metadata.get(path)?.mode });
++    if (mutationListeners.size) {
++      emitMutation({ action: 'change', path, type: 'file', bytes: new Uint8Array(files.get(path)), mode: metadata.get(path)?.mode });
++    }
+     return mount;
+   }
+ 
+@@ -2708,7 +2706,7 @@ export function createVfs(options = {}) {
+     const virtualExecutable = pathValue === VIRTUAL_EXECUTABLE_PATH;
+     const highWaterMark = options.highWaterMark ?? options.bufferSize ?? 64 * 1024;
+     const autoDestroy = options.autoClose !== false;
+-    const streamOptions = { highWaterMark, autoDestroy };
++    const streamOptions = { highWaterMark, autoDestroy, emitClose: options.emitClose };
+     const stream = target || new Readable(streamOptions);
+     if (target) Object.assign(stream, new Readable(streamOptions));
+     else Object.setPrototypeOf(stream, ReadStream.prototype);
+@@ -2730,7 +2728,6 @@ export function createVfs(options = {}) {
+     stream._fsClosed = false;
+     stream._fsPerformingIO = false;
+     stream._fsIoWaiters = [];
+-    trackStreamLifecycle(stream, 'fs.ReadStream');
+     stream._fsCloseWith = typeof fsApi?.close === 'function'
+       ? (fd, callback) => {
+         const closeFn = fsApi.close;
+@@ -3095,6 +3092,7 @@ export function createVfs(options = {}) {
+     const streamOptions = {
+       highWaterMark: options.highWaterMark,
+       autoDestroy,
++      emitClose: options.emitClose,
+       decodeStrings: true,
+       final(callback) {
+         callback();
+@@ -3139,7 +3137,6 @@ export function createVfs(options = {}) {
+       enumerable: false,
+       value: true,
+     });
+-    trackStreamLifecycle(stream, 'fs.WriteStream');
+     stream._destroyHook = WriteStream.prototype._destroy;
+     const destroy = stream.destroy.bind(stream);
+     stream.destroy = (error, callback) => {
+@@ -3346,7 +3343,7 @@ export function createVfs(options = {}) {
+     return mount;
+   }
+ 
+-  function seedEntry(root, entry, value) {
++  function seedEntry(root, entry, value, copyBuffers = true) {
+     const entryValue = value && typeof value === 'object' && !(value instanceof ArrayBuffer) && !ArrayBuffer.isView(value)
+       ? value
+       : { data: value };
+@@ -3382,13 +3379,13 @@ export function createVfs(options = {}) {
+       }
+     }
+     if (files.has(path) && directories.has(path)) throw invalidPath();
+-    files.set(path, decode(entryValue.data ?? entryValue.bytes ?? entryValue.content ?? entryValue));
++    files.set(path, decode(entryValue.data ?? entryValue.bytes ?? entryValue.content ?? entryValue, undefined, copyBuffers));
+     if (entryValue.mode !== undefined) metadataFor(path).mode = modeValue(entryValue.mode);
+   }
+ 
+-  function seedTree(root, tree) {
++  function seedTree(root, tree, copyBuffers = true) {
+     const entries = tree instanceof Map ? tree : Object.entries(tree || {});
+-    for (const [entry, value] of entries) seedEntry(root, entry, value);
++    for (const [entry, value] of entries) seedEntry(root, entry, value, copyBuffers);
+   }
+ 
+   function mount(tree, config = {}, thirdConfig) {
+@@ -3403,7 +3400,7 @@ export function createVfs(options = {}) {
+       fixtureTree = tree.files ?? tree.tree ?? tree.fixtures ?? {};
+     }
+     const mountRecord = declareMount(mountConfig);
+-    seedTree(mountRecord.path, fixtureTree);
++    seedTree(mountRecord.path, fixtureTree, mountConfig.copyBuffers !== false);
+     for (const [link, target] of mountConfig.symlinks || []) {
+       const linkPath = normalizePath(link, mountRecord.path);
+       if (!isWithin(linkPath, mountRecord.path)) throw denied(linkPath, 'mount');
+@@ -4096,6 +4093,29 @@ export function createVfs(options = {}) {
+       if (path.endsWith('.node') && files.has(path)) unsupportedNativeAddon(path);
+       return readBytes(path);
+     },
++    // Text/source and version seams do not expose mutable backing buffers.
++    // All writes replace those buffers, including writes through hard links.
++    readSource(pathValue) {
++      const path = resolvePath(resolve(pathValue));
++      access(path, 'open');
++      if (directories.has(path)) throw isDirectory(path, 'open');
++      const bytes = files.get(path);
++      if (bytes === undefined) throw missing(path, 'open');
++      if (path.endsWith('.node')) unsupportedNativeAddon(path);
++      return new TextDecoder().decode(bytes);
++    },
++    fileVersion(pathValue) {
++      const path = resolvePath(resolve(pathValue));
++      access(path, 'open');
++      const bytes = files.get(path);
++      if (bytes === undefined) return undefined;
++      let version = sourceVersions.get(bytes);
++      if (version === undefined) {
++        version = ++nextSourceVersion;
++        sourceVersions.set(bytes, version);
++      }
++      return version;
++    },
+     readDescriptor: readDescriptorAsync,
+     readFile,
+     writeFile,
+diff --git a/src/runtime/vm.js b/src/runtime/vm.js
+index f399940591fa55da4717f06bf2902ff86a1ef7d2..35bae92d0dc64c3663e47be0afee44059e27d89d 100644
+--- a/src/runtime/vm.js
++++ b/src/runtime/vm.js
+@@ -1,3 +1,5 @@
++import { rewriteDynamicImports } from './dynamic-imports.js';
++
+ const CONTEXT_MARKER = Symbol('browser-node-vm-context');
+ const MODULE_KIND = Symbol('browser-node-vm-module-kind');
+ const INSPECT_CUSTOM = Symbol.for('nodejs.util.inspect.custom');
+@@ -476,136 +478,7 @@ function splitModuleDeclaration(value) {
+ // comment, and template-literal contents while routing actual import
+ // expressions through the script's per-context callback.
+ function rewriteScriptDynamicImports(source, bindingName) {
+-  const text = String(source);
+-  let index = 0;
+-  const isIdentifierPart = (character) => character !== undefined && /[$\w]/u.test(character);
+-
+-  const copyQuoted = (quote) => {
+-    const start = index;
+-    index += 1;
+-    while (index < text.length) {
+-      const character = text[index];
+-      index += 1;
+-      if (character === '\\') index += 1;
+-      else if (character === quote) break;
+-    }
+-    return text.slice(start, index);
+-  };
+-
+-  const copyComment = () => {
+-    const start = index;
+-    index += 2;
+-    if (text[start + 1] === '/') {
+-      while (index < text.length && text[index] !== '\n' && text[index] !== '\r') index += 1;
+-    } else {
+-      while (index < text.length && !(text[index] === '*' && text[index + 1] === '/')) index += 1;
+-      if (index < text.length) index += 2;
+-    }
+-    return text.slice(start, index);
+-  };
+-
+-  const scanTemplate = () => {
+-    let result = '`';
+-    index += 1;
+-    while (index < text.length) {
+-      const character = text[index];
+-      if (character === '\\') {
+-        result += text.slice(index, index + 2);
+-        index += 2;
+-      } else if (character === '`') {
+-        result += character;
+-        index += 1;
+-        break;
+-      } else if (character === '$' && text[index + 1] === '{') {
+-        result += '${';
+-        index += 2;
+-        result += scanCode(true);
+-      } else {
+-        result += character;
+-        index += 1;
+-      }
+-    }
+-    return result;
+-  };
+-
+-  const scanCode = (stopAtBrace = false) => {
+-    let result = '';
+-    let braceDepth = stopAtBrace ? 1 : 0;
+-    while (index < text.length) {
+-      const character = text[index];
+-      const next = text[index + 1];
+-      if (text.startsWith('eval', index)
+-        && !isIdentifierPart(text[index - 1])
+-        && !isIdentifierPart(text[index + 4])) {
+-        let open = index + 4;
+-        while (/\s/u.test(text[open] || '')) open += 1;
+-        if (text[open] === '(') {
+-          let literalStart = open + 1;
+-          while (/\s/u.test(text[literalStart] || '')) literalStart += 1;
+-          if (text[literalStart] === '\'' || text[literalStart] === '"') {
+-            result += text.slice(index, literalStart);
+-            index = literalStart;
+-            const quoted = copyQuoted(text[literalStart]);
+-            const body = quoted.slice(1, -1);
+-            result += quoted[0] + rewriteScriptDynamicImports(body, bindingName) + quoted.slice(-1);
+-            continue;
+-          }
+-        }
+-      }
+-      if (character === '\'' || character === '"') {
+-        result += copyQuoted(character);
+-        continue;
+-      }
+-      if (character === '/' && (next === '/' || next === '*')) {
+-        result += copyComment();
+-        continue;
+-      }
+-      if (character === '`') {
+-        result += scanTemplate();
+-        continue;
+-      }
+-      if (stopAtBrace) {
+-        if (character === '{') braceDepth += 1;
+-        if (character === '}') {
+-          braceDepth -= 1;
+-          result += character;
+-          index += 1;
+-          if (braceDepth === 0) return result;
+-          continue;
+-        }
+-      }
+-      if (text.startsWith('import', index)
+-        && !isIdentifierPart(text[index - 1])
+-        && text[index - 1] !== '.'
+-        && !isIdentifierPart(text[index + 6])) {
+-        let callIndex = index + 6;
+-        for (;;) {
+-          while (/\s/u.test(text[callIndex] || '')) callIndex += 1;
+-          if (text.startsWith('/*', callIndex)) {
+-            const end = text.indexOf('*/', callIndex + 2);
+-            callIndex = end < 0 ? text.length : end + 2;
+-            continue;
+-          }
+-          if (text.startsWith('//', callIndex)) {
+-            callIndex += 2;
+-            while (callIndex < text.length && text[callIndex] !== '\n' && text[callIndex] !== '\r') callIndex += 1;
+-            continue;
+-          }
+-          break;
+-        }
+-        if (text[callIndex] === '(') {
+-          result += bindingName;
+-          index += 6;
+-          continue;
+-        }
+-      }
+-      result += character;
+-      index += 1;
+-    }
+-    return result;
+-  };
+-
+-  return scanCode();
++  return rewriteDynamicImports(source, bindingName);
+ }
+ 
+ let nextFunctionDynamicImportId = 1;
+@@ -613,7 +486,7 @@ let nextFunctionDynamicImportId = 1;
+ function createVmFunctionConstructor(NativeFunction, processObject, filename) {
+   const GuestFunction = function guestFunctionConstructor(...args) {
+     const body = args.length ? String(args.at(-1)) : '';
+-    if (!/\bimport\s*\(/u.test(body)) return Reflect.construct(NativeFunction, args);
++    if (!body.includes('import')) return Reflect.construct(NativeFunction, args);
+     const parameters = args.slice(0, -1);
+     const bindingName = `__bnhVmFunctionImport${nextFunctionDynamicImportId++}`;
+     const source = rewriteScriptDynamicImports(body, bindingName);
+@@ -933,7 +806,7 @@ export function createVmModule(scope = globalThis) {
+       validateContext(contextifiedObject, isContext);
+       const runOptions = getRunInContextArgs(options);
+       const dynamicImportBinding = `__bnhVmDynamicImport${nextScriptDynamicImportId++}`;
+-      const hasDynamicImport = /\bimport\s*\(/u.test(this.code);
++      const hasDynamicImport = this.code.includes('import');
+       const source = hasDynamicImport
+         ? rewriteScriptDynamicImports(this.code, dynamicImportBinding)
+         : this.code;
+@@ -1013,7 +886,7 @@ export function createVmModule(scope = globalThis) {
+     runInThisContext(options = {}) {
+       getRunInContextArgs(options);
+       const dynamicImportBinding = `__bnhVmDynamicImport${nextScriptDynamicImportId++}`;
+-      const hasDynamicImport = /\bimport\s*\(/u.test(this.code);
++      const hasDynamicImport = this.code.includes('import');
+       const source = hasDynamicImport
+         ? rewriteScriptDynamicImports(this.code, dynamicImportBinding)
+         : this.code;

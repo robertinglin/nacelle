@@ -812,7 +812,8 @@ async function runNpm(name, args, input, context, options) {
   const scriptArgs = separator >= 0 ? meaningfulArgs.slice(separator + 1) : isTest ? [] : meaningfulArgs.slice(2);
   const stdout = [];
   const stderr = [];
-  let streamed = false;
+  let streamedStdout = false;
+  let streamedStderr = false;
   try {
     const child = await options.npmRun(scriptName, {
       args: scriptArgs,
@@ -825,13 +826,13 @@ async function runNpm(name, args, input, context, options) {
       onStdout: (chunk) => {
         const text = String(chunk);
         stdout.push(text);
-        if (text) streamed = true;
+        if (text && context.onStdout) streamedStdout = true;
         context.onStdout?.(text);
       },
       onStderr: (chunk) => {
         const text = String(chunk);
         stderr.push(text);
-        if (text) streamed = true;
+        if (text && context.onStderr) streamedStderr = true;
         context.onStderr?.(text);
       },
     });
@@ -855,7 +856,8 @@ async function runNpm(name, args, input, context, options) {
     // delivered output through it.  Callers use this bit to decide whether
     // returned stdout/stderr still needs forwarding; marking an empty stream
     // as streamed loses a valid child result at the shell boundary.
-    res.streamed = streamed;
+    res.streamedStdout = streamedStdout;
+    res.streamedStderr = streamedStderr;
     return res;
   } catch (error) {
     return commandError('npm', error.message || String(error));
@@ -957,8 +959,8 @@ async function executeSimple(command, context, options) {
     stdout: stdoutDestination.kind === 'capture' ? stdoutDestination.text : '',
     stderr: stderrDestination.kind === 'capture' ? stderrDestination.text : '',
     pipe: stdoutDestination.kind === 'capture' ? stdoutDestination.text : '',
-    streamedStdout: Boolean(rawResult?.streamed && shouldStreamStdout),
-    streamedStderr: Boolean(rawResult?.streamed && shouldStreamStderr),
+    streamedStdout: Boolean((rawResult?.streamedStdout ?? rawResult?.streamed) && shouldStreamStdout),
+    streamedStderr: Boolean((rawResult?.streamedStderr ?? rawResult?.streamed) && shouldStreamStderr),
   };
 }
 
@@ -975,7 +977,10 @@ async function executePipeline(pipeline, context, options) {
     stderr += commandResult.stderr;
     input = commandResult.pipe;
     if (isLast && commandResult.streamedStdout) streamedStdout = true;
-    if (commandResult.streamedStderr) streamedStderr = true;
+    // Forward each command's unstreamed stderr before aggregating a pipeline.
+    // One streaming command must not hide another command's returned errors.
+    if (commandResult.stderr && !commandResult.streamedStderr) options.onStderr?.(commandResult.stderr);
+    if (options.onStderr) streamedStderr = true;
   }
   return { code: last.code, stdout: last.stdout, stderr, streamedStdout, streamedStderr };
 }

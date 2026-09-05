@@ -31,10 +31,14 @@ function commandSubstitutionEnd(source, start) {
   for (let index = start + 2; index < source.length; index += 1) {
     const character = source[index];
     if (quote) {
-      if (character === '\\') index += 1;
-      else if (character === quote) quote = null;
+      if (quote === '"' && character === '\\') index += 1;
+      else if (quote === '"' && character === '$' && source[index + 1] === '(') {
+        index = commandSubstitutionEnd(source, index);
+        if (index < 0) return -1;
+      } else if (character === quote) quote = null;
       continue;
     }
+    if (character === '\\') { index += 1; continue; }
     if (character === "'" || character === '"') {
       quote = character;
       continue;
@@ -100,6 +104,7 @@ export function tokenizeShellScript(command) {
       }
       if (character === '$' && source[index + 1] === '(') {
         const end = commandSubstitutionEnd(source, index);
+      if (end < 0) throw shellSyntaxError('unterminated command substitution');
         if (end >= 0) {
           appendCommandSubstitution(parts, source.slice(index + 2, end), true, false);
           wordStarted = true;
@@ -125,6 +130,7 @@ export function tokenizeShellScript(command) {
     if (character === '`') throw shellSyntaxError('command substitution is not supported in npm scripts');
     if (character === '$' && source[index + 1] === '(') {
       const end = commandSubstitutionEnd(source, index);
+      if (end < 0) throw shellSyntaxError('unterminated command substitution');
       if (end >= 0) {
         appendCommandSubstitution(parts, source.slice(index + 2, end), true, true);
         wordStarted = true;

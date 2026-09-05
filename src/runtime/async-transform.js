@@ -268,14 +268,14 @@ function rewriteForAwaitLoops(source) {
     : ${valueName}[Symbol.iterator]();
   let ${stepName};
   try {
-    while (!(${stepName} = (yield Promise.resolve(${iteratorName}.next()).then((result) => (
+    while (!(${stepName} = (await Promise.resolve(${iteratorName}.next()).then((result) => (
       Promise.resolve(result.value).then((value) => ({ ...result, value }))
     )))).done) {
       ${declarationMatch[1]} ${declarationMatch[2]} = ${stepName}.value;${body}
     }
   } finally {
     if (${stepName} && !${stepName}.done && typeof ${iteratorName}.return === 'function') {
-      yield Promise.resolve(${iteratorName}.return());
+      await Promise.resolve(${iteratorName}.return());
     }
   }
 }`,
@@ -686,24 +686,13 @@ function transformCandidates(source, candidates, bindingName) {
 }
 
 export function transformAsyncSource(source, preferredBinding = '__bnhAsync') {
-  const originalText = String(source);
-  // `rewriteForAwaitLoops()` lowers `for await` to a generator protocol. The
-  // lowered source no longer contains the original `await` token, but its
-  // enclosing async function still needs lowering. Keep the pre-rewrite
-  // candidate metadata so the async-identity optimization does not leave a
-  // native async function containing the generated `yield` expressions.
-  const originalCandidates = asyncFunctionCandidates(originalText).candidates;
-  const text = rewriteForAwaitLoops(originalText);
+  // Keep loop suspension points as await until their owning async function
+  // is lowered, including functions visited recursively inside another body.
+  const text = rewriteForAwaitLoops(String(source));
   const names = new Set(text.match(/\b[$A-Z_a-z][$\w]*\b/gu) || []);
   let bindingName = preferredBinding;
   while (names.has(bindingName)) bindingName = `${preferredBinding}$`;
   const { candidates } = asyncFunctionCandidates(text);
-  for (let index = 0; index < candidates.length; index += 1) {
-    const original = originalCandidates[index];
-    candidates[index].containsAwait = original
-      ? tokenize(originalText.slice(original.bodyStart, original.bodyEnd)).some((token) => token.value === 'await')
-      : tokenize(text.slice(candidates[index].bodyStart, candidates[index].bodyEnd)).some((token) => token.value === 'await');
-  }
   if (!candidates.some((candidate) => !candidate.containsUnsupportedSyntax && candidate.containsAwait)) {
     return { source: text, transformed: false, bindingName };
   }
@@ -732,7 +721,7 @@ const simpleEscapes = new Map([
   ['0', '\0'],
 ]);
 
-function decodeStringLiteral(text) {
+export function decodeStringLiteral(text) {
   let result = '';
   for (let index = 0; index < text.length; index += 1) {
     const character = text[index];
@@ -760,6 +749,7 @@ function decodeStringLiteral(text) {
         if (close < 0) return null;
         const code = text.slice(index + 3, close);
         if (!/^[0-9a-fA-F]{1,6}$/.test(code)) return null;
+        if (parseInt(code, 16) > 0x10ffff) return null;
         result += String.fromCodePoint(parseInt(code, 16));
         index = close;
         continue;
@@ -780,7 +770,7 @@ function decodeStringLiteral(text) {
   return result;
 }
 
-function encodeStringLiteral(text, quote) {
+export function encodeStringLiteral(text, quote) {
   let result = '';
   for (const character of text) {
     const code = character.codePointAt(0);

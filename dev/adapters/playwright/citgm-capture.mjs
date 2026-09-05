@@ -28,8 +28,8 @@ export function createSerializedCaptureQueue(bindings = globalThis) {
     const state = stateFor(name);
     state.scheduled = false;
     if (state.running || state.pending.length === 0) return state.running || Promise.resolve();
-    const payloads = state.pending.splice(0);
-    const waiters = state.waiters.splice(0);
+    const payloads = state.pending.splice(0, batchSize);
+    const waiters = state.waiters.splice(0, batchSize);
     state.running = Promise.resolve().then(async () => {
       try {
         const binding = bindings?.[name];

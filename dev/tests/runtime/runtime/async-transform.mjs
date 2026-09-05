@@ -83,3 +83,29 @@ test('preserves native async identity when no await lowering is needed', () => {
   assert.equal(invoke.constructor.name, 'AsyncFunction');
   assert.equal(Object.prototype.toString.call(invoke), '[object AsyncFunction]');
 });
+
+test('lowers for-await inside nested async functions in strict modules', async () => {
+  const source = `
+    'use strict';
+    async function invoke(values) {
+      const collect = async () => {
+        const chunks = [];
+        for await (const value of values) {
+          chunks.push(value);
+          break;
+        }
+        return chunks;
+      };
+      return await collect();
+    }
+  `;
+  const transformed = transformAsyncSource(source);
+  const invoke = new Function(transformed.bindingName, `${transformed.source}; return invoke;`)(runGenerator);
+  let closed = false;
+  async function* values() {
+    try { yield 7; yield 9; }
+    finally { closed = true; }
+  }
+  assert.deepEqual(await invoke(values()), [7]);
+  assert.equal(closed, true);
+});

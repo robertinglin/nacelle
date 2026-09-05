@@ -67,7 +67,7 @@ function decodeChunkedHttpBody(bytes) {
       || bytes[offset + size] !== 13 || bytes[offset + size + 1] !== 10) {
       throw new TypeError('invalid chunked HTTP response');
     }
-    chunks.push(bytes.slice(offset, offset + size));
+    chunks.push(bytes.subarray(offset, offset + size));
     offset += size + 2;
   }
   throw new TypeError('invalid chunked HTTP response');
@@ -674,61 +674,69 @@ export class Nacelle {
         chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
       });
       socket.on('error', (error) => finish(reject, error));
+      // This one-shot HTTP request has no reason to keep the writable half
+      // open after response EOF. Parsing on close must not await a peer RST.
+      socket.once('end', () => socket.destroy());
       socket.on('close', () => {
         if (settled) return;
-        const totalLength = chunks.reduce((acc, c) => acc + c.byteLength, 0);
-        const combined = new Uint8Array(totalLength);
-        let offset = 0;
-        for (const c of chunks) {
-          combined.set(c, offset);
-          offset += c.byteLength;
-        }
-        let headerEnd = -1;
-        for (let i = 0; i < combined.byteLength - 3; i += 1) {
-          if (combined[i] === 13 && combined[i + 1] === 10 && combined[i + 2] === 13 && combined[i + 3] === 10) {
-            headerEnd = i;
-            break;
+        try {
+          const totalLength = chunks.reduce((acc, c) => acc + c.byteLength, 0);
+          const combined = new Uint8Array(totalLength);
+          let offset = 0;
+          for (const c of chunks) {
+            combined.set(c, offset);
+            offset += c.byteLength;
           }
-        }
-        let bodyOffset = headerEnd !== -1 ? headerEnd + 4 : combined.byteLength;
-        if (headerEnd === -1) {
-          for (let i = 0; i < combined.byteLength - 1; i += 1) {
-            if (combined[i] === 10 && combined[i + 1] === 10) {
+          let headerEnd = -1;
+          for (let i = 0; i < combined.byteLength - 3; i += 1) {
+            if (combined[i] === 13 && combined[i + 1] === 10 && combined[i + 2] === 13 && combined[i + 3] === 10) {
               headerEnd = i;
-              bodyOffset = i + 2;
               break;
             }
           }
-        }
-        const headerText = headerEnd !== -1 ? new TextDecoder().decode(combined.subarray(0, headerEnd)) : '';
-        const rawBody = combined.subarray(bodyOffset);
-        const lines = headerText.split(/\r?\n/);
-        const statusMatch = (lines[0] || '').match(/^HTTP\/\d\.\d\s+(\d+)(?:\s+(.*))?$/);
-        if (!statusMatch) {
-          finish(reject, new Error('Virtual HTTP connection closed without a valid response'));
-          return;
-        }
-        const status = parseInt(statusMatch[1], 10);
-        const statusText = statusMatch ? statusMatch[2] || 'OK' : 'OK';
-        const resHeaders = new Headers();
-        for (let i = 1; i < lines.length; i += 1) {
-          const colon = lines[i].indexOf(':');
-          if (colon !== -1) {
-            resHeaders.append(lines[i].slice(0, colon).trim(), lines[i].slice(colon + 1).trim());
+          let bodyOffset = headerEnd !== -1 ? headerEnd + 4 : combined.byteLength;
+          if (headerEnd === -1) {
+            for (let i = 0; i < combined.byteLength - 1; i += 1) {
+              if (combined[i] === 10 && combined[i + 1] === 10) {
+                headerEnd = i;
+                bodyOffset = i + 2;
+                break;
+              }
+            }
           }
+          const headerText = headerEnd !== -1 ? new TextDecoder().decode(combined.subarray(0, headerEnd)) : '';
+          const rawBody = combined.subarray(bodyOffset);
+          const lines = headerText.split(/\r?\n/);
+          const statusMatch = (lines[0] || '').match(/^HTTP\/\d\.\d\s+(\d+)(?:\s+(.*))?$/);
+          if (!statusMatch) {
+            finish(reject, new Error('Virtual HTTP connection closed without a valid response'));
+            return;
+          }
+          const status = parseInt(statusMatch[1], 10);
+          const statusText = statusMatch ? statusMatch[2] || 'OK' : 'OK';
+          const resHeaders = new Headers();
+          for (let i = 1; i < lines.length; i += 1) {
+            const colon = lines[i].indexOf(':');
+            if (colon !== -1) {
+              resHeaders.append(lines[i].slice(0, colon).trim(), lines[i].slice(colon + 1).trim());
+            }
+          }
+          const bodyForbidden = method === 'HEAD' || [204, 205, 304].includes(status);
+          const responseBody = bodyForbidden ? null : /(?:^|\W)chunked(?:$|\W)/i.test(
+            resHeaders.get('transfer-encoding') || '',
+          )
+            ? decodeChunkedHttpBody(rawBody)
+            : rawBody;
+          const ResponseClass = globalThis.Response || this._globalObject.Response;
+          const res = new ResponseClass(responseBody, {
+            status,
+            statusText,
+            headers: resHeaders,
+          });
+          finish(resolve, res);
+        } catch (error) {
+          finish(reject, error);
         }
-        const responseBody = /(?:^|\W)chunked(?:$|\W)/i.test(
-          resHeaders.get('transfer-encoding') || '',
-        )
-          ? decodeChunkedHttpBody(rawBody)
-          : rawBody;
-        const ResponseClass = globalThis.Response || this._globalObject.Response;
-        const res = new ResponseClass(responseBody, {
-          status,
-          statusText,
-          headers: resHeaders,
-        });
-        finish(resolve, res);
       });
       signal?.addEventListener('abort', onAbort, { once: true });
       if (signal?.aborted) {

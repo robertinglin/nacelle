@@ -1322,21 +1322,17 @@ export class Readable extends EventEmitter {
 
   _maybeEmitEnd() {
     if (this._ended && !this._buffer.length && !this._endEmitted && !this._destroyed) {
-      // A readable listener delays end until buffered data is consumed, but it
-      // must not delay end once the buffer is empty. Consumers such as Next's
-      // pull loops remove both wait listeners while reading the final chunk,
-      // then attach them again after observing readableEnded === false.
-      if (!this._flowing && this.listenerCount('readable') && !this._readableDispatching
-        && !this.listenerCount('end')) {
-        this._scheduleReadable();
-        return;
-      }
-      if (!this._flowing && !this.listenerCount('readable') && !this.listenerCount('end')) return;
+      // Flip the ended state unconditionally, like Node: endEmitted must not
+      // depend on which listeners happen to be attached. Poll loops such as
+      // Next's flight-to-HTML renderer remove their wait listeners while
+      // reading the final chunk and re-attach after; if emission waited for
+      // an 'end' listener to be present, they would re-poll readableEnded
+      // forever in a microtask spin that starves the event loop.
       this._endEmitted = true;
       this._readableState.endEmitted = true;
       this.readable = false;
-      this.emit('end');
       queueMicrotask(() => {
+        this.emit('end');
         if (this._destroyed) this._emitClose();
         else if (!this._writable || this._writableState?.finished) {
           if (this._readableState.autoDestroy) this.destroy();

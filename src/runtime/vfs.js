@@ -8,6 +8,7 @@ import { createGlob } from './fs-glob.js';
 import { markAsUncloneable } from './messaging.js';
 
 const textEncoder = new TextEncoder();
+const hostSetTimeout = globalThis.setTimeout.bind(globalThis);
 const SymbolDispose = Symbol.for('nodejs.dispose');
 const SymbolAsyncDispose = Symbol.for('nodejs.asyncDispose');
 const READ_FILE_ASYNC_STAGES = 4;
@@ -743,6 +744,8 @@ export function createVfs(options = {}) {
   let nextDescriptor = 100;
   let nextTemporaryDirectory = 0;
   let mutationQueue = Promise.resolve();
+  let promiseOperations = 0;
+  let ioTurn = null;
   let warningEmitter = null;
   const mutationListeners = new Set();
   let nonPortableTemplateWarningEmitted = false;
@@ -4037,6 +4040,23 @@ export function createVfs(options = {}) {
       } catch (error) {
         release?.();
         throw error;
+      }
+      // Real filesystem I/O yields to the event loop. An unbroken chain of
+      // in-memory completions starves timers and keeps WeakRef targets alive
+      // for the entire trace/build, eventually exhausting the browser heap.
+      if (++promiseOperations >= 128 || ioTurn) {
+        if (!ioTurn) {
+          ioTurn = new Promise((resolve) => hostSetTimeout(() => {
+            promiseOperations = 0;
+            ioTurn = null;
+            resolve();
+          }, 0));
+        }
+        const turn = ioTurn;
+        pending = Promise.resolve(pending).then(
+          (value) => turn.then(() => value),
+          (error) => turn.then(() => { throw error; }),
+        );
       }
       return Promise.resolve(pending).finally(() => release?.());
     }];

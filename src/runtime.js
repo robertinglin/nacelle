@@ -1,3 +1,4 @@
+import { connectVfsUpdates } from './runtime/vfs-worker-bridge.js';
 import { rewriteDynamicImports } from './runtime/dynamic-imports.js';
 import { createAssert, inspect as nodeInspect } from './runtime/assert.js';
 import {
@@ -4624,80 +4625,10 @@ export function createRuntime({
   const virtualProcessLiveness = new Map();
   const environmentData = new Map();
 
-  // A process boundary starts with a VFS snapshot, but npm and ordinary Node
-  // tooling are allowed to add files after that snapshot was taken. Keep
-  // isolated children current without making package installation a special
-  // case or requiring a pre-populated cache.
   function createVfsUpdateBridge() {
     const channel = createMessageChannel(scope);
-    const pendingBatches = [];
-    let fullSyncPending = false;
-    let flushScheduled = false;
-    const queuePathBatch = (paths) => {
-      const previous = pendingBatches.at(-1);
-      if (previous?.kind === 'paths') {
-        for (const pathValue of paths) previous.paths.add(pathValue);
-        return;
-      }
-      pendingBatches.push({ kind: 'paths', paths: new Set(paths) });
-    };
-    const flush = () => {
-      flushScheduled = false;
-      if (fullSyncPending) {
-        fullSyncPending = false;
-        pendingBatches.length = 0;
-        channel.port1.postMessage({ action: 'sync', state: vfs.exportState?.() });
-        return;
-      }
-      for (const batch of pendingBatches.splice(0)) {
-        if (batch.kind === 'delta') {
-          channel.port1.postMessage({
-            action: 'delta',
-            removed: batch.removed,
-            changes: batch.changes,
-          });
-          continue;
-        }
-        const changes = [];
-        for (const pathValue of batch.paths) {
-          changes.push(vfs.describe?.(pathValue) || { path: pathValue, type: 'remove' });
-        }
-        if (changes.length) channel.port1.postMessage({ action: 'delta', changes });
-      }
-    };
-    const schedule = () => {
-      if (flushScheduled) return;
-      flushScheduled = true;
-      runtimeQueueMicrotask(flush);
-    };
-    const unsubscribe = vfs.subscribeMutations?.((update) => {
-      if (update.action === 'sync') {
-        fullSyncPending = true;
-        pendingBatches.length = 0;
-        schedule();
-        return;
-      }
-      if (update.action === 'change-set') {
-        pendingBatches.push({
-          kind: 'delta',
-          removed: Array.isArray(update.removed) ? update.removed : [],
-          changes: Array.isArray(update.changes) ? update.changes : [],
-        });
-        schedule();
-        return;
-      }
-      const paths = [...(update.paths || [])];
-      if (update.path) paths.push(update.path);
-      if (paths.length) queuePathBatch(paths);
-      schedule();
-    });
-    return {
-      port: channel.raw.port2,
-      close() {
-        unsubscribe?.();
-        channel.port1.close?.();
-      },
-    };
+    const bridge = connectVfsUpdates(vfs, channel.raw.port1, runtimeQueueMicrotask);
+    return { port: channel.raw.port2, close: () => bridge.close() };
   }
 
   // The upstream ESM resolver is bundled as a Node internal module, but its
@@ -13201,8 +13132,6 @@ export function createRuntime({
           throw error;
         }
       }
-      const stdout = capabilities.output.stdout;
-      const stderr = capabilities.output.stderr;
       const workerSource = new URL('./runtime/process-entry.js', import.meta.url).href;
       const files = Object.fromEntries(
         vfs.snapshot({ copy: false }).artifacts.map(({ path, bytes }) => [path, {
@@ -13316,8 +13245,8 @@ export function createRuntime({
         workerNetworkBridge?.close();
         if (activeChild === child) activeChild = null;
         capabilities.output.off('data', outputListener);
-        stdout.end();
-        stderr.end();
+        // These collectors belong to the runtime and are reused by later
+        // commands. Ending them here makes the next process write after end.
         // The control-port terminal frame carries the bounded runtime
         // summary. Prefer it over the optional user IPC snapshot, which may
         // contain the internal mutable activity records.

@@ -466,11 +466,13 @@ Stream.prototype.eventNames = function eventNames() {
   }
   return Reflect.ownKeys(events);
 };
-Stream.prototype.pipe = function pipe(destination) {
+Stream.prototype.pipe = function pipe(destination, options = {}) {
   this.on('data', (chunk) => {
     if (!destination.write(chunk)) this.pause?.();
   });
-  this.on('end', () => destination.end?.());
+  this.on('end', () => {
+    if (options?.end !== false && !destination._isStdio) destination.end?.();
+  });
   destination.on?.('drain', () => this.resume?.());
   destination.emit?.('pipe', this);
   this.resume?.();
@@ -1220,7 +1222,7 @@ export class Readable extends EventEmitter {
     return this;
   }
 
-  pipe(destination) {
+  pipe(destination, options = {}) {
     const onData = (chunk) => {
       if (!destination.write(chunk)) {
         this._blockedPipes.add(destination);
@@ -1228,7 +1230,9 @@ export class Readable extends EventEmitter {
       }
     };
     const onEnd = () => {
-      destination.end();
+      // stdout and stderr outlive individual producers (including build
+      // workers); piping one producer must not close the process streams.
+      if (options?.end !== false && !destination._isStdio) destination.end();
     };
     const onDrain = () => {
       this._blockedPipes.delete(destination);

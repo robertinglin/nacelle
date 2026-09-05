@@ -74,6 +74,68 @@ test.describe('Next.js SWC package selection', () => {
     if (localServer) await new Promise((resolve) => localServer.close(resolve));
   });
 
+  test('sequential worker commands retain stdout and stderr after exit and kill', async ({ page }) => {
+    await page.goto(serverUrl);
+    const result = await page.evaluate(async () => {
+      const { Nacelle } = await import('/index.js');
+      const node = await Nacelle.create({ globalObject: window, isolation: 'worker', gateway: false });
+      const results = [];
+      for (const index of [0, 1, 2]) {
+        const stdout = [];
+        const stderr = [];
+        let ready;
+        const started = new Promise((resolve) => { ready = resolve; });
+        const child = await node.execute(`
+          require('node:fs').writeFileSync('/node/result-${index}', 'saved-${index}');
+          process.stdout.write('out-${index}');
+          process.stderr.write('err-${index}');
+          ${index === 1 ? 'setInterval(() => {}, 1000);' : ''}
+          ${index === 2 ? 'process.exit(0);' : ''}
+        `, {
+          onStdout: (chunk) => stdout.push(chunk),
+          onStderr: (chunk) => { stderr.push(chunk); ready(); },
+        });
+        if (index === 1) {
+          await started;
+          await child.kill();
+        }
+        const code = await child.exit;
+        const saved = index === 1 ? null : await node.fs.readFile(`/node/result-${index}`, 'utf8');
+        results.push({ code, stdout: stdout.join(''), stderr: stderr.join(''), saved });
+      }
+      return results;
+    });
+    expect(result).toEqual([
+      { code: 0, stdout: 'out-0', stderr: 'err-0', saved: 'saved-0' },
+      { code: 1, stdout: 'out-1', stderr: 'err-1', saved: null },
+      { code: 0, stdout: 'out-2', stderr: 'err-2', saved: 'saved-2' },
+    ]);
+  });
+
+  test('Next.js file tracing follows local imports and package dependencies', async ({ page }) => {
+    await page.goto(serverUrl);
+    const result = await page.evaluate(async () => {
+      const { Nacelle } = await import('/index.js');
+      const node = await Nacelle.create({ globalObject: window, isolation: 'worker', gateway: false });
+      await node.fs.writeFile('/node/package.json', '{"private":true}');
+      await node.npm.install('next@16.3.3');
+      await node.fs.writeFile('/node/trace-entry.js', "require('./dependency'); require('next/package.json');");
+      await node.fs.writeFile('/node/dependency.js', 'module.exports = 42;');
+      const child = await node.execute(`
+        const { nodeFileTrace } = require('next/dist/compiled/@vercel/nft');
+        nodeFileTrace(['/node/trace-entry.js'], { base: '/node' }).then(
+          ({ fileList }) => console.log(JSON.stringify([...fileList].sort())),
+          (error) => { console.error(error.stack); process.exitCode = 1; },
+        );
+      `);
+      return { code: await child.exit, stdout: await child.stdoutText(), stderr: await child.stderrText() };
+    });
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual(expect.arrayContaining([
+      'trace-entry.js', 'dependency.js', 'node_modules/next/package.json',
+    ]));
+  });
+
   test('stock Next.js 16 checks WebContainer before loading native SWC', async ({ page }) => {
     test.setTimeout(120000);
     await page.goto(serverUrl);

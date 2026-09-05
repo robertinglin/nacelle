@@ -12,6 +12,7 @@ const promiseTargets = new WeakMap();
 const asyncCompletionHandlers = new WeakMap();
 const userContextMarker = Symbol('bnhUserContext');
 const errorAsyncIds = new WeakMap();
+const errorAsyncResources = new WeakMap();
 const reportedRejections = new WeakSet();
 const rootResource = {};
 const asyncIdSymbol = Symbol('asyncId');
@@ -280,7 +281,10 @@ function newAsyncId(type, triggerAsyncId, resource, weakResource = false, collec
     initObserved,
   };
   if (weakResource && resource !== null && (typeof resource === 'object' || typeof resource === 'function')) {
-    record.resource = new WeakRef(resource);
+    // Constructing a WeakRef keeps its target alive until the job ends. Long
+    // promise chains can therefore retain an entire compiler's intermediates.
+    // Promise callbacks supply their live resource when entering the scope.
+    if (type !== 'PROMISE') record.resource = new WeakRef(resource);
     resourceFinalizer?.register(resource, asyncId);
   } else {
     record.resource = resource;
@@ -437,7 +441,7 @@ export function collectAsyncResources() {
   }
 }
 
-function runInScope(asyncId, callback, thisArg, args, nativeContinuation = false) {
+function runInScope(asyncId, callback, thisArg, args, nativeContinuation = false, liveResource) {
   const generation = asyncContextGeneration;
   const previous = executionId;
   const previousUserCode = globalThis.__bnhUserCode;
@@ -456,6 +460,8 @@ function runInScope(asyncId, callback, thisArg, args, nativeContinuation = false
     });
   }
   const record = resources.get(asyncId);
+  const previousResource = record?.resource;
+  if (record && liveResource !== undefined) record.resource = liveResource;
   const dispatchBefore = !record || record.initObserved || record.type === 'PROMISE';
   let dispatchAfter = dispatchBefore;
   const relatedAsyncId = relatedAsyncIds.get(asyncId);
@@ -482,6 +488,7 @@ function runInScope(asyncId, callback, thisArg, args, nativeContinuation = false
   } catch (error) {
     if (error !== null && (typeof error === 'object' || typeof error === 'function')) {
       errorAsyncIds.set(error, asyncId);
+      if (record?.resource) errorAsyncResources.set(error, resourceValue(record));
     }
     throw error;
   } finally {
@@ -489,6 +496,7 @@ function runInScope(asyncId, callback, thisArg, args, nativeContinuation = false
       const restore = () => {
         if (!nativeContinuationActive) return;
         nativeContinuationActive = false;
+        if (record) record.resource = previousResource;
         if (generation !== asyncContextGeneration) return;
         if (executionId === asyncId) {
           executionId = previous;
@@ -501,6 +509,7 @@ function runInScope(asyncId, callback, thisArg, args, nativeContinuation = false
       hostQueueMicrotask(restore);
       executionId = previous;
     } else {
+      if (record) record.resource = previousResource;
       executionId = previous;
     }
     if (previousUserCode === undefined) delete globalThis.__bnhUserCode;
@@ -513,7 +522,7 @@ function runWithErrorScope(error, callback) {
     ? errorAsyncIds.get(error)
     : undefined;
   if (asyncId === undefined) return callback();
-  return runInScope(asyncId, callback, undefined, []);
+  return runInScope(asyncId, callback, undefined, [], false, errorAsyncResources.get(error));
 }
 
 function runWithPromiseScope(promise, callback) {
@@ -524,13 +533,13 @@ function runWithPromiseScope(promise, callback) {
     const previousContext = contexts.get(asyncId);
     contexts.set(asyncId, promiseContext);
     try {
-      return runInScope(asyncId, callback, undefined, []);
+      return runInScope(asyncId, callback, undefined, [], false, promiseTarget(promise));
     } finally {
       if (previousContext) contexts.set(asyncId, previousContext);
       else contexts.delete(asyncId);
     }
   }
-  return runInScope(asyncId, callback, undefined, []);
+  return runInScope(asyncId, callback, undefined, [], false, promiseTarget(promise));
 }
 
 const taskHookTargets = new WeakMap();
@@ -673,12 +682,12 @@ function installPromiseHooks() {
       && String(onFulfilled).includes('[native code]');
     const fulfill = (...args) => {
       return typeof onFulfilled === 'function'
-        ? runInScope(asyncId, onFulfilled, this, args, nativeResolver || Boolean(awaitContext))
+        ? runInScope(asyncId, onFulfilled, this, args, nativeResolver || Boolean(awaitContext), result)
         : args[0];
     };
     const reject = (...args) => {
       return typeof onRejected === 'function'
-        ? runInScope(asyncId, onRejected, this, args)
+        ? runInScope(asyncId, onRejected, this, args, false, result)
         : (() => { throw args[0]; })();
     };
     let result;
@@ -722,7 +731,7 @@ function installPromiseHooks() {
       promiseIds.set(result, awaitedAsyncId);
       emit('promiseResolve', promiseAsyncId);
       emit('promiseResolve', awaitedAsyncId);
-      runInScope(promiseAsyncId, () => {}, undefined, []);
+      runInScope(promiseAsyncId, () => {}, undefined, [], false, result);
       promiseContextSwitchPending = false;
     } else if (this === Promise && isUserCodeActive()) {
       if (existingAsyncId === undefined) trackPromise(result);
@@ -1070,8 +1079,8 @@ function createAsyncLocalStorage(scope) {
 
     _propagate(resource, triggerResource, type) {
       if (!this._enabled) return;
-      let resourceAsyncId;
-      let triggerAsyncId;
+      let resourceAsyncId = promiseIds.get(resource);
+      let triggerAsyncId = promiseIds.get(triggerResource);
       for (const [asyncId, record] of resources) {
         const value = resourceValue(record);
         if (value === resource) resourceAsyncId = asyncId;

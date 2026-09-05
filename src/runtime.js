@@ -2808,7 +2808,10 @@ function cjsStaticExportNames(source) {
 }
 
 function moduleSynchronousEsmSource(source, filename = '/node/index.mjs') {
-  let transformed = String(source);
+  // The hashbang must be removed before the module prelude moves it off the first line.
+  let transformed = String(source).replace(/^#![^\r\n]*(?:\r\n|\n|$)/, (hashbang) => (
+    hashbang.endsWith('\n') ? '\n' : ''
+  ));
   const prelude = "Object.defineProperty(module.exports, Symbol.toStringTag, { value: 'Module' });\n";
   let reexportIndex = 0;
   let namespaceIndex = 0;

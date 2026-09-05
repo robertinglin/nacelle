@@ -455,15 +455,13 @@ export function createModuleLoader({
     if (url.startsWith('http:') || url.startsWith('https:')) return fetchRemoteModule(url, context);
     const resolved = url.startsWith('file:') ? fileURLToPath(url) : url;
     if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) unsupportedNativeAddon(resolved);
-    const value = resolved.endsWith('.wasm') || resolved.endsWith('.node')
-      ? read(resolved, resolved).value
-      : readTextFile(resolved);
+    const value = read(resolved, resolved).value;
     // Node's default ESM loader exposes file source as a Buffer: it is still
     // the raw byte source, but its standard toString() decodes UTF-8.  Keep
     // that representation for load hooks.  A plain Uint8Array has different
     // public behavior (comma-joined numeric output), which breaks otherwise
     // Node-compatible hooks that consume result.source.toString().
-    const source = typeof value === 'string' || value === undefined || value === null
+    const source = value === undefined || value === null
       ? value
       : builtins?.buffer?.Buffer?.from
         ? builtins.buffer.Buffer.from(value)

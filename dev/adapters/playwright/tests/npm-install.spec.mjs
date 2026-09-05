@@ -110,6 +110,49 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     expect(requests).toEqual(['https://registry.test/@scope/package']);
   });
 
+  test('fetches the complete version manifest after compact registry metadata', async () => {
+    const requests = [];
+    const npm = new BrowserNpm({
+      vfs: createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] }),
+      registry: 'https://registry.test',
+      proxyUrl: null,
+      fetchFn: async (url) => {
+        requests.push(url);
+        if (url === 'https://registry.test/contract-package') {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              name: 'contract-package',
+              'dist-tags': { latest: '1.2.3' },
+              versions: {
+                '1.2.3': { name: 'contract-package', version: '1.2.3', dist: { tarball: 'https://registry.test/contract-package/-/contract-package-1.2.3.tgz' } },
+              },
+            }),
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            name: 'contract-package',
+            version: '1.2.3',
+            repository: { type: 'git', url: 'https://example.test/contract-package.git' },
+          }),
+        };
+      },
+    });
+
+    const index = await npm.fetchPackageMetadata('contract-package');
+    const manifest = await npm.fetchPackageVersionMetadata('contract-package', index['dist-tags'].latest);
+
+    expect(manifest.repository).toEqual({ type: 'git', url: 'https://example.test/contract-package.git' });
+    expect(requests).toEqual([
+      'https://registry.test/contract-package',
+      'https://registry.test/contract-package/1.2.3',
+    ]);
+  });
+
   test('BrowserNpm resolves npm aliases using the target metadata while preserving the alias location', async () => {
     const encoder = new TextEncoder();
     const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
@@ -429,6 +472,18 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     expect(afterClearMeta).toBeNull();
     const afterClearTarball = await cache.getTarball('tarball:test-pkg@2.0.0');
     expect(afterClearTarball).toBeNull();
+  });
+
+  test('BrowserNpmCache can clear memory without deleting persistent cache records', async () => {
+    const { BrowserNpmCache } = await import('../runtime/npm.js');
+    const cache = new BrowserNpmCache({ dbName: 'test_bnh_npm_memory_cache' });
+
+    cache.memoryMeta.set('memory-pkg', { name: 'memory-pkg' });
+    cache.memoryTarballs.set('tarball:memory-pkg@1.0.0', new Uint8Array([1]));
+    cache.clearMemory();
+
+    expect(cache.memoryMeta.size).toBe(0);
+    expect(cache.memoryTarballs.size).toBe(0);
   });
 
   test('BrowserNpm installs from custom/live registry and leverages BrowserNpmCache', async () => {

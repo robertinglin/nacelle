@@ -579,7 +579,20 @@ function rewriteScriptDynamicImports(source, bindingName) {
         && text[index - 1] !== '.'
         && !isIdentifierPart(text[index + 6])) {
         let callIndex = index + 6;
-        while (/\s/u.test(text[callIndex] || '')) callIndex += 1;
+        for (;;) {
+          while (/\s/u.test(text[callIndex] || '')) callIndex += 1;
+          if (text.startsWith('/*', callIndex)) {
+            const end = text.indexOf('*/', callIndex + 2);
+            callIndex = end < 0 ? text.length : end + 2;
+            continue;
+          }
+          if (text.startsWith('//', callIndex)) {
+            callIndex += 2;
+            while (callIndex < text.length && text[callIndex] !== '\n' && text[callIndex] !== '\r') callIndex += 1;
+            continue;
+          }
+          break;
+        }
         if (text[callIndex] === '(') {
           result += bindingName;
           index += 6;
@@ -595,9 +608,37 @@ function rewriteScriptDynamicImports(source, bindingName) {
   return scanCode();
 }
 
+let nextFunctionDynamicImportId = 1;
+
+function createVmFunctionConstructor(NativeFunction, processObject, filename) {
+  const GuestFunction = function guestFunctionConstructor(...args) {
+    const body = args.length ? String(args.at(-1)) : '';
+    if (!/\bimport\s*\(/u.test(body)) return Reflect.construct(NativeFunction, args);
+    const parameters = args.slice(0, -1);
+    const bindingName = `__bnhVmFunctionImport${nextFunctionDynamicImportId++}`;
+    const source = rewriteScriptDynamicImports(body, bindingName);
+    const compiled = Reflect.construct(NativeFunction, [bindingName, ...parameters, source]);
+    const importer = typeof filename === 'string' && filename.startsWith('/')
+      ? filename
+      : `/node/${filename}`;
+    const dynamicImport = (specifier) => processObject.__bnhModuleImport(
+      specifier,
+      importer,
+      undefined,
+      processObject,
+    );
+    return function guestFunction(...values) {
+      return compiled.call(this, dynamicImport, ...values);
+    };
+  };
+  Object.setPrototypeOf(GuestFunction, NativeFunction);
+  GuestFunction.prototype = NativeFunction.prototype;
+  return GuestFunction;
+}
+
 function transformModuleSource(source) {
-  let transformed = String(source).replace(/\bimport\.meta\b/g, '__bnhImportMeta');
-  transformed = transformed.replace(/\bimport\s*\(/g, '__bnhDynamicImport(');
+  let transformed = rewriteScriptDynamicImports(String(source), '__bnhDynamicImport')
+    .replace(/\bimport\.meta\b/g, '__bnhImportMeta');
   transformed = transformed.replace(
     /\bimport\s+([\s\S]*?)\s+from\s+(['"])([^'"]+)\2\s*(?:with\s*\{[^}]*\})?\s*;?/g,
     (_, clause, quote, specifier) => {
@@ -822,7 +863,7 @@ export function createVmModule(scope = globalThis) {
         throw vmInvalidArgType(`options.contextExtensions[${index}]`, 'object', extension);
       }
     }
-    const source = String(code).replace(/\bimport\s*\(/g, '__bnhDynamicImport(');
+    const source = rewriteScriptDynamicImports(String(code), '__bnhDynamicImport');
     const compiled = FunctionConstructor('__bnhDynamicImport', ...effectiveParams, source);
     let functionObject;
     functionObject = (...args) => {
@@ -898,12 +939,32 @@ export function createVmModule(scope = globalThis) {
         : this.code;
       if (runOptions.timeout > 0 && isObviouslyUnbounded(source)) throw timedOutScriptError(runOptions.timeout);
       const context = contextifiedObject;
+      const candidateProcess = context.process || scope.process;
+      // VM sandboxes commonly provide a process-shaped test object. Dynamic
+      // import still belongs to the runtime process that owns the VM context,
+      // so use that owner when the sandbox object is not loader-capable.
+      const activeProcess = typeof candidateProcess?.__bnhModuleImport === 'function'
+        ? candidateProcess
+        : scope.__bnhActiveProcess || scope.process;
+      const previousFunction = context.Function;
+      if (typeof activeProcess?.__bnhModuleImport === 'function') {
+        Object.defineProperty(context, 'Function', {
+          configurable: true,
+          enumerable: false,
+          value: createVmFunctionConstructor(FunctionConstructor, activeProcess, this.options.filename),
+          writable: true,
+        });
+      }
       if (hasDynamicImport) {
         const dynamicImport = (specifier) => {
           if (typeof this.options.importModuleDynamically === 'function') {
-            return Promise.resolve(this.options.importModuleDynamically(specifier, this));
+            return Promise.resolve(this.options.importModuleDynamically(specifier, this))
+              .then((module) => module?.namespace || module);
           }
-          const activeProcess = context.process || scope.process;
+          const candidateProcess = context.process || scope.process;
+          const activeProcess = typeof candidateProcess?.__bnhModuleImport === 'function'
+            ? candidateProcess
+            : scope.__bnhActiveProcess || scope.process;
           if (typeof activeProcess?.__bnhModuleImport === 'function') {
             const filename = this.options.filename;
             const importer = typeof filename === 'string' && filename.startsWith('/')
@@ -939,6 +1000,8 @@ export function createVmModule(scope = globalThis) {
         if (previousFilename === undefined) delete scope.__bnhVmFilename;
         else scope.__bnhVmFilename = previousFilename;
         if (realm) copyRealmToContext(context, realm.global, realm.nativeKeys, realm.managedKeys);
+        if (previousFunction === undefined) delete context.Function;
+        else context.Function = previousFunction;
       }
     }
 
@@ -949,7 +1012,52 @@ export function createVmModule(scope = globalThis) {
 
     runInThisContext(options = {}) {
       getRunInContextArgs(options);
-      return (scope.eval || eval)(this.code);
+      const dynamicImportBinding = `__bnhVmDynamicImport${nextScriptDynamicImportId++}`;
+      const hasDynamicImport = /\bimport\s*\(/u.test(this.code);
+      const source = hasDynamicImport
+        ? rewriteScriptDynamicImports(this.code, dynamicImportBinding)
+        : this.code;
+      if (hasDynamicImport) {
+        const dynamicImport = (specifier) => {
+          if (typeof this.options.importModuleDynamically === 'function') {
+            return Promise.resolve(this.options.importModuleDynamically(specifier, this))
+              .then((module) => module?.namespace || module);
+          }
+          const activeProcess = scope.process;
+          if (typeof activeProcess?.__bnhModuleImport === 'function') {
+            const filename = this.options.filename;
+            const importer = typeof filename === 'string' && filename.startsWith('/')
+              ? filename
+              : `/node/${filename}`;
+            return Promise.resolve(activeProcess.__bnhModuleImport(
+              specifier,
+              importer,
+              undefined,
+              activeProcess,
+            ));
+          }
+          return Promise.reject(vmError(
+            'ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING',
+            'A dynamic import callback was not specified',
+          ));
+        };
+        Object.defineProperty(scope, dynamicImportBinding, {
+          configurable: true,
+          enumerable: false,
+          value: dynamicImport,
+          writable: false,
+        });
+      }
+      const activeProcess = scope.process;
+      const previousFunction = scope.Function;
+      if (typeof activeProcess?.__bnhModuleImport === 'function') {
+        scope.Function = createVmFunctionConstructor(FunctionConstructor, activeProcess, this.options.filename);
+      }
+      try {
+        return (scope.eval || eval)(source);
+      } finally {
+        scope.Function = previousFunction;
+      }
     }
   }
 

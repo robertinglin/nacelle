@@ -1010,7 +1010,10 @@ export function createVfs(options = {}) {
           try { removeTree(path, true, true); } catch { /* already absent */ }
         }
       } else if (change.type === 'directory') {
-        try { makeDirectory(path, true, 'sync'); } catch { /* already present */ }
+        try {
+          makeDirectory(path, true, 'sync');
+          if (change.mode !== undefined) metadataFor(path).mode = modeValue(change.mode);
+        } catch { /* already present */ }
       } else if (change.type === 'symlink') {
         try {
           if (nodeExists(path)) removeTree(path, true, true);
@@ -2061,7 +2064,6 @@ export function createVfs(options = {}) {
     if (sourceMount.path !== destinationMount.path) throw denied(destination, 'rename');
     if (source === destination) return;
     if (!nodeExists(source)) throw missing(source, 'rename');
-    const sourceWasDirectory = directories.has(source);
     ensureParent(destination, 'rename');
     if (files.has(destination) && directories.has(source)) throw notDirectory(destination, 'rename');
     if (directories.has(destination) && (files.has(source) || symlinks.has(source))) throw isDirectory(destination, 'rename');
@@ -2081,11 +2083,31 @@ export function createVfs(options = {}) {
       const childDirectories = [...directories].filter((item) => item === source || isWithin(item, source));
       const childFiles = [...files.keys()].filter((item) => isWithin(item, source));
       const childSymlinks = [...symlinks.keys()].filter((item) => isWithin(item, source));
+      const removed = [...childDirectories, ...childFiles, ...childSymlinks];
       for (const item of childDirectories) directories.add(`${destination}${item.slice(source.length)}`);
       for (const item of childFiles) {
         moveFileNode(item, `${destination}${item.slice(source.length)}`);
       }
       for (const item of childSymlinks) symlinks.set(`${destination}${item.slice(source.length)}`, symlinks.get(item));
+      const changes = [
+        ...childDirectories.map((item) => {
+          const path = `${destination}${item.slice(source.length)}`;
+          return { path, type: 'directory', mode: metadata.get(item)?.mode };
+        }),
+        ...childFiles.map((item) => {
+          const path = `${destination}${item.slice(source.length)}`;
+          return {
+            path,
+            type: 'file',
+            bytes: new Uint8Array(files.get(path)),
+            mode: metadata.get(item)?.mode,
+          };
+        }),
+        ...childSymlinks.map((item) => {
+          const path = `${destination}${item.slice(source.length)}`;
+          return { path, type: 'symlink', target: symlinks.get(path), mode: metadata.get(item)?.mode };
+        }),
+      ];
       for (const item of [...childDirectories, ...childFiles, ...childSymlinks]) {
         if (metadata.has(item)) metadata.set(`${destination}${item.slice(source.length)}`, metadata.get(item));
       }
@@ -2093,12 +2115,19 @@ export function createVfs(options = {}) {
       for (const item of childDirectories) directories.delete(item);
       for (const item of childSymlinks) symlinks.delete(item);
       for (const item of [...childDirectories, ...childFiles, ...childSymlinks]) metadata.delete(item);
+      // A directory rename is a finite set of removals and additions. A
+      // full VFS sync here clones unrelated package bytes into every active
+      // child and can retain multiple complete trees while a child is busy.
+      // Publish the exact delta instead; this keeps live post-start updates
+      // on the same generic bridge contract.
+      emitMutation({ action: 'change-set', removed, changes });
+      notify(source, 'rename');
+      notify(destination, 'rename');
+      return;
     }
     notify(source, 'rename');
     notify(destination, 'rename');
-    emitMutation(sourceWasDirectory
-      ? { action: 'sync' }
-      : { action: 'rename', paths: [source, destination] });
+    emitMutation({ action: 'rename', paths: [source, destination] });
   }
 
   function normalizeOpenFlags(value) {

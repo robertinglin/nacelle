@@ -1,9 +1,9 @@
 import { BrowserNpm, BrowserNpmCache } from './runtime/npm.js';
 import { createRuntime } from './runtime.js';
-import { createVfs } from './runtime/vfs.js';
 import { createProgressReporter } from './progress-protocol.mjs';
 import { createCitgmProcessArgv } from './citgm-argv.mjs';
 import { createSerializedCaptureQueue } from './citgm-capture.mjs';
+import { npmCacheSnapshot } from './citgm-cache.mjs';
 
 const DEFAULT_CITGM_VERSION = '10.0.2';
 const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
@@ -30,6 +30,59 @@ function headerEnd(bytes) {
       && bytes[index + 2] === 13 && bytes[index + 3] === 10) return index + 4;
   }
   return -1;
+}
+
+function byteView(value) {
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  if (Array.isArray(value)) return Uint8Array.from(value);
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value).filter((key) => /^\d+$/.test(key)).sort((left, right) => Number(left) - Number(right));
+    if (keys.length) return Uint8Array.from(keys.map((key) => Number(value[key])));
+  }
+  return new Uint8Array();
+}
+
+function headerObject(value) {
+  if (!value) return {};
+  if (typeof value.entries === 'function') return Object.fromEntries(value.entries());
+  if (Array.isArray(value)) return Object.fromEntries(value);
+  return { ...value };
+}
+
+async function responseBytes(response) {
+  if (response?.bodyBytes !== undefined) return byteView(response.bodyBytes);
+  if (typeof response?.arrayBuffer === 'function') return new Uint8Array(await response.arrayBuffer());
+  return new Uint8Array();
+}
+
+async function fetchProxyTarget(url, init = {}) {
+  // The CITGM page cannot read arbitrary registry or source-host responses
+  // through browser CORS. The host bridge is an explicit network capability,
+  // so use it when the runner supplies one; this remains available after the
+  // runtime and any child workers have already started.
+  if (typeof globalThis.__bnhFetchExternal === 'function') {
+    const body = init.body === undefined || init.body === null
+      ? undefined
+      : [...byteView(init.body)];
+    const result = await globalThis.__bnhFetchExternal({
+      url: String(url),
+      method: init.method || 'GET',
+      headers: headerObject(init.headers),
+      body,
+    });
+    if (!result || !Number.isInteger(result.status)) throw new Error('external fetch returned an invalid response');
+    return {
+      url: result.url || String(url),
+      status: result.status,
+      statusText: result.statusText || '',
+      headers: headerObject(result.headers),
+      bodyBytes: byteView(result.bodyBytes),
+    };
+  }
+  if (!browserFetch) throw new Error('browser fetch is unavailable');
+  return browserFetch(url, init);
 }
 
 function createFetchTransport(host, port, loadCachedProject) {
@@ -109,10 +162,6 @@ function createFetchTransport(host, port, loadCachedProject) {
       dispatched = false;
       return;
     }
-    if (!browserFetch) {
-      transport.destroy(new Error('browser fetch is unavailable'));
-      return;
-    }
     try {
       const end = requestEnd;
       const headerText = requestHeaderText;
@@ -142,19 +191,20 @@ function createFetchTransport(host, port, loadCachedProject) {
             headers: new Headers({ 'content-length': String(cachedBody.byteLength) }),
             async arrayBuffer() { return cachedBody.slice().buffer; },
           }
-        : await browserFetch(url, {
+        : await fetchProxyTarget(url, {
             method,
             headers,
             body: body?.byteLength ? body : undefined,
             signal: controller.signal,
             redirect: 'follow',
           });
-      const responseBody = new Uint8Array(await response.arrayBuffer());
+      if (closed) return;
+      const responseBody = await responseBytes(response);
       const responseHeaders = [`HTTP/1.1 ${response.status} ${response.statusText || ''}`.trim()];
-      for (const [name, value] of response.headers) {
+      for (const [name, value] of Object.entries(headerObject(response.headers))) {
         if (name.toLowerCase() !== 'connection') responseHeaders.push(`${name}: ${value}`);
       }
-      if (!response.headers.has('content-length')) responseHeaders.push(`content-length: ${responseBody.byteLength}`);
+      if (!Object.hasOwn(headerObject(response.headers), 'content-length')) responseHeaders.push(`content-length: ${responseBody.byteLength}`);
       responseHeaders.push('connection: close', '', '');
       transport.emit('data', concatBytes([encoder.encode(responseHeaders.join('\r\n')), responseBody]));
       transport.emit('end');
@@ -171,7 +221,76 @@ function createFetchTransport(host, port, loadCachedProject) {
 }
 
 function createBrowserProxyAdapter(loadCachedProject) {
+  const loopbackBindings = new Map();
+  const loopbackByBindingKey = new Map();
+  const loopbackConnections = new Map();
   return {
+    async request(request = {}) {
+      if (request.__bnhNpmCache === true) {
+        if (request.type === 'metadata' && request.name) {
+          const metadata = await npmCache.getMetadata(String(request.name));
+          return metadata ? { metadata } : null;
+        }
+        if (request.type === 'tarball' && request.key) {
+          const bytes = await npmCache.getTarball(String(request.key));
+          return bytes ? { bytes } : null;
+        }
+        if (request.type === 'package-entries' && request.name && request.version) {
+          const entries = npmCache.getUnpackedPackage(String(request.name), String(request.version));
+          return entries ? { entries } : null;
+        }
+        if (request.type === 'set-metadata' && request.name && request.metadata !== undefined) {
+          await npmCache.setMetadata(String(request.name), request.metadata);
+          return { stored: true };
+        }
+        if (request.type === 'set-tarball' && request.key && request.bytes) {
+          const bytes = request.bytes instanceof Uint8Array
+            ? request.bytes
+            : new Uint8Array(request.bytes);
+          await npmCache.setTarball(String(request.key), bytes, {
+            name: String(request.name || ''),
+            version: String(request.version || ''),
+          });
+          return { stored: true };
+        }
+        return null;
+      }
+
+      // A proxy capability serves both cache RPCs and ordinary Node HTTP
+      // requests. Returning null for a normal request makes the HTTP client
+      // interpret the response as a closed connection, which breaks archive
+      // downloads and any other live request after the cache is cold.
+      const target = String(request.url || request.target || '');
+      if (!target || !browserFetch) return null;
+      const cachedBody = String(request.method || 'GET').toUpperCase() === 'GET'
+        ? await loadCachedProject?.(target)
+        : null;
+      if (cachedBody) {
+        return {
+          status: 200,
+          headers: { 'content-length': String(cachedBody.byteLength) },
+          bodyBytes: cachedBody,
+        };
+      }
+      const response = await fetchProxyTarget(target, {
+        method: request.method || 'GET',
+        headers: request.headers,
+        body: request.body,
+        signal: request.signal,
+        redirect: 'follow',
+      });
+      const headers = headerObject(response.headers);
+      // Proxy calls can cross an isolated child boundary. Do not return a
+      // live Response/stream object that cannot survive structured clone;
+      // materialize the normal HTTP response as its serializable wire shape.
+      return {
+        url: response.url || target,
+        status: response.status,
+        statusText: response.statusText || '',
+        headers,
+        bodyBytes: await responseBytes(response),
+      };
+    },
     resolve() {
       // The transport uses the original hostname from client._connectOptions;
       // this address only gives the virtual socket a routable placeholder.
@@ -188,6 +307,100 @@ function createBrowserProxyAdapter(loadCachedProject) {
         remoteAddress: String(clientHost),
         remotePort: Number(request.port),
       };
+    },
+    bindTcp(request = {}) {
+      const bindingKey = String(request.bindingKey || '');
+      const registration = {
+        id: null,
+        listener: request.onConnection,
+        error: request.onError,
+        onConnection(listener) {
+          registration.listener = listener;
+          return registration;
+        },
+        close() {
+          for (const [connectionId, connection] of loopbackConnections) {
+            if (connection.registration === registration) {
+              connection.socket?.destroy?.();
+              loopbackConnections.delete(connectionId);
+            }
+          }
+          if (registration.id === null) return;
+          loopbackBindings.delete(registration.id);
+          if (loopbackByBindingKey.get(bindingKey) === registration) loopbackByBindingKey.delete(bindingKey);
+          globalThis.__bnhCloseLoopback?.({ id: registration.id });
+          registration.id = null;
+        },
+      };
+      loopbackByBindingKey.set(bindingKey, registration);
+      const open = globalThis.__bnhOpenLoopback;
+      if (typeof open !== 'function') {
+        const error = new Error('external loopback capability is unavailable');
+        error.code = 'ERR_NETWORK_CAPABILITY_UNAVAILABLE';
+        registration.error?.(error);
+        return registration;
+      }
+      Promise.resolve(open({
+        bindingKey,
+        address: request.address,
+        port: request.port,
+      })).then((result) => {
+        if (!result || result.id === undefined) throw new Error('external loopback listener did not return an id');
+        registration.id = String(result.id);
+        loopbackBindings.set(registration.id, registration);
+      }).catch((error) => registration.error?.(error));
+      return registration;
+    },
+    unbindTcp(request = {}) {
+      loopbackByBindingKey.get(String(request.bindingKey || ''))?.close();
+    },
+    deliverLoopback(id, event, value) {
+      if (event === 'connect') {
+        const registration = loopbackBindings.get(String(value?.listenerId || id));
+        if (!registration) return false;
+        const connectionId = String(value?.socketId || id);
+        const peer = {
+          destroyed: false,
+          _runTcpResource(callback) { return callback(); },
+          push(bytes) {
+            if (this.destroyed) return false;
+            const valueBytes = bytes === null
+              ? null
+              : bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+            globalThis.__bnhWriteLoopback?.({
+              id: connectionId,
+              operation: valueBytes === null ? 'end' : 'data',
+              bytes: valueBytes === null ? undefined : [...valueBytes],
+            });
+            return true;
+          },
+          destroy() {
+            if (this.destroyed) return;
+            this.destroyed = true;
+            globalThis.__bnhWriteLoopback?.({ id: connectionId, operation: 'close' });
+          },
+        };
+        const socket = registration.listener?.({
+          client: peer,
+          localAddress: value?.remoteAddress || '127.0.0.1',
+          localPort: Number(value?.remotePort || 0),
+          remoteAddress: value?.localAddress || '127.0.0.1',
+          remotePort: Number(value?.localPort || 0),
+        }) || null;
+        if (!socket) return false;
+        loopbackConnections.set(connectionId, { registration, peer, socket });
+        return true;
+      }
+      const connection = loopbackConnections.get(String(id));
+      if (!connection) return false;
+      if (event === 'data') return Boolean(connection.socket?.push?.(new Uint8Array(value || [])));
+      if (event === 'end') return Boolean(connection.socket?.push?.(null));
+      if (event === 'close') {
+        connection.socket?.destroy?.();
+        loopbackConnections.delete(String(id));
+        return true;
+      }
+      return false;
     },
     tls() {
       return { authorized: true, protocol: 'TLSv1.3' };
@@ -264,7 +477,27 @@ class ArtifactNpmCache extends BrowserNpmCache {
 
 const runtime = createRuntime({ globalObject: globalThis, nodeVersion: 'v22' });
 const npmCache = new ArtifactNpmCache({ globalObject: globalThis });
-const browserProxyAdapter = createBrowserProxyAdapter((url) => npmCache.getProject(url));
+const browserProxyAdapter = createBrowserProxyAdapter(async (url) => {
+  const project = await npmCache.getProject(url);
+  if (project) return project;
+  let parsed;
+  try { parsed = new URL(url); } catch { return null; }
+  const registryOrigin = npmCache.artifactManifest?.registry
+    ? String(npmCache.artifactManifest.registry).replace(/\/+$/, '')
+    : DEFAULT_REGISTRY;
+  if (parsed.origin !== registryOrigin) return null;
+  if (/\/[^/]+\/[-][^/]+\.tgz$/.test(parsed.pathname)) {
+    return npmCache.getTarball(`tarball:${url}`);
+  }
+  const packageName = decodeURIComponent(parsed.pathname.replace(/^\/+|\/+$/g, ''));
+  if (!packageName || packageName.includes('/-/')) return null;
+  const metadata = await npmCache.getMetadata(packageName);
+  return metadata ? new TextEncoder().encode(JSON.stringify(metadata)) : null;
+});
+Object.defineProperty(globalThis, '__BNH_EXTERNAL_TCP_DELIVER__', {
+  configurable: true,
+  value: (id, event, value) => browserProxyAdapter.deliverLoopback(id, event, value),
+});
 globalThis.__BNH_NPM_CACHE__ = npmCache;
 let running = false;
 
@@ -319,24 +552,6 @@ function structuredCitgmStage(value) {
   return null;
 }
 
-function npmCacheSnapshot(cache) {
-  const snapshot = {
-    metadata: Object.fromEntries(cache.memoryMeta),
-    tarballs: Object.fromEntries([...cache.memoryTarballs.entries()].map(([key, bytes]) => [
-      key,
-      bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes),
-    ])),
-  };
-  if (cache.artifactManifest && cache.artifactBaseUrl) {
-    snapshot.artifact = {
-      baseUrl: cache.artifactBaseUrl.href,
-      metadata: cache.artifactManifest.metadata || {},
-      tarballs: cache.artifactManifest.tarballs || {},
-    };
-  }
-  return snapshot;
-}
-
 async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 1000, citgmVersion = DEFAULT_CITGM_VERSION, browser = 'unknown', progress: progressConfig = null, capture: captureConfig = null }) {
   if (running) throw new Error('a CITGM run is already active in this browser page');
   if (!module || typeof module !== 'string') throw new TypeError('module is required');
@@ -380,7 +595,6 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
   const capturePromises = new Set();
   const captureQueue = createSerializedCaptureQueue(globalThis);
   let installStats = null;
-  let preloadStats = null;
   let child = null;
   let timer = null;
   let livenessTimer = null;
@@ -396,6 +610,49 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     const boundedText = (value, limit = 256) => value == null ? null : String(value).slice(0, limit);
     const nodeTest = runtimeState?.nodeTest;
     const activity = runtimeState?.childActivity;
+    const compactNestedState = (record) => {
+      const handle = record?.processHandle;
+      const state = handle?.runtimeState || handle?.terminalRecord?.runtimeState || handle?.__bnhRuntimeState;
+      const nestedNodeTest = state?.nodeTest || handle?.__bnhNodeTestState;
+      const lifecycle = state?.lifecycle || handle?.__bnhRuntimeLifecycle;
+      if (!handle && !state && !nestedNodeTest && !lifecycle) return null;
+      return {
+        state: boundedText(handle?.state, 32),
+        runtimePhase: boundedText(handle?.__bnhRuntimePhase || state?.phase, 64),
+        nodeTest: nestedNodeTest ? {
+          registered: Number(nestedNodeTest.registered) || 0,
+          completed: Number(nestedNodeTest.completed) || 0,
+          activeRun: Boolean(nestedNodeTest.activeRun),
+          activeTest: nestedNodeTest.activeTest ? {
+            name: boundedText(nestedNodeTest.activeTest.name, 160),
+            fullName: boundedText(nestedNodeTest.activeTest.fullName, 240),
+            file: boundedText(nestedNodeTest.activeTest.file, 256),
+            state: boundedText(nestedNodeTest.activeTest.state, 32),
+          } : null,
+          streamTerminal: boundedText(nestedNodeTest.streamTerminal, 32),
+          streamError: nestedNodeTest.streamError ? {
+            name: boundedText(nestedNodeTest.streamError.name, 64),
+            message: boundedText(nestedNodeTest.streamError.message || nestedNodeTest.streamError, 512),
+          } : null,
+        } : null,
+        lifecycle: lifecycle ? {
+          pending: Number(lifecycle.pending) || 0,
+          tasks: Array.isArray(lifecycle.tasks) ? {
+            count: lifecycle.tasks.length,
+            first: lifecycle.tasks[0] ? {
+              id: Number(lifecycle.tasks[0].id) || 0,
+              label: boundedText(lifecycle.tasks[0].label, 128),
+              stack: boundedText(lifecycle.tasks[0].stack, 160),
+            } : null,
+            last: lifecycle.tasks.at(-1) ? {
+              id: Number(lifecycle.tasks.at(-1).id) || 0,
+              label: boundedText(lifecycle.tasks.at(-1).label, 128),
+              stack: boundedText(lifecycle.tasks.at(-1).stack, 160),
+            } : null,
+          } : null,
+        } : null,
+      };
+    };
     return {
       state: boundedText(child?.state || worker?.state, 32),
       lifecycle: Array.isArray(child?.stateHistory || worker?.stateHistory)
@@ -432,25 +689,7 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
           stderrBytes: Number(record.stderrBytes) || 0,
           stdoutExcerpt: boundedText(record.stdoutExcerpt, 512) || '',
           stderrExcerpt: boundedText(record.stderrExcerpt, 512) || '',
-          nestedState: record.nestedState ? {
-            state: boundedText(record.nestedState.state, 32),
-            runtimePhase: boundedText(record.nestedState.runtimePhase, 64),
-            nodeTest: record.nestedState.nodeTest ? {
-              registered: Number(record.nestedState.nodeTest.registered) || 0,
-              completed: Number(record.nestedState.nodeTest.completed) || 0,
-              activeRun: Boolean(record.nestedState.nodeTest.activeRun),
-              activeTest: record.nestedState.nodeTest.activeTest ? {
-                name: boundedText(record.nestedState.nodeTest.activeTest.name, 160),
-                fullName: boundedText(record.nestedState.nodeTest.activeTest.fullName, 240),
-                file: boundedText(record.nestedState.nodeTest.activeTest.file, 256),
-              } : null,
-              streamTerminal: boundedText(record.nestedState.nodeTest.streamTerminal, 32),
-              streamError: record.nestedState.nodeTest.streamError ? {
-                name: boundedText(record.nestedState.nodeTest.streamError.name, 64),
-                message: boundedText(record.nestedState.nodeTest.streamError.message, 512),
-              } : null,
-            } : null,
-          } : null,
+          nestedState: record.nestedState || compactNestedState(record),
         })) : [],
       } : null,
       terminal: child?.terminal || worker?.terminal ? {
@@ -466,8 +705,8 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       candidatePreloadEvents: progress.preload.events,
       citgmInstallPackages: installStats?.packages?.length || 0,
       citgmInstallFiles: installStats?.totalFiles || 0,
-      candidatePreloadPackages: preloadStats?.packages?.length || 0,
-      candidatePreloadFiles: preloadStats?.totalFiles || 0,
+      candidatePreloadPackages: 0,
+      candidatePreloadFiles: 0,
     },
     networkEvents: networkEventCount || networkEvents?.length || 0,
     output: {
@@ -581,29 +820,14 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     await progressReporter.flush();
     report('setup', 'citgm-install-complete', { events: progress.bootstrap.events });
 
-    const preloadVfs = createVfs({
-      mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }],
+    // The candidate package and its dependencies are installed by the real
+    // CITGM child after its worker is active. Persistent metadata/tarball
+    // artifacts remain an acceleration layer, but execution must also work
+    // on a cold cache through the live proxy/RPC fetch path.
+    report('setup', 'candidate-dependency-preload-skipped', {
+      reason: 'candidate-install-runs-on-demand-in-active-child',
     });
-    const preloadNpm = new BrowserNpm({
-      vfs: preloadVfs,
-      registry,
-      cache: npmCache,
-      globalObject: globalThis,
-      proxyUrl: null,
-      platform: 'browser',
-      arch: 'browser',
-      libc: 'browser',
-    });
-    currentStage = 'candidate-dependency-preload';
-    report('setup', 'candidate-dependency-preload-started');
-    preloadStats = await preloadNpm.install(module, {
-      cwd: '/node',
-      nodeModulesDir: '/node/node_modules',
-      includeDevDependencies: true,
-      onProgress: (event) => recordProgress(progress.preload, event),
-    });
-    await progressReporter.flush();
-    report('setup', 'candidate-dependency-preload-complete', { events: progress.preload.events });
+    npmCache.clearMemory();
     await runtime.mount({});
 
     const processArgv = createCitgmProcessArgv(CITGM_ENTRY, module, args);
@@ -682,7 +906,11 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       runResult: child.structuredResult,
       precache: { used: precacheUsed, packages: npmCache.artifactManifest?.packageCount || 0 },
       install: { packages: installStats?.packages?.length || 0, files: installStats?.totalFiles || 0 },
-      preload: { packages: preloadStats?.packages?.length || 0, files: preloadStats?.totalFiles || 0 },
+      preload: { packages: 0, files: 0, enabled: false },
+      output: {
+        stdout: { ...outputCounters.stdout },
+        stderr: { ...outputCounters.stderr },
+      },
       progress,
       progressTrace,
       networkEvents: networkEvents || [],

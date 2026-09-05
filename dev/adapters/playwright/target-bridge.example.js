@@ -210,7 +210,7 @@ globalThis.__BROWSER_NODE_HARNESS__ = {
     let timedOut = false;
     let timeoutTimer;
 
-    const runtimeContext = { env, variant, metadata, signal: controller.signal };
+    const runtimeContext = { env, variant, metadata, signal: controller.signal, isolation: request.isolation };
     const runId = String(request.context?.run_id || request.metadata?.runId || `browser-${Date.now()}`);
     runtimeContext.runId = runId;
     runtimeContext.capabilities = request.capabilities;
@@ -220,13 +220,22 @@ globalThis.__BROWSER_NODE_HARNESS__ = {
       if (!child) return;
       try { await child.kill(); } catch { /* already exited */ }
     };
-    const deadline = new Promise((resolve) => {
+    let resolveDeadline;
+    const armDeadline = (delay) => {
+      clearTimeout(timeoutTimer);
       timeoutTimer = setTimeout(async () => {
         timedOut = true;
         controller.abort();
         void stopChild();
-        resolve({ timedOut: true });
-      }, timeoutMs);
+        resolveDeadline({ timedOut: true });
+      }, delay);
+    };
+    const deadline = new Promise((resolve) => {
+      resolveDeadline = resolve;
+      // Runtime reset and VFS materialization are browser bootstrap work, not
+      // child execution. Keep a bounded setup watchdog, then apply the
+      // requested timeout from the actual virtual process launch.
+      armDeadline(Math.max(timeoutMs, 2_000));
     });
     const execute = (async () => {
       runtime = runtimeFor(variant);
@@ -245,6 +254,7 @@ globalThis.__BROWSER_NODE_HARNESS__ = {
         await stopChild();
         return { exitCode: null, stdout: '', stderr: '' };
       }
+      armDeadline(timeoutMs);
       const result = await readChild(child);
       return { ...result, structuredResult: child.structuredResult };
     })();

@@ -86,6 +86,22 @@ test.describe('browser ESM loader', () => {
     expect(result.stderr).toContain('esm child diagnostic');
   });
 
+  test('routes deferred eval imports from an ESM module through the virtual loader', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      const dynamicImport = eval('(url) => import(url)');
+      const loaded = await dynamicImport('./loaded.mjs');
+      assert.strictEqual(loaded.answer, 43);
+      process.stdout.write('esm eval dynamic import completed');
+    `, {
+      entryPath: '/node/esm/eval-dynamic-import.mjs',
+      files: { '/node/esm/loaded.mjs': 'export const answer = 43;' },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('esm eval dynamic import completed');
+  });
+
   test('rewrites minified static imports with no whitespace around from', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       import marker from './minified.mjs';
@@ -187,6 +203,145 @@ test.describe('browser ESM loader', () => {
 
     await expectPass(expect, result);
     expect(result.stdout).toContain('dynamic conditional ESM package completed');
+  });
+
+  test('runs a forked unknown-extension entry through an async module.register loader hook', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { fork } = require('node:child_process');
+
+      const child = fork('/node/node_modules/loader-fixture/worker.ts', [], {
+        cwd: '/node',
+        env: { ...process.env, NODE_OPTIONS: '--import=loader-fixture/register' },
+        silent: true,
+      });
+      child.once('error', (error) => {
+        process.stderr.write(error.stack + '\\n');
+        process.exitCode = 1;
+      });
+      child.once('message', (message) => {
+        assert.deepStrictEqual(message, { answer: 42 });
+      });
+      child.once('close', (code, signal) => {
+        assert.strictEqual(code, 0);
+        assert.strictEqual(signal, null);
+        process.stdout.write('async loader fork contract passed');
+      });
+    `, {
+      files: {
+        '/node/package.json': JSON.stringify({ type: 'module' }),
+        '/node/node_modules/loader-fixture/package.json': JSON.stringify({
+          name: 'loader-fixture',
+          type: 'module',
+          exports: { './register': './register.mjs' },
+        }),
+        '/node/node_modules/loader-fixture/register.mjs': `
+          import { register } from 'node:module';
+          register('./hooks.mjs', import.meta.url);
+        `,
+        '/node/node_modules/loader-fixture/hooks.mjs': `
+          export async function resolve(specifier, context, nextResolve) {
+            return nextResolve(specifier, context);
+          }
+          export async function load(url, context, nextLoad) {
+            if (!url.endsWith('.ts')) return nextLoad(url, context);
+            const result = await nextLoad(url, { ...context, format: 'module' });
+            const source = typeof result.source === 'string'
+              ? result.source
+              : new TextDecoder().decode(result.source);
+            return { format: 'module', shortCircuit: true, source: source.replace(/: number\\b/g, '') };
+          }
+        `,
+        '/node/node_modules/loader-fixture/worker.ts': `
+          import assert from 'node:assert/strict';
+          const answer: number = 42;
+          assert.strictEqual(answer, 42);
+          process.send({ answer });
+          process.disconnect();
+        `,
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('async loader fork contract passed');
+  });
+
+  test('passes raw ESM hook source with Node Buffer string semantics', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { register } from 'node:module';
+
+      register('./source-shape-hooks.mjs', import.meta.url);
+      const loaded = await import('./source-shape-target.ts');
+      assert.strictEqual(loaded.value, 42);
+      process.stdout.write('raw source shape contract passed');
+    `, {
+      entryPath: '/node/source-shape-entry.mjs',
+      files: {
+        '/node/source-shape-hooks.mjs': `
+          export async function load(url, context, nextLoad) {
+            if (!url.endsWith('.ts')) return nextLoad(url, context);
+            const result = await nextLoad(url, { ...context, format: 'module' });
+            if (!(result.source instanceof Uint8Array)) throw new Error('load hook source must remain byte-backed');
+            if (result.source.toString() !== 'export const value: number = 42;') {
+              throw new Error('load hook source must use Node Buffer string semantics');
+            }
+            return {
+              format: 'module',
+              shortCircuit: true,
+              source: result.source.toString().replace(': number', ''),
+            };
+          }
+        `,
+        '/node/source-shape-target.ts': 'export const value: number = 42;',
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('raw source shape contract passed');
+  });
+
+  test('lets an async resolve hook map a missing JavaScript spelling to a source file', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { register } from 'node:module';
+
+      register('./extension-fallback-loader.mjs', import.meta.url);
+      const loaded = await import('./virtual-entry.js');
+      assert.strictEqual(loaded.value, 'resolved through hook');
+      process.stdout.write('extension fallback resolve completed');
+    `, {
+      entryPath: '/node/extension-fallback-entry.mjs',
+      files: {
+        '/node/extension-fallback-loader.mjs': `
+          export async function resolve(specifier, context, nextResolve) {
+            try {
+              return await nextResolve(specifier, context);
+            } catch (error) {
+              if (error?.code !== 'ERR_MODULE_NOT_FOUND' || !error.url?.endsWith('/virtual-entry.js')) throw error;
+              return nextResolve(error.url.slice(0, -3) + '.ts', context);
+            }
+          }
+
+          export async function load(url, context, nextLoad) {
+            if (!url.endsWith('.ts')) return nextLoad(url, context);
+            const result = await nextLoad(url, { ...context, format: 'module' });
+            const source = typeof result.source === 'string'
+              ? result.source
+              : new TextDecoder().decode(result.source);
+            return {
+              format: 'module',
+              shortCircuit: true,
+              source: source.replace(': string', ''),
+            };
+          }
+        `,
+        '/node/virtual-entry.ts': "export const value: string = 'resolved through hook';",
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('extension fallback resolve completed');
   });
 
   test('loads a cyclic ESM graph without deadlocking URL materialization', async ({ harnessPage }) => {

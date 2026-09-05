@@ -101,20 +101,34 @@ function shareFileBytes(bytes, scope) {
   return new Uint8Array(shared);
 }
 
+function shareFileValue(value, scope) {
+  if (value instanceof Uint8Array || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
+    return shareFileBytes(value instanceof Uint8Array ? value : new Uint8Array(value), scope);
+  }
+  if (value && typeof value === 'object') {
+    for (const key of ['data', 'bytes', 'content']) {
+      if (!Object.hasOwn(value, key)) continue;
+      return { ...value, [key]: shareFileValue(value[key], scope) };
+    }
+  }
+  return value;
+}
+
+function shareFileDescriptor(value, scope) {
+  if (value && typeof value === 'object' && !ArrayBuffer.isView(value) && !(value instanceof ArrayBuffer)) {
+    for (const key of ['data', 'bytes', 'content']) {
+      if (!Object.hasOwn(value, key)) continue;
+      return { ...value, [key]: shareFileBytes(value[key], scope) };
+    }
+  }
+  return shareFileBytes(value, scope);
+}
+
 export function prepareWorkerVfs(vfs, scope) {
   if (!vfs?.files || scope.crossOriginIsolated !== true
     || typeof scope.SharedArrayBuffer !== 'function') return vfs;
-  const shareFileValue = (value) => {
-    if (value instanceof Uint8Array || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
-      return shareFileBytes(value instanceof Uint8Array ? value : new Uint8Array(value), scope);
-    }
-    if (value && typeof value === 'object' && value.data !== undefined) {
-      return { ...value, data: shareFileValue(value.data) };
-    }
-    return value;
-  };
   const files = Object.fromEntries(
-    Object.entries(vfs.files).map(([path, value]) => [path, shareFileValue(value)]),
+    Object.entries(vfs.files).map(([path, value]) => [path, shareFileDescriptor(value, scope)]),
   );
   const artifacts = Array.isArray(vfs.artifacts)
     ? vfs.artifacts.map((artifact) => ({ ...artifact, bytes: shareFileBytes(artifact.bytes, scope) }))
@@ -679,6 +693,10 @@ export function createProcess({
     if (exited) return;
     exitCode = Number(code) || 0;
     exitRequested = true;
+    process.__bnhExitRequest = {
+      code: exitCode,
+      stack: String(new Error().stack || '').split('\n').slice(1, 6).join('\n').slice(0, 1024),
+    };
     process.exitCode = exitCode;
     process.emit('exit', exitCode);
     exited = true;
@@ -708,7 +726,11 @@ export function createProcess({
     }
     return ipc.send(...args);
   };
-  process.__bnhSendInternal = (value) => ipc?.sendInternal?.(value) || false;
+  process.__bnhSendInternal = (value) => {
+    if (!ipc) return false;
+    if (typeof ipc.sendInternal === 'function') return ipc.sendInternal(value);
+    return ipc.send(value);
+  };
   process.disconnect = () => {
     if (!ipc) return false;
     process.connected = false;
@@ -801,13 +823,16 @@ export function createBrowserProcess(options = {}) {
     get terminalRecord() { return terminalRecord; },
     get childOutputs() { return childOutputs; },
     stdout: options.stdout || options.output?.stdout, stderr: options.stderr || options.output?.stderr,
-    send(value, transferList, callback) {
+    send(value, transferList, sendOptions, callback) {
       if (!ipc) {
         const error = errorWithCode('ERR_IPC_CLOSED', 'IPC channel is closed');
         if (typeof transferList === 'function') callback = transferList;
+        else if (typeof sendOptions === 'function') callback = sendOptions;
         if (callback) { queueMicrotask(() => callback(error)); return false; }
         throw error;
       }
+      if (typeof transferList === 'function') callback = transferList;
+      else if (typeof sendOptions === 'function') callback = sendOptions;
       return ipc.send(value, transferList, callback);
     },
     disconnect() {
@@ -1018,6 +1043,7 @@ export function createBrowserProcess(options = {}) {
           finalize(frame);
         }
       },
+      onInternalMessage: (value, handle) => events.emit('internalMessage', value, handle),
       onDisconnect: emitDisconnect,
     });
     control.on('message', onControlFrame);

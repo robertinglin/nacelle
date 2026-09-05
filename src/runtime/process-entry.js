@@ -17,6 +17,49 @@ function runtimeFor(nodeVersion) {
   return { profile, runtime };
 }
 
+function createRemoteNpmCache(context) {
+  const cache = new BrowserNpmCache({ globalObject: globalThis });
+  const request = (resource) => context.process.__bnhProxyRequest('request', {
+    __bnhNpmCache: true,
+    ...resource,
+  });
+  cache.getMetadata = async (name) => {
+    const result = await request({ type: 'metadata', name });
+    return result?.metadata || null;
+  };
+  cache.getTarball = async (key) => {
+    const result = await request({ type: 'tarball', key });
+    if (!result?.bytes) return null;
+    return result.bytes instanceof Uint8Array ? result.bytes : new Uint8Array(result.bytes);
+  };
+  cache.getUnpackedPackage = async (name, version) => {
+    const result = await request({ type: 'package-entries', name, version });
+    if (!result?.entries) return null;
+    return result.entries.map((entry) => ({
+      ...entry,
+      data: entry.data instanceof Uint8Array ? entry.data : entry.data ? new Uint8Array(entry.data) : entry.data,
+    }));
+  };
+  // A worker may need to download a package after it has started. Publish
+  // newly fetched cache records to the owning page, but do not retain a
+  // second worker-local copy of the tarball or unpacked package graph.
+  cache.setMetadata = async (name, metadata) => {
+    await request({ type: 'set-metadata', name, metadata });
+  };
+  cache.setTarball = async (key, bytes, meta = {}) => {
+    const value = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    await request({
+      type: 'set-tarball',
+      key,
+      bytes: value,
+      name: meta.name || '',
+      version: meta.version || '',
+    });
+  };
+  cache.setUnpackedPackage = () => {};
+  return cache;
+}
+
 export async function runProcessEntry(context) {
   const setRuntimePhase = (phase) => {
     if (context.process) {
@@ -119,7 +162,10 @@ export async function runProcessEntry(context) {
     delete globalThis.__BNH_NPM_CACHE__;
   }
   const remoteVirtualNetwork = context.networkPort
-    ? createRemoteVirtualNetwork({ port: context.networkPort })
+    ? createRemoteVirtualNetwork({
+        port: context.networkPort,
+        transport: descriptor.proxy?.rpc ? descriptor.proxy.adapter : undefined,
+      })
     : null;
   // Network telemetry uses a control frame, not guest IPC. It cannot affect
   // the guest's own channel lifecycle or ordering when a process exits.
@@ -216,10 +262,12 @@ export async function runProcessEntry(context) {
       child_outputs: context.process.__bnhChildOutputs || [],
     };
     context.process.__bnhRuntimeState = runtimeState;
-    await context.process.send({ type: 'bnh-runtime-state', state: runtimeState });
+    const sendRuntimeState = context.process.__bnhSendInternal || context.process.send;
+    await sendRuntimeState.call(context.process, { type: 'bnh-runtime-state', state: runtimeState });
     const declared = descriptor.capabilities.vfs.mounts.some((mount) => mount.artifacts?.length);
     const artifacts = declared ? runtime.exportArtifacts() : { version: 1, artifacts: [] };
-    await context.process.send({ type: 'bnh-artifacts', artifacts });
+    const sendInternal = context.process.__bnhSendInternal || context.process.send;
+    await sendInternal.call(context.process, { type: 'bnh-artifacts', artifacts });
   }
   return code;
 }

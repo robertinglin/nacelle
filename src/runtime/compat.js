@@ -2817,12 +2817,16 @@ export function finished(stream, options, callbackArgument) {
           complete(streamError);
           return;
         }
-        const premature = Boolean(
-          (readable && readableState?.readable !== false && !readableState?.endEmitted
-            && stream?.readable !== false)
-          || (writable && writableState?.writable !== false && !writableState?.finished
-            && stream?.writable !== false),
-        );
+        // A destroyed stream reports its public readable/writable side as
+        // false, but close is still premature when the corresponding natural
+        // terminal event (end/finish) was not observed.  Checking only the
+        // public side loses the error that callers such as HTTP response
+        // lifecycle handlers use to tear down their source stream.
+        const readablePremature = readable && !readableState?.endEmitted
+          && (stream?.readable !== false || stream?.destroyed || readableState?.destroyed);
+        const writablePremature = writable && !writableState?.finished
+          && (stream?.writable !== false || stream?.destroyed || writableState?.destroyed);
+        const premature = Boolean(readablePremature || writablePremature);
         if (!premature) {
           complete();
           return;

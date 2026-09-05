@@ -1329,6 +1329,17 @@ function normalizeSigningAlgorithm(algorithm, key, options) {
 
 async function importSigningKey(key, algorithm, subtle, globalObject, usage) {
   if (isCryptoKey(key)) return key;
+  if (key instanceof BrowserKeyObject || key?._jwk) {
+    return subtle.importKey(
+      'jwk',
+      key.export({ format: 'jwk' }),
+      algorithm.name === 'ECDSA'
+        ? { name: 'ECDSA', namedCurve: key.asymmetricKeyDetails?.namedCurve === 'prime256v1' ? 'P-256' : key.asymmetricKeyDetails?.namedCurve || 'P-256' }
+        : algorithm,
+      false,
+      [usage],
+    );
+  }
   const virtualKey = virtualKeyPairs.get(key?.key ?? key);
   if (virtualKey) {
     if (usage === 'sign' && virtualKey.encrypted && key?.passphrase !== virtualKey.passphrase) {
@@ -2030,9 +2041,27 @@ async function generateKeyPairForGlobal(type, options = {}, globalObject = globa
       try { Object.defineProperty(key, 'asymmetricKeyDetails', { configurable: true, value: details }); } catch { /* native keys may be sealed */ }
     }
   }
-  const publicKeyEncoding = await exportGeneratedKey(pair.publicKey, options.publicKeyEncoding, subtle);
-  const privateKeyEncoding = await exportGeneratedKey(pair.privateKey, options.privateKeyEncoding, subtle);
-  if (typeof publicKeyEncoding === 'string' && typeof privateKeyEncoding === 'string') {
+  const toNodeKeyObject = async (key, keyType) => {
+    const jwk = await subtle.exportKey('jwk', key);
+    return new BrowserKeyObject({ type: keyType, jwk, BufferClass: globalObject.Buffer || globalThis.Buffer });
+  };
+  const publicKeyEncoding = options.publicKeyEncoding
+    ? await exportGeneratedKey(pair.publicKey, options.publicKeyEncoding, subtle)
+    : await toNodeKeyObject(pair.publicKey, 'public');
+  const privateKeyEncoding = options.privateKeyEncoding
+    ? await exportGeneratedKey(pair.privateKey, options.privateKeyEncoding, subtle)
+    : await toNodeKeyObject(pair.privateKey, 'private');
+  if (publicKeyEncoding instanceof BrowserKeyObject && privateKeyEncoding instanceof BrowserKeyObject) {
+    const record = {
+      id: privateKeyEncoding,
+      publicKey: pair.publicKey,
+      privateKey: pair.privateKey,
+      passphrase: options.privateKeyEncoding?.passphrase,
+      encrypted: Boolean(options.privateKeyEncoding?.cipher),
+    };
+    virtualKeyPairs.set(publicKeyEncoding, record);
+    virtualKeyPairs.set(privateKeyEncoding, record);
+  } else if (typeof publicKeyEncoding === 'string' && typeof privateKeyEncoding === 'string') {
     const record = {
       id: privateKeyEncoding,
       publicKey: pair.publicKey,

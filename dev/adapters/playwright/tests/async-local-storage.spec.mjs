@@ -257,6 +257,73 @@ test('preserves a run store through a promise, microtask, and timer chain', asyn
   await expectPass(expect, result);
 });
 
+test('preserves request storage in an async handler owned by a same-realm child', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    (async () => {
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      const http = require('node:http');
+      const child = spawn(process.execPath, ['/node/async-http-child.js'], { cwd: '/node' });
+      let output = '';
+      let errorOutput = '';
+      child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+      child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+
+      let response;
+      let lastError;
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        try {
+          response = await new Promise((resolve, reject) => {
+            const request = http.get('http://127.0.0.1:3000/', resolve);
+            request.once('error', reject);
+          });
+          break;
+        } catch (error) {
+          lastError = error;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
+      assert.ok(response, lastError?.message || 'child server did not start');
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => { body += chunk; });
+      await new Promise((resolve, reject) => {
+        response.once('end', resolve);
+        response.once('error', reject);
+      });
+      assert.equal(body, 'request-store-ok');
+      child.kill('SIGTERM');
+      const code = await new Promise((resolve) => child.once('close', resolve));
+      assert.equal(code, 0, errorOutput);
+      assert.equal(output, '');
+    })().catch((error) => {
+      console.error(error.stack || error);
+      process.exitCode = 1;
+    });
+  `, {
+    timeoutMs: 30000,
+    files: {
+      '/node/async-http-child.js': `
+        const assert = require('node:assert/strict');
+        const http = require('node:http');
+        const { AsyncLocalStorage } = require('node:async_hooks');
+        const storage = new AsyncLocalStorage();
+        const server = http.createServer(async (_request, response) => {
+          const result = await storage.run('request', async () => {
+            await Promise.resolve();
+            return storage.getStore();
+          });
+          assert.equal(result, 'request');
+          response.end(result === 'request' ? 'request-store-ok' : 'request-store-missing');
+        });
+        server.listen(3000, '127.0.0.1');
+      `,
+    },
+  });
+
+  await expectPass(expect, result);
+});
+
 test('propagates one store through queueMicrotask, nextTick, timers, and immediates', async ({ harnessPage }) => {
   const result = await harnessPage.run(`
     (async () => {

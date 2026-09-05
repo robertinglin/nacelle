@@ -40,6 +40,38 @@ test.describe('browser primitive output adapters', () => {
     expect(stderr.join('')).toBe('stderr string stderr bytes stderr buffer stderr typed');
   });
 
+  test('preserves Node cork and uncork semantics on virtual process stdio', async () => {
+    const runtime = createRuntime();
+    await runtime.reset({
+      runId: 'runtime-output-cork',
+      capabilities: {
+        vfs: { mounts: [{ path: '/node', mode: 'read-write' }] },
+        workers: { entryModules: ['*'], maxChildren: 1 },
+        ipc: { enabled: true },
+        signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
+        output: { maxBytes: 1024, stdoutBytes: 1024, stderrBytes: 1024 },
+        envVars: { allowed: [] },
+      },
+    });
+    await runtime.mount({
+      '/node/cork.js': `
+        process.stdout.cork();
+        process.stdout.write('stdout first');
+        process.stdout.write(' stdout second', () => process.stdout.write(' stdout callback'));
+        process.stdout.uncork();
+        process.stderr.cork();
+        process.stderr.write('stderr first');
+        process.stderr.uncork();
+      `,
+    });
+    const stdout = [];
+    const stderr = [];
+
+    expect(await runtime.executeEntry('/node/cork.js', {}, (value) => stdout.push(value), (value) => stderr.push(value))).toBe(0);
+    expect(stdout.join('')).toBe('stdout first stdout second stdout callback');
+    expect(stderr.join('')).toBe('stderr first');
+  });
+
   test('provides Node path namespace helpers without host path resolution', () => {
     expect(path.toNamespacedPath('/node/entry.mjs')).toBe('/node/entry.mjs');
     expect(path.toNamespacedPath(null)).toBeNull();

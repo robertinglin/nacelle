@@ -181,7 +181,7 @@ function completeAsyncCompletion(promise) {
   callback();
 }
 
-export function runAsyncGenerator(generatorFunction, thisArg, args = [], taskTracker = null) {
+export function runAsyncGenerator(generatorFunction, thisArg, args = []) {
   let asyncResult;
   let pendingCompletion;
   asyncResult = new Promise((resolve, reject) => {
@@ -212,29 +212,14 @@ export function runAsyncGenerator(generatorFunction, thisArg, args = [], taskTra
         return;
       }
       const yielded = result.value;
-      const releaseYield = typeof taskTracker === 'function' ? taskTracker() : null;
-      let yieldReleased = false;
-      const completeYield = () => {
-        if (yieldReleased) return;
-        yieldReleased = true;
-        releaseYield?.();
-      };
       Promise.resolve(yielded).then(
         (nextValue) => {
-          try {
-            advance('next', nextValue);
-            completeAsyncCompletion(yielded);
-          } finally {
-            completeYield();
-          }
+          advance('next', nextValue);
+          completeAsyncCompletion(yielded);
         },
         (error) => {
-          try {
-            advance('throw', error);
-            completeAsyncCompletion(yielded);
-          } finally {
-            completeYield();
-          }
+          advance('throw', error);
+          completeAsyncCompletion(yielded);
         },
       );
     };

@@ -1,3 +1,5 @@
+import { rewriteDynamicImports } from './dynamic-imports.js';
+
 const CONTEXT_MARKER = Symbol('browser-node-vm-context');
 const MODULE_KIND = Symbol('browser-node-vm-module-kind');
 const INSPECT_CUSTOM = Symbol.for('nodejs.util.inspect.custom');
@@ -476,136 +478,7 @@ function splitModuleDeclaration(value) {
 // comment, and template-literal contents while routing actual import
 // expressions through the script's per-context callback.
 function rewriteScriptDynamicImports(source, bindingName) {
-  const text = String(source);
-  let index = 0;
-  const isIdentifierPart = (character) => character !== undefined && /[$\w]/u.test(character);
-
-  const copyQuoted = (quote) => {
-    const start = index;
-    index += 1;
-    while (index < text.length) {
-      const character = text[index];
-      index += 1;
-      if (character === '\\') index += 1;
-      else if (character === quote) break;
-    }
-    return text.slice(start, index);
-  };
-
-  const copyComment = () => {
-    const start = index;
-    index += 2;
-    if (text[start + 1] === '/') {
-      while (index < text.length && text[index] !== '\n' && text[index] !== '\r') index += 1;
-    } else {
-      while (index < text.length && !(text[index] === '*' && text[index + 1] === '/')) index += 1;
-      if (index < text.length) index += 2;
-    }
-    return text.slice(start, index);
-  };
-
-  const scanTemplate = () => {
-    let result = '`';
-    index += 1;
-    while (index < text.length) {
-      const character = text[index];
-      if (character === '\\') {
-        result += text.slice(index, index + 2);
-        index += 2;
-      } else if (character === '`') {
-        result += character;
-        index += 1;
-        break;
-      } else if (character === '$' && text[index + 1] === '{') {
-        result += '${';
-        index += 2;
-        result += scanCode(true);
-      } else {
-        result += character;
-        index += 1;
-      }
-    }
-    return result;
-  };
-
-  const scanCode = (stopAtBrace = false) => {
-    let result = '';
-    let braceDepth = stopAtBrace ? 1 : 0;
-    while (index < text.length) {
-      const character = text[index];
-      const next = text[index + 1];
-      if (text.startsWith('eval', index)
-        && !isIdentifierPart(text[index - 1])
-        && !isIdentifierPart(text[index + 4])) {
-        let open = index + 4;
-        while (/\s/u.test(text[open] || '')) open += 1;
-        if (text[open] === '(') {
-          let literalStart = open + 1;
-          while (/\s/u.test(text[literalStart] || '')) literalStart += 1;
-          if (text[literalStart] === '\'' || text[literalStart] === '"') {
-            result += text.slice(index, literalStart);
-            index = literalStart;
-            const quoted = copyQuoted(text[literalStart]);
-            const body = quoted.slice(1, -1);
-            result += quoted[0] + rewriteScriptDynamicImports(body, bindingName) + quoted.slice(-1);
-            continue;
-          }
-        }
-      }
-      if (character === '\'' || character === '"') {
-        result += copyQuoted(character);
-        continue;
-      }
-      if (character === '/' && (next === '/' || next === '*')) {
-        result += copyComment();
-        continue;
-      }
-      if (character === '`') {
-        result += scanTemplate();
-        continue;
-      }
-      if (stopAtBrace) {
-        if (character === '{') braceDepth += 1;
-        if (character === '}') {
-          braceDepth -= 1;
-          result += character;
-          index += 1;
-          if (braceDepth === 0) return result;
-          continue;
-        }
-      }
-      if (text.startsWith('import', index)
-        && !isIdentifierPart(text[index - 1])
-        && text[index - 1] !== '.'
-        && !isIdentifierPart(text[index + 6])) {
-        let callIndex = index + 6;
-        for (;;) {
-          while (/\s/u.test(text[callIndex] || '')) callIndex += 1;
-          if (text.startsWith('/*', callIndex)) {
-            const end = text.indexOf('*/', callIndex + 2);
-            callIndex = end < 0 ? text.length : end + 2;
-            continue;
-          }
-          if (text.startsWith('//', callIndex)) {
-            callIndex += 2;
-            while (callIndex < text.length && text[callIndex] !== '\n' && text[callIndex] !== '\r') callIndex += 1;
-            continue;
-          }
-          break;
-        }
-        if (text[callIndex] === '(') {
-          result += bindingName;
-          index += 6;
-          continue;
-        }
-      }
-      result += character;
-      index += 1;
-    }
-    return result;
-  };
-
-  return scanCode();
+  return rewriteDynamicImports(source, bindingName);
 }
 
 let nextFunctionDynamicImportId = 1;
@@ -613,7 +486,7 @@ let nextFunctionDynamicImportId = 1;
 function createVmFunctionConstructor(NativeFunction, processObject, filename) {
   const GuestFunction = function guestFunctionConstructor(...args) {
     const body = args.length ? String(args.at(-1)) : '';
-    if (!/\bimport\s*\(/u.test(body)) return Reflect.construct(NativeFunction, args);
+    if (!body.includes('import')) return Reflect.construct(NativeFunction, args);
     const parameters = args.slice(0, -1);
     const bindingName = `__bnhVmFunctionImport${nextFunctionDynamicImportId++}`;
     const source = rewriteScriptDynamicImports(body, bindingName);
@@ -933,7 +806,7 @@ export function createVmModule(scope = globalThis) {
       validateContext(contextifiedObject, isContext);
       const runOptions = getRunInContextArgs(options);
       const dynamicImportBinding = `__bnhVmDynamicImport${nextScriptDynamicImportId++}`;
-      const hasDynamicImport = /\bimport\s*\(/u.test(this.code);
+      const hasDynamicImport = this.code.includes('import');
       const source = hasDynamicImport
         ? rewriteScriptDynamicImports(this.code, dynamicImportBinding)
         : this.code;
@@ -1013,7 +886,7 @@ export function createVmModule(scope = globalThis) {
     runInThisContext(options = {}) {
       getRunInContextArgs(options);
       const dynamicImportBinding = `__bnhVmDynamicImport${nextScriptDynamicImportId++}`;
-      const hasDynamicImport = /\bimport\s*\(/u.test(this.code);
+      const hasDynamicImport = this.code.includes('import');
       const source = hasDynamicImport
         ? rewriteScriptDynamicImports(this.code, dynamicImportBinding)
         : this.code;

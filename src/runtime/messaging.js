@@ -532,7 +532,8 @@ export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePor
   };
   const drainDeferredMessages = () => {
     if (closed || (events.listenerCount('message') === 0 && !assignedOnMessage)) return;
-    while (deferredMessages.length && !closed) {
+    while (deferredMessages.length && !closed
+      && (events.listenerCount('message') > 0 || assignedOnMessage)) {
       const deferred = deferredMessages.shift();
       runInCapturedScope(deferred.scope, () => deliverMessage(deferred.data));
     }
@@ -667,9 +668,16 @@ export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePor
       const [message, transfers] = transferArguments(value, normalizedTransfers);
       const hasTransfer = Array.isArray(transfers) ? transfers.length > 0 : transfers !== undefined;
       const messageScope = peerPort ? captureAsyncScope('MESSAGEPORT') : undefined;
+      try {
+        if (transfers === undefined) callNative(nativePort, 'postMessage', message);
+        else callNative(nativePort, 'postMessage', message, transfers);
+      } catch (error) {
+        runInCapturedScope(messageScope, () => {});
+        throw error;
+      }
+      // Native delivery is asynchronous. Publish the peer queue only after
+      // cloning succeeds, or a failed send leaves a phantom pending message.
       notifyPeerMessage?.(hasTransfer ? undefined : message, hasTransfer, messageScope);
-      if (transfers === undefined) callNative(nativePort, 'postMessage', message);
-      else callNative(nativePort, 'postMessage', message, transfers);
     },
     close(callback) {
       if (callback !== undefined && typeof callback !== 'function') {
@@ -713,6 +721,8 @@ export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePor
         const queued = queuedMessages.find((entry) => !entry.consumed && !entry.useNative);
         if (!queued) return undefined;
         queued.consumed = true;
+        runInCapturedScope(queued.scope, () => {});
+        queued.scope = undefined;
         return queued.value;
       },
     },

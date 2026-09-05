@@ -248,6 +248,7 @@ export function createModuleLoader({
   resolveBuiltin,
   runModuleHook: sharedRunModuleHook,
   readSource,
+  fileVersion,
   fetchModule,
   defaultModuleType = 'commonjs',
 } = {}) {
@@ -523,10 +524,14 @@ export function createModuleLoader({
   const packageConfig = (base) => {
     const packagePath = posix.join(base, 'package.json');
     if (!hasFile(packagePath)) return undefined;
-    if (packageConfigCache.has(packagePath)) return packageConfigCache.get(packagePath);
+    const version = fileVersion?.(packagePath);
+    const cached = packageConfigCache.get(packagePath);
+    if (version !== undefined && cached?.version === version) return cached.config;
     try {
-      const config = JSON.parse(sourceText(readTextFile(packagePath)));
-      packageConfigCache.set(packagePath, config);
+      const source = sourceText(readTextFile(packagePath));
+      if (cached?.source === source) return cached.config;
+      const config = JSON.parse(source);
+      packageConfigCache.set(packagePath, { version, source, config });
       return config;
     } catch (cause) {
       const error = new Error(`Invalid package config '${packagePath}'`);
@@ -723,7 +728,7 @@ export function createModuleLoader({
         }
         break;
       }
-      if (directory === '/') break;
+      if (directory === '/' || directory === '.' || directory === '') break;
       directory = posix.dirname(directory);
     }
     const packageResolved = resolvePackage(specifier, importer, conditions);
@@ -773,7 +778,7 @@ export function createModuleLoader({
       const directoryCandidateList = requireConditions ? commonJsDirectoryCandidates : directoryCandidates;
       if (config?.exports !== undefined) {
         const request = subpath ? `./${subpath}` : '.';
-        const exportsMap = typeof config.exports === 'string' || Array.isArray(config.exports)
+        const exportsMap = config.exports === null || typeof config.exports === 'string' || Array.isArray(config.exports)
           ? { '.': config.exports }
           : Object.keys(config.exports).some((key) => key === '.' || key.startsWith('./'))
             ? config.exports
@@ -784,13 +789,18 @@ export function createModuleLoader({
         if (exported === PACKAGE_TARGET_BLOCKED) {
           throw packageError('ERR_PACKAGE_PATH_NOT_EXPORTED', `Package subpath '${request}' is not defined`);
         }
-        if (exported !== undefined) return exported;
+        if (exported !== undefined) {
+          if (requireConditions && !hasFile(exported)) {
+            throw packageError('MODULE_NOT_FOUND', `Cannot find module '${exported}'`);
+          }
+          return exported;
+        }
         throw packageError('ERR_PACKAGE_PATH_NOT_EXPORTED', `Package subpath '${request}' is not defined`);
       }
       const base = subpath ? posix.join(packageRoot, subpath) : packageRoot;
       const resolved = resolveFileOrDirectory(base, false, fileCandidateList, directoryCandidateList);
       if (resolved) return resolved;
-      if (directory === '/') break;
+      if (directory === '/' || directory === '.' || directory === '') break;
       directory = posix.dirname(directory);
     }
     return undefined;
@@ -869,7 +879,7 @@ export function createModuleLoader({
     ) || base;
   };
 
-  const resolveRequire = (specifier, importer = '/node/index.js') => {
+  const resolveRequire = (specifier, importer = '/node/index.js', conditions = ['node', 'require']) => {
     const rawValue = String(specifier);
     const value = rawValue.startsWith('file:') ? fileURLToPath(rawValue) : rawValue;
     const name = builtinName(value);
@@ -880,16 +890,15 @@ export function createModuleLoader({
       throw packageError('ERR_UNKNOWN_BUILTIN_MODULE', `No such built-in module: ${name}`);
     }
     if (value.startsWith('#')) {
-      const imported = resolvePackageImports(value, importer, ['node', 'require']);
+      const imported = resolvePackageImports(value, importer, conditions);
       if (imported.startsWith('node:') || imported.startsWith('data:')
         || imported.startsWith('http:') || imported.startsWith('https:')) return imported;
-      const candidate = resolveFileOrDirectory(imported, false, commonJsFileCandidates, commonJsDirectoryCandidates);
-      if (candidate) return candidate;
+      if (hasFile(imported)) return imported;
       throw packageError('MODULE_NOT_FOUND', `Cannot find module '${value}'`);
     }
-    if (value.startsWith('data:') || /^[A-Za-z][A-Za-z\d+.-]*:/.test(value)) return resolve(value, importer, ['node', 'require']);
+    if (value.startsWith('data:') || /^[A-Za-z][A-Za-z\d+.-]*:/.test(value)) return resolve(value, importer, conditions);
     if (!isPathSpecifier(value)) {
-      const resolved = resolvePackage(value, importer, ['node', 'require']);
+      const resolved = resolvePackage(value, importer, conditions);
       if (resolved) {
         const candidate = resolveFileOrDirectory(resolved, false, commonJsFileCandidates, commonJsDirectoryCandidates);
         if (candidate) return candidate;
@@ -1918,6 +1927,7 @@ export function createModuleLoader({
     moduleURL,
     dispose: () => {
       delete globalObject[registryName];
+      packageConfigCache.clear();
       for (const objectURL of generatedObjectURLs) {
         try { globalObject.URL.revokeObjectURL(objectURL); } catch { /* already revoked */ }
       }

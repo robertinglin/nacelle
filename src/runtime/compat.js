@@ -2779,6 +2779,7 @@ export function finished(stream, options, callbackArgument) {
     const callbackResource = callback ? new AsyncResource('STREAMFINISHED') : null;
     return new Promise((resolve, reject) => {
       let settled = false;
+      let cleanupAbort;
       const readable = options?.readable ?? Boolean(
         stream?._readableState || stream?.readable === true,
       );
@@ -2788,6 +2789,7 @@ export function finished(stream, options, callbackArgument) {
       const complete = (error = undefined) => {
         if (settled) return;
         settled = true;
+        cleanupAbort?.();
         try {
           if (options?.cleanup) {
             stream.off?.('finish', onFinish);
@@ -2802,11 +2804,15 @@ export function finished(stream, options, callbackArgument) {
           callbackResource?.emitDestroy();
         }
       };
+      let readableFinished = !readable || stream?._readableState?.endEmitted === true;
+      let writableFinished = !writable || stream?._writableState?.finished === true;
       const onFinish = () => {
-        if (writable) complete();
+        writableFinished = true;
+        if (readableFinished) complete();
       };
       const onEnd = () => {
-        if (readable) complete();
+        readableFinished = true;
+        if (writableFinished) complete();
       };
       const onError = (err) => complete(err || abortError());
       const onClose = () => {
@@ -2839,29 +2845,26 @@ export function finished(stream, options, callbackArgument) {
         stream.on('finish', onFinish);
         stream.on('end', onEnd);
         stream.on('close', onClose);
-        if (options && options.error !== false) {
+        if (options?.error !== false) {
           stream.on('error', onError);
         }
         if (options?.signal?.addEventListener) {
           const onAbort = () => complete(abortError());
           if (options.signal.aborted) onAbort();
-          else options.signal.addEventListener('abort', onAbort, { once: true });
+          else {
+            options.signal.addEventListener('abort', onAbort, { once: true });
+            cleanupAbort = () => options.signal.removeEventListener('abort', onAbort);
+          }
         }
         // `finished()` is allowed to observe a stream after its terminal
         // event was emitted.  This is common when an async reporter awaits
         // its own output before checking the source stream.  Event listeners
         // alone would miss that transition and leave the promise pending.
-        const readableState = stream?._readableState;
-        const writableState = stream?._writableState;
-        const readableFinished = !readable
-          || !readableState && stream.readable !== true
-          || readableState?.endEmitted
-          || stream.readable === false;
-        const writableFinished = !writable
-          || !writableState && stream.writable !== true
-          || writableState?.finished
-          || stream.writable === false;
-        if (readableFinished && writableFinished) queueMicrotask(() => complete());
+        // A false public readable/writable flag can mean destruction, not
+        // completion. Preserve premature-close and stored error outcomes.
+        if (stream.closed || stream._readableState?.closed || stream._writableState?.closed) {
+          queueMicrotask(onClose);
+        } else if (readableFinished && writableFinished) queueMicrotask(() => complete());
     } else if (stream && typeof stream.getReader === 'function') {
       const closedPromise = stream[kIsClosedPromise];
       if (closedPromise?.promise) {

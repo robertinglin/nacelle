@@ -1190,6 +1190,7 @@ function responseFromBytes(url, statusCode, headers, bytes, scope, socket = null
     statusText: STATUS_CODES[statusCode] || '',
     headers,
     arrayBuffer: async () => body.slice().buffer,
+    __bnhBodyDiagnostic: () => ({ byteLength: body.byteLength, prefix: body.subarray(0, 512) }),
     body: bodyStream,
     ok: statusCode >= 200 && statusCode < 300,
     redirected: false,
@@ -4998,26 +4999,22 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
           statusType: typeof (response?.status ?? response?.statusCode),
           statusValue: String(response?.status ?? response?.statusCode ?? ''),
         });
-        // The in-memory virtual network returns a fetch-compatible response
-        // whose arrayBuffer() is a non-consuming copy. Capture a bounded
-        // diagnostic body for that path too; the raw response remains in the
-        // normal network artifact and response delivery is not coupled to
-        // observability.
-        if (response?.scope === scope && typeof response?.arrayBuffer === 'function') {
-          void Promise.resolve(response.arrayBuffer()).then((value) => {
-            const bytes = new Uint8Array(value || 0);
-            const decoder = scope.TextDecoder || TextDecoder;
-            this._ownerProcess?.__bnhNetworkEvent?.({
-              source: 'guest-http',
-              method: String(this.method || 'GET'),
-              url: String(this._url || this.path || ''),
-              phase: 'body',
-              transport: 'virtual-network',
-              status: Number(response?.status ?? response?.statusCode ?? 0),
-              bodyBytes: bytes.byteLength,
-              bodyExcerpt: new decoder().decode(bytes).slice(0, 512),
-            });
-          }).catch(() => {});
+        // Observe only the bounded prefix. Do not clone/decode the full body
+        // or consume a streaming response merely to produce diagnostics.
+        if (typeof this._ownerProcess?.__bnhNetworkEvent === 'function'
+          && response?.scope === scope && typeof response.__bnhBodyDiagnostic === 'function') {
+          const body = response.__bnhBodyDiagnostic();
+          const decoder = scope.TextDecoder || TextDecoder;
+          this._ownerProcess.__bnhNetworkEvent({
+            source: 'guest-http',
+            method: String(this.method || 'GET'),
+            url: String(this._url || this.path || ''),
+            phase: 'body',
+            transport: 'virtual-network',
+            status: Number(response?.status ?? response?.statusCode ?? 0),
+            bodyBytes: body.byteLength,
+            bodyExcerpt: new decoder().decode(body.prefix),
+          });
         }
       } catch {
         // Network diagnostics must never change HTTP response delivery.

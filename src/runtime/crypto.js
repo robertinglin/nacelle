@@ -858,6 +858,15 @@ function pemBytes(value, BufferClass) {
 }
 
 function keyObjectFromInput(value, type, BufferClass) {
+  if (value instanceof BrowserKeyObject) {
+    if (type === 'private' || value.type === 'secret') {
+      throw new TypeError('The key must contain asymmetric key data');
+    }
+    if (value._jwk) return keyObjectFromInput({ key: value._jwk, format: 'jwk' }, type, BufferClass);
+    // Returning private PEM/DER unchanged as a public key would expose private
+    // material. Conversion needs a real parser, not a relabelled KeyObject.
+    throw new UnsupportedWebCapabilityError('crypto.createPublicKey', 'PEM/DER KeyObject conversion is not available');
+  }
   const options = value && typeof value === 'object' && !ArrayBuffer.isView(value)
     && !isArrayBuffer(value) && !Object.hasOwn(value, 'byteLength') ? value : { key: value };
   const format = options.format || (typeof options.key === 'string' ? 'pem' : 'der');
@@ -865,7 +874,16 @@ function keyObjectFromInput(value, type, BufferClass) {
     if (!options.key || typeof options.key !== 'object' || Array.isArray(options.key)) {
       throw new TypeError('The "key" property must be a JSON Web Key object');
     }
-    return new BrowserKeyObject({ type: keyObjectType(options.key, type), jwk: options.key, BufferClass });
+    const jwk = cloneKeyRecord(options.key);
+    if (jwk.kty === 'oct' || (type === 'private' && jwk.d === undefined)) {
+      throw new TypeError('The key must contain the requested asymmetric key material');
+    }
+    if (type === 'public') {
+      for (const field of ['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth', 'priv']) delete jwk[field];
+      // Private-key usage restrictions do not apply to the derived public key.
+      delete jwk.key_ops;
+    }
+    return new BrowserKeyObject({ type: keyObjectType(jwk, type), jwk, BufferClass });
   }
   if (format === 'pem') {
     const pem = typeof options.key === 'string' ? options.key : BufferClass.from(options.key).toString('utf8');
@@ -1294,7 +1312,9 @@ export function aesGcmDecrypt(value, key, iv, options = {}) {
 }
 
 function normalizeSigningAlgorithm(algorithm, key, options) {
-  const keyName = isCryptoKey(key) ? key.algorithm.name : virtualKeyPairs.has(key?.key ?? key) ? 'ECDSA' : 'HMAC';
+  const virtualKey = virtualKeyPairs.get(key?.key ?? key);
+  const keyName = isCryptoKey(key) ? key.algorithm.name
+    : virtualKey ? virtualKey.publicKey.algorithm.name : 'HMAC';
   if (algorithm && typeof algorithm === 'object') {
     const normalized = { ...algorithm };
     normalized.name = String(normalized.name).toUpperCase() === 'HMAC' ? 'HMAC' : normalized.name;
@@ -1329,6 +1349,13 @@ function normalizeSigningAlgorithm(algorithm, key, options) {
 
 async function importSigningKey(key, algorithm, subtle, globalObject, usage) {
   if (isCryptoKey(key)) return key;
+  const virtualKey = virtualKeyPairs.get(key?.key ?? key);
+  if (virtualKey) {
+    if (usage === 'sign' && virtualKey.encrypted && key?.passphrase !== virtualKey.passphrase) {
+      throw missingPassphraseError();
+    }
+    return usage === 'sign' ? virtualKey.privateKey : virtualKey.publicKey;
+  }
   if (key instanceof BrowserKeyObject || key?._jwk) {
     return subtle.importKey(
       'jwk',
@@ -1339,13 +1366,6 @@ async function importSigningKey(key, algorithm, subtle, globalObject, usage) {
       false,
       [usage],
     );
-  }
-  const virtualKey = virtualKeyPairs.get(key?.key ?? key);
-  if (virtualKey) {
-    if (usage === 'sign' && virtualKey.encrypted && key?.passphrase !== virtualKey.passphrase) {
-      throw missingPassphraseError();
-    }
-    return usage === 'sign' ? virtualKey.privateKey : virtualKey.publicKey;
   }
   if (algorithm.name !== 'HMAC') {
     throw new UnsupportedWebCapabilityError('crypto signing', 'raw keys are supported only for HMAC; import an asymmetric CryptoKey for other algorithms');
@@ -1786,6 +1806,7 @@ function rsaKeyJwk(material, privateKey) {
 }
 
 function rsaKeyObject(material, privateKey) {
+  if (!privateKey) material = { modulus: material.modulus, publicExponent: material.publicExponent };
   const keyType = privateKey ? 'private' : 'public';
   const object = { type: keyType, asymmetricKeyType: 'rsa' };
   Object.defineProperty(object, '_bnhRsaMaterial', { configurable: true, value: material });
@@ -3318,7 +3339,8 @@ function bigintToBytes(value) {
     error.code = 'ERR_OUT_OF_RANGE';
     throw error;
   }
-  const encoded = value.toString(16).padStart(2, '0');
+  const hex = value.toString(16);
+  const encoded = hex.length % 2 ? `0${hex}` : hex;
   const result = new Uint8Array(encoded.length / 2);
   for (let index = 0; index < result.length; index += 1) {
     result[index] = Number.parseInt(encoded.slice(index * 2, index * 2 + 2), 16);

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, mkdir, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -88,4 +88,15 @@ test('CITGM artifacts retain output already received before a browser failure', 
   await writer.close({ stdout: 'unavailable fallback', stderr: 'unavailable fallback' });
   assert.equal(await readFile(writer.paths.stdout, 'utf8'), 'partial stdout\n');
   assert.equal(await readFile(writer.paths.stderr, 'utf8'), 'error\n');
+});
+
+
+test('asynchronous artifact open failures reject capture and still close resources', async () => {
+  const rootDir = await mkdtemp(path.join(os.tmpdir(), 'bnh-artifacts-error-'));
+  await mkdir(path.join(rootDir, 'run-module', 'stdout.log'), { recursive: true });
+  const writer = await createCITGMArtifactWriter({ rootDir, module: 'module', runId: 'run' });
+  try {
+    await assert.rejects(writer.recordOutput('stdout', 'data'), { code: 'EISDIR' });
+    await assert.rejects(writer.close(), { code: 'EISDIR' });
+  } finally { await rm(rootDir, { recursive: true, force: true }); }
 });

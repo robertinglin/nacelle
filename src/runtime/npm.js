@@ -102,7 +102,7 @@ function wildcardComparator(v, value) {
   if (!match || ![match[2], match[3], match[4]].some((part) => part && /[xX*]/.test(part))) return undefined;
   const operator = match[1] || '';
   const majorPart = match[2];
-  if (/[xX*]/.test(majorPart)) return operator === '' || operator === '=';
+  if (/[xX*]/.test(majorPart)) return operator !== '<' && operator !== '>';
   const major = Number(majorPart);
   const minorPart = match[3];
   const patchPart = match[4];
@@ -114,7 +114,7 @@ function wildcardComparator(v, value) {
     patch: patchPart && wildcardAt !== 'patch' ? Number(patchPart) : 0,
     prerelease: null,
   };
-  const upper = wildcardAt === 'minor'
+  const upper = wildcardAt === 'minor' || operator === '^' && major > 0
     ? { major: major + 1, minor: 0, patch: 0, prerelease: null }
     : { major, minor: lower.minor + 1, patch: 0, prerelease: null };
   const lowerComparison = compareSemver(v, lower);
@@ -255,6 +255,14 @@ export function parseNpmAlias(range) {
 /**
  * Persistent IndexedDB and in-memory cache for NPM package metadata and tarball archives.
  */
+const parentNodeModulesDir = (directory) => {
+  const packageRoot = directory.endsWith('/node_modules')
+    ? directory.slice(0, -'/node_modules'.length)
+    : directory;
+  const marker = packageRoot.lastIndexOf('/node_modules/');
+  return marker < 0 ? null : `${packageRoot.slice(0, marker)}/node_modules`;
+};
+
 export class BrowserNpmCache {
   constructor({ dbName = 'bnh_npm_cache', globalObject = globalThis } = {}) {
     this.dbName = dbName;
@@ -653,36 +661,50 @@ export class BrowserNpm {
     return Object.entries(deps).map(([name, range]) => `${name}@${range}`);
   }
 
-  async seedInstalledLocations() {
-    const packageJsonSuffix = '/package.json';
+  async seedInstalledLocations(nodeModulesDir = '/node/node_modules') {
+    // Inspect package roots, not every file in dist/.next/source trees. Large
+    // frameworks install thousands of non-package directories; walking them
+    // all on every optional dependency install made startup quadratic.
+    const visited = new Set();
+    const entries = (directory) => {
+      try { return this.vfs?.entries?.(directory) || []; }
+      catch (error) { if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return []; throw error; }
+    };
+    const visitPackage = async (packageDir) => {
+      const pathname = `${packageDir}/package.json`;
+      try {
+        const value = this.vfs.fs.readFileSync
+          ? this.vfs.fs.readFileSync(pathname, 'utf8')
+          : await this.vfs.fs.promises.readFile(pathname, 'utf8');
+        const manifest = JSON.parse(typeof value === 'string' ? value : new TextDecoder().decode(value));
+        if (typeof manifest.name === 'string' && typeof manifest.version === 'string') {
+          this.installedLocations.set(packageDir, manifest.version);
+          this.installed.set(manifest.name, manifest.version);
+        }
+      } catch {
+        this.installedLocations.delete(packageDir);
+      }
+      await visit(`${packageDir}/node_modules`);
+    };
     const visit = async (directory) => {
-      for (const entry of this.vfs?.entries?.(directory) || []) {
-        const pathname = `${directory.replace(/\/+$/, '')}/${entry.name}`;
-        if (entry.isDirectory?.()) {
-          await visit(pathname);
-          continue;
-        }
-        if (entry.name !== 'package.json' || !pathname.endsWith(packageJsonSuffix)) continue;
-        const packageDir = pathname.slice(0, -packageJsonSuffix.length);
-        const marker = packageDir.lastIndexOf('/node_modules/');
-        if (marker < 0) continue;
-        const relative = packageDir.slice(marker + '/node_modules/'.length);
-        const segments = relative.split('/');
-        if (segments.length !== 1 && !(segments.length === 2 && segments[0].startsWith('@'))) continue;
-        try {
-          const bytes = await this.vfs.fs.promises.readFile(pathname);
-          const text = typeof bytes === 'string' ? bytes : new TextDecoder().decode(bytes);
-          const manifest = JSON.parse(text);
-          if (typeof manifest.name === 'string' && typeof manifest.version === 'string') {
-            this.installedLocations.set(packageDir, manifest.version);
-            this.installed.set(manifest.name, manifest.version);
+      if (visited.has(directory)) return;
+      visited.add(directory);
+      for (const entry of entries(directory)) {
+        if (!entry.isDirectory?.()) continue;
+        const pathname = `${directory}/${entry.name}`;
+        if (entry.name.startsWith('@')) {
+          for (const scoped of entries(pathname)) {
+            if (scoped.isDirectory?.()) await visitPackage(`${pathname}/${scoped.name}`);
           }
-        } catch {
-          // A malformed or inaccessible manifest is handled by normal loading.
-        }
+        } else if (!entry.name.startsWith('.')) await visitPackage(pathname);
       }
     };
-    await visit('/node');
+    // Include ancestor node_modules directories used for normal hoisting.
+    let current = nodeModulesDir.replace(/\/+$/, '');
+    while (current) {
+      await visit(current);
+      current = parentNodeModulesDir(current);
+    }
   }
 
   async install(packageSpecs, {
@@ -703,19 +725,13 @@ export class BrowserNpm {
     }
     const specs = Array.isArray(rawSpecs) ? rawSpecs : [rawSpecs];
     const targetNodeModules = nodeModulesDir || (cwd.endsWith('/') ? `${cwd}node_modules` : `${cwd}/node_modules`);
-    await this.seedInstalledLocations();
+    await this.seedInstalledLocations(targetNodeModules);
     const queue = specs.map((spec) => ({ ...parsePackageSpec(spec), optional: false, nodeModulesDir: targetNodeModules }));
     const results = [];
     const visited = new Set();
     const filesToMount = {};
 
-    const parentNodeModulesDir = (directory) => {
-      const packageRoot = directory.endsWith('/node_modules')
-        ? directory.slice(0, -'/node_modules'.length)
-        : directory;
-      const marker = packageRoot.lastIndexOf('/node_modules/');
-      return marker < 0 ? null : `${packageRoot.slice(0, marker)}/node_modules`;
-    };
+
 
     const dependencyLocation = (name, range, currentNodeModulesDir, currentPackageDir) => {
       const resolutionRange = parseNpmAlias(range)?.range || range;

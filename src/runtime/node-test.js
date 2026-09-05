@@ -537,6 +537,8 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
   let testCount = 0;
   let passCount = 0;
   let failCount = 0;
+  let skipCount = 0;
+  let todoCount = 0;
   let testApiUsed = false;
   let activeRun = null;
   let runOwnsOutput = false;
@@ -564,6 +566,7 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
     if (!activeRun) return;
     const event = { type, data };
     runtimeState.streamEvents.push(type);
+    if (runtimeState.streamEvents.length > 64) runtimeState.streamEvents.shift();
     if (emit) activeRun.stream.emit(type, data);
     if (push) activeRun.stream.push(event);
     return event;
@@ -573,10 +576,14 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
     runtimeState.completed = testCount;
     if (result.status === 'fail') failCount += 1;
     else if (result.status === 'pass') passCount += 1;
+    else if (result.status === 'skip') skipCount += 1;
+    else if (result.status === 'todo') todoCount += 1;
     if (!activeRun) return;
-    const passed = result.status === 'pass';
+    const passed = result.status !== 'fail';
     const data = {
       name: result.name,
+      ...(result.status === 'skip' ? { skip: true } : {}),
+      ...(result.status === 'todo' ? { todo: true } : {}),
       nesting: 0,
       testNumber: testCount,
       testId: testCount,
@@ -749,7 +756,7 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
           }
           if (testOptions.skip || testOptions.todo) {
             if (!runOwnsOutput) stdout(`ok - ${label}${testOptions.skip ? ' # SKIP' : ' # TODO'}\n`);
-            return { name: label, status: testOptions.skip ? 'skip' : 'pass', file };
+            return { name: label, status: testOptions.skip ? 'skip' : 'todo', file };
           }
           let planCount = null;
           const testAbortController = typeof scope.AbortController === 'function'
@@ -896,12 +903,12 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
   const mock = globalMock;
   const run = (options = {}) => {
     if (activeRun) return activeRun.stream;
-    runOwnsOutput = true;
-    const releaseRunTask = trackTask();
     const streamApi = scope.require('node:stream');
     const Readable = streamApi?.Readable;
     if (typeof Readable !== 'function') throw codedError(Error, 'ERR_UNSUPPORTED_NODE_TEST_RUN', 'node:test run requires node:stream.Readable');
     const stream = new Readable({ objectMode: true, read() {} });
+    runOwnsOutput = true;
+    const releaseRunTask = trackTask();
     activeRun = {
       stream,
       file: null,
@@ -972,7 +979,7 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
         emitRunEvent('test:plan', { nesting: 0, count: testCount });
         for (const [name, count] of [
           ['tests', testCount], ['suites', 0], ['pass', passCount], ['fail', failCount],
-          ['cancelled', 0], ['skipped', 0], ['todo', 0],
+          ['cancelled', 0], ['skipped', skipCount], ['todo', todoCount],
         ]) emitRunEvent('test:diagnostic', { nesting: 0, message: `${name} ${count}`, level: 'info' });
         emitRunEvent('test:summary', {
           success: failCount === 0,
@@ -981,8 +988,8 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
             failed: failCount,
             passed: passCount,
             cancelled: 0,
-            skipped: 0,
-            todo: 0,
+            skipped: skipCount,
+            todo: todoCount,
             topLevel: testCount,
             suites: 0,
           },

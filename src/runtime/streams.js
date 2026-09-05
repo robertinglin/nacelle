@@ -1321,13 +1321,11 @@ export class Readable extends EventEmitter {
   }
 
   _maybeEmitEnd() {
-    if (this._ended && !this._buffer.length && !this._endEmitted && !this._destroyed) {
-      // Flip the ended state unconditionally, like Node: endEmitted must not
-      // depend on which listeners happen to be attached. Poll loops such as
-      // Next's flight-to-HTML renderer remove their wait listeners while
-      // reading the final chunk and re-attach after; if emission waited for
-      // an 'end' listener to be present, they would re-poll readableEnded
-      // forever in a microtask spin that starves the event loop.
+    if (!this._ended || this._buffer.length || this._endEmitted || this._destroyed || this._endScheduled) return;
+    this._endScheduled = true;
+    queueMicrotask(() => {
+      this._endScheduled = false;
+      if (!this._ended || this._buffer.length || this._endEmitted || this._destroyed) return;
       this._endEmitted = true;
       this._readableState.endEmitted = true;
       this.readable = false;
@@ -1339,7 +1337,7 @@ export class Readable extends EventEmitter {
           else this._emitClose();
         }
       });
-    }
+    });
   }
 
   _emitClose() {
@@ -2515,7 +2513,7 @@ class WritableImpl extends EventEmitter {
     this._closeEmitted = true;
     this._writableState.closeEmitted = true;
     this._writableState.closed = true;
-    this.emit('close');
+    if (this._writableState.emitClose) this.emit('close');
   }
 }
 

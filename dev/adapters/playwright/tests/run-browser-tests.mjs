@@ -4,43 +4,17 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+import { browserAssetPath, browserAssetContentType, harnessPage } from '../static-assets.mjs';
 
 const adapterRoot = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
-const runtimeRoot = path.resolve(adapterRoot, '../../..');
-const harnessPage = '<!doctype html><script type="module" src="/target-bridge.example.js"></script>';
-
-function safePath(value) {
-  const relative = value === '/' || value === '/harness.html' ? 'harness.html' : value.slice(1);
-  const absolute = path.resolve(adapterRoot, relative);
-  if (absolute !== adapterRoot && !absolute.startsWith(`${adapterRoot}${path.sep}`)) {
-    throw new Error(`unsafe browser test path: ${value}`);
-  }
-  return { relative, absolute };
-}
-
-function contentType(relative) {
-  if (relative.endsWith('.html')) return 'text/html; charset=utf-8';
-  if (relative.endsWith('.json')) return 'application/json; charset=utf-8';
-  return 'text/javascript; charset=utf-8';
-}
-
 const server = createServer(async (request, response) => {
   try {
-    const { relative, absolute } = safePath(request.url || '/');
+    const { relative, absolute } = browserAssetPath(request.url || '/', adapterRoot);
     let body;
     if (relative === 'harness.html') body = harnessPage;
-    else {
-      try {
-        body = await readFile(absolute);
-      } catch (error) {
-        if (error?.code !== 'ENOENT' || !relative.startsWith('wasm/')) throw error;
-        // Browser runtime modules resolve core WASM beside the runtime asset.
-        // Keep the test server's /wasm path consistent with the CITGM server.
-        body = await readFile(path.join(runtimeRoot, 'src', relative));
-      }
-    }
+    else body = await readFile(absolute);
     response.writeHead(200, {
-      'content-type': contentType(relative),
+      'content-type': browserAssetContentType(relative),
       'Cross-Origin-Opener-Policy': 'same-origin',
       'Cross-Origin-Embedder-Policy': 'require-corp',
       'Service-Worker-Allowed': '/',

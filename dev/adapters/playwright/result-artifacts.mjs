@@ -108,6 +108,8 @@ function writeJsonLine(stream, value) {
 }
 
 async function finishStream(stream) {
+  if (stream.errored) throw stream.errored;
+  if (stream.writableFinished) return;
   const completion = once(stream, 'finish');
   stream.end();
   await completion;
@@ -134,57 +136,30 @@ export async function createCITGMArtifactWriter({ rootDir, module, runId } = {})
     stderr: createWriteStream(paths.stderr),
   };
   const outputWritten = { stdout: false, stderr: false };
+  const streams = [progressStream, networkStream, ...Object.values(outputStreams)];
+  let streamFailure;
+  // Open/write errors may arrive before a caller queues the first write, or
+  // after write() returned true. Keep an error observer for the whole lifetime.
+  for (const stream of streams) stream.on('error', error => { streamFailure ||= error; });
   let writeChain = Promise.resolve();
   let closed = false;
-
-  const append = (stream, value) => {
+  const appendBytes = (stream, bytes) => {
     if (closed) return writeChain;
-    const line = `${JSON.stringify(value, jsonReplacer())}\n`;
     writeChain = writeChain.then(() => new Promise((resolve, reject) => {
-      const cleanup = () => {
-        stream.off('error', onError);
-        stream.off('drain', onDrain);
-      };
-      const complete = () => {
-        cleanup();
-        resolve();
-      };
-      const onError = (error) => {
-        cleanup();
-        reject(error);
-      };
-      const onDrain = complete;
-      stream.once('error', onError);
-      if (stream.write(line)) complete();
-      else stream.once('drain', onDrain);
+      if (streamFailure) { reject(streamFailure); return; }
+      stream.write(bytes, error => error ? reject(error) : resolve());
     }));
+    // Callers may intentionally fire-and-forget capture writes. Preserve the
+    // rejection for close(), without causing a host unhandled rejection.
+    writeChain.catch(() => {});
     return writeChain;
   };
-
+  const append = (stream, value) => appendBytes(stream, `${JSON.stringify(value, jsonReplacer())}\n`);
   const appendOutput = (streamName, value) => {
     const stream = outputStreams[streamName];
     if (!stream || closed) return writeChain;
     outputWritten[streamName] = true;
-    const bytes = asBytes(value);
-    writeChain = writeChain.then(() => new Promise((resolve, reject) => {
-      const cleanup = () => {
-        stream.off('error', onError);
-        stream.off('drain', onDrain);
-      };
-      const complete = () => {
-        cleanup();
-        resolve();
-      };
-      const onError = (error) => {
-        cleanup();
-        reject(error);
-      };
-      const onDrain = complete;
-      stream.once('error', onError);
-      if (stream.write(bytes)) complete();
-      else stream.once('drain', onDrain);
-    }));
-    return writeChain;
+    return appendBytes(stream, asBytes(value));
   };
 
   return {
@@ -202,18 +177,22 @@ export async function createCITGMArtifactWriter({ rootDir, module, runId } = {})
       if (closed) return paths;
       for (const event of networkEvents) append(networkStream, event);
       closed = true;
-      await writeChain;
-      await Promise.all([
-        outputWritten.stdout ? Promise.resolve() : writeFile(paths.stdout, asBytes(stdoutBytes, stdout)),
-        outputWritten.stderr ? Promise.resolve() : writeFile(paths.stderr, asBytes(stderrBytes, stderr)),
-        writeFile(paths.runResult, `${JSON.stringify(runResult, jsonReplacer(), 2)}\n`, 'utf8'),
-        writeFile(paths.summary, `${JSON.stringify(summary, jsonReplacer(), 2)}\n`, 'utf8'),
-        writeFile(paths.terminalSummary, `${JSON.stringify(summary, jsonReplacer(), 2)}\n`, 'utf8'),
-        finishStream(progressStream),
-        finishStream(networkStream),
-        finishStream(outputStreams.stdout),
-        finishStream(outputStreams.stderr),
-      ]);
+      try {
+        await writeChain;
+        await Promise.all(streams.map(finishStream));
+        if (streamFailure) throw streamFailure;
+        // Finish even unused output streams before writing fallbacks: their
+        // asynchronous open('w') must not truncate a completed fallback file.
+        await Promise.all([
+          outputWritten.stdout ? Promise.resolve() : writeFile(paths.stdout, asBytes(stdoutBytes, stdout)),
+          outputWritten.stderr ? Promise.resolve() : writeFile(paths.stderr, asBytes(stderrBytes, stderr)),
+          writeFile(paths.runResult, `${JSON.stringify(runResult, jsonReplacer(), 2)}\n`, 'utf8'),
+          writeFile(paths.summary, `${JSON.stringify(summary, jsonReplacer(), 2)}\n`, 'utf8'),
+          writeFile(paths.terminalSummary, `${JSON.stringify(summary, jsonReplacer(), 2)}\n`, 'utf8'),
+        ]);
+      } finally {
+        for (const stream of streams) if (!stream.destroyed) stream.destroy();
+      }
       return paths;
     },
   };

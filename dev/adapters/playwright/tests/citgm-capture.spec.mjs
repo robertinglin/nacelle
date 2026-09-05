@@ -49,3 +49,16 @@ test('keeps worker npm cache descriptors fetchable without cloning package conte
     tarballs: { 'pkg-tarball:large-package@1.0.0': 'tarballs/large.tgz' },
   });
 });
+
+test('a slow capture binding receives bounded batches without dropping payloads', async () => {
+  const received = [], sizes = [];
+  const queue = createSerializedCaptureQueue({ capture: async payload => {
+    const batch = payload.events || [payload]; sizes.push(batch.length);
+    await new Promise(resolve => setTimeout(resolve, 1));
+    received.push(...batch.map(x => x.index));
+  } });
+  for (let index = 0; index < 257; index += 1) queue('capture', { index });
+  await queue.flush();
+  assert.ok(sizes.every(size => size <= 32), JSON.stringify(sizes));
+  assert.deepEqual(received, Array.from({ length: 257 }, (_, index) => index));
+});

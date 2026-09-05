@@ -25,6 +25,10 @@ const promiseResolveSymbol = Symbol('promiseResolve');
 export const ownerSymbol = Symbol('owner');
 let hookDispatchDepth = 0;
 let activeHookSnapshot = null;
+
+function currentProcess() {
+  return globalThis.__bnhActiveProcess || globalThis.process;
+}
 const ASYNC_WRAP_PROVIDER_NAMES = [
   'NONE', 'DIRHANDLE', 'DNSCHANNEL', 'ELDHISTOGRAM', 'FILEHANDLE',
   'FILEHANDLECLOSEREQ', 'BLOBREADER', 'FSEVENTWRAP', 'FSREQCALLBACK',
@@ -252,18 +256,18 @@ resources.set(executionId, {
   type: 'ROOT',
   triggerAsyncId: 0,
   resource: rootResource,
-  process: globalThis.process,
+  process: currentProcess(),
   destroyed: false,
 });
 contexts.set(executionId, new Map());
 
 function emit(name, ...args) {
-  const currentProcess = globalThis.process;
+  const process = currentProcess();
   if (hookDispatchDepth === 0) activeHookSnapshot = [...hooks];
   hookDispatchDepth += 1;
   try {
     for (const hook of activeHookSnapshot) {
-      if (hook.process !== currentProcess) continue;
+      if (hook.process !== process) continue;
       try {
         hook[name]?.(...args);
       } catch (error) {
@@ -282,7 +286,7 @@ function emit(name, ...args) {
 
 function newAsyncId(type, triggerAsyncId, resource, weakResource = false, collectOnExplicitGc = false, emitInitEvent = true) {
   const asyncId = nextAsyncId++;
-  const resourceProcess = globalThis.__bnhActiveProcess || globalThis.process;
+  const resourceProcess = currentProcess();
   const initObserved = emitInitEvent
     && [...hooks].some((hook) => hook.process === resourceProcess);
   const record = {
@@ -370,20 +374,19 @@ function observablePromise(promise) {
 function withResourceProcess(asyncId, callback) {
   const resourceProcess = resources.get(asyncId)?.process;
   if (resourceProcess === undefined) return callback();
-  const previousProcess = globalThis.process;
   const previousActiveProcess = globalThis.__bnhActiveProcess;
-  globalThis.process = resourceProcess;
   // Async resources are created while this callback is active. Keep the
-  // logical owner paired with the process binding; otherwise a same-realm
+  // logical owner paired with the process context; otherwise a same-realm
   // child callback can create a Promise recorded for the parent and lose the
-  // child's AsyncLocalStorage context on its next continuation.
+  // child's AsyncLocalStorage context on its next continuation. The browser
+  // global `process` may be an immutable bundler alias, so the private marker
+  // is the only binding changed at an async boundary.
   globalThis.__bnhActiveProcess = resourceProcess;
   try {
     return callback();
   } finally {
     if (previousActiveProcess === undefined) delete globalThis.__bnhActiveProcess;
     else globalThis.__bnhActiveProcess = previousActiveProcess;
-    globalThis.process = previousProcess;
   }
 }
 
@@ -812,7 +815,7 @@ class AsyncHook {
       }
     }
     Object.assign(this, callbacks);
-    this.process = globalThis.process;
+    this.process = currentProcess();
     this.enabled = false;
   }
 
@@ -855,7 +858,7 @@ function internalEmitInit(asyncId, type, triggerAsyncId, resource) {
     type,
     triggerAsyncId,
     resource,
-    process: globalThis.process,
+    process: currentProcess(),
     destroyed: false,
   };
   record.type = type;
@@ -880,7 +883,7 @@ function internalEmitBefore(asyncId, triggerAsyncId) {
       type: 'Unknown',
       triggerAsyncId: trigger,
       resource: {},
-      process: globalThis.process,
+      process: currentProcess(),
       destroyed: false,
     });
     const inherited = contexts.get(trigger);
@@ -916,14 +919,14 @@ function internalEmitDestroy(asyncId) {
 
 function initHooksExist() {
   for (const hook of hooks) {
-    if (hook.process === globalThis.process && typeof hook.init === 'function') return true;
+    if (hook.process === currentProcess() && typeof hook.init === 'function') return true;
   }
   return false;
 }
 
 function enabledHooksExist() {
   for (const hook of hooks) {
-    if (hook.process === globalThis.process) return true;
+    if (hook.process === currentProcess()) return true;
   }
   return false;
 }
@@ -1062,7 +1065,7 @@ export function createAsyncHooksModule(scope = globalThis) {
         type: 'ROOT',
         triggerAsyncId: 0,
         resource: rootResource,
-        process: globalThis.process,
+        process: currentProcess(),
         destroyed: false,
       });
       contexts.set(executionId, new Map());

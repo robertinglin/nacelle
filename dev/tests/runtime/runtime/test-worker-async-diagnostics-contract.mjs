@@ -56,6 +56,23 @@ test('async hooks propagate local storage and clean resource lifecycle', async (
   assert.ok(lifecycle.some(([name]) => name === 'destroy'));
 });
 
+test('async resource scopes tolerate an immutable global process binding', () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'process');
+  assert.ok(descriptor?.configurable, 'the test requires a restorable process property');
+  const module = createAsyncHooksModule();
+  const resource = new AsyncResource('immutable-process');
+  Object.defineProperty(globalThis, 'process', { ...descriptor, set: undefined });
+  try {
+    assert.doesNotThrow(() => resource.runInAsyncScope(() => {
+      assert.equal(module.executionAsyncId(), resource.asyncId());
+    }));
+  } finally {
+    resource.emitDestroy();
+    module.cleanup();
+    Object.defineProperty(globalThis, 'process', descriptor);
+  }
+});
+
 test('diagnostics channels support subscriptions, tracing, and cleanup', async () => {
   const diagnostics = createDiagnosticsModule();
   const channel = diagnostics.channel('contract');

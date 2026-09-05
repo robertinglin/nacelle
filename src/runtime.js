@@ -34,7 +34,7 @@ import {
   runAsyncGenerator,
   setPromiseRejectionObserver,
 } from './runtime/async-hooks.js';
-import { transformAsyncSource, transformEvalLiterals } from './runtime/async-transform.js';
+import { createCommonJsSourcePreparer } from './runtime/commonjs-source.js';
 import { EventEmitter, addAbortListener, getEventListeners, getMaxListeners, once } from './runtime/events.js';
 import { createVfs, fileURLToPath, pathToFileURL } from './runtime/vfs.js';
 import { path } from './runtime/path.js';
@@ -2428,14 +2428,6 @@ function rewriteCommonJsDynamicImports(source) {
   return rewriteDynamicImports(source, '__bnhImport');
 }
 
-function hasTopLevelCommonJsProcessBinding(source) {
-  const masked = String(source)
-    .replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '')
-    .replace(/'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`/g, '');
-  return /(?:^|[;\n])\s*(?:const|let|var|function|class)\s+process\b/m.test(masked)
-    || /(?:^|[;\n])\s*(?:const|let|var)\s*[({[][^;\n}]*\bprocess\b/m.test(masked);
-}
-
 function createGuestFunctionConstructor(NativeFunction, processOverride, sourceURL) {
   const GuestFunction = function guestFunctionConstructor(...args) {
     const body = args.length ? String(args.at(-1)) : '';
@@ -2458,17 +2450,16 @@ function createGuestFunctionConstructor(NativeFunction, processOverride, sourceU
   return GuestFunction;
 }
 
+const prepareCommonJsSource = createCommonJsSourcePreparer();
+// Nested requires run while the parent's guest Function is installed. Their
+// source is already prepared; routing it through that constructor scans it again.
+const CommonJsFunction = Function;
+
 function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = null, processOverride = null) {
-  // npm bin shims are executable text files and commonly start with a
-  // shebang, which JavaScript's Function constructor cannot parse.
-  const transformedAsyncSource = transformAsyncSource(rewriteCommonJsDynamicImports(source));
-  const evalAsync = transformEvalLiterals(transformedAsyncSource.source, transformedAsyncSource.bindingName);
-  const transformedText = evalAsync.transformed ? evalAsync.source : transformedAsyncSource.source;
-  const sourceText = `${transformedText
-    .replace(/^#![^\r\n]*(?:\r\n|\n|$)/, (shebang) => shebang.endsWith('\n') ? '\n' : '')
-  }\n//# sourceURL=${sourceURL}`;
-  const bindProcess = processOverride && !hasTopLevelCommonJsProcessBinding(sourceText);
-  const bindAsync = transformedAsyncSource.transformed || evalAsync.transformed;
+  const prepared = prepareCommonJsSource(source);
+  const sourceText = `${prepared.source}\n//# sourceURL=${sourceURL}`;
+  const bindProcess = processOverride && !prepared.hasProcessBinding;
+  const bindAsync = prepared.bindAsync;
   const asyncRunner = bindAsync
     ? (generatorFunction, thisArg, args) => runAsyncGenerator(
       generatorFunction,
@@ -2480,9 +2471,9 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
   if (moduleWrapper) {
     let prefix = String(moduleWrapper[0]).replace('__dirname) {', '__dirname, __bnhImport) {');
     if (bindProcess) prefix = prefix.replace('__bnhImport) {', '__bnhImport, process) {');
-    if (bindAsync) prefix = prefix.replace(/\)\s*\{\s*$/u, `, ${transformedAsyncSource.bindingName}) {`);
+    if (bindAsync) prefix = prefix.replace(/\)\s*\{\s*$/u, `, ${prepared.bindingName}) {`);
     const wrappedSource = `${prefix}${sourceText}${moduleWrapper[1]}`;
-    const wrapped = new Function(`return ${wrappedSource}`)();
+    const wrapped = new CommonJsFunction(`return ${wrappedSource}`)();
     const values = [
       commonJsValues[2],
       commonJsValues[0],
@@ -2518,10 +2509,10 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
       else globalThis.__bnhUserCode = previousUserCode;
     }
   }
-  const wrapped = new Function(
+  const wrapped = new CommonJsFunction(
     ...COMMONJS_WRAPPER_PARAMETERS,
     ...(bindProcess ? ['process'] : []),
-    ...(bindAsync ? [transformedAsyncSource.bindingName] : []),
+    ...(bindAsync ? [prepared.bindingName] : []),
     sourceText,
   );
   // Promise-hook compatibility needs to distinguish test code from the

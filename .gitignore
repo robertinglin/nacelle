@@ -8,6 +8,7 @@ dist/
 .pytest_cache/
 .DS_Store
 .bnh-state/
+.worktrees/
 node/
 target/
 node_modules/

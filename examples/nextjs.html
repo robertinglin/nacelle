@@ -654,18 +654,41 @@ export default nextConfig;
       if (e.key === 'Enter') document.getElementById('btn-go').click();
     });
 
-    async function waitForNextServer(port = 3000) {
-      const deadline = Date.now() + 30000;
+    let launching = false;
+    let readinessController = null;
+
+    async function waitForNextServer(port = 3000, signal) {
+      const deadline = Date.now() + 90000;
       let lastError;
       while (Date.now() < deadline) {
+        signal?.throwIfAborted();
+        const probe = new AbortController();
+        const onAbort = () => probe.abort(signal.reason);
+        signal?.addEventListener('abort', onAbort, { once: true });
+        // Let the first request finish the cold compile. Racing a five-second
+        // timer without aborting fetch left a growing queue of live requests.
+        const timeout = setTimeout(() => probe.abort(new Error('Next.js readiness timed out')), deadline - Date.now());
         try {
-          const response = await node.fetch(`http://localhost:${port}/`, { cache: 'no-store' });
+          const response = await node.fetch(`http://localhost:${port}/`, {
+            cache: 'no-store',
+            signal: probe.signal,
+          });
           if (response.ok) return;
           const body = await response.text();
-          throw new Error(`Next.js returned HTTP ${response.status}: ${body.slice(0, 400)}`);
+          // A 502 is the gateway reporting the dev server is not accepting
+          // connections yet (ECONNREFUSED before listen). That is ordinary
+          // boot racing; every other status came from the app itself.
+          if (response.status !== 502) {
+            throw new Error(`Next.js returned HTTP ${response.status}: ${body.slice(0, 400)}`);
+          }
+          lastError = new Error(`Next.js not listening yet: ${body.slice(0, 200)}`);
         } catch (error) {
-          lastError = error;
+          signal?.throwIfAborted();
           if (error?.message?.startsWith('Next.js returned HTTP')) throw error;
+          lastError = lastError || error;
+        } finally {
+          clearTimeout(timeout);
+          signal?.removeEventListener('abort', onAbort);
         }
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
@@ -673,11 +696,19 @@ export default nextConfig;
     }
 
     async function launchNextApp(mode = 'dev') {
+      if (launching) return;
+      launching = true;
+      readinessController?.abort();
       currentMode = mode;
       serverStatus.className = 'status-dot loading';
       logTerminal(`--- Booting stock Next.js 16 App Router (${mode}) ---`, 'system');
 
       try {
+        if (activeProcess) {
+          const previous = activeProcess;
+          activeProcess = null;
+          await previous.kill();
+        }
         if (!node) {
           logTerminal('Creating Nacelle Node 22 runtime...', 'system');
           node = await Nacelle.create({
@@ -707,38 +738,45 @@ export default nextConfig;
           },
         });
         logTerminal('✓ stock Next.js 16 dependencies installed', 'system');
-        if (activeProcess) {
-          try { await activeProcess.kill(); } catch {}
-        }
-
-        let booted = false;
-        const onReady = async () => {
-          if (booted) return;
-          try {
-            // Next 16 prints its startup banner before the App Router finishes
-            // creating request handlers. Probe the real virtual port so the
-            // iframe sees the same server a native browser would reach.
-            await waitForNextServer();
-            booted = true;
-            serverStatus.className = 'status-dot active';
-            window.navigateFrame(urlInput.value || '/');
-          } catch (error) {
-            serverStatus.className = 'status-dot error';
-            logTerminal(`Error: name=${error.name || typeof error} message=${error.message || ''} code=${error.code || ''} stack=${error.stack || String(error)}`, 'stderr');
-          }
-        };
+        const controller = new AbortController();
+        readinessController = controller;
         const processHandle = await node.npm.run(mode, {
           onNetwork: logGuestNetwork,
-          onStdout: (chunk) => {
-            logTerminal(chunk, 'stdout');
-            if (chunk.includes('Ready in')) setTimeout(onReady, 50);
-          },
+          onStdout: (chunk) => logTerminal(chunk, 'stdout'),
           onStderr: (chunk) => logTerminal(chunk, 'stderr'),
         });
         activeProcess = processHandle;
+        const onExit = (code, error) => {
+          if (activeProcess !== processHandle) return;
+          activeProcess = null;
+          controller.abort();
+          serverStatus.className = mode === 'build' && code === 0 ? 'status-dot' : 'status-dot error';
+          logTerminal(error?.stack || `Next.js ${mode} exited with code ${code}`, code === 0 ? 'system' : 'stderr');
+        };
+        processHandle.exit.then((code) => onExit(code), (error) => onExit(null, error));
+
+        if (mode !== 'build') {
+          // Startup output is a byte stream: "Ready in" can cross chunks.
+          // Start one HTTP probe independently of the banner; requesting /
+          // is also what triggers the first development compilation.
+          void (async () => {
+            try {
+              await waitForNextServer(3000, controller.signal);
+              if (activeProcess !== processHandle || controller.signal.aborted) return;
+              serverStatus.className = 'status-dot active';
+              window.navigateFrame(urlInput.value || '/');
+            } catch (error) {
+              if (controller.signal.aborted || activeProcess !== processHandle) return;
+              serverStatus.className = 'status-dot error';
+              logTerminal(error.stack || String(error), 'stderr');
+            }
+          })();
+        }
       } catch (err) {
         serverStatus.className = 'status-dot error';
-          logTerminal(`Error: name=${err.name || typeof err} message=${err.message || ''} code=${err.code || ''} stack=${err.stack || String(err)}`, 'stderr');
+        logTerminal(err.stack || String(err), 'stderr');
+      } finally {
+        launching = false;
       }
     }
 
@@ -749,8 +787,6 @@ export default nextConfig;
     document.getElementById('btn-apply-code').addEventListener('click', async () => {
       files[currentFile] = codeEditor.value;
       if (node) {
-        await node.fs.writeFile(`/node/${currentFile}`, files[currentFile]);
-        logNetwork(`Updated /node/${currentFile} in VFS`);
         await launchNextApp(currentMode);
       }
     });

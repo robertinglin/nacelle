@@ -909,8 +909,13 @@ export function createVfs(options = {}) {
     const parent = parentOf(path);
     for (const [watchPath, list] of watchers) {
       for (const watcher of [...list]) {
-        if (!watcher._recursive && parent !== watchPath && path !== watchPath) continue;
-        watcher._notify(eventType, path.split('/').at(-1));
+        if (watcher._recursive) {
+          if (!isWithin(path, watchPath)) continue;
+        } else if (parent !== watchPath && path !== watchPath) continue;
+        const filename = watcher._recursive && path !== watchPath
+          ? path.slice(watchPath === '/' ? 1 : watchPath.length + 1)
+          : path.split('/').at(-1);
+        watcher._notify(eventType, filename);
       }
     }
   }
@@ -3196,7 +3201,6 @@ export function createVfs(options = {}) {
     let referenced = true;
     let failure;
     const owner = options.owner || watcherOwner;
-    const ownerClose = () => emitter.close();
     const onAbort = () => emitter._fail(abortError(options.signal.reason));
     if (callback) emitter.on('change', callback);
     if (options.persistent === false) referenced = false;
@@ -3221,13 +3225,16 @@ export function createVfs(options = {}) {
       if (owner) {
         const owned = watchersByOwner.get(owner);
         if (owned) {
-          owned.delete(emitter);
-          if (!owned.size) watchersByOwner.delete(owner);
+          owned.watchers.delete(emitter);
+          if (!owned.watchers.size) {
+            watchersByOwner.delete(owner);
+            const remove = owner.off || owner.removeListener;
+            remove?.call(owner, 'exit', owned.close);
+            remove?.call(owner, 'close', owned.close);
+            owner.removeEventListener?.('exit', owned.close);
+            owner.removeEventListener?.('close', owned.close);
+          }
         }
-        owner.off?.('exit', ownerClose);
-        owner.off?.('close', ownerClose);
-        owner.removeEventListener?.('exit', ownerClose);
-        owner.removeEventListener?.('close', ownerClose);
       }
       for (const waiter of waiters.splice(0)) waiter.resolve({ value: undefined, done: true });
       resource.emitDestroy();
@@ -3261,16 +3268,26 @@ export function createVfs(options = {}) {
     list.push(emitter);
     watchers.set(path, list);
     if (owner) {
-      const owned = watchersByOwner.get(owner) || new Set();
-      owned.add(emitter);
-      watchersByOwner.set(owner, owned);
-      if (owner.once) {
-        owner.once('exit', ownerClose);
-        owner.once('close', ownerClose);
-      } else {
-        owner.addEventListener?.('exit', ownerClose, { once: true });
-        owner.addEventListener?.('close', ownerClose, { once: true });
+      let owned = watchersByOwner.get(owner);
+      if (!owned) {
+        owned = {
+          watchers: new Set(),
+          close: () => {
+            for (const watcher of [...owned.watchers]) watcher.close();
+          },
+        };
+        watchersByOwner.set(owner, owned);
+        // A project can have thousands of watchers but needs only one pair
+        // of process lifecycle listeners, not one pair per watched path.
+        if (owner.once) {
+          owner.once('exit', owned.close);
+          owner.once('close', owned.close);
+        } else {
+          owner.addEventListener?.('exit', owned.close, { once: true });
+          owner.addEventListener?.('close', owned.close, { once: true });
+        }
       }
+      owned.watchers.add(emitter);
     }
     if (options.signal) {
       options.signal.addEventListener('abort', onAbort, { once: true });

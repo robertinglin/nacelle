@@ -575,22 +575,33 @@ test.describe('Next.js SWC package selection', () => {
         private: true,
       }));
       await node.npm.install('next@16.3.3');
+      // execute() does not mount an options.files object. Seed real files so
+      // this cannot pass through Watchpack's initial-missing event instead.
+      await node.fs.writeFile('/node/app/page.tsx', 'export default function Page() { return null; }');
+      await node.fs.writeFile('/node/app/nested/page.tsx', 'export default function Page() { return null; }');
       const child = await node.execute(`
         (async () => {
           const assert = require('node:assert/strict');
           const Watchpack = require('next/dist/compiled/watchpack');
-          const watchpack = new Watchpack({ aggregateTimeout: 5 });
+          const watchpack = new Watchpack({
+            aggregateTimeout: 5,
+            ignored: (path) => path !== '/node' && path !== '/node/app' && !path.startsWith('/node/app/'),
+          });
           const keepAlive = setInterval(() => {}, 1000);
+          let timeout;
           try {
             const aggregated = new Promise((resolve) => watchpack.once('aggregated', resolve));
-            watchpack.watch({ directories: ['/node/app'], startTime: 0 });
+            watchpack.watch({ directories: ['/node'], startTime: 0 });
             await Promise.race([
               aggregated,
-              new Promise((_, reject) => setTimeout(() => reject(new Error('Watchpack initial scan timed out')), 5000)),
+              new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('Watchpack initial scan timed out')), 5000); }),
             ]);
-            assert.ok(watchpack.getTimeInfoEntries());
+            const entries = watchpack.getTimeInfoEntries();
+            assert.equal(typeof entries.get('/node/app/page.tsx')?.timestamp, 'number');
+            assert.equal(typeof entries.get('/node/app/nested/page.tsx')?.timestamp, 'number');
             process.stdout.write('NEXT_WATCHPACK_SCAN_COMPLETED\\n');
           } finally {
+            clearTimeout(timeout);
             watchpack.close();
             clearInterval(keepAlive);
           }
@@ -598,7 +609,7 @@ test.describe('Next.js SWC package selection', () => {
           console.error(error.stack || error);
           process.exitCode = 1;
         });
-      `, { files: { '/node/app/page.tsx': 'export default function Page() { return null; }' } });
+      `);
       return {
         exitCode: await child.exit,
         stdout: await child.stdoutText(),

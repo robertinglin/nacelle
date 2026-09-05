@@ -11640,6 +11640,9 @@ export function createRuntime({
           headers: response.headers,
         });
         Object.defineProperty(result, '__bnhURL', { configurable: true, value: url });
+        // The virtual client buffers the whole body before resolving, so the
+        // fetch task can release as soon as the response is delivered.
+        Object.defineProperty(result, '__bnhBufferedBody', { configurable: true, value: true });
         if (response._response?.body?._bnhTerminated === true) {
           Object.defineProperty(result, '__bnhTerminated', { configurable: true, value: true });
         }
@@ -11918,34 +11921,92 @@ export function createRuntime({
       };
       const holdForResponseBody = (response) => {
         const body = response?.body;
-        if (!body || typeof body.pipeTo !== 'function') {
+        // Buffered virtual responses are already complete when resolved, and
+        // responses without a stream body need no hold at all.
+        if (!body || typeof body.pipeTo !== 'function' || response.__bnhBufferedBody === true) {
           releaseFetch();
           return response;
         }
-        const originalPipeTo = body.pipeTo;
-        let restored = false;
-        const restorePipeTo = () => {
-          if (restored) return;
-          restored = true;
-          try { body.pipeTo = originalPipeTo; } catch { /* host streams may be sealed */ }
-        };
-        try {
-          body.pipeTo = (...args) => {
-            let result;
-            try {
-              result = originalPipeTo.apply(body, args);
-            } catch (error) {
-              releaseFetch();
-              restorePipeTo();
-              throw error;
-            }
-            return Promise.resolve(result).finally(() => {
-              releaseFetch();
-              restorePipeTo();
-            });
-          };
-        } catch {
+        // Keep the child alive only while the guest is still consuming the
+        // body. Every consumption entry point a guest can reach — pipeTo,
+        // manual readers, async iteration, and the buffered response methods —
+        // must release the fetch task when it settles; a body consumed through
+        // only one of them would otherwise block the child lifecycle forever.
+        let released = false;
+        const releaseOnce = () => {
+          if (released) return;
+          released = true;
           releaseFetch();
+        };
+        const wrapSettling = (owner, name) => {
+          try {
+            const original = owner[name];
+            if (typeof original !== 'function') return;
+            owner[name] = (...args) => {
+              let result;
+              try {
+                result = original.apply(owner, args);
+              } catch (error) {
+                releaseOnce();
+                throw error;
+              }
+              return Promise.resolve(result).finally(releaseOnce);
+            };
+          } catch {
+            releaseOnce();
+          }
+        };
+        wrapSettling(body, 'pipeTo');
+        wrapSettling(response, 'text');
+        wrapSettling(response, 'json');
+        wrapSettling(response, 'arrayBuffer');
+        wrapSettling(response, 'blob');
+        wrapSettling(response, 'formData');
+        try {
+          const originalGetReader = body.getReader;
+          if (typeof originalGetReader === 'function') {
+            body.getReader = (...args) => {
+              const reader = originalGetReader.apply(body, args);
+              try {
+                Promise.resolve(reader.closed).catch(() => {}).finally(releaseOnce);
+              } catch {
+                releaseOnce();
+              }
+              return reader;
+            };
+          }
+        } catch {
+          releaseOnce();
+        }
+        try {
+          const originalIterator = body[Symbol.asyncIterator];
+          if (typeof originalIterator === 'function') {
+            body[Symbol.asyncIterator] = () => {
+              const iterator = originalIterator.call(body);
+              return {
+                next: (...args) => Promise.resolve(iterator.next(...args)).then(
+                  (result) => {
+                    if (!result || result.done) releaseOnce();
+                    return result;
+                  },
+                  (error) => {
+                    releaseOnce();
+                    throw error;
+                  },
+                ),
+                return: (value) => {
+                  releaseOnce();
+                  return iterator.return ? iterator.return(value) : Promise.resolve({ done: true, value });
+                },
+                throw: (error) => {
+                  releaseOnce();
+                  return iterator.throw ? iterator.throw(error) : Promise.reject(error);
+                },
+              };
+            };
+          }
+        } catch {
+          releaseOnce();
         }
         return response;
       };

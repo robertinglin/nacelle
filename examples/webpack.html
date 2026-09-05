@@ -295,51 +295,63 @@ async function build() {
     input: '/node/src/index.js',
   });
 
-  const { output } = await bundle.generate({
-    format: 'cjs',
-    exports: 'auto',
-  });
+  try {
+    const { output } = await bundle.generate({
+      format: 'cjs',
+      exports: 'auto',
+    });
 
-  const code = output[0].code;
-  const hash = crypto.createHash('sha256').update(code).digest('hex').slice(0, 8);
-  const bundleFilename = 'bundle.' + hash + '.js';
+    const code = output[0].code;
+    const hash = crypto.createHash('sha256').update(code).digest('hex').slice(0, 8);
+    const bundleFilename = 'bundle.' + hash + '.js';
 
-  fs.mkdirSync('/node/dist', { recursive: true });
-  fs.writeFileSync('/node/dist/' + bundleFilename, code);
-  fs.writeFileSync('/node/dist/manifest.json', JSON.stringify({
-    'main.js': bundleFilename,
-    modules: output[0].modules ? Object.keys(output[0].modules) : ['/node/src/index.js', '/node/src/analytics.js', '/node/src/math.js'],
-    hash: hash,
-    size: Buffer.byteLength(code),
-  }, null, 2));
+    fs.mkdirSync('/node/dist', { recursive: true });
+    fs.writeFileSync('/node/dist/' + bundleFilename, code);
+    fs.writeFileSync('/node/dist/manifest.json', JSON.stringify({
+      'main.js': bundleFilename,
+      modules: output[0].modules ? Object.keys(output[0].modules) : ['/node/src/index.js', '/node/src/analytics.js', '/node/src/math.js'],
+      hash: hash,
+      size: Buffer.byteLength(code),
+    }, null, 2));
 
-  console.log(JSON.stringify({
-    bundle: bundleFilename,
-    hash: hash,
-    size: Buffer.byteLength(code),
-    manifest: '/node/dist/manifest.json'
-  }));
+    console.log(JSON.stringify({
+      bundle: bundleFilename,
+      hash: hash,
+      size: Buffer.byteLength(code),
+      manifest: '/node/dist/manifest.json'
+    }));
+  } finally {
+    await bundle.close();
+  }
 }
 
-build().catch(console.error);
+build().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
 `;
 
     document.getElementById('code-editor').value = bundlerCode;
 
     let nodeInstance = null;
+    let building = false;
 
     async function build() {
+      if (building) return;
+      building = true;
+      document.getElementById('btn-run').disabled = true;
       document.getElementById('global-status').textContent = 'Building...';
       document.getElementById('global-status').className = 'status-pill running';
 
       const t0 = performance.now();
       try {
         if (!nodeInstance) {
-          nodeInstance = await Nacelle.create({
+          const instance = await Nacelle.create({
             gateway: false,
             cwd: '/node',
           });
-          await nodeInstance.npm.install('rollup@2.79.2');
+          await instance.npm.install('rollup@2.79.2');
+          nodeInstance = instance;
         }
 
         const node = nodeInstance;
@@ -350,18 +362,18 @@ build().catch(console.error);
 
         const child = await node.bash('node rollup.js');
         const code = await child.exit;
-        const stdout = await child.stdoutText();
         const t1 = performance.now();
 
         if (code !== 0) {
-          console.error(await child.stderrText());
-          return;
+          throw new Error((await child.stderrText()).trim() || `Rollup exited with code ${code}`);
         }
 
-        const data = JSON.parse(stdout);
+        // The manifest is the build result; stdout is diagnostic output, not
+        // a JSON protocol (plugins may also write to it).
         const manifestRaw = await node.fs.readFile('/node/dist/manifest.json', 'utf8');
+        const data = JSON.parse(manifestRaw);
 
-        document.getElementById('metric-bundle').textContent = data.bundle;
+        document.getElementById('metric-bundle').textContent = data['main.js'];
         document.getElementById('metric-hash').textContent = data.hash;
         document.getElementById('metric-size').textContent = `${(data.size / 1024).toFixed(2)} KB`;
         document.getElementById('metric-time').textContent = `${(t1 - t0).toFixed(1)} ms`;
@@ -374,7 +386,7 @@ build().catch(console.error);
           <div style="color: var(--text-muted); margin-top: 12px; margin-bottom: 8px;">Executing Generated Bundle in Isolated Runtime:</div>
         `;
 
-        const runChild = await node.bash('node /node/dist/' + data.bundle);
+        const runChild = await node.bash('node /node/dist/' + data['main.js']);
         const runCode = await runChild.exit;
         const runOut = await runChild.stdoutText();
         const runErr = await runChild.stderrText();
@@ -389,6 +401,12 @@ build().catch(console.error);
         document.getElementById('global-status').className = 'status-pill ready';
       } catch (err) {
         console.error(err);
+        document.getElementById('global-status').textContent = 'Build failed';
+        document.getElementById('global-status').className = 'status-pill error';
+        document.getElementById('output-pane').textContent = err.message || String(err);
+      } finally {
+        building = false;
+        document.getElementById('btn-run').disabled = false;
       }
     }
 

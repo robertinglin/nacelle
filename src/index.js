@@ -568,6 +568,11 @@ export class Nacelle {
    * @param {Object} [options]
    */
   async fetch(url, options = {}) {
+    const signal = options.signal;
+    const abortReason = () => signal.reason === undefined
+      ? new DOMException('The operation was aborted', 'AbortError')
+      : signal.reason;
+    if (signal?.aborted) throw abortReason();
     let port = 3000;
     let path = url;
     try {
@@ -589,6 +594,17 @@ export class Nacelle {
         BufferClass,
       });
       const socket = netModule.connect({ port, host: '127.0.0.1' });
+      let settled = false;
+      const finish = (complete, value) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener('abort', onAbort);
+        complete(value);
+      };
+      const onAbort = () => {
+        finish(reject, abortReason());
+        socket.destroy();
+      };
       const method = (options.method || 'GET').toUpperCase();
       const headers = { ...(options.headers || {}) };
       if (!headers.host && !headers.Host) headers.host = `127.0.0.1:${port}`;
@@ -612,15 +628,13 @@ export class Nacelle {
       reqLines.push('');
       reqLines.push('');
 
-      socket.write(new TextEncoder().encode(reqLines.join('\r\n')));
-      if (bodyBytes) socket.write(bodyBytes);
-
       const chunks = [];
       socket.on('data', (chunk) => {
         chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
       });
-      socket.on('error', reject);
+      socket.on('error', (error) => finish(reject, error));
       socket.on('close', () => {
+        if (settled) return;
         const totalLength = chunks.reduce((acc, c) => acc + c.byteLength, 0);
         const combined = new Uint8Array(totalLength);
         let offset = 0;
@@ -649,7 +663,11 @@ export class Nacelle {
         const rawBody = combined.subarray(bodyOffset);
         const lines = headerText.split(/\r?\n/);
         const statusMatch = (lines[0] || '').match(/^HTTP\/\d\.\d\s+(\d+)(?:\s+(.*))?$/);
-        const status = statusMatch ? parseInt(statusMatch[1], 10) : 200;
+        if (!statusMatch) {
+          finish(reject, new Error('Virtual HTTP connection closed without a valid response'));
+          return;
+        }
+        const status = parseInt(statusMatch[1], 10);
         const statusText = statusMatch ? statusMatch[2] || 'OK' : 'OK';
         const resHeaders = new Headers();
         for (let i = 1; i < lines.length; i += 1) {
@@ -664,8 +682,15 @@ export class Nacelle {
           statusText,
           headers: resHeaders,
         });
-        resolve(res);
+        finish(resolve, res);
       });
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      socket.write(new TextEncoder().encode(reqLines.join('\r\n')));
+      if (bodyBytes) socket.write(bodyBytes);
     });
   }
 

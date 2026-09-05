@@ -116,7 +116,11 @@ test.describe('Next.js 16 App Router browser demo', () => {
     await page.waitForTimeout(2000);
     await page.waitForTimeout(10000);
     try {
-      await expect(serverStatus).toHaveClass(/active/, { timeout: 35000 });
+      // Cold first compile of the App Router takes ~48s in the browser VFS,
+      // and the page's server probe (waitForNextServer) polls for the full
+      // compile before flipping this dot. The budget below must exceed that
+      // cold path, not just the warm one.
+      await expect(serverStatus).toHaveClass(/active/, { timeout: 90000 });
     } catch (error) {
       throw new Error(`${error.message}\nNEXT TERMINAL:\n${await termOutput.textContent()}`
         + `\nGATEWAY LOGS:\n${JSON.stringify(await page.evaluate(() => window.__bnhGatewayLogs || []))}`);
@@ -139,6 +143,10 @@ test.describe('Next.js 16 App Router browser demo', () => {
       'WebSocket connection to',
       '/_next/hmr',
       'Unexpected response code: 404',
+      // The readiness probe polls / through the Service Worker gateway while
+      // the dev server is still booting; each refused connection is reported
+      // by the gateway as a 502 response the browser logs as a resource error.
+      'the server responded with a status of 502',
     ];
     const unexpectedConsoleErrors = consoleErrors.filter((message) => (
       !expectedConsoleErrorFragments.some((fragment) => message.includes(fragment))

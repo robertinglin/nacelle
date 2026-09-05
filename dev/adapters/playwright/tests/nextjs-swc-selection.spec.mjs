@@ -313,14 +313,14 @@ test.describe('Next.js SWC package selection', () => {
       expect.objectContaining({
         phase: 'request',
         source: 'guest-fetch',
-        transport: 'npm-proxy',
+        transport: 'browser-native',
         method: 'GET',
         url: 'https://registry.npmjs.org/@next/swc-wasm-nodejs/-/swc-wasm-nodejs-16.3.3.tgz',
       }),
       expect.objectContaining({
         phase: 'response',
         source: 'guest-fetch',
-        transport: 'npm-proxy',
+        transport: 'browser-native',
         status: 200,
         url: 'https://registry.npmjs.org/@next/swc-wasm-nodejs/-/swc-wasm-nodejs-16.3.3.tgz',
       }),

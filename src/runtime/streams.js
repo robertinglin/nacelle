@@ -943,6 +943,7 @@ export class Readable extends EventEmitter {
       chunk = this._decoder.decode(bytes, { stream: true });
     }
     if (typeof chunk === 'string' && this._preserveStrings) {
+      if (chunk.length === 0) return this._bufferedBytes < this.readableHighWaterMark;
       this._buffer.push(chunk);
       this._bufferedBytes += chunk.length;
       this._readableState.length = this._bufferedBytes;
@@ -954,6 +955,8 @@ export class Readable extends EventEmitter {
       return this._bufferedBytes < this.readableHighWaterMark;
     }
     const bytes = toBytes(chunk);
+    // Empty chunks cannot be consumed by read(), so queuing them stalls the flow drain.
+    if (bytes.byteLength === 0) return this._bufferedBytes < this.readableHighWaterMark;
     this._buffer.push(bytes);
     this._bufferedBytes += bytes.byteLength;
     this._readableState.length = this._bufferedBytes;

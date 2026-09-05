@@ -26,6 +26,37 @@ function runGenerator(generatorFactory) {
   });
 }
 
+test('async arrows in instance and static class fields preserve parameters and this', async () => {
+  const source = `
+    class Task {
+      value = 3;
+      run = async (input) => { return this.value + await Promise.resolve(input); };
+      static value = 5;
+      static run = async (input) => this.value + await Promise.resolve(input);
+    }
+  `;
+  const transformed = transformAsyncSource(source);
+  assert.equal(transformed.transformed, true);
+  const Task = new Function(transformed.bindingName, `${transformed.source}; return Task;`)(
+    (generator, receiver, args) => runGenerator(() => generator.apply(receiver, args)),
+  );
+  assert.equal(await new Task().run(7), 10);
+  assert.equal(await Task.run(7), 12);
+});
+
+test('async arrows still read their enclosing function arguments', async () => {
+  const source = `
+    function task(value) {
+      return async () => { return arguments[0] + await Promise.resolve(2); };
+    }
+  `;
+  const transformed = transformAsyncSource(source);
+  const task = new Function(transformed.bindingName, `${transformed.source}; return task;`)(
+    (generator, receiver, args) => runGenerator(() => generator.apply(receiver, args)),
+  );
+  assert.equal(await task(8)(), 10);
+});
+
 test('keeps awaited function expression calls syntactically valid', async () => {
   const source = `
     async function invoke() {

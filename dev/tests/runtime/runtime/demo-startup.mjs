@@ -192,7 +192,8 @@ async function nextPage(fetchImpl = async () => ({ ok: true })) {
     fs: { writeFile: async () => { events.push('write'); } },
     npm: {
       install: async () => { events.push('install'); },
-      run: async (_mode, options) => {
+      run: async (mode, options) => {
+        events.push(`${mode}:${options.env.NODE_ENV}`);
         let exit;
         const handle = { exit: new HostPromise((resolve) => { exit = resolve; }), kill: async () => { events.push('kill'); exit(0); }, finish: (code) => exit(code) };
         handles.push(handle);
@@ -214,7 +215,7 @@ async function nextPage(fetchImpl = async () => ({ ok: true })) {
   const start = source.indexOf('    async function waitForNextServer');
   const end = source.indexOf("    document.getElementById('btn-dev')", start);
   assert.ok(start >= 0 && end > start);
-  vm.runInContext(`let launching = false, readinessController = null;\n${source.slice(start, end)}\nthis.launchDemo = launchNextApp;`, context);
+  vm.runInContext(`let builtFiles = null, launching = false, readinessController = null;\n${source.slice(start, end)}\nthis.launchDemo = launchNextApp;`, context);
   return { context, events, handles };
 }
 
@@ -249,4 +250,56 @@ test('Next demo cancels readiness and reports a process that exits before servin
   await turn();
   assert.equal(probeSignal.aborted, true);
   assert.equal(context.serverStatus.className, 'status-dot error');
+});
+
+test('Next start builds first, reuses a successful build, and rebuilds edited sources', async () => {
+  const { context, events, handles } = await nextPage();
+  try {
+    const start = context.launchDemo('start');
+    await turn();
+    assert.ok(events.includes('build:production'));
+    assert.ok(!events.includes('fetch'));
+    handles[0].finish(0);
+    await start;
+    await turn();
+    assert.ok(events.includes('start:production'));
+    assert.equal(context.serverStatus.className, 'status-dot active');
+
+    events.length = 0;
+    await context.launchDemo('start');
+    await turn();
+    assert.ok(!events.includes('build:production'));
+    assert.ok(events.includes('start:production'));
+
+    context.files['app/page.tsx'] = 'edited';
+    events.length = 0;
+    const rebuild = context.launchDemo('start');
+    await turn();
+    assert.ok(events.includes('build:production'));
+    assert.ok(!events.includes('start:production'));
+    handles.at(-1).finish(1);
+    await rebuild;
+    assert.equal(context.serverStatus.className, 'status-dot error');
+    assert.ok(!events.includes('start:production'));
+  } finally {
+    for (const handle of handles) handle.finish(0);
+    await turn();
+  }
+});
+
+test('Next build can finish without probing a server and unlocks subsequent launches', async () => {
+  const { context, events, handles } = await nextPage();
+  const build = context.launchDemo('build');
+  await turn();
+  await context.launchDemo('dev');
+  assert.equal(handles.length, 1);
+  handles[0].finish(0);
+  await build;
+  assert.equal(context.serverStatus.className, 'status-dot');
+  assert.ok(!events.includes('fetch'));
+  await context.launchDemo('dev');
+  await turn();
+  assert.ok(events.includes('dev:development'));
+  handles[1].finish(0);
+  await turn();
 });

@@ -25,17 +25,24 @@ function newStreamReadableFromReadableStream(readableStream, options = {}) {
       if (reading || released) return;
       reading = true;
       Promise.resolve(reader.read()).then(({ value, done }) => {
+        // push() may immediately request the next chunk in flowing mode.
+        reading = false;
         if (done) {
           release();
           this.push(null);
         } else {
           this.push(value);
         }
-      }, (error) => this.destroy(error)).finally(() => {
+      }, (error) => {
         reading = false;
+        this.destroy(error);
       });
     },
     destroy(error, callback) {
+      if (released) {
+        callback(error);
+        return;
+      }
       Promise.resolve(reader.cancel(error)).then(() => {
         release();
         callback(error);
@@ -122,6 +129,10 @@ function newStreamWritableFromWritableStream(writableStream, options = {}) {
       });
     },
     destroy(error, callback) {
+      if (released) {
+        callback(error);
+        return;
+      }
       Promise.resolve(writer.abort(error)).then(() => {
         release();
         callback(error);

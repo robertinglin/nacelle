@@ -271,6 +271,8 @@ alternate registry artifact.
 
 Nacelle runs full Next.js App Router applications entirely in-browser without host subprocesses. The Next.js demo (`npm run examples:next`) demonstrates Server-Side Rendering (SSR), file-system routing (`app/page.tsx`, `app/about/page.tsx`, `app/dashboard/page.tsx`), Server Actions & API endpoints (`app/api/hello/route.ts`), and Next.js CLI orchestration (`next dev`, `next build`, `next start`). Nacelle advertises the WebContainer runtime signal that makes stock Next.js select its own official SWC WebAssembly fallback (`@next/swc-wasm-nodejs`) instead of its platform `.node` package.
 
+The demo's **next start** button builds the current sources when needed, then starts the production server. **next build** can also run separately. Production builds use one worker with worker threads to fit the browser's memory budget, and generated files remain available between commands.
+
 ### Proxy configuration
 
 `createProxyConfig()` provides one small, explicit configuration for HTTP(S)

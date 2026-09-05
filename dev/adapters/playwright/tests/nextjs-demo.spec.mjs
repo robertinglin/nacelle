@@ -92,7 +92,7 @@ test.describe('Next.js 16 App Router browser demo', () => {
   });
 
   test('loads Next.js demo and executes App Router SSR, client navigation, and API routes', async ({ page }) => {
-    test.setTimeout(120000);
+    test.setTimeout(660000);
     const consoleErrors = [];
     const pageErrors = [];
     page.on('pageerror', (error) => pageErrors.push(error.message));
@@ -138,6 +138,22 @@ test.describe('Next.js 16 App Router browser demo', () => {
 
     await page.locator('.btn-route:has-text("/api/hello")').click();
     await expect(iframe.locator('body')).toContainText('Hello from a native Next.js route', { timeout: 10000 });
+
+    await page.locator('#btn-build').click();
+    try {
+      await expect(termOutput).toContainText(/Next.js build exited with code \d+/, { timeout: 600000 });
+      await expect(termOutput).toContainText('Next.js build exited with code 0');
+    } catch (error) {
+      throw new Error(`${error.message}\nNEXT TERMINAL:\n${await termOutput.textContent()}\nPAGE ERRORS: ${JSON.stringify(pageErrors)}\nCONSOLE ERRORS: ${JSON.stringify(consoleErrors)}`);
+    }
+    await page.locator('#btn-start').click();
+    await expect(serverStatus).toHaveClass(/active/, { timeout: 30000 });
+    await page.locator('.btn-route[data-route="/"]').click();
+    await expect(iframe.locator('h1')).toHaveText('Hello Next.js!', { timeout: 30000 });
+    await page.locator('.btn-route[data-route="/about"]').click();
+    await expect(iframe.locator('h1')).toHaveText('About the Next.js runtime');
+    await page.locator('.btn-route[data-route="/api/hello"]').click();
+    await expect(iframe.locator('body')).toContainText('Hello from a native Next.js route');
 
     const expectedConsoleErrorFragments = [
       'WebSocket connection to',

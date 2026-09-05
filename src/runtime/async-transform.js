@@ -669,17 +669,20 @@ function transformCandidates(source, candidates, bindingName) {
         value: `${header}{ return ${bindingName}(function* () {${body}}, this, arguments); }`,
       };
     }
+    // Arrows have no arguments object of their own. Only forward the outer
+    // one when the source uses it: introducing it in a class field is illegal.
+    const arrowArguments = /\barguments\b/u.test(rawBody) ? 'arguments' : '[]';
     if (candidate.kind === 'arrow-block') {
       return {
         start: candidate.start,
         end: candidate.bodyEnd,
-        value: `${header}${bindingName}(function* () {${body}}, this, arguments)`,
+        value: `${header}${bindingName}(function* () {${body}}, this, ${arrowArguments})`,
       };
     }
     return {
       start: candidate.start,
       end: candidate.bodyEnd,
-      value: `${header}${bindingName}(function* () { return ${body}; }, this, arguments)`,
+      value: `${header}${bindingName}(function* () { return ${body}; }, this, ${arrowArguments})`,
     };
   });
   return applyReplacements(source, replacements);

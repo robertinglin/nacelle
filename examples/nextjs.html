@@ -377,8 +377,8 @@
     </div>
     <div class="mode-controls">
       <button class="btn btn-primary" id="btn-dev">▶ next dev</button>
-      <button class="btn btn-secondary" id="btn-build" disabled title="next build is currently disabled in the browser runtime">🔨 next build (disabled)</button>
-      <button class="btn btn-secondary" id="btn-start">🚀 next start</button>
+      <button class="btn btn-secondary" id="btn-build">🔨 next build</button>
+      <button class="btn btn-secondary" id="btn-start" title="Build if needed, then start the production server">🚀 next start</button>
       <button class="btn btn-secondary" id="btn-restart">🔄 Restart</button>
     </div>
   </header>
@@ -521,6 +521,12 @@ export function GET(request: Request) {
       'next.config.mjs': `/** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  experimental: {
+    // Keep production compilation within the browser's memory budget.
+    cpus: 1,
+    webpackBuildWorker: false,
+    workerThreads: true,
+  },
 };
 
 export default nextConfig;
@@ -654,6 +660,7 @@ export default nextConfig;
       if (e.key === 'Enter') document.getElementById('btn-go').click();
     });
 
+    let builtFiles = null;
     let launching = false;
     let readinessController = null;
 
@@ -700,6 +707,8 @@ export default nextConfig;
       launching = true;
       readinessController?.abort();
       currentMode = mode;
+      const sourceFiles = { ...files };
+      const sourceVersion = JSON.stringify(sourceFiles);
       serverStatus.className = 'status-dot loading';
       logTerminal(`--- Booting stock Next.js 16 App Router (${mode}) ---`, 'system');
 
@@ -724,7 +733,7 @@ export default nextConfig;
           });
         }
 
-        for (const [filePath, content] of Object.entries(files)) {
+        for (const [filePath, content] of Object.entries(sourceFiles)) {
           await node.fs.writeFile(`/node/${filePath}`, content);
         }
         logTerminal('Installing stock Next.js dependencies...', 'system');
@@ -738,39 +747,50 @@ export default nextConfig;
           },
         });
         logTerminal('✓ stock Next.js 16 dependencies installed', 'system');
-        const controller = new AbortController();
-        readinessController = controller;
-        const processHandle = await node.npm.run(mode, {
-          onNetwork: logGuestNetwork,
-          onStdout: (chunk) => logTerminal(chunk, 'stdout'),
-          onStderr: (chunk) => logTerminal(chunk, 'stderr'),
-        });
-        activeProcess = processHandle;
-        const onExit = (code, error) => {
-          if (activeProcess !== processHandle) return;
-          activeProcess = null;
-          controller.abort();
-          serverStatus.className = mode === 'build' && code === 0 ? 'status-dot' : 'status-dot error';
-          logTerminal(error?.stack || `Next.js ${mode} exited with code ${code}`, code === 0 ? 'system' : 'stderr');
-        };
-        processHandle.exit.then((code) => onExit(code), (error) => onExit(null, error));
+        const commands = mode === 'start' && builtFiles !== sourceVersion ? ['build', 'start'] : [mode];
+        for (const command of commands) {
+          if (command === 'build') {
+            builtFiles = null;
+            logTerminal('Building production app...', 'system');
+          }
+          const controller = new AbortController();
+          readinessController = controller;
+          const processHandle = await node.npm.run(command, {
+            env: { NODE_ENV: command === 'dev' ? 'development' : 'production' },
+            onNetwork: logGuestNetwork,
+            onStdout: (chunk) => logTerminal(chunk, 'stdout'),
+            onStderr: (chunk) => logTerminal(chunk, 'stderr'),
+          });
+          activeProcess = processHandle;
+          const onExit = (code, error) => {
+            if (activeProcess !== processHandle) return;
+            activeProcess = null;
+            controller.abort();
+            serverStatus.className = command === 'build' && code === 0 ? 'status-dot' : 'status-dot error';
+            logTerminal(error?.stack || `Next.js ${command} exited with code ${code}`, code === 0 ? 'system' : 'stderr');
+          };
+          processHandle.exit.then((code) => onExit(code), (error) => onExit(null, error));
 
-        if (mode !== 'build') {
-          // Startup output is a byte stream: "Ready in" can cross chunks.
-          // Start one HTTP probe independently of the banner; requesting /
-          // is also what triggers the first development compilation.
-          void (async () => {
-            try {
-              await waitForNextServer(3000, controller.signal);
-              if (activeProcess !== processHandle || controller.signal.aborted) return;
-              serverStatus.className = 'status-dot active';
-              window.navigateFrame(urlInput.value || '/');
-            } catch (error) {
-              if (controller.signal.aborted || activeProcess !== processHandle) return;
-              serverStatus.className = 'status-dot error';
-              logTerminal(error.stack || String(error), 'stderr');
-            }
-          })();
+          if (command === 'build') {
+            if (await processHandle.exit !== 0) return;
+            builtFiles = sourceVersion;
+          } else {
+            // Startup output is a byte stream: "Ready in" can cross chunks.
+            // Start one HTTP probe independently of the banner; requesting /
+            // is also what triggers the first development compilation.
+            void (async () => {
+              try {
+                await waitForNextServer(3000, controller.signal);
+                if (activeProcess !== processHandle || controller.signal.aborted) return;
+                serverStatus.className = 'status-dot active';
+                window.navigateFrame(urlInput.value || '/');
+              } catch (error) {
+                if (controller.signal.aborted || activeProcess !== processHandle) return;
+                serverStatus.className = 'status-dot error';
+                logTerminal(error.stack || String(error), 'stderr');
+              }
+            })();
+          }
         }
       } catch (err) {
         serverStatus.className = 'status-dot error';

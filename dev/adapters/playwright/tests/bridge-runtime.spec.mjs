@@ -1154,6 +1154,41 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('routes a direct .bin/node ESM script through the native child lifecycle', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/node', ['/node/direct-entry.mjs'], { cwd: '/node' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(output, 'direct ESM child ran\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/package.json': JSON.stringify({ type: 'module' }),
+        '/node/node_modules/.bin/node': '#!/usr/bin/env node\n',
+        '/node/direct-entry.mjs': [
+          "await Promise.resolve();",
+          "process.stdout.write('direct ESM child ran\\n');",
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
   test('supports source files and command substitution in npm scripts', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert');

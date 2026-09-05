@@ -10198,6 +10198,55 @@ export function createRuntime({
                 streamed: Boolean((onStdout && stdout) || (onStderr && stderr)),
               });
             }
+            // `node script` is a real child launch.  If the script is ESM (or
+            // has an ESM loader registered), preserve that format at this
+            // boundary instead of sending it through the synchronous
+            // CommonJS evaluator.  This matters for async loader hooks and
+            // top-level await used by ordinary package lifecycle scripts.
+            if ((entry === processObject.execPath || isNodeExecutable(entry))
+              && Array.isArray(argv) && typeof argv[0] === 'string' && !argv[0].startsWith('-')) {
+              const prepared = prepareChild(entry, argv, {
+                cwd,
+                env: commandEnv,
+                input: stdin,
+                signal,
+                timeout,
+              }, ownerProcess);
+              const stdout = [];
+              const stderr = [];
+              const complete = (code, signalValue) => ({
+                code: signalValue ? null : code ?? 1,
+                stdout: stdout.join(''),
+                stderr: stderr.join(''),
+                streamed: Boolean(stdout.length || stderr.length),
+              });
+              if (isRuntimeEsmModule(prepared.entryPath, prepared.executionArgv)) {
+                const processHandle = runPreparedESM(prepared, {
+                  signal,
+                  timeout,
+                  asyncLifecycle: true,
+                }, (value) => {
+                  const chunk = normalizeOutputChunk(value);
+                  stdout.push(chunk);
+                  onStdout?.(chunk);
+                }, (value) => {
+                  const chunk = normalizeOutputChunk(value);
+                  stderr.push(chunk);
+                  onStderr?.(chunk);
+                });
+                return processHandle.wait().then(
+                  (terminal) => complete(terminal.code, terminal.signal),
+                  (error) => {
+                    const message = `${error?.stack || error?.message || error}\n`;
+                    if (!stderr.length) {
+                      stderr.push(message);
+                      onStderr?.(message);
+                    }
+                    return complete(1, null);
+                  },
+                );
+              }
+            }
             // A shell's `node script.js` command is a real child launch. Run
             // the script through the same prepared-process path as spawn so
             // its exit, output, and pending lifecycle are observed directly;

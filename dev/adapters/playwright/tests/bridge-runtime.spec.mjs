@@ -5,6 +5,35 @@ import { runShellScript } from '../../../../src/runtime/shell.js';
 test.skip(!browserRuntimeURL, 'set BNH_TEST_URL to a browser runtime harness page');
 
 test.describe('browser runtime bridge and core primitives', () => {
+  test('exits worker Promise callbacks without reporting the private exit signal', async ({ harnessPage, page }) => {
+    const errors = [];
+    page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+    page.on('pageerror', error => errors.push(error.message));
+    const closed = page.waitForEvent('worker').then(worker => new Promise(resolve => worker.once('close', resolve)));
+    const result = await harnessPage.run(`
+      Promise.resolve().then(() => process.exit(7));
+    `, { isolation: 'worker' });
+    await closed;
+    expect(result.exitCode).toBe(7);
+    expect(errors).toEqual([]);
+  });
+
+  test('keeps native Web Crypto jobs alive through key generation and export', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert/strict');
+        const { webcrypto } = require('node:crypto');
+        const key = await crypto.subtle.generateKey(
+          { name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
+        const bytes = await webcrypto.subtle.exportKey('raw', key);
+        assert.strictEqual(bytes.byteLength, 32);
+        console.log('native crypto completed');
+      })().catch(error => { console.error(error); process.exitCode = 1; });
+    `);
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('native crypto completed');
+  });
+
   test('resets, mounts, spawns, and captures stdout and stderr in the browser', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       (async () => {

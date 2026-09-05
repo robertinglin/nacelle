@@ -105,7 +105,14 @@ test.describe('Next.js 16 App Router browser demo', () => {
     await page.goto(serverUrl);
     const serverStatus = page.locator('#server-status');
     const termOutput = page.locator('#term-output');
-    const iframe = page.frameLocator('#app-preview');
+    // Firefox can retain an about:blank automation context after a Service Worker
+    // navigation. Read the live same-origin document through its owning element.
+    const previewText = (selector, timeout = 10000) => expect.poll(
+      () => page.locator('#app-preview').evaluate((frame, selector) => (
+        frame.contentDocument?.querySelector(selector)?.textContent || ''
+      ), selector),
+      { timeout },
+    );
 
     try {
       await expect(termOutput).toContainText('▲ Next.js 16.3.3', { timeout: 25000 });
@@ -127,17 +134,27 @@ test.describe('Next.js 16 App Router browser demo', () => {
     }
 
     // Verify home page SSR in the App Router iframe.
-    await expect(iframe.locator('body')).toContainText('Hello Next.js!', { timeout: 30000 });
-    await expect(iframe.locator('h1')).toHaveText('Hello Next.js!');
+    await previewText('body', 30000).toContain('Hello Next.js!');
+    await previewText('h1').toBe('Hello Next.js!');
+
+    const originalSource = await page.locator('#code-editor').inputValue();
+    await page.locator('#app-preview').evaluate(frame => { frame.contentWindow.__bnhHmrDocument = 'original'; });
+    await page.locator('#code-editor').fill(originalSource.replace('Hello Next.js!', 'Hello hot reload!'));
+    await page.locator('#btn-apply-code').click();
+    await previewText('h1', 60000).toBe('Hello hot reload!');
+    expect(await page.locator('#app-preview').evaluate(frame => frame.contentWindow.__bnhHmrDocument)).toBe('original');
+    await page.locator('#code-editor').fill(originalSource);
+    await page.locator('#btn-apply-code').click();
+    await previewText('h1', 60000).toBe('Hello Next.js!');
 
     await page.locator('.btn-route:has-text("/about")').click();
-    await expect(iframe.locator('h1')).toHaveText('About the Next.js runtime', { timeout: 10000 });
+    await previewText('h1').toBe('About the Next.js runtime');
 
     await page.locator('.btn-route:has-text("/dashboard")').click();
-    await expect(iframe.locator('h1')).toHaveText('Next.js runtime diagnostics', { timeout: 10000 });
+    await previewText('h1').toBe('Next.js runtime diagnostics');
 
     await page.locator('.btn-route:has-text("/api/hello")').click();
-    await expect(iframe.locator('body')).toContainText('Hello from a native Next.js route', { timeout: 10000 });
+    await previewText('body').toContain('Hello from a native Next.js route');
 
     await page.locator('#btn-build').click();
     try {
@@ -147,18 +164,19 @@ test.describe('Next.js 16 App Router browser demo', () => {
       throw new Error(`${error.message}\nNEXT TERMINAL:\n${await termOutput.textContent()}\nPAGE ERRORS: ${JSON.stringify(pageErrors)}\nCONSOLE ERRORS: ${JSON.stringify(consoleErrors)}`);
     }
     await page.locator('#btn-start').click();
-    await expect(serverStatus).toHaveClass(/active/, { timeout: 30000 });
+    try {
+      await expect(serverStatus).toHaveClass(/active/, { timeout: 30000 });
+    } catch (error) {
+      throw new Error(`${error.message}\nNEXT TERMINAL:\n${await termOutput.textContent()}`);
+    }
     await page.locator('.btn-route[data-route="/"]').click();
-    await expect(iframe.locator('h1')).toHaveText('Hello Next.js!', { timeout: 30000 });
+    await previewText('h1', 30000).toBe('Hello Next.js!');
     await page.locator('.btn-route[data-route="/about"]').click();
-    await expect(iframe.locator('h1')).toHaveText('About the Next.js runtime');
+    await previewText('h1').toBe('About the Next.js runtime');
     await page.locator('.btn-route[data-route="/api/hello"]').click();
-    await expect(iframe.locator('body')).toContainText('Hello from a native Next.js route');
+    await previewText('body').toContain('Hello from a native Next.js route');
 
     const expectedConsoleErrorFragments = [
-      'WebSocket connection to',
-      '/_next/hmr',
-      'Unexpected response code: 404',
       // The readiness probe polls / through the Service Worker gateway while
       // the dev server is still booting; each refused connection is reported
       // by the gateway as a 502 response the browser logs as a resource error.

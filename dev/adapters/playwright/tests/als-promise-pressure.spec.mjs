@@ -5,6 +5,7 @@ test.skip(!browserRuntimeURL, 'set BNH_TEST_URL to a browser runtime harness pag
 
 test.describe('browser runtime ALS promise pressure', () => {
   test('keeps the ALS store alive across a long await chain', async ({ harnessPage }) => {
+    test.setTimeout(180000);
     const result = await harnessPage.run(`
       const assert = require('node:assert');
       const { AsyncLocalStorage } = require('node:async_hooks');

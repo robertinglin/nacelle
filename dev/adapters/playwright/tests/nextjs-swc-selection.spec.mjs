@@ -19,6 +19,7 @@ let localServer;
 let serverUrl;
 
 function setIsolationHeaders(response) {
+  response.setHeader('Service-Worker-Allowed', '/');
   response.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   response.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
   response.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
@@ -950,6 +951,58 @@ test.describe('Next.js SWC package selection', () => {
     });
 
     expect(result.exitCode, `${result.stdout}\n${result.stderr}`).toBe(0);
+  });
+
+  test('virtual-host previews route WebSocket upgrades through the worker virtual network', async ({ page }) => {
+    await page.goto(serverUrl);
+    const result = await page.evaluate(async () => {
+      const { Nacelle } = await import('/index.js');
+      const node = await Nacelle.create({ cwd: '/node', globalObject: window, isolation: 'worker' });
+      await node.fs.writeFile('/node/socket-server.js', `
+        const http = require('node:http');
+        const { createHash } = require('node:crypto');
+        const server = http.createServer((request, response) => {
+          response.setHeader('content-type', 'text/html');
+          response.end('<!doctype html><html><head></head><body>ready</body></html>');
+        });
+        server.on('upgrade', (request, socket) => {
+          const accept = createHash('sha1').update(request.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+          socket.write('HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: ' + accept + '\\r\\n\\r\\n');
+          socket.on('data', frame => {
+            const length = frame[1] & 127;
+            const payload = Buffer.alloc(length);
+            for (let i = 0; i < length; i++) payload[i] = frame[6 + i] ^ frame[2 + i % 4];
+            socket.write(Buffer.concat([Buffer.from([frame[0], length]), payload]));
+          });
+        });
+        server.listen(3000);
+      `);
+      const child = await node.run({ entry: '/node/socket-server.js' });
+      try {
+        for (let attempt = 0; ; attempt++) {
+          try { const response = await node.fetch('http://localhost:3000/'); if (!response.ok) throw new Error('server not ready: ' + response.status); break; }
+          catch (error) { if (attempt === 100) throw error; await new Promise(resolve => setTimeout(resolve, 20)); }
+        }
+        const frame = document.createElement('iframe');
+        const loaded = new Promise(resolve => frame.onload = resolve);
+        frame.src = node.getVirtualUrl(3000);
+        document.body.append(frame);
+        await loaded;
+        const win = frame.contentWindow;
+        const socket = new win.WebSocket('ws://' + location.host + '/echo');
+        const received = [];
+        return await new Promise((resolve, reject) => {
+          socket.onerror = () => reject(new Error('virtual WebSocket failed'));
+          socket.onopen = () => socket.send('hello');
+          socket.onmessage = event => {
+            received.push(event.data);
+            socket.close(1000, 'done');
+          };
+          socket.onclose = event => resolve({ received, code: event.code, reason: event.reason, clean: event.wasClean });
+        });
+      } finally { await child.kill(); }
+    });
+    expect(result).toEqual({ received: ['hello'], code: 1000, reason: 'done', clean: true });
   });
 
   test('worker-isolated HTTP servers share the parent virtual network', async ({ page }) => {

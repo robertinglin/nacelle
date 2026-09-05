@@ -1,3 +1,5 @@
+import { installGatewayWebSocketBridge } from './gateway-websocket-bridge.js';
+
 export function installGatewayBridge({ net, globalObject = globalThis } = {}) {
   if (!globalObject.navigator?.serviceWorker) return () => {};
 
@@ -10,6 +12,7 @@ export function installGatewayBridge({ net, globalObject = globalThis } = {}) {
     };
   }
   globalObject.__bnhGatewayBridgeInstalled = true;
+  const closeWebSockets = installGatewayWebSocketBridge(globalObject, () => globalObject.__bnhActiveGatewayNet || net);
 
   const onMessage = async (event) => {
     const data = event.data;
@@ -279,6 +282,7 @@ export function installGatewayBridge({ net, globalObject = globalThis } = {}) {
 
   globalObject.navigator.serviceWorker.addEventListener('message', onMessage);
   return () => {
+    closeWebSockets();
     globalObject.navigator.serviceWorker.removeEventListener('message', onMessage);
   };
 }

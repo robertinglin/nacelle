@@ -179,7 +179,7 @@ test.describe('Vite + React browser demo', () => {
         && response.request().resourceType() === 'document',
       { timeout: 5000 },
     );
-    await page.evaluate(() => document.getElementById('app-preview').contentDocument.getElementById('native-about-link').click());
+    await app.locator('#native-about-link').click();
     const aboutResponse = await virtualAbout;
     if (publicAbout) {
       const aboutRedirect = await publicAbout;
@@ -195,7 +195,7 @@ test.describe('Vite + React browser demo', () => {
         && response.request().resourceType() === 'document',
       { timeout: 5000 },
     );
-    await page.evaluate(() => document.getElementById('app-preview').contentDocument.getElementById('native-home-link').click());
+    await app.locator('#native-home-link').click();
     await homeResponse;
     await expect(app.locator('#app-title')).toHaveText('Vite + React in Nacelle');
 
@@ -223,11 +223,11 @@ test.describe('Vite + React browser demo', () => {
         && response.request().resourceType() === 'document',
       { timeout: 5000 },
     );
-    await page.evaluate(() => document.getElementById('app-preview').contentDocument.getElementById('native-about-link').click());
+    await app.locator('#native-about-link').click();
     expect((await productionAbout).status()).toBe(200);
     await expect(app.locator('#app-title')).toHaveText('About the React app');
 
-    await page.evaluate(() => document.getElementById('app-preview').contentDocument.getElementById('native-home-link').click());
+    await app.locator('#native-home-link').click();
     await expect(app.locator('#app-title')).toHaveText('Vite + React in Nacelle');
 
     await page.getByRole('button', { name: 'Restart Current Mode' }).click();
@@ -239,7 +239,7 @@ test.describe('Vite + React browser demo', () => {
       && response.request().resourceType() === 'document',
       { timeout: 5000 },
     );
-    await page.evaluate(() => document.getElementById('app-preview').contentDocument.getElementById('native-about-link').click());
+    await app.locator('#native-about-link').click();
     expect((await restartedAbout).status()).toBe(200);
     await expect(app.locator('#app-title')).toHaveText('About the React app');
 

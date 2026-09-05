@@ -206,6 +206,9 @@ npm run parity
 npm run test:full
 ```
 
+The release gate covers the JavaScript runtime, builds, artifacts, and browser
+workloads. Python harness tests run separately with `npm run test:python`.
+
 `npm run publish:n22 -- --dry-run` exercises the release path without
 uploading. The live command publishes the major-scoped `n22` tag first and promotes `latest` and
 `lts` only after the explicit release gate.

@@ -37,7 +37,6 @@ const runtimeTests = fs.readdirSync(runtimeTestDirectory)
 
 const steps = [
   ['runtime contracts', process.execPath, ['--test', '--test-concurrency=1', ...runtimeTests]],
-  ['harness and adapter contracts', path.join(repositoryRoot, 'dev/scripts/self-test.sh'), []],
   ['Node 22 build', process.execPath, [path.join(repositoryRoot, 'scripts/build.mjs'), '--node-version=v22']],
   ['Node 22 artifact validation', process.execPath, [path.join(repositoryRoot, 'scripts/validate-version-support.mjs'), '--node-version=v22']],
   ['Node 22 parity', process.execPath, [

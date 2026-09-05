@@ -396,7 +396,7 @@
           <button class="file-tab" data-file="next.config.mjs">next.config.mjs</button>
           <button class="file-tab" data-file="package.json">package.json</button>
         </div>
-        <button class="btn btn-primary" id="btn-apply-code" style="padding: 4px 10px; font-size: 0.74rem;">⚡ Apply &amp; Reload</button>
+        <button class="btn btn-primary" id="btn-apply-code" style="padding: 4px 10px; font-size: 0.74rem;">⚡ Apply Changes</button>
       </div>
       <div class="editor-container">
         <textarea class="code-editor" id="code-editor" spellcheck="false"></textarea>
@@ -521,6 +521,7 @@ export function GET(request: Request) {
       'next.config.mjs': `/** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  allowedDevOrigins: [${JSON.stringify(location.hostname)}],
   experimental: {
     // Keep production compilation within the browser's memory budget.
     cpus: 1,
@@ -806,6 +807,11 @@ export default nextConfig;
     document.getElementById('btn-restart').addEventListener('click', () => launchNextApp(currentMode));
     document.getElementById('btn-apply-code').addEventListener('click', async () => {
       files[currentFile] = codeEditor.value;
+      if (node && activeProcess && currentMode === 'dev' && !launching
+          && serverStatus.classList.contains('active') && currentFile.startsWith('app/')) {
+        await node.fs.writeFile(`/node/${currentFile}`, files[currentFile]);
+        return;
+      }
       if (node) {
         await launchNextApp(currentMode);
       }

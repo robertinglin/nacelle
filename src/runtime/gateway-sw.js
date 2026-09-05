@@ -13,6 +13,10 @@ self.addEventListener('activate', (event) => {
 const VHOST_PATTERN = /^https?:\/\/[^/]+\/(?:__vhost__|__bnh_vnet__)\/(\d+)(\/.*)?$/;
 const GATEWAY_PROTOCOL_VERSION = 1;
 const HARNESS_STATIC_PATTERNS = [
+  // Looking up a worker client can wait for its module graph to finish loading.
+  // Its own imports must bypass that lookup to avoid a bootstrap deadlock.
+  /^\/(?:index|runtime)\.js$/,
+  /^\/versions\//,
   /^\/runtime\//,
   /^\/wasm\//,
   /^\/tests\//,
@@ -22,6 +26,7 @@ const HARNESS_STATIC_PATTERNS = [
 ];
 
 function isHarnessStaticPath(pathname) {
+  if (pathname === new URL('gateway-websocket-client.js', self.location.href).pathname) return true;
   return HARNESS_STATIC_PATTERNS.some((p) => p.test(pathname));
 }
 
@@ -246,7 +251,16 @@ async function handleVirtualRequest(request, { port, routeId = null, version = G
       if (headers.has('content-length')) {
         headers.delete('content-length');
       }
-      return new Response(fullBody, {
+      let responseBody = fullBody;
+      if (request.mode === 'navigate' && headers.get('content-type')?.includes('text/html')) {
+        const scriptURL = new URL('gateway-websocket-client.js', self.location.href).href;
+        const script = `<script src="${scriptURL}"></script>`;
+        const html = new TextDecoder().decode(fullBody);
+        responseBody = /<head\b[^>]*>/i.test(html)
+          ? html.replace(/<head\b[^>]*>/i, head => head + script)
+          : script + html;
+      }
+      return new Response(responseBody, {
         status: statusCode,
         statusText,
         headers,

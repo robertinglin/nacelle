@@ -2260,19 +2260,17 @@ export function createVfs(options = {}) {
   function writevSync(value, buffers, position) {
     validateVectorArguments(value, buffers);
     const start = vectorPosition(position);
-    let total = 0;
+    const total = buffers.reduce((size, buffer) => size + buffer.byteLength, 0);
+    if (total === 0) return 0;
+    // Commit the vector once: publishing every buffer copies the growing file
+    // repeatedly and floods worker bridges while writing large cache packs.
+    const combined = new Uint8Array(total);
+    let offset = 0;
     for (const buffer of buffers) {
-      if (buffer.byteLength === 0) continue;
-      const result = writeDescriptor(
-        value,
-        buffer,
-        0,
-        buffer.byteLength,
-        start === null ? null : start + total,
-      );
-      total += result.bytesWritten;
+      combined.set(new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength), offset);
+      offset += buffer.byteLength;
     }
-    return total;
+    return writeDescriptor(value, combined, 0, total, start).bytesWritten;
   }
 
   function readv(value, buffers, position, callback) {

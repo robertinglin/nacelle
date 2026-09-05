@@ -1,3 +1,4 @@
+import { installWebCryptoLifecycle } from './runtime/webcrypto-lifecycle.js';
 import { connectVfsUpdates } from './runtime/vfs-worker-bridge.js';
 import { rewriteDynamicImports } from './runtime/dynamic-imports.js';
 import { createAssert, inspect as nodeInspect } from './runtime/assert.js';
@@ -157,7 +158,7 @@ import { createPrimordials } from './runtime/primordials.js';
 import { createBrowserInternalBindings } from './runtime/internal-bindings.js';
 import { createUrlModule } from './runtime/url.js';
 import { installWarningContract } from './runtime/warnings.js';
-import { nativeAddonDisabledError, unsupportedNativeAddon } from './runtime/errors.js';
+import { formatError, nativeAddonDisabledError, unsupportedNativeAddon } from './runtime/errors.js';
 import { loadWasmAddon, isWasmModuleBytes } from './runtime/addon-napi.js';
 import { createSqliteModule } from './runtime/sqlite.js';
 import { createInspectorModule, createInspectorPromisesModule } from './runtime/inspector.js';
@@ -2440,7 +2441,7 @@ function createGuestFunctionConstructor(NativeFunction, processOverride, sourceU
       specifier,
       sourceURL,
       options,
-      processOverride,
+      processOverride?._bnhTaskTracker,
     );
     return function guestFunction(...values) {
       return compiled.call(this, importModule, ...values);
@@ -7827,7 +7828,7 @@ export function createRuntime({
               }
               finish(result.code, null);
             }, (error) => {
-              const message = `${error?.stack || error?.message || error}\n`;
+              const message = `${formatError(error)}\n`;
               stderr += message;
               writeStderr(message);
               finish(1, null, error);
@@ -7905,7 +7906,7 @@ export function createRuntime({
                   }
                   finish(result.code, null);
                 }, (error) => {
-                  const message = `${error?.stack || error?.message || error}\n`;
+                  const message = `${formatError(error)}\n`;
                   stderr += message;
                   writeStderr(message);
                   finish(1, null, error);
@@ -7946,7 +7947,7 @@ export function createRuntime({
                   }
                   finish(result.code, null);
                 }, (error) => {
-                  const message = `${error?.stack || error?.message || error}\n`;
+                  const message = `${formatError(error)}\n`;
                   stderr += message;
                   writeStderr(message);
                   finish(1, null, error);
@@ -9373,7 +9374,7 @@ export function createRuntime({
                 stderrArr.push('Thrown at:\n    at [eval]:1:1\n');
               } else {
                 let detail;
-                try { detail = error?.stack || String(error); } catch { detail = Object.prototype.toString.call(error); }
+                try { detail = formatError(error); } catch { detail = Object.prototype.toString.call(error); }
                 const message = `${detail}\n`;
                 stderrArr.push(message);
                 options.onStderr?.(message);
@@ -9953,7 +9954,7 @@ export function createRuntime({
                 return processHandle.wait().then(
                   (terminal) => complete(terminal.code, terminal.signal),
                   (error) => {
-                    const message = `${error?.stack || error?.message || error}\n`;
+                    const message = `${formatError(error)}\n`;
                     if (!stderr.length) {
                       stderr.push(message);
                       onStderr?.(message);
@@ -10254,7 +10255,7 @@ export function createRuntime({
                 streamed: Boolean((nodeOptions.onStdout && stdout.length) || (nodeOptions.onStderr && stderr.length)),
               }),
               (error) => {
-                const message = `${error?.stack || error?.message || error}\n`;
+                const message = `${formatError(error)}\n`;
                 if (!stderr.length) {
                   stderr.push(message);
                   nodeOptions.onStderr?.(message);
@@ -10370,7 +10371,7 @@ export function createRuntime({
                   args: name === scriptName ? scriptOptions.args : [],
                 });
               } catch (error) {
-                const message = `${error?.stack || error?.message || error}\n`;
+                const message = `${formatError(error)}\n`;
                 scriptOptions.onStderr?.(message);
                 return {
                   code: 1,
@@ -10729,7 +10730,10 @@ export function createRuntime({
     const usesHostNodeGlobals = scope === globalThis
       && scope.process?.release?.name === 'node'
       && typeof scope.process?.versions?.node === 'string';
-    if (!usesHostNodeGlobals) installBrowserAbortSignalCompatibility(scope);
+    if (!usesHostNodeGlobals) {
+      installBrowserAbortSignalCompatibility(scope);
+      installWebCryptoLifecycle(scope);
+    }
     scope.__BNH_BROWSER_WORKERS__ ||= new Set();
     if (options.workerThread) {
       environmentData.clear();

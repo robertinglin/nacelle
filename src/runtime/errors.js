@@ -1,3 +1,11 @@
+export function formatError(error) {
+  const message = error?.message == null ? String(error) : String(error.message);
+  const stack = typeof error?.stack === 'string' ? error.stack : '';
+  if (!stack) return message;
+  if (!message || stack.includes(message)) return stack;
+  return `${error?.name || 'Error'}: ${message}\n${stack}`;
+}
+
 const BOUNDARY_REASONS = Object.freeze({
   'native-addons': 'requires a browser-safe WASM or JavaScript adapter',
   'privileged-os-apis': 'requires explicit browser permission and adapter scope',

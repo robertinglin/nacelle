@@ -22,7 +22,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
   // the injected process here so state produced immediately before natural
   // completion cannot be stranded behind a separately ordered IPC message.
   let processStateSource;
-  const processExitSignal = {};
+  const processExitSignal = { [Symbol.for('bnh.process-exit')]: true };
   const remoteHandles = new Map();
   const proxyRequests = new Map();
 
@@ -32,6 +32,10 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
   }
 
   function uncaughtWorkerError(event) {
+    if (event?.error === processExitSignal) {
+      event.preventDefault?.();
+      return true;
+    }
     if (terminalSent) return true;
     const error = event?.error || Object.assign(new Error(event?.message || 'worker failed'), {
       name: event?.name || 'Error',
@@ -488,8 +492,14 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       process.stdin.resume();
       return destination;
     };
-    if (typeof self.addEventListener === 'function') self.addEventListener('error', uncaughtWorkerError);
-    else self.onerror = uncaughtWorkerError;
+    if (typeof self.addEventListener === 'function') {
+      self.addEventListener('error', uncaughtWorkerError);
+      self.addEventListener('unhandledrejection', event => {
+        // process.exit unwinds guest code with a private value. Browsers can
+        // report it before the worker closes when exit occurs in a Promise.
+        if (event.reason === processExitSignal) event.preventDefault();
+      });
+    } else self.onerror = uncaughtWorkerError;
     Object.assign(process, {
       ...identity,
       execArgv: [...(message.execArgv || [])],

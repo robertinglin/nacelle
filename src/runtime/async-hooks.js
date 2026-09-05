@@ -182,15 +182,25 @@ function completeAsyncCompletion(promise) {
   callback();
 }
 
+function observeProcessExit(promise, error) {
+  if (!promise || error?.[Symbol.for('bnh.process-exit')] !== true) return;
+  // Firefox workers can report rejected exit sentinels without dispatching
+  // unhandledrejection. Observe that rejection without changing its value.
+  originalThen.call(promiseTarget(promise), undefined, () => {});
+}
+
 export function runAsyncGenerator(generatorFunction, thisArg, args = []) {
   let asyncResult;
   let pendingCompletion;
+  let initialError;
   asyncResult = new Promise((resolve, reject) => {
     let iterator;
     try {
       iterator = Reflect.apply(generatorFunction, thisArg, args);
     } catch (error) {
+      initialError = error;
       reject(error);
+      observeProcessExit(asyncResult, error);
       return;
     }
 
@@ -199,7 +209,9 @@ export function runAsyncGenerator(generatorFunction, thisArg, args = []) {
       try {
         result = Reflect.apply(iterator[method], iterator, [value]);
       } catch (error) {
+        initialError = error;
         reject(error);
+        observeProcessExit(asyncResult, error);
         return;
       }
       if (result.done) {
@@ -227,6 +239,7 @@ export function runAsyncGenerator(generatorFunction, thisArg, args = []) {
 
     advance('next', undefined);
   });
+  observeProcessExit(asyncResult, initialError);
   if (pendingCompletion) asyncCompletionHandlers.set(asyncResult, pendingCompletion);
   return asyncResult;
 }
@@ -486,6 +499,7 @@ function runInScope(asyncId, callback, thisArg, args, nativeContinuation = false
       }
     });
   } catch (error) {
+    observeProcessExit(liveResource, error);
     if (error !== null && (typeof error === 'object' || typeof error === 'function')) {
       errorAsyncIds.set(error, asyncId);
       if (record?.resource) errorAsyncResources.set(error, resourceValue(record));
@@ -686,6 +700,7 @@ function installPromiseHooks() {
         : args[0];
     };
     const reject = (...args) => {
+      observeProcessExit(result, args[0]);
       return typeof onRejected === 'function'
         ? runInScope(asyncId, onRejected, this, args, false, result)
         : (() => { throw args[0]; })();

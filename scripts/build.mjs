@@ -212,6 +212,7 @@ fs.copyFileSync(path.join(sourceDirectory, 'index.js'), path.join(outputDirector
 fs.copyFileSync(path.join(sourceDirectory, 'types.d.ts'), path.join(outputDirectory, 'index.d.ts'));
 fs.copyFileSync(path.join(sourceDirectory, 'runtime', 'process-worker.js'), path.join(outputDirectory, 'process-worker.js'));
 fs.copyFileSync(path.join(sourceDirectory, 'runtime', 'gateway-sw.js'), path.join(outputDirectory, 'gateway-sw.js'));
+fs.copyFileSync(path.join(sourceDirectory, 'runtime', 'gateway-websocket-client.js'), path.join(outputDirectory, 'gateway-websocket-client.js'));
 
 const metadata = [];
 for (const profile of profiles) {

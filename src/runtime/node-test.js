@@ -1,10 +1,4 @@
-function formatError(error) {
-  const message = error?.message == null ? String(error) : String(error.message);
-  const stack = typeof error?.stack === 'string' ? error.stack : '';
-  if (!stack) return message;
-  if (!message || stack.includes(message)) return stack;
-  return `${error?.name || 'Error'}: ${message}\n${stack}`;
-}
+import { formatError } from './errors.js';
 
 function normalizeOptions(options) {
   return options && typeof options === 'object' ? options : {};

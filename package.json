@@ -84,6 +84,7 @@
     "test:full": "node scripts/test-alpha.mjs",
     "release:check": "node scripts/test-alpha.mjs --require-native",
     "examples": "node examples/examples-server.mjs",
+    "examples:cdn": "node examples/cdn-sim-server.mjs",
     "examples:http-client": "node examples/examples-server.mjs --http-client",
     "examples:bcrypt": "node examples/examples-server.mjs --bcrypt",
     "examples:sqlite": "node examples/examples-server.mjs --sqlite",
@@ -103,7 +104,10 @@
     "build:nacelle-plus": "node nacelle-plus/build.mjs",
     "publish:release": "node scripts/publish-release.mjs",
     "publish:n22": "node scripts/publish-release.mjs --channel=n22 --set-latest",
-    "publish:v22": "node scripts/publish-release.mjs --channel=n22 --set-latest"
+    "publish:v22": "node scripts/publish-release.mjs --channel=n22 --set-latest",
+    "test:gateway": "node --test --test-concurrency=1 dev/tests/runtime/runtime/direct-iframe-*.mjs",
+    "test:gateway:coverage": "node --experimental-test-coverage --test --test-concurrency=1 --test-coverage-include='src/runtime/direct-iframe-*.js' --test-coverage-include='src/runtime/gateway-selection.js' --test-coverage-include='src/runtime/gateway-http.js' --test-coverage-lines=80 --test-coverage-functions=80 --test-coverage-branches=80 dev/tests/runtime/runtime/direct-iframe-*.mjs",
+    "test:gateway:browser": "node --test dev/tests/gateway/browser.mjs"
   },
   "engines": {
     "node": ">=18.0.0"

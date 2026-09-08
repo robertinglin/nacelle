@@ -6,6 +6,8 @@ import { createNacellePlusAdapter, createNacellePlusTransport } from './runtime/
 import { createProxyConfig } from './runtime/proxy-config.js';
 import { createNegotiatedTransport, isBrowserFetchFailure } from './runtime/transport.js';
 import { installGatewayBridge } from './runtime/gateway-bridge.js';
+import { normalizeGatewayOptions, selectGateway, gatewayError, DIRECT_GATEWAY_POLICY } from './runtime/gateway-selection.js';
+import { createDirectIframeGateway } from './runtime/direct-iframe-gateway.js';
 import { watchFrameAddress } from './runtime/frame-address.js';
 import { createBrowserNet } from './runtime/net.js';
 import { createBufferClass } from './runtime/buffer.js';
@@ -24,6 +26,8 @@ import {
   resolveNodeVersionProfile,
   resolveNodeVersionRecord,
 } from './versions/index.js';
+
+const runtimeModuleUrl = import.meta.url;
 
 const NPM_SCRIPT_ENV_KEYS = Object.freeze([
   'npm_lifecycle_event',
@@ -95,6 +99,7 @@ export {
   NacelleError,
   createSecretBroker,
   createGatewayRouteRegistry,
+  selectGateway,
   createCompatibilityLab,
   listNodeVersionProfiles,
   listSupportedNodeVersions,
@@ -121,31 +126,35 @@ export class Nacelle {
    * @param {string} [scope='/']
    * @param {Object} [globalObject=globalThis] Browser realm that owns the Service Worker API
    */
-  static async initServiceWorker(swPath = '/runtime/gateway-sw.js', scope = '/', globalObject = globalThis) {
-    const browserNavigator = globalObject.navigator;
-    if (!browserNavigator || !('serviceWorker' in browserNavigator)) {
-      return null;
-    }
-    const registration = await browserNavigator.serviceWorker.register(swPath, {
-      scope,
-      updateViaCache: 'none',
-    });
-    await registration.update().catch(() => {});
-    await browserNavigator.serviceWorker.ready;
-    if (!browserNavigator.serviceWorker.controller) {
-      // Direct runtime fetches have a fallback path, but iframe navigations do not.
-      // Do not report gateway readiness until this page is actually controlled.
-      await new Promise((resolve) => {
-        const finish = () => {
-          if (!browserNavigator.serviceWorker.controller) return;
-          browserNavigator.serviceWorker.removeEventListener('controllerchange', finish);
-          resolve();
-        };
-        browserNavigator.serviceWorker.addEventListener('controllerchange', finish);
-        finish();
+  static async initServiceWorker(swPath = '/runtime/gateway-sw.js', scope = '/', globalObject = globalThis, timeoutMs = 30_000) {
+    const serviceWorker = globalObject.navigator?.serviceWorker;
+    if (!serviceWorker) return null;
+    let timer;
+    let timedOut = false;
+    let controllerListener;
+    const initialize = async () => {
+      const registration = await serviceWorker.register(swPath, { scope, updateViaCache: 'none' });
+      await registration.update().catch(() => {});
+      await serviceWorker.ready;
+      if (timedOut) return null;
+      if (!serviceWorker.controller) await new Promise(resolve => {
+        controllerListener = () => { if (serviceWorker.controller) resolve(); };
+        serviceWorker.addEventListener('controllerchange', controllerListener);
+        controllerListener();
       });
+      return registration;
+    };
+    try {
+      return await Promise.race([initialize(), new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(gatewayError('ERR_GATEWAY_TIMEOUT', 'Service Worker registration/control timed out; host swPath under scope or use direct-iframe mode'));
+        }, timeoutMs);
+      })]);
+    } finally {
+      clearTimeout(timer);
+      if (controllerListener) serviceWorker.removeEventListener('controllerchange', controllerListener);
     }
-    return registration;
   }
 
   /**
@@ -163,6 +172,16 @@ export class Nacelle {
   static async create(options = {}) {
     const cwd = options.cwd || '/node';
     const globalObject = options.globalObject || globalThis;
+    // Guest execution temporarily installs compatibility globals on this realm.
+    // Browser-facing gateway resources must retain the native implementations.
+    const gatewayGlobal = {};
+    for (const name of ['MessageChannel', 'MutationObserver', 'AbortController', 'crypto', 'URL', 'Blob', 'document', 'location']) {
+      gatewayGlobal[name] = globalObject[name];
+    }
+    for (const name of ['setTimeout', 'clearTimeout', 'addEventListener', 'removeEventListener']) {
+      gatewayGlobal[name] = globalObject[name]?.bind(globalObject);
+    }
+
     const nodeProfile = resolveNodeVersionProfile(options.version || 'lts');
     const nacellePlusOptions = options.nacellePlus === true
       ? {}
@@ -197,17 +216,26 @@ export class Nacelle {
     const BufferClass = globalObject.Buffer || createBufferClass(globalObject);
     globalObject.Buffer = BufferClass;
 
-    // Auto-register Service Worker gateway in browser if enabled
-    if (options.gateway !== false && typeof globalObject.navigator?.serviceWorker !== 'undefined') {
-      const swPath = typeof options.gateway === 'object' && options.gateway.swPath
-        ? options.gateway.swPath
-        : '/runtime/gateway-sw.js';
-      const scope = typeof options.gateway === 'object' && options.gateway.scope
-        ? options.gateway.scope
-        : '/';
-      await this.initServiceWorker(swPath, scope, globalObject).catch((err) => {
-        console.warn('[Nacelle] Service Worker registration skipped:', err.message);
-      });
+    const gatewayOptions = normalizeGatewayOptions(options.gateway);
+    let gatewaySelection = selectGateway({
+      requestedMode: gatewayOptions.mode,
+      runtimeModuleUrl,
+      pageUrl: globalObject.location?.href,
+      serviceWorkerAvailable: Boolean(globalObject.navigator?.serviceWorker),
+      serviceWorkerPath: gatewayOptions.swPath,
+    });
+    const gatewayEvents = [];
+    if (gatewaySelection.mode === 'service-worker') {
+      try {
+        if (!globalObject.navigator?.serviceWorker) throw new Error('Service Workers are unavailable in this context');
+        await this.initServiceWorker(gatewayOptions.swPath, gatewayOptions.scope, globalObject, gatewayOptions.requestTimeoutMs);
+      } catch (cause) {
+        const error = gatewayError('ERR_GATEWAY_MODE', `Service Worker gateway failed: ${cause.message}`);
+        error.cause = cause;
+        if (gatewayOptions.mode === 'service-worker') throw error;
+        gatewaySelection = Object.freeze({ ...gatewaySelection, mode: 'direct-iframe', reason: 'service-worker-registration-failed' });
+        gatewayEvents.push(Object.freeze({ code: error.code, message: error.message, reason: gatewaySelection.reason }));
+      }
     }
 
     const wasmBaseUrl = options.wasmBaseUrl
@@ -234,6 +262,7 @@ export class Nacelle {
       globalObject,
       nodeProfile,
       wasmBaseUrl,
+      runtimeModuleUrl,
     });
 
     const mounts = [
@@ -270,12 +299,13 @@ export class Nacelle {
     });
 
     // Install Gateway Bridge with proper createBrowserNet instance
-    if (runtime.virtualNetwork) {
+    let closeGatewayBridge = null;
+    if (gatewaySelection.mode === 'service-worker' && runtime.virtualNetwork) {
       const netModule = createBrowserNet({
         network: runtime.virtualNetwork,
         BufferClass,
       });
-      installGatewayBridge({ net: netModule, globalObject });
+      closeGatewayBridge = installGatewayBridge({ net: netModule, globalObject });
     }
 
     const instance = new this(runtime, {
@@ -287,6 +317,8 @@ export class Nacelle {
       capabilities,
       isolation,
       gateway: options.gateway,
+      gatewayOptions, gatewaySelection, gatewayEvents, closeGatewayBridge, gatewayGlobal,
+      resetContext: { capabilities, proxy, isolation },
       secrets: options.secrets,
     });
 
@@ -314,6 +346,29 @@ export class Nacelle {
       ? this._gatewayRoutes.register({ clientId: config.gateway.clientId || `nacelle-${Date.now()}-${Math.random().toString(36).slice(2)}`, port: config.gateway.port || 3000 })
       : null;
     this._listeners = new Map();
+    this._gatewaySessions = new Map();
+    this._processes = new Set();
+    this._gatewayGlobal = config.gatewayGlobal || this._globalObject;
+    this._gatewayOptions = config.gatewayOptions || normalizeGatewayOptions(config.gateway);
+    this._gatewayEvents = config.gatewayEvents || [];
+    this._closeGatewayBridge = config.closeGatewayBridge;
+    this._resetContext = config.resetContext;
+    this._closed = false;
+    const instance = this;
+    this._gateway = Object.freeze({
+      ...(config.gatewaySelection || selectGateway({ requestedMode: this._gatewayOptions.mode })),
+      runtimeModuleUrl: runtimeInstance.runtimeModuleUrl || runtimeModuleUrl,
+      policy: Object.freeze({ ...DIRECT_GATEWAY_POLICY,
+        maxBodyBytes: this._gatewayOptions.maxBodyBytes ?? DIRECT_GATEWAY_POLICY.maxBodyBytes,
+        maxConcurrentRequests: this._gatewayOptions.maxConcurrentRequests ?? DIRECT_GATEWAY_POLICY.maxConcurrentRequests,
+        requestTimeoutMs: this._gatewayOptions.requestTimeoutMs ?? DIRECT_GATEWAY_POLICY.requestTimeoutMs }),
+      get diagnostics() { return Object.freeze([...instance._gatewayEvents]); },
+      get sessions() { return Object.freeze([...instance._gatewaySessions.values()].map(session => session.getDiagnostic())); },
+    });
+    this._removeResetListener = this._runtime.onReset?.(async () => {
+      this._closeGatewaySessions();
+      await Promise.all([...this._processes].map(process => process.kill()));
+    });
     this._npmCache = new BrowserNpmCache({ globalObject: this._globalObject });
     this._wasm = createWasmAddonManager({
       baseUrl: this._runtime.wasmBaseUrl,
@@ -376,6 +431,40 @@ export class Nacelle {
 
   get gatewayRoute() {
     return this._gatewayRoute;
+  }
+
+  get gateway() { return this._gateway; }
+
+  _recordGatewayDiagnostic(detail) {
+    this._gatewayEvents.push(Object.freeze({ ...detail }));
+    if (this._gatewayEvents.length > DIRECT_GATEWAY_POLICY.maxDiagnostics) this._gatewayEvents.shift();
+    this.emit('gateway-diagnostic', detail);
+  }
+
+  _closeGatewaySessions() {
+    for (const close of [...this._gatewaySessions.values()]) close();
+    this._gatewaySessions.clear();
+  }
+
+  async reset(context = {}) {
+    if (this._closed) throw gatewayError('ERR_GATEWAY_CLOSED', 'Nacelle has been shut down');
+    this._closeGatewayBridge?.(); this._closeGatewayBridge = null;
+    await this._runtime.reset({ ...this._resetContext, ...context });
+    if (this.gateway.mode === 'service-worker') this._closeGatewayBridge = installGatewayBridge({
+      net: createBrowserNet({ network: this._runtime.virtualNetwork, BufferClass: this._globalObject.Buffer }),
+      globalObject: this._globalObject,
+    });
+  }
+
+  async shutdown() {
+    if (this._closed) return;
+    this._closed = true;
+    this._closeGatewaySessions();
+    await Promise.all([...this._processes].map(process => process.kill()));
+    await this._runtime.shutdown?.();
+    this._removeResetListener?.();
+    this._closeGatewayBridge?.();
+    this._transport?.close?.();
   }
 
   checkpoint(metadata = {}) { return this._checkpointStore.create(metadata); }
@@ -578,6 +667,27 @@ export class Nacelle {
    * @returns {() => void} Unsubscribe listener function
    */
   connectIframe(iframe, options = {}) {
+    if (this._closed) throw gatewayError('ERR_GATEWAY_CLOSED', 'Nacelle has been shut down');
+    if (this.gateway.mode === 'disabled') throw gatewayError('ERR_GATEWAY_MODE', 'Iframe gateway is disabled');
+    const grantedPorts = this._runtime.capabilities?.manifest?.preview?.ports || this._capabilities?.preview?.ports;
+    if (grantedPorts && !grantedPorts.includes(options.port ?? 3000)) {
+      throw Object.assign(new Error('Preview port is not granted'), { code: 'ERR_CAPABILITY_DENIED' });
+    }
+    if (this.gateway.mode === 'direct-iframe') {
+      this._gatewaySessions.get(iframe)?.();
+      const network = this._runtime.virtualNetwork;
+      // Never let a missing local listener fall through to a configured host proxy.
+      const localNetwork = Object.create(network);
+      localNetwork.connectTcp = request => network.connectTcp({ ...request, virtualOnly: true });
+      const net = createBrowserNet({ network: localNetwork, BufferClass: this._globalObject.Buffer });
+      const session = createDirectIframeGateway({ iframe, net, globalObject: this._gatewayGlobal,
+        options, gatewayOptions: this._gatewayOptions,
+        onDiagnostic: detail => this._recordGatewayDiagnostic(detail),
+        onClose: sessionId => { this._gatewaySessions.delete(iframe); this.emit('gateway-close', { sessionId }); },
+      });
+      this._gatewaySessions.set(iframe, session);
+      return session;
+    }
     const port = options.port || 3000;
     const initialPath = options.path || '/';
     const autoLoad = options.autoLoad !== false;
@@ -622,7 +732,7 @@ export class Nacelle {
       path = parsed.pathname + parsed.search + parsed.hash;
     } catch { /* fallback */ }
 
-    if (this._globalObject.navigator?.serviceWorker?.controller) {
+    if (this.gateway.mode === 'service-worker' && this._globalObject.navigator?.serviceWorker?.controller) {
       const targetUrl = this.getVirtualUrl(port, path);
       return this._globalObject.fetch(targetUrl, options);
     }
@@ -876,6 +986,8 @@ export class Nacelle {
       },
     };
 
+    this._processes.add(processHandle);
+    runPromise.then(() => this._processes.delete(processHandle), () => this._processes.delete(processHandle));
     return processHandle;
   }
 

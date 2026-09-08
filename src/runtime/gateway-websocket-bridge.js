@@ -1,3 +1,8 @@
+/** Shared virtual-only socket boundary for both browser gateway protocols. */
+export function openGatewaySocket(net, port) {
+  return net.connect({ port, host: '127.0.0.1' });
+}
+
 export function installGatewayWebSocketBridge(scope, getNet) {
   const sockets = new Set();
   const onMessage = event => {
@@ -9,7 +14,7 @@ export function installGatewayWebSocketBridge(scope, getNet) {
       const source = new URL(event.source.location.href);
       const route = source.pathname.match(/^\/(?:__vhost__|__bnh_vnet__)\/(?:r-[^/]+\/)?(\d+)(?:\/|$)/);
       if (!route || Number(route[1]) !== event.data.port) throw new Error('WebSocket source is not a virtual host');
-      socket = getNet().connect({ port: Number(route[1]), host: '127.0.0.1' });
+      socket = openGatewaySocket(getNet(), Number(route[1]));
       sockets.add(socket);
       socket.on('data', bytes => channel.postMessage({ type: 'data', bytes: new Uint8Array(bytes) }));
       socket.on('error', error => channel.postMessage({ type: 'error', message: error.message }));

@@ -4567,6 +4567,7 @@ export function createRuntime({
   nodeVersion,
   nodeProfile,
   wasmBaseUrl,
+  runtimeModuleUrl,
   } = {}) {
   const scope = globalObject;
   const runtimeQueueMicrotask = typeof scope.queueMicrotask === 'function'
@@ -4593,6 +4594,7 @@ export function createRuntime({
   const transcode = createTranscode(Buffer);
   let mounted = false;
   let activeChild = null;
+  const resetListeners = new Set();
   let capabilities = null;
   let runSpec = null;
   let virtualNetwork = getSharedVirtualNetwork(scope);
@@ -12996,7 +12998,16 @@ export function createRuntime({
     profile: resolvedProfile,
     wasmBaseUrl: wasmBaseUrl || `./${resolvedProfile.id}/wasm/`,
     contracts: createBrowserRuntimeContracts({ globalObject: scope }),
+    runtimeModuleUrl,
+    onReset(listener) { resetListeners.add(listener); return () => resetListeners.delete(listener); },
+    async shutdown() {
+      await Promise.all([...resetListeners].map(listener => listener()));
+      if (activeChild) await activeChild.kill();
+      activeChild = null;
+      virtualProcessLiveness.clear();
+    },
     async reset(context = {}) {
+      await Promise.all([...resetListeners].map(listener => listener()));
       if (activeChild) await activeChild.kill();
       activeChild = null;
       virtualProcessLiveness.clear();

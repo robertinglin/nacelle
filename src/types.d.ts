@@ -22,6 +22,67 @@ export interface NodeVersionProfile extends NodeVersionRecord {
   readonly wasm: Readonly<{ directory: string; manifest: string; modules: string; napi: string }>;
 }
 
+export type GatewayMode = 'auto' | 'service-worker' | 'direct-iframe';
+export interface GatewayOptions {
+  mode?: GatewayMode;
+  swPath?: string;
+  scope?: string;
+  /** Positive finite timeout, including bootstrap and redirect processing. Default: 30000. */
+  requestTimeoutMs?: number;
+  /** Maximum request body, response body, WebSocket message and aggregate document assets. Default: 16777216. */
+  maxBodyBytes?: number;
+  /** Combined open HTTP requests and WebSockets. Default: 32. */
+  maxConcurrentRequests?: number;
+  /** Legacy Service Worker routing options. */
+  sessionScoped?: boolean;
+  clientId?: string;
+  port?: number;
+}
+export interface GatewaySelection {
+  readonly mode: Exclude<GatewayMode, 'auto'> | 'disabled';
+  readonly reason: 'explicit' | 'disabled' | 'same-origin-module' | 'cross-origin-module'
+    | 'service-worker-unavailable' | 'service-worker-registration-failed';
+  readonly runtimeOrigin: string | null;
+  readonly pageOrigin: string | null;
+  readonly workerPath: string;
+}
+export interface GatewayErrorDetail {
+  readonly code: string;
+  readonly message: string;
+  readonly sessionId?: string;
+  readonly reason?: string;
+}
+export interface GatewaySessionDiagnostic {
+  readonly sessionId: string;
+  readonly state: 'created' | 'iframe-attached' | 'bootstrap-sent' | 'ready' | 'navigating' | 'loaded' | 'closing' | 'closed';
+  readonly path: string;
+  readonly pendingRequests: number;
+  readonly blobUrls: number;
+}
+export interface GatewayDiagnostic extends GatewaySelection {
+  readonly runtimeModuleUrl: string;
+  readonly policy: Readonly<{
+    nestedIframes: 'unsupported'; externalResources: 'deny'; customResourceRewriter: 'unsupported';
+    bootstrap: 'static-function-source-v1'; resourceDelivery: 'parent-owned-blobs-with-document-local-mirrors';
+    maxBodyBytes: number; maxConcurrentRequests: number; requestTimeoutMs: number;
+    maxRedirects: number; maxResources: number; maxDiagnostics: number;
+  }>;
+  readonly diagnostics: readonly GatewayErrorDetail[];
+  readonly sessions: readonly GatewaySessionDiagnostic[];
+}
+/** Optional methods are available only on a direct-mode connection. Calling the handle always disconnects. */
+export interface IframeConnection {
+  (): void;
+  navigate?: (path: string) => Promise<void>;
+  back?: () => void;
+  forward?: () => void;
+  getDiagnostic?: () => GatewaySessionDiagnostic;
+}
+export function selectGateway(options?: {
+  requestedMode?: GatewayMode | 'disabled'; runtimeModuleUrl?: string; pageUrl?: string;
+  serviceWorkerAvailable?: boolean; serviceWorkerPath?: string;
+}): GatewaySelection;
+
 export interface NacelleOptions {
   /** Node.js alpha target. Node 22 is the only shipped release line. */
   version?: SupportedNodeVersion;
@@ -32,7 +93,7 @@ export interface NacelleOptions {
   /** Initial virtual filesystem files */
   files?: Record<string, string | Uint8Array>;
   /** Enable Service Worker & iframe gateway (default: true) */
-  gateway?: boolean | { swPath?: string; scope?: string; sessionScoped?: boolean; clientId?: string; port?: number };
+  gateway?: boolean | GatewayOptions;
   /** Custom base URL for WASM binary fetching */
   wasmBaseUrl?: string;
   /** Global execution scope */
@@ -200,6 +261,10 @@ export interface ConnectIframeOptions {
   autoLoad?: boolean;
   /** Callback on iframe URL change: (cleanAddress, rawAddress) => void */
   onNavigate?: (cleanAddress: string, rawAddress: string) => void;
+  /** Structured direct-mode diagnostic; also emitted as gateway-diagnostic on Nacelle. */
+  onError?: (error: GatewayErrorDetail) => void;
+  /** Called once on direct session teardown. */
+  onClose?: () => void;
 }
 
 export interface ProcessRunOptions {
@@ -278,7 +343,7 @@ export interface WasmArtifactManifest {
 export class Nacelle {
   static readonly supportedVersions: readonly NodeVersionRecord[];
   static resolveVersion(value?: SupportedNodeVersion): NodeVersionRecord;
-  static initServiceWorker(swPath?: string, scope?: string, globalObject?: any): Promise<ServiceWorkerRegistration | null>;
+  static initServiceWorker(swPath?: string, scope?: string, globalObject?: any, timeoutMs?: number): Promise<ServiceWorkerRegistration | null>;
   static create(options?: NacelleOptions): Promise<Nacelle>;
   readonly rawRuntime: any;
   readonly vfs: any;
@@ -288,6 +353,7 @@ export class Nacelle {
   readonly capabilities: Readonly<CapabilityManifest>;
   readonly secretBroker: any;
   readonly trace: any;
+  readonly gateway: GatewayDiagnostic;
   readonly gatewayRoute: Readonly<{ routeId: string; clientId: string; port: number; version: number; expiresAt: number }> | null;
   readonly fs: {
     readFile(path: string, encoding?: string): Promise<string | Uint8Array>;
@@ -325,7 +391,11 @@ export class Nacelle {
     probe(moduleName: string): Promise<ProcessHandle>;
   };
   getVirtualUrl(port?: number, pathname?: string): string;
-  connectIframe(iframe: HTMLIFrameElement, options?: ConnectIframeOptions): () => void;
+  connectIframe(iframe: HTMLIFrameElement, options?: ConnectIframeOptions): IframeConnection;
+  /** Close iframe sessions and processes before resetting the low-level runtime. */
+  reset(context?: Record<string, any>): Promise<void>;
+  /** Idempotently close sessions, processes, gateway bridge and transport. */
+  shutdown(): Promise<void>;
   fetch(url: string, options?: RequestInit): Promise<Response>;
   run(options: ProcessRunOptions): Promise<ProcessHandle>;
   runScript(scriptName: string, options?: RunScriptOptions): Promise<ProcessHandle>;

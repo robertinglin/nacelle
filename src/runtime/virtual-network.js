@@ -367,7 +367,7 @@ export function createVirtualNetwork({ transport } = {}) {
     }
   }
 
-  function connectTcp({ address, port, hostname, client, serverSocket, onConnected, onError, localAddress, localPort }) {
+  function connectTcp({ address, port, hostname, client, serverSocket, onConnected, onError, localAddress, localPort, virtualOnly = false }) {
     globalThis.__bnhGatewayLogs?.push?.({ type: 'network-connect-tcp', address, port, bindings: tcpBindings.size });
     let settled = false;
     const fail = (error) => {
@@ -420,7 +420,7 @@ export function createVirtualNetwork({ transport } = {}) {
     // listeners on the in-memory network even when that capability is active.
     // This is important for cluster workers and for HTTP/TCP servers created
     // by the same browser run.
-    if (findBinding(tcpBindings, address, port)) {
+    if (virtualOnly || findBinding(tcpBindings, address, port)) {
       schedule(connect);
       return;
     }

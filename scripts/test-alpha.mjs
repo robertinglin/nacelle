@@ -37,6 +37,14 @@ const runtimeTests = fs.readdirSync(runtimeTestDirectory)
 
 const steps = [
   ['runtime contracts', process.execPath, ['--test', '--test-concurrency=1', ...runtimeTests]],
+  ['Direct iframe gateway coverage', process.execPath, [
+    '--experimental-test-coverage', '--test', '--test-concurrency=1',
+    '--test-coverage-include=src/runtime/direct-iframe-*.js',
+    '--test-coverage-include=src/runtime/gateway-selection.js',
+    '--test-coverage-include=src/runtime/gateway-http.js',
+    '--test-coverage-lines=80', '--test-coverage-functions=80', '--test-coverage-branches=80',
+    ...runtimeTests.filter(name => path.basename(name).startsWith('direct-iframe-')),
+  ]],
   ['Node 22 build', process.execPath, [path.join(repositoryRoot, 'scripts/build.mjs'), '--node-version=v22']],
   ['Node 22 artifact validation', process.execPath, [path.join(repositoryRoot, 'scripts/validate-version-support.mjs'), '--node-version=v22']],
   ['Node 22 parity', process.execPath, [
@@ -68,6 +76,9 @@ if (!skipBrowsers) {
     process.exit(1);
   }
   for (const browser of ['chromium', 'firefox']) {
+    if (!run(`${browser} direct iframe gateway`, process.execPath, [
+      '--test', path.join(repositoryRoot, 'dev/tests/gateway/browser.mjs'),
+    ], { env: { BNH_BROWSER: browser } })) process.exit(1);
     if (!run(`${browser} browser workloads`, process.execPath, [
       path.join(browserRoot, 'tests/run-browser-tests.mjs'),
     ], { env: { BNH_BROWSER: browser, BNH_NODE_VERSION: 'v22' } })) process.exit(1);

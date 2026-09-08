@@ -140,6 +140,9 @@ Try out the interactive in-browser examples included in `examples/`:
 # Start local examples server (Express in-browser IDE)
 npm run examples
 
+# Test the CDN-origin direct iframe flow with a local esm.sh simulation
+npm run examples:cdn
+
 # Run Vite + React in-browser IDE example
 npm run examples:vite-react
 
@@ -304,3 +307,94 @@ upstream request temporarily disables environment routing to avoid a loop.
 ## License
 
 MIT © Nacelle Contributors
+
+## Virtual HTTP previews: Service Worker or direct iframe
+
+`Nacelle.create({ gateway: true })` selects a gateway from the loaded module's
+`import.meta.url` and the host page's origin. Same-origin deployments use the
+Service Worker when available. Cross-origin imports (including esm.sh), missing
+Service Worker support, and failed automatic worker registration use a direct
+iframe/message-channel gateway. Cross-origin automatic selection does not try
+`/runtime/gateway-sw.js` first. Explicit worker failures reject creation.
+
+```js
+// CDN / no worker asset:
+const node = await Nacelle.create({ gateway: { mode: 'direct-iframe' } });
+// Same-origin worker deployment:
+// const node = await Nacelle.create({
+//   gateway: { mode: 'service-worker', swPath: '/runtime/gateway-sw.js', scope: '/' },
+// });
+
+node.on('gateway-diagnostic', error => console.error(error.code, error.message));
+console.log(node.gateway.mode, node.gateway.reason, node.gateway.policy);
+
+// Start a virtual HTTP server before connecting.
+const disconnect = node.connectIframe(document.querySelector('iframe'), {
+  port: 3000,
+  path: '/hello?name=Developer',
+  onNavigate: cleanPath => { addressInput.value = cleanPath; },
+  onError: error => { errorOutput.textContent = `${error.code}: ${error.message}`; },
+});
+// Additional methods on a direct connection:
+await disconnect.navigate?.('/another-page');
+disconnect.back?.();
+disconnect();                    // idempotent; cancels requests and sockets
+await node.shutdown();           // closes every connection and process
+// node.reset() also closes direct connections before resetting the runtime.
+```
+
+`gateway: false` disables iframe gateway setup. The read-only `node.gateway`
+diagnostic retains up to 128 errors and exposes active sessions, clean virtual
+paths, request counts, Blob ownership, and the resolved policies. The existing
+`getVirtualUrl()` helper is for Service Worker navigation; do not assign its
+result to a direct iframe's `src`. Use `connectIframe` and its direct navigation
+handle instead.
+
+Direct mode uses `sandbox="allow-scripts allow-forms"`, an opaque origin, fresh
+nonces and MessagePorts, and a deny-by-default resource CSP. The parent never
+uses host `fetch` for virtual HTTP, assets or sockets, and a missing virtual
+listener cannot fall through to a configured Nacelle+ proxy. Request credentials,
+authorization and cookie headers are not forwarded. The session's preview port
+must be granted by the runtime's capability manifest.
+
+Defaults are a 30-second request/navigation timeout, 16 MiB per request or
+response body and aggregate document assets, 32 combined HTTP/WebSocket
+operations, 20 redirects, and 1,024 document resources. Set `requestTimeoutMs`,
+`maxBodyBytes`, and `maxConcurrentRequests` in the `gateway` options to change the
+first three. WebSockets have a handshake timeout; open sockets count against the
+concurrency cap until closed, and each message is size-limited.
+
+HTTP fetch bodies stream over the channel; XHR buffers its eventual result and
+HTML navigation is buffered within the limit for inert parsing and resource
+rewriting. Scripts, literal module dependencies, stylesheets, recursive CSS
+URLs/imports, images, media, links, forms and virtual history are supported.
+The parent owns the resource catalog; the opaque document creates local Blob
+mirrors because it cannot reliably fetch another origin's Blob URLs. Both sets
+are revoked on navigation/close. Classic scripts run in document order after
+staging the DOM; deferred/module scripts run afterward. This is not a complete
+emulation of parser-blocking HTML execution.
+
+Nested frames, external resources, custom rewriters, import maps, computed or
+cyclic module imports, encoded responses, integrity metadata, `srcset`, escaped
+CSS URLs, and unsupported browser networking APIs produce structured errors.
+Application CSP/framing headers that cannot survive origin/resource rewriting
+reject navigation instead of being silently weakened. A restrictive host CSP
+can also block the fixed inline bootstrap; direct mode does not bypass it.
+
+**Security boundary:** the opaque iframe prevents access to parent DOM/storage;
+it is not a general network-egress sandbox for arbitrary hostile JavaScript.
+Browser sandbox/CSP do not prevent every self-navigation through `location`.
+Intercepted APIs never fall back to host networking, but an unmanaged navigation
+is detected and closed only on load, potentially after its network request.
+Deploy a browser-level network restriction when complete egress isolation is
+required. The existing same-origin Service Worker mode has a different trust
+boundary and is not made opaque by this change. Neither transport changes the
+runtime's separate `inline` versus `worker` guest execution isolation policy.
+
+See `examples/direct-iframe-cdn.html` for an esm.sh/Express example. Run
+`npm run examples:cdn` to serve that page on one origin and the built Nacelle
+package behind an esm.sh-shaped static origin on another. The fixture also
+proxies npm registry requests needed by the example's browser install. See
+`docs/direct-iframe-gateway-validation.md` for the test commands, coverage and
+outstanding live-environment acceptance checks. Pin a release containing this
+implementation before deploying the CDN example.

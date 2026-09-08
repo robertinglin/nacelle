@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Nacelle direct iframe / CDN</title>
+  <style>
+    body { font: 16px system-ui; margin: 2rem auto; max-width: 960px; padding: 0 1rem; }
+    form { display: flex; gap: .5rem; margin: 1rem 0; }
+    input { flex: 1; padding: .5rem; } button { padding: .5rem 1rem; }
+    iframe { width: 100%; min-height: 320px; border: 1px solid #aaa; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #eee; padding: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>Direct iframe gateway from esm.sh</h1>
+  <p>Serve this page over HTTPS or localhost. No Service Worker asset is needed.
+    Use a published Nacelle release containing the direct gateway; pin that version in production.</p>
+  <form id="start"><input id="module" aria-label="ESM module URL" value="https://esm.sh/nacelle@n22"><button>Start Express</button></form>
+  <form id="navigate"><input id="address" aria-label="Virtual path" value="/"><button disabled>Navigate</button></form>
+  <iframe title="Untrusted virtual application"></iframe>
+  <pre id="status">Not started.</pre>
+  <pre id="stdout" aria-label="Independent server stdout"></pre>
+  <script type="module">
+    const status = document.querySelector('#status');
+    const stdout = document.querySelector('#stdout');
+    const address = document.querySelector('#address');
+    let node, connection;
+    document.querySelector('#start').addEventListener('submit', async event => {
+      event.preventDefault();
+      const button = event.currentTarget.querySelector('button'); button.disabled = true;
+      try {
+        await node?.shutdown(); stdout.textContent = '';
+        const { Nacelle } = await import(document.querySelector('#module').value);
+        node = await Nacelle.create({ gateway: true });
+        if (node.gateway?.mode !== 'direct-iframe') throw new Error('The selected release does not expose the direct iframe gateway. Publish this implementation, then select its esm.sh URL.');
+        node.on('gateway-diagnostic', error => { status.textContent = JSON.stringify(error, null, 2); });
+        node.on('stdout', text => { stdout.textContent += text; });
+        status.textContent = 'Installing Express into the virtual filesystem…';
+        await node.npm.install('express@4.19.2');
+        let readyResolve;
+        const ready = new Promise(resolve => { readyResolve = resolve; });
+        const listener = text => { if (text.includes('direct-demo-ready')) readyResolve(); };
+        node.on('stdout', listener);
+        const process = await node.execute(`
+          const express = require('express');
+          const app = express();
+          app.use(express.urlencoded({ extended: false }));
+          app.get('/', (req, res) => res.send('<h1>Virtual Express</h1><p id="result"></p><a href="/hello?name=Developer">Follow a virtual link</a><form action="/hello" method="post"><input name="name" value="Developer"><button>Submit</button></form><script>fetch("/api").then(r => r.json()).then(data => document.querySelector("#result").textContent = data.message)<\/script>'));
+          app.get('/api', (req, res) => { console.log('API requested'); res.json({ message: 'Fetch crossed a MessagePort, not the host network.' }); });
+          app.all('/hello', (req, res) => res.type('text').send('Hello, ' + (req.query.name || req.body?.name || 'world') + '!'));
+          app.listen(3000, () => console.log('direct-demo-ready'));
+        `);
+        await Promise.race([ready, process.exit.then(code => { throw new Error('Server exited before listening: ' + code); })]);
+        node.off('stdout', listener);
+        connection = node.connectIframe(document.querySelector('iframe'), {
+          port: 3000, path: '/', onNavigate: path => { address.value = path; },
+        });
+        document.querySelector('#navigate button').disabled = false;
+        status.textContent = JSON.stringify(node.gateway, null, 2);
+      } catch (error) { status.textContent = `${error.code || error.name}: ${error.message}`; }
+      finally { button.disabled = false; }
+    });
+    document.querySelector('#navigate').addEventListener('submit', event => {
+      event.preventDefault();
+      connection?.navigate(address.value).catch(error => { status.textContent = `${error.code}: ${error.message}`; });
+    });
+    addEventListener('pagehide', () => { connection?.(); void node?.shutdown(); });
+  </script>
+</body>
+</html>

@@ -824,3 +824,7 @@ export function transformEvalLiterals(source, bindingName) {
   if (!replacements.length) return { source, transformed: false };
   return { source: applyReplacements(source, replacements), transformed: true };
 }
+
+// Shared lexical scan: consumers can locate module specifiers without rewriting
+// comments, quoted strings, or regular-expression bodies.
+export { tokenize as tokenizeJavaScript };

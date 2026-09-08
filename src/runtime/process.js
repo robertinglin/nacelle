@@ -803,6 +803,7 @@ export function createBrowserProcess(options = {}) {
   let startupTimer;
   let pendingTerminal;
   const proxyTransports = new Map();
+  const proxyAbortControllers = new Map();
   let nextProxyTransportId = 1;
   let abortListener;
   let completionResolve;
@@ -902,6 +903,8 @@ export function createBrowserProcess(options = {}) {
     if (terminalRecord) return;
     if (startupTimer) clearTimeout(startupTimer);
     if (abortListener) options.signal.removeEventListener?.('abort', abortListener);
+    for (const controller of proxyAbortControllers.values()) controller.abort();
+    proxyAbortControllers.clear();
     const terminalState = frame.status === 'failed' ? 'failed' : 'exited';
     moveTo(terminalState);
     terminalRecord = createTerminalRecord(identity, state, frame);
@@ -969,12 +972,24 @@ export function createBrowserProcess(options = {}) {
       direction: 'parent',
       scope,
       onMessage: (value) => {
+        const proxyAbort = value?.__bnhProxyAbort;
+        if (proxyAbort?.requestId) {
+          proxyAbortControllers.get(String(proxyAbort.requestId))?.abort();
+          return;
+        }
         if (value?.__bnhProxyRequest?.requestId && options.proxyAdapter) {
           const {
             requestId,
             operation = 'request',
             request = {},
           } = value.__bnhProxyRequest;
+          const proxyController = typeof scope.AbortController === 'function'
+            ? new scope.AbortController()
+            : null;
+          if (proxyController) proxyAbortControllers.set(String(requestId), proxyController);
+          const adapterRequest = proxyController
+            ? { ...request, signal: proxyController.signal }
+            : request;
           const dispatchTransport = async () => {
             if (operation === 'send' && request.transportId) {
               const transport = proxyTransports.get(request.transportId);
@@ -1008,7 +1023,7 @@ export function createBrowserProcess(options = {}) {
               ? options.proxyAdapter
               : options.proxyAdapter[operation] || options.proxyAdapter.request;
             if (typeof method !== 'function') throw new Error(`proxy adapter does not implement ${operation}()`);
-            const result = await method.call(options.proxyAdapter, request);
+            const result = await method.call(options.proxyAdapter, adapterRequest);
             if (operation !== 'connect' || !result?.transport) return result;
             const transportId = `${childId}-transport-${nextProxyTransportId++}`;
             proxyTransports.set(transportId, result.transport);
@@ -1033,7 +1048,8 @@ export function createBrowserProcess(options = {}) {
               __bnhProxyResponse: true,
               requestId,
               error: { name: error.name, message: error.message, code: error.code || 'ERR_NACELLE_PROXY' },
-            }));
+            }))
+            .finally(() => proxyAbortControllers.delete(String(requestId)));
           return;
         }
         events.emit('message', value);

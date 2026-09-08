@@ -2125,6 +2125,7 @@ class VirtualServerResponse extends Writable {
   destroy(error) {
     if (this._responseBody) this._responseBody._bnhTerminated = true;
     this._responseBody?.close();
+    setOutgoingMessageErrored(this, error);
     // A failed or incomplete ServerResponse terminates the underlying
     // connection. A normally completed response is auto-destroyed by the
     // Writable implementation after `end()`, but Node keeps its HTTP/1
@@ -2446,6 +2447,8 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
   }
 
   function attachRawSocket(binding, socket) {
+    socket._bnhDeferPeerClose = true;
+    socket._bnhHttpServerSocket = true;
     globalThis.__bnhGatewayLogs?.push?.({
       type: 'http-attach-raw-socket',
       listeners: socket?.listenerCount?.('data'),
@@ -2459,10 +2462,22 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
     let activeResponse = null;
     let releaseConnection = trackTask?.() || null;
     const queue = [];
-    const finishConnection = () => {
+    let connectionFinished = false;
+    const finishConnection = (socketError = undefined) => {
+      if (connectionFinished) return;
+      connectionFinished = true;
       releaseConnection?.();
       releaseConnection = null;
-      if (activeResponse && !activeResponse.destroyed) activeResponse.destroy();
+      const error = socketError || socketHangUpError();
+      // Native HTTP servers surface a client abort as ECONNRESET on the
+      // socket before close. The virtual transport may only deliver close,
+      // so synthesize that error event while the socket's internal listener
+      // is still attached; on-finished then receives the same terminal error
+      // that Express uses to produce ECONNABORTED.
+      if (!socketError) socket.emit?.('error', error);
+      if (activeResponse && !activeResponse.destroyed) {
+        activeResponse.destroy(error);
+      }
     };
     socket.once?.('close', finishConnection);
 
@@ -2543,6 +2558,7 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
             socket.once?.('close', onSocketClose);
             const complete = (result) => {
               socket.off?.('close', onSocketClose);
+              socket._bnhHttpResponseComplete = true;
               recordNetworkLifecycle('server-response-finish', request, response, {
                 route: 'raw-socket',
                 bodyBytes: Number(result?.body?.byteLength || 0),
@@ -2606,6 +2622,7 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
               }
             });
             activeResponse = response;
+            socket._bnhHttpResponseComplete = false;
             recordNetworkLifecycle('server-request', request, response, {
               route: 'raw-socket',
               requestAborted: Boolean(request?.aborted),
@@ -2790,10 +2807,23 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
     }
     return new Promise((resolve, reject) => {
       const request = new VirtualServerRequest(url, init, scope, BufferClass);
+      const requestSignal = init?.signal;
       if (init.requestTarget) request.url = init.requestTarget;
       let responseDelivered = false;
       let responseBody;
+      let response;
+      const removeAbortListener = () => requestSignal?.removeEventListener?.('abort', onAbort);
+      const onAbort = () => {
+        request.aborted = true;
+        if (request.socket && !request.socket.destroyed) {
+          // The synthetic server socket has no user-visible error consumer;
+          // close it without emitting an unhandled socket error.
+          request.socket.destroy();
+          if (response && !response.destroyed) response.destroy();
+        } else if (response && !response.destroyed) response.destroy();
+      };
       const finishResponse = (result) => {
+        removeAbortListener();
         recordNetworkLifecycle('server-response-finish', request, response, {
           bodyBytes: Number(result?.body?.byteLength || 0),
           responseDestroyed: Boolean(response?.destroyed),
@@ -2828,7 +2858,7 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
         responseDelivered = true;
         resolve(responseFromBytes(url, result.statusCode, result.headers, result.body, scope, request.socket));
       };
-      const response = new VirtualServerResponse(
+      response = new VirtualServerResponse(
         request,
         scope,
         BufferClass,
@@ -2878,11 +2908,13 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
       // client to observe, so propagate the terminal socket condition to the
       // virtual request instead of leaving its dispatch promise pending.
       response.once('close', () => {
+        removeAbortListener();
         if (!response._completedResponse && !responseDelivered) {
           reject(socketHangUpError());
         }
       });
       request.once('close', () => {
+        removeAbortListener();
         // Readable auto-destroy closes a fully consumed request before the
         // server has necessarily finished writing its response. Treat that
         // normal end-of-request close as harmless; only an early close is a
@@ -2949,15 +2981,15 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
             // pipeline users, and the server's lifecycle all settle instead
             // of retaining a deferred body forever.
             if (!response._completedResponse && !response.destroyed) {
-              // The peer close is a premature response close, rather than an
-              // error emitted by ServerResponse. Leave the response
-              // unerrored so stream.finished() reports
-              // ERR_STREAM_PREMATURE_CLOSE, as Node does for HTTP aborts.
               response.destroy();
             }
           };
           request.socket.once?.('close', onSocketClose);
           response.once('close', () => request.socket?.off?.('close', onSocketClose));
+          if (requestSignal?.addEventListener) {
+            requestSignal.addEventListener('abort', onAbort, { once: true });
+            if (requestSignal.aborted) onAbort();
+          }
           recordNetworkLifecycle('server-request', request, response, {
             requestAborted: Boolean(request.aborted),
           });
@@ -4303,7 +4335,11 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
         });
       }
       schedule(scope, () => {
-        if (this.destroyed || error) {
+        if (this.destroyed) {
+          this._deferSocketDestroy(socket, this._destroyError);
+          return;
+        }
+        if (error) {
           if (error && !this.destroyed) this.destroy(error);
           return;
         }
@@ -4662,6 +4698,18 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       return this;
     }
 
+    _deferSocketDestroy(socket, error) {
+      if (!socket || socket.destroyed) return;
+      const defer = typeof scope.setImmediate === 'function'
+        ? (callback) => scope.setImmediate(callback)
+        : typeof scope.setTimeout === 'function'
+          ? (callback) => scope.setTimeout(callback, 0)
+          : (callback) => queueMicrotask(callback);
+      defer(() => {
+        if (!socket.destroyed) socket.destroy(error);
+      });
+    }
+
     destroy(error = undefined) {
       if (this.destroyed) return this;
       // Node reports an abort before response headers as ECONNRESET even when
@@ -4669,6 +4717,7 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       // this terminal error, callers waiting for the request's error event
       // can remain pending forever after a client-side cancellation.
       if (!error && !this.response) error = socketHangUpError();
+      this._destroyError = error;
       this.destroyed = true;
       setOutgoingMessageErrored(this, error);
       this.aborted ||= !this.response;
@@ -4681,6 +4730,11 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
         this._emitError(error);
       }
       if (this.response && !this.response.destroyed) this.response.destroy(error);
+      // ClientRequest.destroy()/abort() closes the underlying TCP connection
+      // as well as the request object. Without this, a raw virtual server
+      // observes only a later close and cannot report ECONNRESET to middleware
+      // such as Express's sendFile callback.
+      this._deferSocketDestroy(this.socket, error);
       // A virtual child can keep the proxy's synthetic socket task alive after
       // the request itself times out or is destroyed. Releasing that process-
       // local task set lets the child finish exactly as a real process would.
@@ -4744,6 +4798,12 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
           this._endCallback?.();
         });
       }
+
+      // A custom Agent may attach an already-connected raw socket through
+      // ClientRequest#onSocket. That path owns request delivery; do not also
+      // start the browser fetch fallback, which would race and destroy the
+      // raw request before the server sees the client abort.
+      if (this.socket && this._rawRequestSent) return;
 
       // Browser-native virtual internet endpoints do not have a host socket
       // for an explicit https.Agent to connect to. Dispatch the deterministic

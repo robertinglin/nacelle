@@ -172,9 +172,32 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
 
   function requestProxy(operation, request) {
     const requestId = String(identity.childId) + '-proxy-' + (++proxySequence);
+    const signal = request && typeof request === 'object' ? request.signal : undefined;
+    const wireRequest = request && typeof request === 'object' ? { ...request } : request;
+    if (wireRequest && typeof wireRequest === 'object') delete wireRequest.signal;
+    const onAbort = signal?.addEventListener
+      ? () => {
+          try {
+            sendUserFrame('message', { __bnhProxyAbort: { requestId } });
+          } catch {
+            // The process boundary may already be closing.
+          }
+        }
+      : null;
+    const cleanup = () => signal?.removeEventListener?.('abort', onAbort);
     return new Promise((resolve, reject) => {
-      proxyRequests.set(requestId, { resolve, reject });
-      sendUserFrame('message', { __bnhProxyRequest: { requestId, operation, request } });
+      proxyRequests.set(requestId, { resolve, reject, cleanup });
+      try {
+        sendUserFrame('message', { __bnhProxyRequest: { requestId, operation, request: wireRequest } });
+        if (onAbort) {
+          signal.addEventListener('abort', onAbort, { once: true });
+          if (signal.aborted) onAbort();
+        }
+      } catch (error) {
+        proxyRequests.delete(requestId);
+        cleanup();
+        reject(error);
+      }
     });
   }
 
@@ -656,6 +679,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
           const pending = proxyRequests.get(response.requestId);
           if (!pending) return;
           proxyRequests.delete(response.requestId);
+          pending.cleanup?.();
           if (response.error) {
             pending.reject(Object.assign(new Error(response.error.message || 'proxy request failed'), response.error));
           } else {

@@ -30,6 +30,29 @@ function networkError(code, syscall, address, port) {
   return error;
 }
 
+function serializeNetworkError(error) {
+  if (!error || typeof error !== 'object') return undefined;
+  return {
+    name: error.name,
+    message: error.message,
+    code: error.code,
+    errno: error.errno,
+    syscall: error.syscall,
+    address: error.address,
+    port: error.port,
+  };
+}
+
+function deserializeNetworkError(value) {
+  if (!value || typeof value !== 'object' || !value.message) return undefined;
+  const error = new Error(String(value.message));
+  if (value.name) error.name = String(value.name);
+  for (const field of ['code', 'errno', 'syscall', 'address', 'port']) {
+    if (value[field] !== undefined) error[field] = value[field];
+  }
+  return error;
+}
+
 function normalizePipePath(path) {
   if (typeof path !== 'string' || path.length === 0) {
     const error = new TypeError('pipe path must be a non-empty string');
@@ -678,10 +701,10 @@ export function createRemoteVirtualNetwork({ port, transport: proxyTransport } =
       const peer = {
         destroyed: false,
         _runTcpResource(callback) { return callback(); },
-        _peerClosed() {
+        _peerClosed(error) {
           if (this.destroyed) return;
           this.destroyed = true;
-          send({ type: 'close', connectionId });
+          send({ type: 'close', connectionId, error: serializeNetworkError(error) });
         },
         push(bytes) {
           if (this.destroyed) return false;
@@ -692,8 +715,8 @@ export function createRemoteVirtualNetwork({ port, transport: proxyTransport } =
           }
           return true;
         },
-        destroy() {
-          this._peerClosed();
+        destroy(error) {
+          this._peerClosed(error);
         },
       };
       const serverSocket = binding.owner._createAcceptedSocket({ ...connection, client: peer });
@@ -756,7 +779,7 @@ export function createRemoteVirtualNetwork({ port, transport: proxyTransport } =
       connection.socket.push(null);
     } else if (message.type === 'close') {
       connections.delete(message.connectionId);
-      connection.socket.destroy();
+      connection.socket.destroy(deserializeNetworkError(message.error));
     }
   };
   const removeListener = addMessagePortListener(port, receive);
@@ -811,10 +834,10 @@ export function createWorkerNetworkBridge({ network, port } = {}) {
           const peer = {
             destroyed: false,
             _runTcpResource(callback) { return callback(); },
-            _peerClosed() {
+            _peerClosed(error) {
               if (this.destroyed) return;
               this.destroyed = true;
-              send({ type: 'close', connectionId });
+              send({ type: 'close', connectionId, error: serializeNetworkError(error) });
             },
             push(bytes) {
               if (this.destroyed) return false;
@@ -825,8 +848,8 @@ export function createWorkerNetworkBridge({ network, port } = {}) {
               }
               return true;
             },
-            destroy() {
-              this._peerClosed();
+            destroy(error) {
+              this._peerClosed(error);
             },
           };
           record.peer = peer;
@@ -879,7 +902,7 @@ export function createWorkerNetworkBridge({ network, port } = {}) {
     } else if (operation === 'end') {
       connection.client.push(null);
     } else if (operation === 'close') {
-      destroyConnection(message.connectionId);
+      destroyConnection(message.connectionId, deserializeNetworkError(message.error));
     }
   };
   const removeListener = addMessagePortListener(port, handle);

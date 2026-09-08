@@ -261,6 +261,42 @@ test.describe('browser-native virtual HTTP compatibility', () => {
     await close(server);
   });
 
+  test('raw agent ClientRequest abort reaches the server as ECONNRESET', async () => {
+    const { http, boundaries: { rawTcp } } = createHttpCompatibility(globalThis);
+    let client;
+    const result = new Promise((resolve, reject) => {
+      const server = http.createServer((request, response) => {
+        response.on('error', () => {});
+        setImmediate(() => queueMicrotask(() => {
+          if (response.finished || (response.socket && !response.socket.writable)) {
+            resolve('undefined');
+            return;
+          }
+          response.socket.on('error', (error) => resolve(error.code));
+          response.socket.on('close', () => resolve('close'));
+        }));
+        client.abort();
+      });
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => {
+        const agent = {
+          addRequest(request, options) {
+            request.onSocket(rawTcp({ host: options.host, port: options.port }));
+          },
+        };
+        client = http.get({
+          host: 'localhost',
+          port: server.address().port,
+          path: '/raw-client-abort',
+          agent,
+        });
+        client.once('error', () => {});
+      });
+    });
+
+    await expect(result).resolves.toBe('ECONNRESET');
+  });
+
   test('propagates a readable-listener response destroy to the active server response', async () => {
     const { http } = createHttpCompatibility(globalThis);
     let resolveServerClosed;

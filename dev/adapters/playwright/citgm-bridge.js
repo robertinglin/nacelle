@@ -396,7 +396,11 @@ function createBrowserProxyAdapter(loadCachedProject) {
       if (event === 'data') return Boolean(connection.socket?.push?.(new Uint8Array(value || [])));
       if (event === 'end') return Boolean(connection.socket?.push?.(null));
       if (event === 'close') {
-        connection.socket?.destroy?.();
+        const error = new Error('read ECONNRESET');
+        error.code = 'ECONNRESET';
+        error.errno = 'ECONNRESET';
+        error.syscall = 'read';
+        connection.socket?.destroy?.(error);
         loopbackConnections.delete(String(id));
         return true;
       }
@@ -560,11 +564,15 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
   const registry = String(env.npm_config_registry || DEFAULT_REGISTRY).replace(/\/+$/, '');
   const runEnv = {
     PATH: '/node/node_modules/.bin',
-    HOME: '/node/.citgm/home',
-    USERPROFILE: '/node/.citgm/home',
-    TEMP: '/node/.citgm/tmp',
-    TMP: '/node/.citgm/tmp',
-    TMPDIR: '/node/.citgm/tmp',
+    // Keep the synthetic CITGM workspace out of a dot-prefixed directory.
+    // Upstream packages such as send inspect every path component when
+    // applying dotfile rules; placing the checkout under `.citgm` makes
+    // ordinary fixtures look like hidden files.
+    HOME: '/node/citgm/home',
+    USERPROFILE: '/node/citgm/home',
+    TEMP: '/node/citgm/tmp',
+    TMP: '/node/citgm/tmp',
+    TMPDIR: '/node/citgm/tmp',
     npm_config_registry: registry,
     npm_config_loglevel: 'error',
     ...env,

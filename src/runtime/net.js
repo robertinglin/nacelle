@@ -998,7 +998,22 @@ export class Socket extends Duplex {
     this.unpipe();
     const peer = this._peer;
     this._peer = null;
-    if (peer && !peer.destroyed) peer._peerClosed(true);
+    if (peer && !peer.destroyed) {
+      if (peer._bnhDeferPeerClose
+        && (typeof globalThis.setImmediate === 'function' || typeof globalThis.setTimeout === 'function')) {
+        // Real TCP peer shutdown is observed after the current server
+        // callback returns. Preserve that boundary for virtual HTTP sockets
+        // so abort handlers scheduled with setImmediate can attach first.
+        const defer = typeof globalThis.setImmediate === 'function'
+          ? globalThis.setImmediate.bind(globalThis)
+          : globalThis.setTimeout.bind(globalThis);
+        defer(() => {
+          if (!peer.destroyed) peer._peerClosed(error || true);
+        });
+      } else {
+        peer._peerClosed(error || true);
+      }
+    }
     if (this._transportPeer?.destroy) this._transportPeer.destroy();
     this._tcpConnectResource?.emitDestroy();
     this._tcpResource?.emitDestroy();
@@ -1023,7 +1038,42 @@ export class Socket extends Duplex {
     this._peer = null;
     this.push(null);
     if (!forceClose && this.readyState === 'open') this._readyState = 'writeOnly';
-    if (forceClose || !this.allowHalfOpen) this.destroy();
+    if (forceClose || !this.allowHalfOpen) {
+      if (forceClose && this._bnhHttpServerSocket) {
+        this._bnhPeerResetError ||= socketError(
+          'ECONNRESET',
+          'read ECONNRESET',
+          this.remoteAddress || 'socket',
+          this.remotePort || 0,
+        );
+        this._emitPeerResetError();
+      }
+      this.destroy();
+    }
+  }
+
+  _emitPeerResetError() {
+    const error = this._bnhPeerResetError;
+    if (!error || this._bnhPeerResetErrorEmitted) return;
+    this._bnhPeerResetErrorEmitted = true;
+    this.emit('error', error);
+  }
+
+  _emitClose() {
+    // Keep the reset notification ahead of close even when another teardown
+    // path initiated destruction before _peerClosed could emit it. Libraries
+    // such as on-finished use the first socket terminal event to distinguish a
+    // client reset from a clean close.
+    if (this._bnhHttpServerSocket && this._bnhHttpResponseComplete === false) {
+      this._bnhPeerResetError ||= socketError(
+        'ECONNRESET',
+        'read ECONNRESET',
+        this.remoteAddress || 'socket',
+        this.remotePort || 0,
+      );
+    }
+    this._emitPeerResetError();
+    return super._emitClose();
   }
 
   async [SymbolAsyncDispose]() {

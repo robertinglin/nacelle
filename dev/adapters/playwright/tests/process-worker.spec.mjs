@@ -8,6 +8,72 @@ async function openRuntime(page) {
 }
 
 test.describe('browser-native worker process boundary', () => {
+  test('routes isolated proxy requests without structured-cloning AbortSignal', async ({ page }) => {
+    await openRuntime(page);
+    const result = await page.evaluate(async () => {
+      const { createRuntime } = await import('/runtime.js');
+      const encode = (source) => new TextEncoder().encode(source);
+      const calls = [];
+      const capabilities = {
+        vfs: { mounts: [{ path: '/node', mode: 'read-write' }] },
+        workers: { entryModules: ['*'], maxChildren: 2 },
+        ipc: { enabled: true },
+        signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
+        output: { maxBytes: 1024 * 1024, stdoutBytes: 1024 * 1024, stderrBytes: 1024 * 1024 },
+        envVars: { allowed: [] },
+        proxy: { mode: 'proxy', enabled: true, capability: true },
+      };
+      const runtime = createRuntime({ globalObject: globalThis });
+      await runtime.reset({
+        runId: 'proxy-signal-regression',
+        capabilities,
+        isolation: 'worker',
+        proxy: {
+          mode: 'proxy',
+          enabled: true,
+          capability: true,
+          adapter: {
+            request(request) {
+              calls.push({ hasSignal: Boolean(request.signal), target: request.url });
+              return {
+                status: 200,
+                statusText: 'OK',
+                headers: { 'content-length': '8' },
+                bodyBytes: encode('proxy-ok'),
+              };
+            },
+          },
+        },
+      });
+      await runtime.mount({
+        '/node/proxy-signal.js': encode(`
+          const https = require('node:https');
+          const request = https.get('https://example.test/', (response) => {
+            let body = '';
+            response.setEncoding('utf8');
+            response.on('data', (chunk) => { body += chunk; });
+            response.on('end', () => process.stdout.write(body));
+          });
+          request.on('error', (error) => { console.error(error); process.exitCode = 1; });
+        `),
+      });
+      const stdout = [];
+      const stderr = [];
+      const decode = (value) => typeof value === 'string' ? value : new TextDecoder().decode(value);
+      const code = await runtime.executeEntry('/node/proxy-signal.js', {
+        cwd: '/node',
+        env: {},
+        processArgv: ['node', '/node/proxy-signal.js'],
+      }, (value) => stdout.push(decode(value)), (value) => stderr.push(decode(value)));
+      return { code, stdout: stdout.join(''), stderr: stderr.join(''), calls };
+    });
+
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toBe('proxy-ok');
+    expect(result.stderr).toBe('');
+    expect(result.calls).toEqual([{ hasSignal: true, target: 'https://example.test/' }]);
+  });
+
   test('shares bytes in both raw and descriptor-shaped worker VFS entries', async ({ page }) => {
     await openRuntime(page);
     const result = await page.evaluate(async () => {

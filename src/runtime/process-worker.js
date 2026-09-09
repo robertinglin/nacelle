@@ -18,6 +18,11 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
   let exitCode = 0;
   let signalCode = null;
   let runtimeStateTimer;
+  let deferredVfsResolver;
+  let deferredVfsReceived = false;
+  let deferredVfsChunks = [];
+  let deferredVfsPathChunks = [];
+  let deferredVfsRecordChunks = [];
   // The control terminal frame is the reliable end-of-process boundary. Keep
   // the injected process here so state produced immediately before natural
   // completion cannot be stranded behind a separately ordered IPC message.
@@ -128,14 +133,37 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         launched: Number(activity.launched) || 0,
         completed: Number(activity.completed) || 0,
         failed: Number(activity.failed) || 0,
+        npmPhase: activity.npmPhase == null ? null : String(activity.npmPhase).slice(0, 160),
+        activeEsmChildren: Array.isArray(activity.activeEsmChildren)
+          ? activity.activeEsmChildren.slice(-4).map((child) => ({
+              entry: String(child.entry || '').slice(0, 256),
+              phase: child.phase == null ? null : String(child.phase).slice(0, 64),
+              mode: child.mode == null ? null : String(child.mode).slice(0, 32),
+              files: Number(child.files) || 0,
+              bytes: Number(child.bytes) || 0,
+              symlinks: Number(child.symlinks) || 0,
+              state: child.state == null ? null : String(child.state).slice(0, 32),
+              runtimePhase: child.runtimePhase == null ? null : String(child.runtimePhase).slice(0, 64),
+            }))
+          : [],
         firstCommand: (activity.first?.command || activity.first?.entry) ? String(activity.first.command || activity.first.entry).split('/').pop().slice(0, 80) : null,
         lastCommand: (activity.last?.command || activity.last?.entry) ? String(activity.last.command || activity.last.entry).split('/').pop().slice(0, 80) : null,
         recent: Array.isArray(activity.recent) ? activity.recent.slice(-4).map((record) => ({
           command: String(record.command || record.entry || '').split('/').pop().slice(0, 80),
+          entry: String(record.entry || record.command || '').slice(0, 256),
+          argv: Array.isArray(record.argv) ? record.argv.slice(0, 8).map((value) => String(value).slice(0, 128)) : [],
           argumentCount: Number(record.argumentCount) || 0,
           code: record.code ?? null,
           signal: record.signal ?? record.terminal?.signal ?? null,
           pending: Boolean(record.pending),
+          phase: record.phase == null ? null : String(record.phase).slice(0, 64),
+          ipcMessageCount: Number(record.ipcMessageCount) || 0,
+          ipcMessageTypes: Array.isArray(record.ipcMessageTypes) ? record.ipcMessageTypes.slice(0, 8).map((value) => String(value).slice(0, 96)) : [],
+          ipcError: record.ipcError ? {
+            type: String(record.ipcError.type || '').slice(0, 96),
+            name: String(record.ipcError.name || 'Error').slice(0, 64),
+            message: String(record.ipcError.message || '').slice(0, 512),
+          } : null,
           stdoutBytes: Number(record.stdoutBytes) || 0,
           stderrBytes: Number(record.stderrBytes) || 0,
           stdoutExcerpt: record.stdoutExcerpt == null ? '' : String(record.stdoutExcerpt).slice(0, 512),
@@ -728,7 +756,9 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     runtimeStateTimer = typeof setInterval === 'function'
       ? setInterval(sendRuntimeState, 100)
       : undefined;
-    const vfs = message.vfs;
+    const vfsPromise = message.vfsDeferred
+      ? new Promise((resolve) => { deferredVfsResolver = resolve; })
+      : Promise.resolve(message.vfs);
     const output = {
       stdout: (value) => process.stdout.write(value),
       stderr: (value) => process.stderr.write(value),
@@ -738,16 +768,17 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       ipc: process,
       stdout: output.stdout,
       stderr: output.stderr,
-      vfs,
+      vfs: message.vfsDeferred ? undefined : message.vfs,
       signal: process,
       networkPort: message.networkPort,
       vfsUpdatePort: message.vfsUpdatePort,
     };
     process.__bnhRuntimePhase = 'dispatch-queued';
     sendRuntimeState();
-    Promise.resolve().then(() => {
+    Promise.resolve().then(async () => {
       process.__bnhRuntimePhase = 'dispatch';
       sendRuntimeState();
+      context.vfs = await vfsPromise;
       return run(context);
     }).then(() => {
       if (!terminalSent) finish('natural', process.exitCode || 0, null);
@@ -758,6 +789,58 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
   }
 
   self.onmessage = (event) => {
+    if (event.data?.type === 'bnh-process-vfs-chunk' && control && !deferredVfsReceived) {
+      deferredVfsChunks[Number(event.data.index) || 0] = event.data.chunk;
+      return;
+    }
+    if (event.data?.type === 'bnh-process-vfs-path-chunk' && control && !deferredVfsReceived) {
+      deferredVfsPathChunks[Number(event.data.index) || 0] = String(event.data.chunk || '');
+      return;
+    }
+    if (event.data?.type === 'bnh-process-vfs-record-chunk' && control && !deferredVfsReceived) {
+      deferredVfsRecordChunks[Number(event.data.index) || 0] = event.data.chunk;
+      return;
+    }
+    if (event.data?.type === 'bnh-process-vfs' && control && !deferredVfsReceived) {
+      deferredVfsReceived = true;
+      let vfs = event.data.vfs;
+      if (vfs?.vfsChunked) {
+        const buffer = new ArrayBuffer(Number(vfs.vfsByteLength) || 0);
+        const target = new Uint8Array(buffer);
+        let offset = 0;
+        for (const chunk of deferredVfsChunks) {
+          const bytes = chunk instanceof ArrayBuffer ? new Uint8Array(chunk) : new Uint8Array(chunk?.buffer || chunk || 0);
+          target.set(bytes, offset);
+          offset += bytes.byteLength;
+        }
+        vfs = { ...vfs, vfsBuffer: buffer };
+        delete vfs.vfsChunked;
+        delete vfs.vfsChunkCount;
+        delete vfs.vfsByteLength;
+        deferredVfsChunks = [];
+      }
+      if (vfs?.vfsPathChunked) {
+        vfs = { ...vfs, vfsFilePaths: deferredVfsPathChunks.join('') };
+        delete vfs.vfsPathChunked;
+        delete vfs.vfsPathChunkCount;
+        deferredVfsPathChunks = [];
+      }
+      if (vfs?.vfsRecordChunked) {
+        const records = new Uint32Array((Number(vfs.vfsFileCount) || 0) * 3);
+        let offset = 0;
+        for (const chunk of deferredVfsRecordChunks) {
+          records.set(chunk, offset);
+          offset += chunk.length;
+        }
+        vfs = { ...vfs, vfsFileRecords: records };
+        delete vfs.vfsRecordChunked;
+        delete vfs.vfsRecordChunkCount;
+        deferredVfsRecordChunks = [];
+      }
+      deferredVfsResolver?.(vfs);
+      deferredVfsResolver = undefined;
+      return;
+    }
     if (event.data?.type !== 'bnh-process-init' || control) return;
     try { start(event.data); } catch (error) { finish('bootstrap', null, null, error); }
   };

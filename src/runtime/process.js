@@ -15,7 +15,12 @@ const SIGNALS = Object.freeze(new Set(['SIGTERM', 'SIGINT', 'SIGKILL']));
 const STATES = Object.freeze(['created', 'starting', 'running', 'stopping', 'exited', 'failed']);
 let nextProcessId = 1000;
 let nextRunId = 1;
-const sharedFileBuffers = new WeakMap();
+const workerVfsTransferList = Symbol('workerVfsTransferList');
+const workerVfsWire = Symbol('workerVfsWire');
+const workerVfsChunks = Symbol('workerVfsChunks');
+const workerVfsPathChunks = Symbol('workerVfsPathChunks');
+const workerVfsRecordChunks = Symbol('workerVfsRecordChunks');
+const packedVfsFile = '__bnhPackedVfsFile';
 
 function resolveLogicalCwd(value, cwd = '/node') {
   const input = String(value);
@@ -89,51 +94,192 @@ export function createBrowserExecve(processObject) {
   };
 }
 
-function shareFileBytes(bytes, scope) {
-  if (!(bytes instanceof Uint8Array)) return bytes;
-  if (bytes.buffer instanceof scope.SharedArrayBuffer) return bytes;
-  let shared = sharedFileBuffers.get(bytes);
-  if (!shared) {
-    shared = new scope.SharedArrayBuffer(bytes.byteLength);
-    new Uint8Array(shared).set(bytes);
-    sharedFileBuffers.set(bytes, shared);
-  }
-  return new Uint8Array(shared);
+function asFileBytes(value) {
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  return null;
 }
 
-function shareFileValue(value, scope) {
-  if (value instanceof Uint8Array || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
-    return shareFileBytes(value instanceof Uint8Array ? value : new Uint8Array(value), scope);
-  }
-  if (value && typeof value === 'object') {
-    for (const key of ['data', 'bytes', 'content']) {
-      if (!Object.hasOwn(value, key)) continue;
-      return { ...value, [key]: shareFileValue(value[key], scope) };
-    }
-  }
-  return value;
-}
-
-function shareFileDescriptor(value, scope) {
-  if (value && typeof value === 'object' && !ArrayBuffer.isView(value) && !(value instanceof ArrayBuffer)) {
-    for (const key of ['data', 'bytes', 'content']) {
-      if (!Object.hasOwn(value, key)) continue;
-      return { ...value, [key]: shareFileBytes(value[key], scope) };
-    }
-  }
-  return shareFileBytes(value, scope);
-}
-
+/**
+ * Make a compact worker payload for large virtual filesystems.
+ *
+ * A package install can contain thousands of files. Sharing each file in its
+ * own SharedArrayBuffer still leaves the browser structured-clone algorithm
+ * to walk thousands of nested objects and allocations. Pack the byte views
+ * into one backing buffer and retain the logical file map as lightweight
+ * views. Page-owned workers can share that backing buffer in isolated pages;
+ * nested workers receive an owned transfer so Chromium does not synchronously
+ * clone a very large SharedArrayBuffer from one worker into another.
+ */
 export function prepareWorkerVfs(vfs, scope) {
-  if (!vfs?.files || scope.crossOriginIsolated !== true
-    || typeof scope.SharedArrayBuffer !== 'function') return vfs;
-  const files = Object.fromEntries(
-    Object.entries(vfs.files).map(([path, value]) => [path, shareFileDescriptor(value, scope)]),
-  );
-  const artifacts = Array.isArray(vfs.artifacts)
-    ? vfs.artifacts.map((artifact) => ({ ...artifact, bytes: shareFileBytes(artifact.bytes, scope) }))
+  if (!vfs?.files) return vfs;
+
+  const byteRecords = [];
+  const byteOffsets = new WeakMap();
+  const recordFor = (value) => {
+    const bytes = asFileBytes(value);
+    if (!bytes) return null;
+    let record = byteOffsets.get(value);
+    if (!record) {
+      record = { source: bytes, offset: 0 };
+      byteOffsets.set(value, record);
+      byteRecords.push(record);
+    }
+    return record;
+  };
+  const fileRecords = new Map();
+  for (const [path, value] of Object.entries(vfs.files)) {
+    const descriptor = value && typeof value === 'object'
+      && !ArrayBuffer.isView(value) && !(value instanceof ArrayBuffer)
+      ? value
+      : null;
+    const key = descriptor
+      ? ['data', 'bytes', 'content'].find((candidate) => Object.hasOwn(descriptor, candidate))
+      : null;
+    const source = key ? descriptor[key] : value;
+    const record = recordFor(source);
+    if (record) fileRecords.set(path, { descriptor, key, record });
+  }
+  const artifactRecords = Array.isArray(vfs.artifacts)
+    ? vfs.artifacts.map((artifact) => ({
+        artifact,
+        record: recordFor(artifact?.bytes),
+      }))
+    : null;
+  if (!byteRecords.length) return vfs;
+
+  const totalBytes = byteRecords.reduce((total, record) => total + record.source.byteLength, 0);
+  const nestedWorker = typeof WorkerGlobalScope === 'function' && scope instanceof WorkerGlobalScope;
+  const chunked = nestedWorker && totalBytes > 16 * 1024 * 1024;
+  const isolated = !nestedWorker
+    && scope.crossOriginIsolated === true
+    && typeof scope.SharedArrayBuffer === 'function';
+  const chunkSize = 1 * 1024 * 1024;
+  const backing = chunked ? null : isolated ? new scope.SharedArrayBuffer(totalBytes) : new ArrayBuffer(totalBytes);
+  const chunks = chunked
+    ? Array.from({ length: Math.ceil(totalBytes / chunkSize) }, (_, index) => new ArrayBuffer(Math.min(chunkSize, totalBytes - index * chunkSize)))
+    : null;
+  const target = backing ? new Uint8Array(backing) : null;
+  let offset = 0;
+  for (const record of byteRecords) {
+    if (target) target.set(record.source, offset);
+    else {
+      let sourceOffset = 0;
+      while (sourceOffset < record.source.byteLength) {
+        const chunkIndex = Math.floor(offset / chunkSize);
+        const chunkOffset = offset % chunkSize;
+        const chunk = new Uint8Array(chunks[chunkIndex]);
+        const length = Math.min(record.source.byteLength - sourceOffset, chunk.byteLength - chunkOffset);
+        chunk.set(record.source.subarray(sourceOffset, sourceOffset + length), chunkOffset);
+        sourceOffset += length;
+        offset += length;
+      }
+      record.offset = offset - record.source.byteLength;
+      continue;
+    }
+    record.offset = offset;
+    offset += record.source.byteLength;
+  }
+  const viewFor = (record) => backing
+    ? new Uint8Array(backing, record.offset, record.source.byteLength)
+    : record.source;
+  const markerFor = (record) => ({
+    [packedVfsFile]: true,
+    offset: record.offset,
+    size: record.source.byteLength,
+  });
+  const files = Object.fromEntries(Object.entries(vfs.files).map(([path, value]) => {
+    const info = fileRecords.get(path);
+    if (!info) return [path, value];
+    const bytes = viewFor(info.record);
+    if (!info.descriptor) return [path, bytes];
+    return [path, { ...info.descriptor, [info.key]: bytes }];
+  }));
+  const artifacts = artifactRecords
+    ? artifactRecords.map(({ artifact, record }) => record
+      ? { ...artifact, bytes: viewFor(record) }
+      : artifact)
     : vfs.artifacts;
-  return { ...vfs, files, artifacts };
+  const prepared = { ...vfs, files, artifacts };
+  const wireFiles = Object.fromEntries(Object.entries(vfs.files).map(([path, value]) => {
+    const info = fileRecords.get(path);
+    if (!info) return [path, value];
+    const marker = markerFor(info.record);
+    if (!info.descriptor) return [path, marker];
+    return [path, { ...info.descriptor, [info.key]: marker }];
+  }));
+  const canPackFiles = Object.keys(vfs.files).length > 0
+    && Object.keys(vfs.files).every((path) => fileRecords.has(path));
+  const wireArtifacts = canPackFiles
+    ? []
+    : artifactRecords
+      ? artifactRecords.map(({ artifact, record }) => record
+        ? { ...artifact, bytes: markerFor(record) }
+        : artifact)
+      : vfs.artifacts;
+  let wireFilePaths = '';
+  let wireFileRecords = null;
+  let pathChunks = null;
+  let recordChunks = null;
+  if (canPackFiles) {
+    const paths = Object.keys(vfs.files);
+    wireFilePaths = paths.join('\u0000');
+    wireFileRecords = new Uint32Array(paths.length * 3);
+    paths.forEach((path, index) => {
+      const info = fileRecords.get(path);
+      const base = index * 3;
+      wireFileRecords[base] = info.record.offset;
+      wireFileRecords[base + 1] = info.record.source.byteLength;
+      wireFileRecords[base + 2] = info.descriptor?.mode === undefined
+        ? 0xffffffff
+        : Number(info.descriptor.mode) >>> 0;
+    });
+    if (chunked) {
+      pathChunks = Array.from({ length: Math.ceil(wireFilePaths.length / chunkSize) }, (_, index) => (
+        wireFilePaths.slice(index * chunkSize, (index + 1) * chunkSize)
+      ));
+      const recordsPerChunk = 3 * 16384;
+      recordChunks = Array.from({ length: Math.ceil(wireFileRecords.length / recordsPerChunk) }, (_, index) => (
+        wireFileRecords.slice(index * recordsPerChunk, (index + 1) * recordsPerChunk)
+      ));
+    }
+  }
+  const wire = {
+    ...vfs,
+    // Keep a tiny fallback map for mixed/non-byte entries. Normal package
+    // snapshots use the path table below, avoiding one cloned object per file.
+    files: canPackFiles ? {} : wireFiles,
+    artifacts: wireArtifacts,
+    ...(backing ? { vfsBuffer: backing } : {}),
+    vfsPacked: true,
+    ...(chunked ? { vfsChunked: true, vfsByteLength: totalBytes } : {}),
+    ...(canPackFiles ? {
+      ...(pathChunks ? {
+        vfsPathChunked: true,
+        vfsPathChunkCount: pathChunks.length,
+        vfsRecordChunked: true,
+        vfsRecordChunkCount: recordChunks.length,
+        vfsFileRecords: undefined,
+      } : { vfsFilePaths: wireFilePaths }),
+      ...(pathChunks ? {} : { vfsFileRecords: wireFileRecords }),
+      vfsFileCount: Object.keys(vfs.files).length,
+    } : {}),
+  };
+  Object.defineProperty(prepared, workerVfsWire, {
+    configurable: true,
+    value: wire,
+  });
+  if (chunks) Object.defineProperty(prepared, workerVfsChunks, { configurable: true, value: chunks });
+  if (pathChunks) Object.defineProperty(prepared, workerVfsPathChunks, { configurable: true, value: pathChunks });
+  if (recordChunks) Object.defineProperty(prepared, workerVfsRecordChunks, { configurable: true, value: recordChunks });
+  if (!isolated && !chunked) {
+    Object.defineProperty(prepared, workerVfsTransferList, {
+      configurable: true,
+      value: [backing],
+    });
+  }
+  return prepared;
 }
 
 function format(...values) {
@@ -741,7 +887,15 @@ export function createProcess({
   process.stdout = makeWritableEndpoint(output.stdout);
   process.stderr = makeWritableEndpoint(output.stderr);
   installProcessStdoutSurface(process.stdout);
-  Object.defineProperty(process, 'exitCode', { configurable: true, enumerable: true, get: () => exitCode, set: (value) => { exitCode = Number(value) || 0; } });
+  Object.defineProperty(process, 'exitCode', {
+    configurable: true,
+    enumerable: true,
+    get: () => exitCode,
+    set: (value) => {
+      const next = Number(value) || 0;
+      exitCode = next;
+    },
+  });
   process.getCode = () => exitCode;
   process._exitRequested = () => exitRequested;
   process._markExited = () => { if (!exited) process.exit(exitCode); };
@@ -808,6 +962,7 @@ export function createBrowserProcess(options = {}) {
   let abortListener;
   let completionResolve;
   let completionReject;
+  let deferredVfsMessage;
   const completion = new Promise((resolve, reject) => { completionResolve = resolve; completionReject = reject; });
   const childOutputs = [];
   const child = {
@@ -933,7 +1088,23 @@ export function createBrowserProcess(options = {}) {
     if (frame.type === 'ready') {
       if (spawned || terminalRecord) return;
       if (startupTimer) { clearTimeout(startupTimer); startupTimer = null; }
-      moveTo('running'); spawned = true; events.emit('spawn'); return;
+      moveTo('running'); spawned = true; events.emit('spawn');
+      if (deferredVfsMessage && worker) {
+        const payload = deferredVfsMessage;
+        deferredVfsMessage = null;
+        for (let index = 0; index < (payload.chunks?.length || 0); index += 1) {
+          worker.postMessage({ type: 'bnh-process-vfs-chunk', index, chunk: payload.chunks[index] }, [payload.chunks[index]]);
+        }
+        for (let index = 0; index < (payload.pathChunks?.length || 0); index += 1) {
+          worker.postMessage({ type: 'bnh-process-vfs-path-chunk', index, chunk: payload.pathChunks[index] });
+        }
+        for (let index = 0; index < (payload.recordChunks?.length || 0); index += 1) {
+          const chunk = payload.recordChunks[index];
+          worker.postMessage({ type: 'bnh-process-vfs-record-chunk', index, chunk }, [chunk.buffer]);
+        }
+        worker.postMessage(payload.message, payload.transferList);
+      }
+      return;
     }
     if (frame.type === 'child-disconnect') { emitDisconnect(); ipc?.close(); return; }
     if (frame.type === 'signal-result') return;
@@ -1082,7 +1253,9 @@ export function createBrowserProcess(options = {}) {
     };
     if (options.networkPort) initialData.networkPort = options.networkPort;
     if (options.vfsUpdatePort) initialData.vfsUpdatePort = options.vfsUpdatePort;
-    if (options.vfs !== undefined) initialData.vfs = prepareWorkerVfs(options.vfs, scope);
+    const preparedVfs = options.vfs === undefined ? null : prepareWorkerVfs(options.vfs, scope);
+    const vfsTransferList = preparedVfs?.[workerVfsTransferList] || [];
+    if (preparedVfs !== null) initialData.vfsDeferred = true;
     const transferList = [
       controlChannel.raw.port2,
       userChannel.raw.port2,
@@ -1091,6 +1264,35 @@ export function createBrowserProcess(options = {}) {
       ...(options.workerDataTransferList || []),
     ];
     worker.postMessage(initialData, transferList);
+    if (preparedVfs !== null) {
+      const wire = preparedVfs[workerVfsWire] || preparedVfs;
+      let vfsMessage = wire;
+      let vfsChunks = null;
+      let vfsPathChunks = null;
+      let vfsRecordChunks = null;
+      if (wire.vfsChunked && preparedVfs[workerVfsChunks]) {
+        vfsChunks = preparedVfs[workerVfsChunks];
+        vfsMessage = { ...wire, vfsBuffer: undefined, vfsChunkCount: vfsChunks.length };
+      }
+      if (wire.vfsPathChunked && preparedVfs[workerVfsPathChunks]) {
+        vfsPathChunks = preparedVfs[workerVfsPathChunks];
+        vfsMessage = { ...vfsMessage, vfsFilePaths: undefined };
+      }
+      if (wire.vfsRecordChunked && preparedVfs[workerVfsRecordChunks]) {
+        vfsRecordChunks = preparedVfs[workerVfsRecordChunks];
+        vfsMessage = { ...vfsMessage, vfsFileRecords: undefined };
+      }
+      deferredVfsMessage = {
+        message: {
+          type: 'bnh-process-vfs',
+          vfs: vfsMessage,
+        },
+        chunks: vfsChunks,
+        pathChunks: vfsPathChunks,
+        recordChunks: vfsRecordChunks,
+        transferList: vfsChunks ? [] : vfsTransferList,
+      };
+    }
     // The worker now owns the initialized VFS snapshot. Do not retain the
     // parent-side descriptor map through the child lifecycle closures.
     options.vfs = undefined;

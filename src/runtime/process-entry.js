@@ -8,6 +8,55 @@ import { createRemoteVirtualNetwork } from './virtual-network.js';
 
 const runtimes = new Map();
 
+function expandPackedVfs(descriptor) {
+  if (!descriptor?.vfsPacked || !descriptor.vfsBuffer) return descriptor;
+  const buffer = descriptor.vfsBuffer;
+  const viewFor = (value) => {
+    if (!value?.__bnhPackedVfsFile) return value;
+    return new Uint8Array(buffer, Number(value.offset) || 0, Number(value.size) || 0);
+  };
+  const files = {};
+  if (typeof descriptor.vfsFilePaths === 'string' && descriptor.vfsFileRecords) {
+    const paths = descriptor.vfsFilePaths ? descriptor.vfsFilePaths.split('\u0000') : [];
+    const records = descriptor.vfsFileRecords;
+    const count = Math.min(Number(descriptor.vfsFileCount) || paths.length, paths.length, Math.floor(records.length / 3));
+    for (let index = 0; index < count; index += 1) {
+      const base = index * 3;
+      const mode = Number(records[base + 2]);
+      files[paths[index]] = mode === 0xffffffff
+        ? { data: new Uint8Array(buffer, Number(records[base]) || 0, Number(records[base + 1]) || 0) }
+        : {
+            data: new Uint8Array(buffer, Number(records[base]) || 0, Number(records[base + 1]) || 0),
+            mode,
+          };
+    }
+  }
+  for (const [path, value] of Object.entries(descriptor.files || {})) {
+    if (value?.__bnhPackedVfsFile) {
+      files[path] = viewFor(value);
+      continue;
+    }
+    if (!value || typeof value !== 'object' || ArrayBuffer.isView(value) || value instanceof ArrayBuffer) {
+      files[path] = viewFor(value);
+      continue;
+    }
+    const key = ['data', 'bytes', 'content'].find((candidate) => Object.hasOwn(value, candidate));
+    files[path] = key ? { ...value, [key]: viewFor(value[key]) } : value;
+  }
+  const artifacts = Array.isArray(descriptor.artifacts)
+    ? descriptor.artifacts.map((artifact) => artifact?.bytes
+      ? { ...artifact, bytes: viewFor(artifact.bytes) }
+      : artifact)
+    : descriptor.artifacts;
+  const expanded = { ...descriptor, files, artifacts };
+  delete expanded.vfsBuffer;
+  delete expanded.vfsPacked;
+  delete expanded.vfsFilePaths;
+  delete expanded.vfsFileRecords;
+  delete expanded.vfsFileCount;
+  return expanded;
+}
+
 function runtimeFor(nodeVersion) {
   const profile = resolveNodeVersionProfile(nodeVersion || 'lts');
   let runtime = runtimes.get(profile.id);
@@ -69,7 +118,7 @@ export async function runProcessEntry(context) {
     }
   };
   setRuntimePhase('bootstrap');
-  const sourceDescriptor = context.vfs;
+  const sourceDescriptor = expandPackedVfs(context.vfs);
   const proxyOperations = new Set(sourceDescriptor?.proxy?.operations || []);
   const descriptor = sourceDescriptor?.proxy?.rpc
     ? {

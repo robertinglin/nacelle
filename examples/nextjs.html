@@ -662,6 +662,7 @@ export default nextConfig;
     });
 
     let builtFiles = null;
+    let installedDependencyVersion = null;
     let launching = false;
     let readinessController = null;
 
@@ -748,17 +749,26 @@ export default nextConfig;
         for (const [filePath, content] of Object.entries(sourceFiles)) {
           await node.fs.writeFile(`/node/${filePath}`, content);
         }
-        logTerminal('Installing stock Next.js dependencies...', 'system');
-        await node.npm.install({
-          onProgress: (event) => {
-            if (event.phase === 'fetching-meta' || event.phase === 'downloading-tarball') {
-              logNetwork(`[NPM] ${event.phase}: GET ${event.url || event.name}`);
-            } else if (event.phase === 'unpacking') {
-              logNetwork(`[NPM] ${event.phase}: ${event.name}@${event.version || ''}`);
-            }
-          },
+        const dependencyVersion = JSON.stringify({
+          packageJson: sourceFiles['package.json'] || '',
+          packageLock: sourceFiles['package-lock.json'] || '',
         });
-        logTerminal('✓ stock Next.js 16 dependencies installed', 'system');
+        if (installedDependencyVersion !== dependencyVersion) {
+          logTerminal('Installing stock Next.js dependencies...', 'system');
+          await node.npm.install({
+            onProgress: (event) => {
+              if (event.phase === 'fetching-meta' || event.phase === 'downloading-tarball') {
+                logNetwork(`[NPM] ${event.phase}: GET ${event.url || event.name}`);
+              } else if (event.phase === 'unpacking') {
+                logNetwork(`[NPM] ${event.phase}: ${event.name}@${event.version || ''}`);
+              }
+            },
+          });
+          installedDependencyVersion = dependencyVersion;
+          logTerminal('✓ stock Next.js 16 dependencies installed', 'system');
+        } else {
+          logTerminal('✓ stock Next.js 16 dependencies already installed', 'system');
+        }
         const commands = mode === 'start' && builtFiles !== sourceVersion ? ['build', 'start'] : [mode];
         for (const command of commands) {
           if (command === 'build') {

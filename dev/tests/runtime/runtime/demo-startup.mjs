@@ -215,7 +215,7 @@ async function nextPage(fetchImpl = async () => ({ ok: true })) {
   const start = source.indexOf('    async function waitForNextServer');
   const end = source.indexOf("    document.getElementById('btn-dev')", start);
   assert.ok(start >= 0 && end > start);
-  vm.runInContext(`let builtFiles = null, launching = false, readinessController = null;\n${source.slice(start, end)}\nthis.launchDemo = launchNextApp;`, context);
+  vm.runInContext(`let builtFiles = null, installedDependencyVersion = null, launching = false, readinessController = null;\n${source.slice(start, end)}\nthis.launchDemo = launchNextApp;`, context);
   return { context, events, handles };
 }
 
@@ -225,12 +225,14 @@ test('Next demo probes without relying on banner chunk boundaries and kills befo
     await context.launchDemo();
     await turn();
     assert.equal(events.filter((event) => event === 'fetch').length, 1);
+    assert.equal(events.filter((event) => event === 'install').length, 1);
     assert.equal(context.serverStatus.className, 'status-dot active');
     events.length = 0;
     await context.launchDemo();
     await turn();
     assert.equal(events[0], 'kill');
     assert.ok(events.indexOf('write') > events.indexOf('kill'));
+    assert.equal(events.filter((event) => event === 'install').length, 0);
   } finally {
     for (const handle of handles) handle.finish(0);
     await turn();

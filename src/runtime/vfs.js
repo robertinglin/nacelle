@@ -1,4 +1,3 @@
-Error.stackTraceLimit = 40; // TEMP-DIAG
 import { EventEmitter } from './events.js';
 import { Readable, Writable } from './streams.js';
 import { resolveEncodingOps } from './buffer.js';
@@ -749,6 +748,10 @@ export function createVfs(options = {}) {
   let warningEmitter = null;
   const mutationListeners = new Set();
   let nonPortableTemplateWarningEmitted = false;
+  let directoryChildrenIndex = null;
+  const invalidateDirectoryChildrenIndex = () => {
+    directoryChildrenIndex = null;
+  };
   let recursiveRmdirWarningEmitted = false;
   let truncateDescriptorWarningEmitted = false;
 
@@ -911,6 +914,7 @@ export function createVfs(options = {}) {
   }
 
   function notify(path, eventType) {
+    invalidateDirectoryChildrenIndex();
     const parent = parentOf(path);
     for (const [watchPath, list] of watchers) {
       for (const watcher of [...list]) {
@@ -957,6 +961,7 @@ export function createVfs(options = {}) {
   }
 
   function applyUpdate(update = {}) {
+    invalidateDirectoryChildrenIndex();
     const removed = Array.isArray(update.removed) ? update.removed : [];
     for (const pathValue of removed) {
       const path = resolvePath(pathValue);
@@ -1208,26 +1213,23 @@ export function createVfs(options = {}) {
     access(path, 'scandir');
     if (files.has(path) || symlinks.has(path)) throw notDirectory(path, 'scandir');
     if (!directories.has(path)) throw missing(path, 'scandir');
-    const names = new Map();
-    const prefix = path === '/' ? '/' : `${path}/`;
-    for (const directory of directories) {
-      if (directory.startsWith(prefix) && directory !== path) {
-        const name = directory.slice(prefix.length).split('/')[0];
-        names.set(name, 'directory');
+    if (!directoryChildrenIndex) {
+      const index = new Map();
+      const add = (entryPath, kind) => {
+        const parent = parentOf(entryPath);
+        const name = entryPath.slice(parent === '/' ? 1 : parent.length + 1);
+        const names = index.get(parent) || new Map();
+        if (!names.has(name)) names.set(name, kind);
+        index.set(parent, names);
+      };
+      for (const directory of directories) {
+        if (directory !== '/') add(directory, 'directory');
       }
+      for (const file of files.keys()) add(file, 'file');
+      for (const link of symlinks.keys()) add(link, 'symlink');
+      directoryChildrenIndex = index;
     }
-    for (const file of files.keys()) {
-      if (file.startsWith(prefix)) {
-        const name = file.slice(prefix.length).split('/')[0];
-        names.set(name, names.get(name) || 'file');
-      }
-    }
-    for (const link of symlinks.keys()) {
-      if (link.startsWith(prefix)) {
-        const name = link.slice(prefix.length).split('/')[0];
-        names.set(name, names.get(name) || 'symlink');
-      }
-    }
+    const names = directoryChildrenIndex.get(path) || new Map();
     return [...names].sort((left, right) => lexicalCompare(left[0], right[0]))
       .map(([name, kind]) => new Dirent(name, kind, path));
   }
@@ -1328,12 +1330,13 @@ export function createVfs(options = {}) {
     return new Dir(createRawDirectoryHandle(path), path, options);
   }
 
-  function statPath(path) {
+  function statPath(path, optionsValue) {
     path = resolvePath(path);
     access(path, 'stat');
     if (files.has(path)) return new Stats('file', files.get(path).byteLength, metadataFor(path));
     if (directories.has(path)) return new Stats('directory', 0, metadataFor(path));
     if (virtualSocketExists(path)) return new Stats('socket', 0, { mode: 0o777, ...metadataFor(path) });
+    if (optionsValue?.throwIfNoEntry === false) return undefined;
     throw missing(path, 'stat');
   }
 
@@ -1358,13 +1361,14 @@ export function createVfs(options = {}) {
     return Object.fromEntries(Object.entries(values).map(([key, value]) => [key, BigInt(value)]));
   }
 
-  function lstatPath(path) {
+  function lstatPath(path, optionsValue) {
     path = resolvePath(path, false);
     access(path, 'lstat');
     if (symlinks.has(path)) return new Stats('symlink', textEncoder.encode(symlinks.get(path)).byteLength, metadataFor(path));
     if (files.has(path)) return new Stats('file', files.get(path).byteLength, metadataFor(path));
     if (directories.has(path)) return new Stats('directory', 0, metadataFor(path));
     if (virtualSocketExists(path)) return new Stats('socket', 0, { mode: 0o777, ...metadataFor(path) });
+    if (optionsValue?.throwIfNoEntry === false) return undefined;
     throw missing(path, 'lstat');
   }
 
@@ -3417,6 +3421,10 @@ export function createVfs(options = {}) {
       if (nodeExists(linkPath)) throw existsError(linkPath, 'mount');
       symlinks.set(linkPath, sourcePath(target));
     }
+    // A mount can add a complete package tree after a directory has already
+    // been read (npm installs do exactly this). Do not let the lazy child
+    // index hide files from the newly mounted tree.
+    invalidateDirectoryChildrenIndex();
     emitMutation({ action: 'sync' });
     return { path: mountRecord.path, mode: mountRecord.mode };
   }
@@ -3504,6 +3512,7 @@ export function createVfs(options = {}) {
       directories.add('/');
     }
     symlinks.clear();
+    invalidateDirectoryChildrenIndex();
     hardLinks.clear();
     metadata.clear();
     descriptors.clear();
@@ -3604,8 +3613,9 @@ export function createVfs(options = {}) {
 
   function stat(pathValue, optionsValue, callback) {
     const done = typeof optionsValue === 'function' ? optionsValue : callback;
+    const options = typeof optionsValue === 'object' && optionsValue !== null ? optionsValue : {};
     resolve(pathValue);
-    asyncFsOperation(done, () => statPath(resolve(pathValue)));
+    asyncFsOperation(done, () => statPath(resolve(pathValue), options));
   }
 
   function statfs(pathValue, optionsValue, callback) {
@@ -3617,9 +3627,10 @@ export function createVfs(options = {}) {
 
   function lstat(pathValue, optionsValue, callback) {
     const done = typeof optionsValue === 'function' ? optionsValue : callback;
+    const options = typeof optionsValue === 'object' && optionsValue !== null ? optionsValue : {};
     resolve(pathValue);
     const resolvedPath = resolve(pathValue);
-    asyncFsOperation(done, () => lstatPath(resolvedPath));
+    asyncFsOperation(done, () => lstatPath(resolvedPath, options));
   }
 
   function readdir(pathValue, optionsValue, callback) {
@@ -3787,7 +3798,8 @@ export function createVfs(options = {}) {
     existsSync(pathValue) {
       try { statPath(resolve(pathValue)); return true; } catch (error) {
         if (error.code === 'ENOENT' || error.code === 'ERR_CAPABILITY_DENIED'
-          || error.code === 'ERR_INVALID_PATH' || error.code === 'ERR_INVALID_ARG_TYPE') return false;
+          || error.code === 'ENOTDIR' || error.code === 'ERR_INVALID_PATH'
+          || error.code === 'ERR_INVALID_ARG_TYPE') return false;
         throw error;
       }
     },
@@ -3811,8 +3823,8 @@ export function createVfs(options = {}) {
       removeDirectory(resolve(pathValue), optionsValue.recursive);
     },
     mkdirSync(pathValue, optionsValue = {}) { return makeDirectory(resolve(pathValue), optionsValue.recursive); },
-    statSync(pathValue) { return statPath(resolve(pathValue)); },
-    lstatSync(pathValue) { return lstatPath(resolve(pathValue)); },
+    statSync(pathValue, optionsValue) { return statPath(resolve(pathValue), optionsValue); },
+    lstatSync(pathValue, optionsValue) { return lstatPath(resolve(pathValue), optionsValue); },
     statfsSync(pathValue, optionsValue) { return statFsPath(resolve(pathValue), optionsValue); },
     readdirSync(pathValue, optionsValue) {
       return entriesFor(pathValue, optionsValue);

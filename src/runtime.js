@@ -3197,11 +3197,22 @@ function browserProcessVersions(scope, profile) {
   // Next.js uses this WebContainer marker to select its own official SWC
   // WebAssembly fallback before attempting the platform-specific .node file.
   const openssl = browserCryptoVersion(scope);
-  return Object.freeze({
+  const values = {
     ...profile.versions,
     ...(openssl ? { openssl } : {}),
     webcontainer: '1.0.0',
-  });
+  };
+  // Node exposes process.versions as a non-writable object whose individual
+  // properties remain configurable. Test runners use that boundary to
+  // emulate older Node releases between cases.
+  return Object.defineProperties({}, Object.fromEntries(
+    Object.entries(values).map(([key, value]) => [key, {
+      configurable: true,
+      enumerable: true,
+      value,
+      writable: false,
+    }]),
+  ));
 }
 
 function createProcess(scope, options, stdout, stderr, trackTask) {
@@ -7061,6 +7072,11 @@ export function createRuntime({
             Object.entries({ ...owner.env, ...(options?.env || {}) })
               .filter(([, value]) => value !== undefined),
           );
+          // Node's os.tmpdir() contract assumes the configured directory is
+          // available to the child. Package tooling commonly realpaths it at
+          // module initialization, so materialize child-specific temporary
+          // directories before loading any child modules.
+          materializeTempDirectories(env);
           const nodeOptions = tokenizeShell(env.NODE_OPTIONS || '', env);
           const childExecArgv = Array.isArray(options?.execArgv) ? options.execArgv : [];
           const rawArgs = [...nodeOptions, ...childExecArgv, ...(Array.isArray(args) ? args : [])].map(String);
@@ -11133,6 +11149,15 @@ export function createRuntime({
     };
   }
 
+  function materializeTempDirectories(env) {
+    for (const key of ['npm_config_tmp', 'TMPDIR', 'TMP', 'TEMP']) {
+      const configuredPath = env?.[key];
+      if (typeof configuredPath === 'string' && configuredPath.startsWith('/')) {
+        vfs.fs.mkdirSync(configuredPath, { recursive: true });
+      }
+    }
+  }
+
   async function execute(entry, options, stdout, stderr) {
     // The browser compatibility layer patches host AbortSignal methods. Keep
     // Node-side consumers isolated because Node already provides these APIs.
@@ -11425,6 +11450,7 @@ export function createRuntime({
       : fullProcessData;
     reportExecutePhase('process-bound');
     const processObject = processData.processObject;
+    materializeTempDirectories(processObject.env);
     // The process-entry boundary carries this marker on the injected worker
     // process. Mirror it onto the runtime-owned process object used by child
     // spawning so asynchronous ESM grandchildren can select an isolated

@@ -1,0 +1,152 @@
+# CITGM top-100 status
+
+This is the ordered status record for `dev/adapters/playwright/citgm-top-100.json`.
+`PASS` means the real upstream CITGM run passed in Chromium and the required
+post-run gates passed. `PENDING` means the package has not been attempted yet.
+`BLOCKED` is reserved for an external package or repository blocker.
+
+The continuation started from commit `0a56f2b` with ranks 1–5 already green.
+Ranks 1–4 were completed before this record was introduced; rank 5
+(`ansi-regex`) was reported CITGM-green at the continuation point. They are
+not being reclassified as newly rerun here.
+
+| Rank | Package | Status | Classification | Evidence / notes |
+| ---: | --- | --- | --- | --- |
+| 1 | semver | PASS | prior result | Green at continuation baseline (`0a56f2b`). |
+| 2 | minimatch | PASS | prior result | Green at continuation baseline (`0a56f2b`). |
+| 3 | debug | PASS | prior result | Green at continuation baseline (`0a56f2b`). |
+| 4 | brace-expansion | PASS | prior result | Green at continuation baseline (`0a56f2b`). |
+| 5 | ansi-regex | PASS | prior result | CITGM-green at continuation baseline. |
+| 6 | supports-color | PASS | ours | Final Chromium CITGM run `citgm-1789059865080`; XO, AVA (55 tests), and TSD all exited 0. Required gates: build passed; `npm test` 296/296; Chromium Playwright 243/243; Firefox Playwright 243/243. |
+| 7 | ms | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 8 | ansi-styles | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 9 | chalk | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 10 | emoji-regex | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 11 | wrap-ansi | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 12 | lru-cache | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 13 | tslib | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 14 | picomatch | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 15 | glob | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 16 | minipass | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 17 | type-fest | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 18 | color-name | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 19 | strip-ansi | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 20 | balanced-match | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 21 | p-limit | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 22 | glob-parent | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 23 | p-locate | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 24 | has-flag | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 25 | iconv-lite | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 26 | entities | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 27 | uuid | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 28 | json-schema-traverse | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 29 | string-width | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 30 | escape-string-regexp | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 31 | globals | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 32 | is-fullwidth-code-point | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 33 | argparse | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 34 | ignore | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 35 | which | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 36 | esbuild | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 37 | isexe | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 38 | js-yaml | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 39 | resolve | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 40 | mime-types | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 41 | nanoid | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 42 | yargs-parser | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 43 | source-map | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 44 | string_decoder | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 45 | color-convert | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 46 | estraverse | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 47 | https-proxy-agent | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 48 | @babel/helper-validator-identifier | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 49 | json5 | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 50 | react-is | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 51 | readdirp | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 52 | commander | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 53 | js-tokens | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 54 | shebang-regex | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 55 | fs-extra | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 56 | readable-stream | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 57 | punycode | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 58 | tr46 | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 59 | find-up | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 60 | webidl-conversions | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 61 | path-exists | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 62 | graceful-fs | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 63 | eslint-scope | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 64 | yargs | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 65 | cross-spawn | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 66 | statuses | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 67 | whatwg-url | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 68 | fast-deep-equal | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 69 | locate-path | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 70 | is-number | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 71 | get-stream | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 72 | yaml | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 73 | path-scurry | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 74 | @babel/parser | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 75 | browserslist | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 76 | @babel/helper-string-parser | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 77 | camelcase | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 78 | yallist | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 79 | @babel/template | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 80 | cookie | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 81 | agent-base | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 82 | safe-buffer | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 83 | qs | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 84 | fill-range | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 85 | path-to-regexp | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 86 | lodash | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 87 | universalify | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 88 | form-data | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 89 | jiti | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 90 | @radix-ui/react-primitive | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 91 | onetime | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 92 | node-releases | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 93 | ajv | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 94 | is-glob | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 95 | escalade | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 96 | update-browserslist-db | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 97 | yocto-queue | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 98 | to-regex-range | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 99 | fast-json-stable-stringify | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 100 | get-intrinsic | PENDING | — | Not attempted; rank 6 was required to commit first. |
+
+## Rank 6 failure record
+
+All failures below occurred while running the real package through Chromium
+CITGM 10.0.2. The nested packages were diagnostic surfaces; the fixes were
+general runtime conformance fixes. No package-specific conditionals, fake
+success paths, or candidate shims were added.
+
+| Run / log | Observed failure | Classification and resolution |
+| --- | --- | --- |
+| `citgm-1789057606078` / `/tmp/nacelle-citgm-top-100/citgm-1789057606078` | `@tybys/wasm-util` called `DataView.setBigUint64` with VFS `Stats` number fields. | Ours. Implemented Node-compatible `{ bigint: true }` `Stats` fields and nanosecond timestamps. |
+| `citgm-1789057930325` / `/tmp/nacelle-citgm-top-100/citgm-1789057930325` | `@unrs/resolver-binding-wasm32-wasi` reached WASI but `Stats.isBlockDevice()` mixed BigInt mode with numeric constants. | Ours, exposed by a nested dependency. Updated all `Stats` mode predicates for BigInt metadata and verified the published resolver graph in isolation. |
+| `citgm-1789058752375` / `/tmp/nacelle-citgm-top-100/citgm-1789058752375` | `ava` failed to import `../package.json` because the loader parsed `default}` as the export name. | Ours. Fixed the general ESM re-export parser and added a JSON default re-export oracle. |
+| `citgm-1789058949225` / `/tmp/nacelle-citgm-top-100/citgm-1789058949225` | published `temp-dir` failed on `fs.realpath(os.tmpdir())` for an unmaterialized child `TMPDIR`. | Ours. Materialized configured temporary directories for runtime entries and nested children; added a child-process oracle. |
+| `citgm-1789059495580` / `/tmp/nacelle-citgm-top-100/citgm-1789059495580` | AVA stalled after its Windows emulation changed `process.versions.node` and `os.release`. | Ours. Matched native configurability for `process.versions` entries and mutable `os` methods; added an override/dynamic-import oracle. |
+| `citgm-1789059865080` / `artifacts/citgm-top-100/rank-006-supports-color/1789059865080.terminal-summary.json` | upstream test suite completed successfully: 55 AVA tests passed; XO and TSD exited 0. | PASS. Full stdout, stderr, child output, and terminal summaries for every attempt are preserved under `artifacts/citgm-top-100/rank-006-supports-color/`. |
+
+## Explicit external blocker
+
+`typescript-eslint` is `BLOCKED` outside the ranked manifest: its published
+workspace package layout requires `nx` to resolve the package under test. This
+is an upstream/package-layout blocker, not a Nacelle failure. No fake `nx`
+shim was added.
+
+## Rank 6 gate evidence
+
+Commands were run from the repository root after the final CITGM pass:
+
+```text
+npm run build -- --node-version=v22                         PASS
+npm test                                                     PASS — 296/296
+npm run test:browser:chromium                               PASS — 243/243
+npm run test:browser:firefox                                 PASS — 243/243
+```
+
+The first sandboxed `npm test` attempt was retained in the gate log and only
+failed its existing network-backed demos with `EAI_AGAIN registry.npmjs.org`.
+The host-network rerun above is the authoritative gate result.

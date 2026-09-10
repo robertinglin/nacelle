@@ -44,3 +44,20 @@ test('rewrites export-from specifiers when an exported name contains from', asyn
     loader.dispose();
   }
 });
+
+test('preserves the default binding when re-exporting JSON', async () => {
+  const loader = createModuleLoader({
+    files: new Map([
+      ['/node/index.mjs', "export {default} from './package.json' with { type: 'json' };"],
+      ['/node/package.json', '{"name":"fixture"}'],
+    ]),
+    builtins: {},
+    defaultModuleType: 'module',
+  });
+  try {
+    const namespace = await loader.import('/node/index.mjs');
+    assert.deepEqual(namespace.default, { name: 'fixture' });
+  } finally {
+    loader.dispose();
+  }
+});

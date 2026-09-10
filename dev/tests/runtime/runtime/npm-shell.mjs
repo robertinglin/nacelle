@@ -162,6 +162,43 @@ test('bash exposes common file, process, and text commands', async () => {
   assert.equal(await node.fs.readFile('/node/work/tee.txt'), 'tee\n');
 });
 
+test('child processes can realpath their configured temporary directory', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/temp-dir.mjs': `
+        import fs from 'node:fs';
+        import os from 'node:os';
+        process.stdout.write(fs.realpathSync(os.tmpdir()));
+      `,
+    },
+  });
+  const child = await node.run({ entry: '/node/temp-dir.mjs', env: { TMPDIR: '/node/generated-temp' } });
+  assert.equal(await child.exit, 0, await child.stderrText());
+  assert.equal(await child.stdoutText(), '/node/generated-temp');
+});
+
+test('dynamic imports survive platform and OS release overrides', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/fixture.mjs': 'export default 1;',
+      '/node/platform-override.mjs': `
+        import os from 'node:os';
+        import process from 'node:process';
+        Object.defineProperty(process, 'platform', { value: 'win32' });
+        Object.defineProperty(process.versions, 'node', { value: '8.0.0' });
+        os.release = () => '10.0.10240';
+        const fixture = await import('./fixture.mjs?fresh');
+        process.stdout.write(String(fixture.default));
+      `,
+    },
+  });
+  const child = await node.run({ entry: '/node/platform-override.mjs' });
+  assert.equal(await child.exit, 0, await child.stderrText());
+  assert.equal(await child.stdoutText(), '1');
+});
+
 test('rm accepts bundled force and recursive options', async () => {
   const node = await Nacelle.create({
     gateway: false,

@@ -331,13 +331,20 @@ function selectedProfile(value) {
 }
 
 function processVersions(scope = globalThis, profile = selectedProfile()) {
-  const versions = { ...profile.versions };
+  const values = { ...profile.versions };
   // This is the runtime identity Next.js checks to enter its supported
   // WebContainer SWC-WASM fallback path.
-  versions.webcontainer = '1.0.0';
+  values.webcontainer = '1.0.0';
   const openssl = browserCryptoVersion(scope);
-  if (openssl) versions.openssl = openssl;
-  return versions;
+  if (openssl) values.openssl = openssl;
+  return Object.defineProperties({}, Object.fromEntries(
+    Object.entries(values).map(([key, value]) => [key, {
+      configurable: true,
+      enumerable: true,
+      value,
+      writable: false,
+    }]),
+  ));
 }
 
 function credentialError(kind, value) {

@@ -451,32 +451,54 @@ function virtualExecutableBytes() {
   return new TextEncoder().encode('browser-native-node-runtime\n');
 }
 
+function statNanoseconds(milliseconds) {
+  const value = Number(milliseconds);
+  const wholeMilliseconds = Math.trunc(value);
+  const fractionalNanoseconds = Math.trunc((value - wholeMilliseconds) * 1_000_000);
+  return BigInt(wholeMilliseconds) * 1_000_000n + BigInt(fractionalNanoseconds);
+}
+
 export function createMemoryVfsBackend() {
   return createMemoryBackend();
 }
 
 class Stats {
   constructor(kind, size, attributes = {}) {
-    this.size = size;
+    const bigint = attributes.bigint === true;
+    const statValue = (value) => bigint ? BigInt(Math.trunc(Number(value))) : value;
     const defaultPermissions = kind === 'file' ? 0o666 : kind === 'directory' ? 0o777 : 0o777;
     const typeBits = kind === 'file' ? 0o100000 : kind === 'directory' ? 0o40000 : 0o120000;
-    this.mode = typeBits | (attributes.mode ?? defaultPermissions);
-    this.dev = 0;
-    this.ino = 0;
-    this.nlink = attributes.nlink ?? 1;
-    this.uid = attributes.uid ?? 0;
-    this.gid = attributes.gid ?? 0;
-    this.rdev = 0;
-    this.blksize = 4096;
-    this.blocks = Math.ceil(size / 512);
-    this.atimeMs = attributes.atimeMs ?? Date.now();
-    this.mtimeMs = attributes.mtimeMs ?? this.atimeMs;
-    this.ctimeMs = attributes.ctimeMs ?? this.mtimeMs;
-    this.birthtimeMs = attributes.birthtimeMs ?? this.ctimeMs;
+    this.size = statValue(size);
+    this.mode = statValue(typeBits | (attributes.mode ?? defaultPermissions));
+    this.dev = statValue(0);
+    this.ino = statValue(0);
+    this.nlink = statValue(attributes.nlink ?? 1);
+    this.uid = statValue(attributes.uid ?? 0);
+    this.gid = statValue(attributes.gid ?? 0);
+    this.rdev = statValue(0);
+    this.blksize = statValue(4096);
+    this.blocks = statValue(Math.ceil(size / 512));
+    const atimeMs = Number(attributes.atimeMs ?? Date.now());
+    const mtimeMs = Number(attributes.mtimeMs ?? atimeMs);
+    const ctimeMs = Number(attributes.ctimeMs ?? mtimeMs);
+    const birthtimeMs = Number(attributes.birthtimeMs ?? ctimeMs);
+    this.atimeMs = statValue(atimeMs);
+    this.mtimeMs = statValue(mtimeMs);
+    this.ctimeMs = statValue(ctimeMs);
+    this.birthtimeMs = statValue(birthtimeMs);
+    if (bigint) {
+      this.atimeNs = statNanoseconds(atimeMs);
+      this.mtimeNs = statNanoseconds(mtimeMs);
+      this.ctimeNs = statNanoseconds(ctimeMs);
+      this.birthtimeNs = statNanoseconds(birthtimeMs);
+    }
     this._kind = kind;
   }
 
   _checkModeProperty(property) {
+    if (typeof this.mode === 'bigint') {
+      return (this.mode & BigInt(S_IFMT)) === BigInt(property);
+    }
     return (this.mode & S_IFMT) === property;
   }
   isFile() { return this._checkModeProperty(S_IFREG); }
@@ -486,10 +508,10 @@ class Stats {
   isCharacterDevice() { return this._checkModeProperty(S_IFCHR); }
   isFIFO() { return this._checkModeProperty(S_IFIFO); }
   isSocket() { return this._checkModeProperty(S_IFSOCK); }
-  get atime() { return new globalThis.Date(this.atimeMs); }
-  get mtime() { return new globalThis.Date(this.mtimeMs); }
-  get ctime() { return new globalThis.Date(this.ctimeMs); }
-  get birthtime() { return new globalThis.Date(this.birthtimeMs); }
+  get atime() { return new globalThis.Date(Number(this.atimeMs)); }
+  get mtime() { return new globalThis.Date(Number(this.mtimeMs)); }
+  get ctime() { return new globalThis.Date(Number(this.ctimeMs)); }
+  get birthtime() { return new globalThis.Date(Number(this.birthtimeMs)); }
 }
 
 class Dirent {
@@ -1341,9 +1363,11 @@ export function createVfs(options = {}) {
   function statPath(path, optionsValue) {
     path = resolvePath(path);
     access(path, 'stat');
-    if (files.has(path)) return new Stats('file', files.get(path).byteLength, metadataFor(path));
-    if (directories.has(path)) return new Stats('directory', 0, metadataFor(path));
-    if (virtualSocketExists(path)) return new Stats('socket', 0, { mode: 0o777, ...metadataFor(path) });
+    const bigint = optionsValue?.bigint === true;
+    const attributes = () => ({ ...metadataFor(path), bigint });
+    if (files.has(path)) return new Stats('file', files.get(path).byteLength, attributes());
+    if (directories.has(path)) return new Stats('directory', 0, attributes());
+    if (virtualSocketExists(path)) return new Stats('socket', 0, { ...attributes(), mode: 0o777 });
     if (optionsValue?.throwIfNoEntry === false) return undefined;
     throw missing(path, 'stat');
   }
@@ -1372,10 +1396,12 @@ export function createVfs(options = {}) {
   function lstatPath(path, optionsValue) {
     path = resolvePath(path, false);
     access(path, 'lstat');
-    if (symlinks.has(path)) return new Stats('symlink', textEncoder.encode(symlinks.get(path)).byteLength, metadataFor(path));
-    if (files.has(path)) return new Stats('file', files.get(path).byteLength, metadataFor(path));
-    if (directories.has(path)) return new Stats('directory', 0, metadataFor(path));
-    if (virtualSocketExists(path)) return new Stats('socket', 0, { mode: 0o777, ...metadataFor(path) });
+    const bigint = optionsValue?.bigint === true;
+    const attributes = () => ({ ...metadataFor(path), bigint });
+    if (symlinks.has(path)) return new Stats('symlink', textEncoder.encode(symlinks.get(path)).byteLength, attributes());
+    if (files.has(path)) return new Stats('file', files.get(path).byteLength, attributes());
+    if (directories.has(path)) return new Stats('directory', 0, attributes());
+    if (virtualSocketExists(path)) return new Stats('socket', 0, { ...attributes(), mode: 0o777 });
     if (optionsValue?.throwIfNoEntry === false) return undefined;
     throw missing(path, 'lstat');
   }
@@ -3932,9 +3958,11 @@ export function createVfs(options = {}) {
         } catch (error) { done(error); }
       });
     },
-    fstatSync(handle) { return statPath(descriptor(handle).path); },
-    fstat(handle, callback) {
-      asyncFsOperation(callback, () => fs.fstatSync(handle));
+    fstatSync(handle, optionsValue) { return statPath(descriptor(handle).path, optionsValue); },
+    fstat(handle, optionsValue, callback) {
+      const done = typeof optionsValue === 'function' ? optionsValue : callback;
+      const options = typeof optionsValue === 'function' ? undefined : optionsValue;
+      asyncFsOperation(done, () => fs.fstatSync(handle, options));
     },
     stat,
     statfs,

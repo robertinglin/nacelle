@@ -1313,7 +1313,7 @@ export function createModuleLoader({
       .trim();
     if (!clause || clause.startsWith('*')) return undefined;
     if (clause.startsWith('{')) {
-      const first = clause.slice(1).split(',')[0].trim();
+      const first = clause.slice(1).replace(/}\s*$/, '').split(',')[0].trim();
       return first.split(/\s+as\s+/)[0].trim().replace(/^(['"])(.*?)\1$/, '$2');
     }
     return isImport ? 'default' : clause.split(',')[0].trim();

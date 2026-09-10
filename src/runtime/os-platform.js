@@ -119,7 +119,7 @@ export function createPlatformContract({
       ? String(candidate).replace(/[\\/]+$/, '')
       : String(candidate).replace(/\/+$/, '');
   };
-  const os = Object.freeze({
+  const os = {
     EOL: eol,
     constants,
     arch: createPrimitiveMethod(() => arch),
@@ -161,7 +161,7 @@ export function createPlatformContract({
         { address: '::1', netmask: 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff', family: 'IPv6', mac: '00:00:00:00:00:00', internal: true, cidr: '::1/128' },
       ],
     }),
-  });
+  };
   const environment = Object.freeze({ variant, platform, arch });
 
   return Object.freeze({

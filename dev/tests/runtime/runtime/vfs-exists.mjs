@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, statSync as nativeStatSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -31,6 +31,35 @@ test('stat APIs honor throwIfNoEntry:false for optional package probes', async (
       resolve();
     }
   }));
+});
+
+test('stat APIs return Node-compatible BigInt metadata when requested', () => {
+  const vfs = createVfs();
+  vfs.mount({ '/node/package.json': '{}' });
+  const nativeStats = nativeStatSync(new URL(import.meta.url), { bigint: true });
+  const fields = [
+    'dev', 'mode', 'nlink', 'uid', 'gid', 'rdev', 'blksize', 'ino', 'size',
+    'blocks', 'atimeMs', 'mtimeMs', 'ctimeMs', 'birthtimeMs',
+    'atimeNs', 'mtimeNs', 'ctimeNs', 'birthtimeNs',
+  ];
+
+  for (const stats of [
+    vfs.fs.statSync('/node/package.json', { bigint: true }),
+    vfs.fs.lstatSync('/node/package.json', { bigint: true }),
+  ]) {
+    for (const field of fields) assert.equal(typeof stats[field], typeof nativeStats[field], field);
+    assert.equal(stats.isFile(), true);
+    assert.equal(stats.isDirectory(), false);
+    assert.equal(stats.isSymbolicLink(), false);
+    assert.equal(stats.isBlockDevice(), false);
+    assert.equal(stats.isCharacterDevice(), false);
+    assert.equal(stats.isFIFO(), false);
+    assert.equal(stats.isSocket(), false);
+    assert.equal(stats.atimeMs, stats.atimeNs / 1_000_000n);
+    assert.equal(stats.mtimeMs, stats.mtimeNs / 1_000_000n);
+    assert.equal(stats.ctimeMs, stats.ctimeNs / 1_000_000n);
+    assert.equal(stats.birthtimeMs, stats.birthtimeNs / 1_000_000n);
+  }
 });
 
 test('read-only virtual root is visible above a scoped mount', () => {

@@ -18,7 +18,7 @@ not being reclassified as newly rerun here.
 | 4 | brace-expansion | PASS | prior result | Green at continuation baseline (`0a56f2b`). |
 | 5 | ansi-regex | PASS | prior result | CITGM-green at continuation baseline. |
 | 6 | supports-color | PASS | ours | Final Chromium CITGM run `citgm-1789059865080`; XO, AVA (55 tests), and TSD all exited 0. Required gates: build passed; `npm test` 296/296; Chromium Playwright 243/243; Firefox Playwright 243/243. |
-| 7 | ms | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 7 | ms | PASS | none observed | First Chromium CITGM attempt `citgm-1789061171244` passed for published `ms@2.1.3`; npm install, upstream mocha tests, and all four child phases exited 0. No runtime defect was observed. Required gates: build passed; `npm test` 296/296; Chromium Playwright 243/243; Firefox Playwright 243/243. |
 | 8 | ansi-styles | PENDING | — | Not attempted; rank 6 was required to commit first. |
 | 9 | chalk | PENDING | — | Not attempted; rank 6 was required to commit first. |
 | 10 | emoji-regex | PENDING | — | Not attempted; rank 6 was required to commit first. |
@@ -150,3 +150,22 @@ npm run test:browser:firefox                                 PASS — 243/243
 The first sandboxed `npm test` attempt was retained in the gate log and only
 failed its existing network-backed demos with `EAI_AGAIN registry.npmjs.org`.
 The host-network rerun above is the authoritative gate result.
+
+## Rank 7 CITGM evidence
+
+The real Chromium CITGM run used CITGM 10.0.2 and the published `ms@2.1.3`
+package. It completed without a package, nested-dependency, or runtime
+failure, so no code change was required for rank 7. The complete run output,
+child output, terminal summary, and gate logs are preserved under
+`artifacts/citgm-top-100/rank-007-ms/`.
+
+## Rank 7 gate evidence
+
+Commands were run from the repository root after the successful CITGM pass:
+
+```text
+npm run build -- --node-version=v22                         PASS
+npm test                                                     PASS — 296/296
+npm run test:browser:chromium                               PASS — 243/243
+npm run test:browser:firefox                                 PASS — 243/243
+```

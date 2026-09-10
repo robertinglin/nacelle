@@ -661,6 +661,22 @@ export class BrowserNpm {
     return Object.entries(deps).map(([name, range]) => `${name}@${range}`);
   }
 
+  async readPackageLock(cwd = '/node') {
+    const lockPath = `${cwd.replace(/\/+$/, '')}/package-lock.json`;
+    try {
+      const bytes = await this.vfs.fs.promises.readFile(lockPath);
+      const text = (typeof bytes === 'string' ? bytes : new TextDecoder().decode(bytes)).trim();
+      if (!text) return null;
+      const lockfile = JSON.parse(text);
+      return lockfile?.lockfileVersion >= 2 && lockfile.packages && typeof lockfile.packages === 'object'
+        ? lockfile
+        : null;
+    } catch (err) {
+      if (err.code === 'ENOENT') return null;
+      throw err;
+    }
+  }
+
   async seedInstalledLocations(nodeModulesDir = '/node/node_modules') {
     // Inspect package roots, not every file in dist/.next/source trees. Large
     // frameworks install thousands of non-package directories; walking them
@@ -725,11 +741,36 @@ export class BrowserNpm {
     }
     const specs = Array.isArray(rawSpecs) ? rawSpecs : [rawSpecs];
     const targetNodeModules = nodeModulesDir || (cwd.endsWith('/') ? `${cwd}node_modules` : `${cwd}/node_modules`);
+    const packageLock = await this.readPackageLock(cwd);
+    const lockPackages = packageLock?.packages || null;
     await this.seedInstalledLocations(targetNodeModules);
     const queue = specs.map((spec) => ({ ...parsePackageSpec(spec), optional: false, nodeModulesDir: targetNodeModules }));
     const results = [];
     const visited = new Set();
     const filesToMount = {};
+
+    const lockPackageEntry = (currentNodeModulesDir, name, range) => {
+      if (!lockPackages || !currentNodeModulesDir.startsWith(targetNodeModules)) return null;
+      const suffix = currentNodeModulesDir.slice(targetNodeModules.length).replace(/^\/+/, '');
+      const lockDirectory = suffix ? `node_modules/${suffix}` : 'node_modules';
+      const lockEntry = lockPackages[`${lockDirectory}/${name}`];
+      if (!lockEntry || lockEntry.link || !lockEntry.version || !satisfiesSemver(lockEntry.version, range)) return null;
+      if (!lockEntry.resolved) return null;
+      return {
+        version: lockEntry.version,
+        doc: {
+          version: lockEntry.version,
+          dependencies: lockEntry.dependencies,
+          optionalDependencies: lockEntry.optionalDependencies,
+          peerDependencies: lockEntry.peerDependencies,
+          peerDependenciesMeta: lockEntry.peerDependenciesMeta,
+          dist: {
+            tarball: lockEntry.resolved,
+            integrity: lockEntry.integrity,
+          },
+        },
+      };
+    };
 
 
 
@@ -785,25 +826,38 @@ export class BrowserNpm {
       let version = null;
       let tarballBytes = null;
 
-      // Check direct tarball cache by spec
-      const directTarballKey = `pkg-tarball:${resolutionName}@${resolutionRange}`;
-      const cachedDirect = await this.cache.getTarball(directTarballKey);
-      if (cachedDirect) {
-        tarballBytes = cachedDirect;
-        version = resolutionRange === 'latest' ? '1.0.0' : resolutionRange;
-        onProgress?.({ phase: 'cache-hit-tarball', name, version, bytes: tarballBytes.byteLength });
+      const locked = lockPackageEntry(itemNodeModulesDir, name, resolutionRange);
+      if (locked) {
+        version = locked.version;
+        versionDoc = locked.doc;
+        tarballBytes = await this.fetchTarball(versionDoc.dist.tarball, {
+          name: resolutionName,
+          version,
+          integrity: versionDoc.dist.integrity,
+          onProgress,
+        });
       } else {
-        const metadata = await this.fetchPackageMetadata(resolutionName, { onProgress });
-        const resolved = this.resolveVersion(metadata, resolutionRange);
-        version = resolved.version;
-        versionDoc = resolved.doc;
-        if (optional && !optionalPackageSupportsTarget(resolutionName, versionDoc, this.platform, this.arch, this.libc)) {
-          onProgress?.({ phase: 'optional-skipped', name, range, reason: 'platform-mismatch' });
-          return;
+        // Check direct tarball cache by spec
+        const directTarballKey = `pkg-tarball:${resolutionName}@${resolutionRange}`;
+        const cachedDirect = await this.cache.getTarball(directTarballKey);
+        if (cachedDirect) {
+          tarballBytes = cachedDirect;
+          version = resolutionRange === 'latest' ? '1.0.0' : resolutionRange;
+          onProgress?.({ phase: 'cache-hit-tarball', name, version, bytes: tarballBytes.byteLength });
+        } else {
+          const metadata = await this.fetchPackageMetadata(resolutionName, { onProgress });
+          const resolved = this.resolveVersion(metadata, resolutionRange);
+          version = resolved.version;
+          versionDoc = resolved.doc;
+          const tarballUrl = versionDoc?.dist?.tarball;
+          if (!tarballUrl) throw new Error(`Missing tarball URL for ${name}@${version}`);
+          tarballBytes = await this.fetchTarball(tarballUrl, { name, version, integrity: versionDoc?.dist?.integrity, onProgress });
         }
-        const tarballUrl = versionDoc?.dist?.tarball;
-        if (!tarballUrl) throw new Error(`Missing tarball URL for ${name}@${version}`);
-        tarballBytes = await this.fetchTarball(tarballUrl, { name, version, integrity: versionDoc?.dist?.integrity, onProgress });
+      }
+
+      if (optional && !optionalPackageSupportsTarget(resolutionName, versionDoc, this.platform, this.arch, this.libc)) {
+        onProgress?.({ phase: 'optional-skipped', name, range, reason: 'platform-mismatch' });
+        return;
       }
 
       onProgress?.({ phase: 'unpacking', name, version });

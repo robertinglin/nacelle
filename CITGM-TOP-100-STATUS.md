@@ -26,7 +26,7 @@ not being reclassified as newly rerun here.
 | 9 | chalk | PASS | ours | Published `chalk@6.0.0` initially failed in the shared ESM lowering path; six Chromium CITGM runs were preserved. Final run `citgm-1789065205654` passed after general ESM binding, export, `import.meta`, and `module.exports` interop fixes. Required gates: build passed; `npm test` 296/296; Chromium Playwright 243/243; Firefox Playwright 243/243. |
 | 10 | emoji-regex | PASS | none observed | Published `emoji-regex@10.6.0` passed on the first Chromium CITGM run `citgm-1789065974177`; install and all four child phases exited 0. No runtime, nested-dependency, or upstream package/repository failure was observed. Required gates: build passed; `npm test` 296/296; Chromium Playwright 243/243; Firefox Playwright 243/243. |
 | 11 | wrap-ansi | PASS | ours | Published `wrap-ansi@10.0.1` passed final Chromium CITGM `citgm-1789070077131`; the package-level failures were fixed in the shared ESM literal scanner and bare `node --test` discovery. Required gates passed after rebuilding the generated bundle: `npm test` 296/296; Chromium Playwright 246/246; Firefox Playwright 246/246. |
-| 12 | lru-cache | PENDING | — | Not attempted; rank 11 requires a successful commit first. |
+| 12 | lru-cache | BLOCKED | upstream package/repository (nested dependency) | Real Chromium CITGM was attempted through runs `citgm-1789073282313`, `citgm-1789073491479`, `citgm-1789073754174`, `citgm-1789073980749`, and `citgm-1789074100969`. General lockfile and VFS rename defects were fixed, but the final run reaches the upstream `scripts/build.sh` and fails because its nested native `esbuild` dependency requires omitted `@esbuild/linux-x64`; the exact native checkout passes. Repository gates for the fixes pass: build; `npm test` 298/298; Chromium 246/246; Firefox 246/246. Ordering stops here; ranks 13–100 remain pending. |
 | 13 | tslib | PENDING | — | Not attempted; rank 11 requires a successful commit first. |
 | 14 | picomatch | PENDING | — | Not attempted; rank 11 requires a successful commit first. |
 | 15 | glob | PENDING | — | Not attempted; rank 11 requires a successful commit first. |
@@ -116,6 +116,10 @@ not being reclassified as newly rerun here.
 | 99 | fast-json-stable-stringify | PENDING | — | Not attempted; rank 11 requires a successful commit first. |
 | 100 | get-intrinsic | PENDING | — | Not attempted; rank 11 requires a successful commit first. |
 
+The pending-row cursor notes below rank 12 retain the historical rank-11
+wording; rank 12 is the active external blocker, so no later package has been
+started.
+
 ## Rank 6 failure record
 
 All failures below occurred while running the real package through Chromium
@@ -189,6 +193,36 @@ failure. The failed runs and shell-stack diagnostic remain preserved in
 The first sandboxed `npm test` attempt was retained in the gate log and only
 failed its existing network-backed demos with `EAI_AGAIN registry.npmjs.org`.
 The host-network rerun above is the authoritative gate result.
+
+## Rank 12 failure record
+
+The exact upstream `lru-cache@11.5.2` git head was tested through Chromium
+CITGM 10.0.2. Its native checkout at git head
+`16b3a916662ab449d496b7b4b4f04132565d1d28` installed successfully and passed
+its native test suite (29 TAP subtests, 19,645 assertions), so the final
+failure is not an upstream lru-cache test failure or a fake package shim.
+Complete CITGM artifacts are preserved under
+`artifacts/citgm-top-100/rank-012-lru-cache/`.
+
+| Run / log | Observed failure | Classification and resolution |
+| --- | --- | --- |
+| `citgm-1789073282313` / `citgm-initial/` | `tshy`'s TypeScript compiler returned `TS2344` for `Channel<unknown>` and `TracingChannel<unknown>`. | Ours, exposed by npm dependency resolution: the browser installer ignored the committed lockfile and selected newer `tshy`, TypeScript, and `@types/node` versions. Added general lockfile-aware package placement and a regression oracle. |
+| `citgm-1789073491479` / `citgm-debug-spawn/` | The synchronous compiler spawn returned status 2 with the same TypeScript diagnostics. | Ours; the probe confirmed this was a real compiler failure, not lost child output. The temporary probe was removed. |
+| `citgm-1789073754174` / `citgm-debug-install/` | Dependency probe recorded browser selections `tshy@4.1.3`, `typescript@6.0.3`, and `@types/node@26.5.1`, versus the native lockfile's `tshy@4.1.2`, `typescript@6.0.2`, and `@types/node@25.8.0`. | Ours. Lockfile resolution corrected the graph without pinning lru-cache or adding a shim. |
+| `citgm-1789073980749` / `citgm-fix-1/` | `tshy` reached output generation but failed with `EEXIST` when renaming an existing generated file. | Ours. Implemented Node-compatible replacement semantics for VFS file/symlink renames and added a regression oracle. |
+| `citgm-1789074100969` / `citgm-fix-2/` | The upstream build script invokes `esbuild`, which requires the omitted native optional package `@esbuild/linux-x64`; the browser cannot execute that Linux binary. | Upstream package/repository blocker exposed by a nested dependency. The browser npm installer correctly skips OS-specific native optional packages; replacing it with a fake binary or package would hide the actual incompatibility. No such shim was added. |
+
+## Rank 12 gate evidence
+
+The repository gates for the general fixes passed after the final blocked CITGM
+run:
+
+```text
+npm run build                                             PASS
+npm test                                                   PASS — 298/298
+npm run test:browser:chromium                             PASS — 246/246
+npm run test:browser:firefox                              PASS — 246/246
+```
 
 ## Rank 7 CITGM evidence
 

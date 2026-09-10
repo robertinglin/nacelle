@@ -3,6 +3,7 @@ import test from 'node:test';
 import { Nacelle, createBrowserNet, createBufferClass } from '../../../../src/index.js';
 import { createVfs } from '../../../../src/runtime/vfs.js';
 import { BrowserNpm, satisfiesSemver } from '../../../../src/runtime/npm.js';
+import { packTarGz } from '../../../../src/runtime/tar.js';
 import { runShellScript } from '../../../../src/runtime/shell.js';
 import { parseShellScript } from '../../../../src/runtime/shell-parser.js';
 
@@ -218,6 +219,14 @@ test('VFS source versions change on mutation and large appends preserve bytes', 
   assert.equal(result.at(-1), 7);
 });
 
+test('VFS rename replaces an existing file like Node fs.rename', () => {
+  const vfs = createVfs();
+  vfs.mount({ '/node/source': 'new', '/node/destination': 'old' });
+  vfs.fs.renameSync('/node/source', '/node/destination');
+  assert.equal(vfs.fs.readFileSync('/node/destination', 'utf8'), 'new');
+  assert.equal(vfs.fs.existsSync('/node/source'), false);
+});
+
 test('npm seeds installed packages without descending into package payloads', async () => {
   const vfs = createVfs();
   vfs.mount({
@@ -235,6 +244,57 @@ test('npm seeds installed packages without descending into package payloads', as
   assert.equal(npm.installedLocations.get('/node/node_modules/@scope/pkg'), '3.0.0');
   assert.equal(visited.some(p => p.includes('/dist')), false);
   assert.ok(visited.length <= 6, JSON.stringify(visited));
+});
+
+test('npm install honors a package-lock dependency graph', async () => {
+  const vfs = createVfs();
+  vfs.mount({
+    '/node/package.json': JSON.stringify({
+      name: 'lockfile-fixture',
+      version: '1.0.0',
+      devDependencies: { fixture: '^1.0.0' },
+    }),
+    '/node/package-lock.json': JSON.stringify({
+      name: 'lockfile-fixture',
+      version: '1.0.0',
+      lockfileVersion: 3,
+      packages: {
+        '': { name: 'lockfile-fixture', version: '1.0.0', devDependencies: { fixture: '^1.0.0' } },
+        'node_modules/fixture': {
+          version: '1.0.0',
+          resolved: 'https://registry.example/fixture-1.0.0.tgz',
+        },
+      },
+    }),
+  });
+  const lockedTarball = await packTarGz([{
+    path: 'package/package.json',
+    data: new TextEncoder().encode(JSON.stringify({ name: 'fixture', version: '1.0.0', main: 'index.js' })),
+  }, {
+    path: 'package/index.js',
+    data: new TextEncoder().encode('module.exports = "locked";'),
+  }]);
+  const selectedUrls = [];
+  const npm = new BrowserNpm({
+    vfs,
+    fetchFn: async (url) => {
+      selectedUrls.push(String(url));
+      if (String(url).endsWith('/fixture-1.0.0.tgz')) return new Response(lockedTarball);
+      return new Response(JSON.stringify({
+        name: 'fixture',
+        'dist-tags': { latest: '1.1.0' },
+        versions: {
+          '1.1.0': { version: '1.1.0', dist: { tarball: 'https://registry.example/fixture-1.1.0.tgz' } },
+        },
+      }), { headers: { 'content-type': 'application/json' } });
+    },
+  });
+
+  await npm.install();
+
+  assert.equal(npm.installed.get('fixture'), '1.0.0');
+  assert.equal(vfs.fs.readFileSync('/node/node_modules/fixture/index.js', 'utf8'), 'module.exports = "locked";');
+  assert.deepEqual(selectedUrls, ['https://registry.example/fixture-1.0.0.tgz']);
 });
 
 test('wildcard caret and tilde ranges keep their respective upper bounds', () => {

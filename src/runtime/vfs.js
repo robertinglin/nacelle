@@ -2109,8 +2109,16 @@ export function createVfs(options = {}) {
     ensureParent(destination, 'rename');
     if (files.has(destination) && directories.has(source)) throw notDirectory(destination, 'rename');
     if (directories.has(destination) && (files.has(source) || symlinks.has(source))) throw isDirectory(destination, 'rename');
-    if (nodeExists(destination)) throw existsError(destination, 'rename');
+    const replaceDestination = files.has(source) || symlinks.has(source);
+    const replaced = nodeExists(destination);
+    if (replaced && (!replaceDestination || directories.has(destination))) throw existsError(destination, 'rename');
     if (directories.has(source) && isWithin(destination, source)) throw invalidPath('rename target is inside source directory');
+
+    if (replaced) {
+      if (files.has(destination)) removeFileBytes(destination);
+      symlinks.delete(destination);
+      removeMetadata(destination);
+    }
 
     if (files.has(source)) {
       moveFileNode(source, destination);
@@ -2169,7 +2177,7 @@ export function createVfs(options = {}) {
     }
     notify(source, 'rename');
     notify(destination, 'rename');
-    emitMutation({ action: 'rename', paths: [source, destination] });
+    emitMutation({ action: 'rename', paths: [source, destination], ...(replaced ? { replaced: destination } : {}) });
   }
 
   function normalizeOpenFlags(value) {

@@ -1340,10 +1340,16 @@ export function createModuleLoader({
     let state = 'code';
     let quoteChar = '';
     let regexCharClass = false;
+    const templateExpressionDepth = [];
     const canStartRegex = (index) => {
       let cursor = index - 1;
-      while (cursor >= 0 && /\s/.test(value[cursor])) cursor -= 1;
+      let sawLineTerminator = false;
+      while (cursor >= 0 && /\s/.test(value[cursor])) {
+        if (value[cursor] === '\n' || value[cursor] === '\r') sawLineTerminator = true;
+        cursor -= 1;
+      }
       if (cursor < 0) return true;
+      if (sawLineTerminator) return true;
       if ('([{,:;=!&|?+-*%^~<>'.includes(value[cursor])) return true;
       const end = cursor + 1;
       while (cursor >= 0 && /[$\w]/.test(value[cursor])) cursor -= 1;
@@ -1354,6 +1360,23 @@ export function createModuleLoader({
       const char = value[index];
       const next = value[index + 1];
       if (state === 'code') {
+        if (char === String.fromCharCode(96)) {
+          state = 'template';
+          continue;
+        }
+        if (templateExpressionDepth.length && char === '{') {
+          templateExpressionDepth[templateExpressionDepth.length - 1] += 1;
+          continue;
+        }
+        if (templateExpressionDepth.length && char === '}') {
+          const depth = templateExpressionDepth.length - 1;
+          if (templateExpressionDepth[depth] > 0) templateExpressionDepth[depth] -= 1;
+          else {
+            templateExpressionDepth.pop();
+            state = 'template';
+          }
+          continue;
+        }
         if (char === '/' && next === '/') {
           masked[index] = ' ';
           masked[index + 1] = ' ';
@@ -1372,6 +1395,22 @@ export function createModuleLoader({
           quoteChar = char;
           state = 'string';
         }
+        continue;
+      }
+      if (state === 'template') {
+        if (char === String.fromCharCode(92)) {
+          masked[index] = ' ';
+          if (index + 1 < value.length && value[index + 1] !== String.fromCharCode(10) && value[index + 1] !== String.fromCharCode(13)) {
+            masked[index + 1] = ' ';
+            index += 1;
+          }
+        } else if (char === String.fromCharCode(96)) {
+          state = 'code';
+        } else if (char === '$' && next === '{') {
+          templateExpressionDepth.push(0);
+          state = 'code';
+          index += 1;
+        } else if (char !== String.fromCharCode(10) && char !== String.fromCharCode(13)) masked[index] = ' ';
         continue;
       }
       if (state === 'line-comment') {

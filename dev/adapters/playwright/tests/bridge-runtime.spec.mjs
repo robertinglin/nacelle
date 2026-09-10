@@ -1442,6 +1442,37 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('discovers the package root test file when node:test has no script argument', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn(process.execPath, ['--test'], { cwd: '/node', stdio: ['ignore', 'pipe', 'pipe'] });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.match(output, /bare node:test discovery passed/);
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/package.json': JSON.stringify({ type: 'module' }),
+        '/node/test.js': "import { test } from 'node:test'; test('bare discovery', () => process.stdout.write('bare node:test discovery passed\\n'));",
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
   test('preserves npm dispatch when Node is resolved by name', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert');

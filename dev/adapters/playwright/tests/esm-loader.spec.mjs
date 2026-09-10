@@ -458,6 +458,63 @@ test.describe('browser ESM loader', () => {
     expect(result.stdout).toContain('star export completed');
   });
 
+  test('rewrites imports after nested template literals in ESM dependencies', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { marker } from 'template-after-export-package';
+      assert.strictEqual(marker, 'after-template');
+      process.stdout.write('template import completed');
+    `, {
+      entryPath: '/node/template-after-export-entry.mjs',
+      files: {
+        '/node/node_modules/template-after-export-package/package.json': JSON.stringify({
+          type: 'module',
+          exports: { '.': './index.js' },
+        }),
+        '/node/node_modules/template-after-export-package/index.js': [
+          'const getDirectoryGlob = ({directoryPath, files, extensions}) => {',
+          "  const extensionGlob = extensions?.length > 0 ? `.${extensions.length > 1 ? `{${extensions.join(',')}}` : extensions[0]}` : '';",
+          '  return files',
+          '    ? files.map(file => nodePath.posix.join(directoryPath, `**/${nodePath.extname(file) ? file : `${file}${extensionGlob}`}`))',
+          "    : [nodePath.posix.join(directoryPath, `**${extensionGlob ? `/*${extensionGlob}` : ''}`)];",
+          '};',
+          "export { marker } from './marker.js';",
+        ].join('\n'),
+        '/node/node_modules/template-after-export-package/marker.js': "export const marker = 'after-template';",
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('template import completed');
+  });
+
+  test('rewrites imports after regex literals following line comments', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { marker } from 'regex-after-comment-package';
+      assert.strictEqual(marker, 'after-regex');
+      process.stdout.write('regex import completed');
+    `, {
+      entryPath: '/node/regex-after-comment-entry.mjs',
+      files: {
+        '/node/node_modules/regex-after-comment-package/package.json': JSON.stringify({
+          type: 'module',
+          exports: { '.': './index.js' },
+        }),
+        '/node/node_modules/regex-after-comment-package/index.js': [
+          '// Keep regex detection anchored after a line comment.',
+          "const quotedToken = /(?<=^Unexpected token )(?<quote>')?(.)\\k<quote>/;",
+          'export { marker } from \'./marker.js\';',
+          'void quotedToken;',
+        ].join('\n'),
+        '/node/node_modules/regex-after-comment-package/marker.js': "export const marker = 'after-regex';",
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('regex import completed');
+  });
+
   test('exposes named exports forwarded by a CommonJS __exportStar helper', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       import assert from 'node:assert/strict';

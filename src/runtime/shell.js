@@ -750,10 +750,12 @@ async function runNode(args, input, context, options) {
   }
   if (args[index] === '--') index += 1;
   const script = args[index];
-  if (!script) return commandError('node', 'no script specified');
+  const execArgv = args.slice(0, index);
+  if (!script && !execArgv.includes('--test')) return commandError('node', 'no script specified');
   return options.runNode({
-    script: shellPath(script, context.cwd),
+    script: script ? shellPath(script, context.cwd) : null,
     args: args.slice(index + 1),
+    execArgv,
     cwd: context.cwd,
     env: context.env,
     input,

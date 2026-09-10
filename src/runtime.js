@@ -7079,6 +7079,29 @@ export function createRuntime({
           return { args: normalizedArgs, options: normalizedOptions };
         }
 
+        function discoverNodeTestFiles(cwd) {
+          // These are Node's default test-runner discovery names. Keep the
+          // search rooted at the child cwd and out of dependency trees so a
+          // bare `node --test` behaves like the host runner without importing
+          // every JavaScript file in the package.
+          const patterns = [
+            'test.js', 'test.mjs', 'test.cjs',
+            'test/**/*.js', 'test/**/*.mjs', 'test/**/*.cjs',
+            'test-*.js', 'test-*.mjs', 'test-*.cjs',
+            '**/test.js', '**/test.mjs', '**/test.cjs',
+            '**/test-*.js', '**/test-*.mjs', '**/test-*.cjs',
+            '**/*-test.js', '**/*-test.mjs', '**/*-test.cjs',
+            '**/*.test.js', '**/*.test.mjs', '**/*.test.cjs',
+          ];
+          try {
+            return [...new Set(vfs.fs.globSync(patterns, { cwd, exclude: ['node_modules'] }))]
+              .map((pathname) => normalizePath(pathname, cwd))
+              .sort();
+          } catch {
+            return [];
+          }
+        }
+
         function prepareChild(file, args, options = {}, owner = scope.process || processObject) {
           validateChildCommand(file);
           if (args !== undefined && args !== null && !Array.isArray(args)) {
@@ -7226,8 +7249,12 @@ export function createRuntime({
           }
           const executionArgv = [executable, ...rawArgs];
           const id = ++childSequence;
+          const nodeTestMode = script === null && rawArgs.includes('--test');
+          const nodeTestFiles = nodeTestMode ? discoverNodeTestFiles(cwd) : [];
           const mainPath = script
             ? normalizePath(script, cwd)
+            : nodeTestMode
+              ? normalizePath(`.bnh-test-runner-${id}.mjs`, cwd)
             : interactive
               ? normalizePath(`.bnh-child-${id}.js`, cwd)
               : `/node/.bnh-child-${id}.js`;
@@ -7256,6 +7283,11 @@ export function createRuntime({
             source = moduleEntry
               ? `${importPreloads.map((item) => `import ${JSON.stringify(item)};`).join('\n')}\n${moduleInput ? evalCode : expression}`
               : `${preloads.map((item) => `require(${JSON.stringify(normalizePath(item, cwd))});`).join('\n')}\n${expression}`;
+          } else if (nodeTestMode) {
+            source = [
+              ...preloads.map((item) => `import ${JSON.stringify(normalizePath(item, cwd))};`),
+              ...nodeTestFiles.map((pathname) => `import ${JSON.stringify(pathname)};`),
+            ].join('\n');
           } else if (preloads.length && !script) {
             source = `${preloads.map((item) => `require(${JSON.stringify(normalizePath(item, cwd))});`).join('\n')}\nrequire(${JSON.stringify(mainPath)});`;
           } else if (interactive) {
@@ -10601,9 +10633,12 @@ export function createRuntime({
           };
 
           const runNodeCommand = (nodeOptions) => {
+            const execArgv = Array.isArray(nodeOptions.execArgv) ? nodeOptions.execArgv : [];
             const argv = nodeOptions.script
-              ? [nodeOptions.script, ...(nodeOptions.args || [])]
-              : [nodeOptions.print ? '-p' : '-e', nodeOptions.code, ...(nodeOptions.args || [])];
+              ? [...execArgv, nodeOptions.script, ...(nodeOptions.args || [])]
+              : nodeOptions.code !== undefined
+                ? [...execArgv, nodeOptions.print ? '-p' : '-e', nodeOptions.code, ...(nodeOptions.args || [])]
+                : [...execArgv, ...(nodeOptions.args || [])];
             const prepared = prepareChild(processObject.execPath, argv, {
               cwd: nodeOptions.cwd,
               env: nodeOptions.env,

@@ -154,6 +154,52 @@ test('supports synchronous require of an ESM graph when the Node profile enables
   expect(JSON.parse(child.stdout)).toEqual({ __esModule: true, default: 'default', named: 'named', packageValue: 'main' });
 });
 
+test('allows ESM bindings that overlap synthetic CommonJS wrapper names', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const assert = require('node:assert/strict');
+    const value = require('/node/esm-binding-collision.mjs');
+    assert.strictEqual(value.default, 'esm binding survived');
+    assert.strictEqual(value.enumValue, 'enum-like value survived');
+    process.stdout.write('ESM binding collision completed');
+  `, {
+    files: {
+      '/node/esm-binding-collision.mjs': `
+        import {enumValue} from './empty-export.js';
+        const __dirname = 'an ESM-local binding';
+        export default 'esm binding survived';
+        export {enumValue};
+      `,
+      '/node/empty-export.js': `
+        export {};
+        export var enumValue;
+        enumValue = 'enum-like value survived';
+      `,
+    },
+  });
+
+  await expectPass(expect, result);
+  expect(result.stdout).toContain('ESM binding collision completed');
+});
+
+test('supports the ESM module.exports interop export name', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const assert = require('node:assert/strict');
+    const callable = require('/node/esm-module-exports.mjs');
+    assert.strictEqual(callable(), 'callable export survived');
+    process.stdout.write('ESM module.exports interop completed');
+  `, {
+    files: {
+      '/node/esm-module-exports.mjs': `
+        const callable = () => 'callable export survived';
+        export {callable as 'module.exports'};
+      `,
+    },
+  });
+
+  await expectPass(expect, result);
+  expect(result.stdout).toContain('ESM module.exports interop completed');
+});
+
 test('isolates a nested ESM fork from its parent execution gate', async ({ harnessPage }) => {
   const result = await harnessPage.run(`
     const { fork } = require('node:child_process');

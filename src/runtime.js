@@ -2822,6 +2822,7 @@ function moduleSynchronousEsmSource(source, filename = '/node/index.mjs') {
   const prelude = "Object.defineProperty(module.exports, Symbol.toStringTag, { value: 'Module' });\n";
   let reexportIndex = 0;
   let namespaceIndex = 0;
+  const uninitializedExportNames = [];
   const defaultDeclarations = [...String(source).matchAll(
     /(^|[;\n])\s*export\s+default\s+(?:async\s+)?(?:function|class)\s+([$_A-Za-z][$_\w]*)/gm,
   )].map(([, , name]) => name);
@@ -2848,6 +2849,16 @@ function moduleSynchronousEsmSource(source, filename = '/node/index.mjs') {
     if (comma >= 0) result += `\n${importBindings(trimmed.slice(comma + 1), request)}`;
     return result;
   };
+  const exportName = (value) => {
+    const trimmed = value.trim();
+    return /^(['"]).*\1$/s.test(trimmed) ? trimmed.slice(1, -1) : trimmed;
+  };
+  const exportAssignment = (local, exported) => {
+    const name = exportName(exported);
+    return name === 'module.exports'
+      ? `module.exports = ${local};`
+      : `module.exports[${JSON.stringify(name)}] = ${local};`;
+  };
   transformed = transformed.replace(
     /(^|[;\n])[ \t]*import[ \t]*([\s\S]*?)[ \t]*from[ \t]*(['\"])([^'\"]+)\3[ \t]*;?/g,
     (_, prefix, clause, quote, specifier) => `${prefix}${importBindings(clause, `require(${JSON.stringify(specifier)})`, clause.trim().startsWith('*'))}`,
@@ -2857,6 +2868,13 @@ function moduleSynchronousEsmSource(source, filename = '/node/index.mjs') {
     (_, prefix, quote, specifier) => `${prefix}require(${JSON.stringify(specifier)});`,
   );
   transformed = transformed.replace(/\bconst\s+(require|exports|module)\s*=/g, 'var $1 =');
+  transformed = transformed.replace(
+    /(^|[;\n])[ \t]*export[ \t]+(const|let|var)[ \t]+([$_A-Za-z][$_\w]*)[ \t]*(?:;[ \t]*)?(?=\r?$)/gm,
+    (_, prefix, declaration, name) => {
+      uninitializedExportNames.push(name);
+      return `${prefix}${declaration} ${name};`;
+    },
+  );
   transformed = transformed.replace(
     /(^|[;\n])\s*export\s+default\s+((?:async\s+)?(?:function|class)\s+[$_A-Za-z][$_\w]*)/g,
     (_, prefix, declaration) => `${prefix}${declaration}`,
@@ -2944,7 +2962,7 @@ function moduleSynchronousEsmSource(source, filename = '/node/index.mjs') {
     /(^|[;\n])\s*export\s+\{([^}]+)\}(?!\s+from\b)\s*;?/g,
     (_, prefix, names) => `${prefix}${names.split(',').map((part) => part.trim()).filter(Boolean).map((part) => {
       const [local, exported = local] = part.trim().split(/\s+as\s+/);
-      return `module.exports[${JSON.stringify(exported)}] = ${local};`;
+      return exportAssignment(local, exported);
     }).join('\n')}`,
   );
   transformed = transformed.replace(
@@ -2954,7 +2972,7 @@ function moduleSynchronousEsmSource(source, filename = '/node/index.mjs') {
       const binding = `__bnhReexport${reexportIndex++}`;
       return `${prefix}const ${binding} = ${request};\n${names.split(',').map((part) => {
         const [local, exported = local] = part.trim().split(/\s+as\s+/);
-        return `module.exports[${JSON.stringify(exported)}] = ${binding}[${JSON.stringify(local)}];`;
+        return exportAssignment(`${binding}[${JSON.stringify(local)}]`, exported);
       }).join('\n')}`;
     },
   );
@@ -2967,11 +2985,25 @@ function moduleSynchronousEsmSource(source, filename = '/node/index.mjs') {
     transformed += `\n${exportedDeclarations.map(([, name]) => `module.exports.${name} = ${name};`).join('\n')}`;
   }
   transformed = transformed.replace(
+    /(^|[;\n])\s*export\s*\{\s*\}\s*;?/g,
+    '$1',
+  );
+  transformed = transformed.replace(
     /(^|[;\n])\s*export\s+\*\s+from\s+(['\"])([^'\"]+)\2\s*;?/g,
     (_, prefix, quote, specifier) => `${prefix}Object.assign(module.exports, require(${JSON.stringify(specifier)}));`,
   );
-  transformed = transformed.replace(/\bimport\.meta\.url\b/g, JSON.stringify(pathToFileURL(filename).href));
-  return `${prelude}${transformed}`;
+  if (uninitializedExportNames.length) {
+    transformed += `\n${uninitializedExportNames.map((name) => `module.exports.${name} = ${name};`).join('\n')}`;
+  }
+  const importMetaURL = JSON.stringify(pathToFileURL(filename).href);
+  const importMetaResolve = '((specifier) => { const resolved = require.resolve(specifier); return resolved.startsWith(\'/\') ? new URL(resolved, \'file:///\').href : resolved; })';
+  transformed = transformed.replace(/\bimport\.meta\.resolve\b/g, importMetaResolve);
+  transformed = transformed.replace(/\bimport\.meta\.url\b/g, importMetaURL);
+  transformed = transformed.replace(/\bimport\.meta\b/g, `({ url: ${importMetaURL}, resolve: ${importMetaResolve} })`);
+  // Synchronous ESM is lowered into the CommonJS wrapper. Keep the lowered
+  // module in a block so legal ESM lexical bindings (such as __dirname) do
+  // not collide with the wrapper's CommonJS parameters.
+  return `${prelude}{\n${transformed}\n}`;
 }
 
 function moduleArgumentTypeError(name, expected, value) {

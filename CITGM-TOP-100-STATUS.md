@@ -20,7 +20,7 @@ not being reclassified as newly rerun here.
 | 6 | supports-color | PASS | ours | Final Chromium CITGM run `citgm-1789059865080`; XO, AVA (55 tests), and TSD all exited 0. Required gates: build passed; `npm test` 296/296; Chromium Playwright 243/243; Firefox Playwright 243/243. |
 | 7 | ms | PASS | none observed | First Chromium CITGM attempt `citgm-1789061171244` passed for published `ms@2.1.3`; npm install, upstream mocha tests, and all four child phases exited 0. No runtime defect was observed. Required gates: build passed; `npm test` 296/296; Chromium Playwright 243/243; Firefox Playwright 243/243. |
 | 8 | ansi-styles | PASS | ours | First Chromium CITGM attempt `citgm-1789062097927` exposed an AVA worker-exit defect after 10 tests passed; fixed generally by tracking worker parent-port ref state. Final rerun `citgm-1789062714781` passed. Required gates: build passed; `npm test` 296/296; Chromium Playwright 243/243; Firefox Playwright 243/243. |
-| 9 | chalk | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 9 | chalk | PASS | ours | Published `chalk@6.0.0` initially failed in the shared ESM lowering path; six Chromium CITGM runs were preserved. Final run `citgm-1789065205654` passed after general ESM binding, export, `import.meta`, and `module.exports` interop fixes. Required gates: build passed; `npm test` 296/296; Chromium Playwright 243/243; Firefox Playwright 243/243. |
 | 10 | emoji-regex | PENDING | — | Not attempted; rank 6 was required to commit first. |
 | 11 | wrap-ansi | PENDING | — | Not attempted; rank 6 was required to commit first. |
 | 12 | lru-cache | PENDING | — | Not attempted; rank 6 was required to commit first. |
@@ -210,3 +210,56 @@ npm run test:browser:firefox                                 PASS — 243/243
 The focused `expanded-primitives` oracle also passed 6/6 in Chromium and 6/6
 in Firefox. Its pre-fix red run and post-fix build/green runs are preserved
 under `artifacts/citgm-top-100/rank-008-ansi-styles/gates/`.
+
+## Rank 9 failure record
+
+All failures below occurred while running the real published `chalk@6.0.0`
+package through Chromium CITGM 10.0.2. The exact native checkout passed its
+upstream 58-test suite, so the failures were runtime compatibility defects;
+nested `yargs` and `yargs-parser` only exposed the defects. No package-specific
+conditionals, fake success paths, or candidate shims were added.
+
+| Run / log | Observed failure | Classification and resolution |
+| --- | --- | --- |
+| `citgm-1789063844945` / `artifacts/citgm-top-100/rank-009-chalk/citgm-initial/` | `SyntaxError: Identifier '__dirname' has already been declared` while c8 loaded the ESM dependency graph. | Ours. Synchronous ESM lowering placed legal ESM lexical bindings in the synthetic CommonJS wrapper scope. Lowered modules now execute in a block, with a focused collision oracle. |
+| `citgm-1789064234996` / `artifacts/citgm-top-100/rank-009-chalk/citgm-rerun-1/` | `SyntaxError: Unexpected token 'export'` remained in a nested `yargs-parser` module. | Ours, exposed by a nested dependency. Added handling for line-form uninitialized `export var`/`let`/`const` declarations. |
+| `citgm-1789064557014` / `artifacts/citgm-top-100/rank-009-chalk/citgm-rerun-2/` | The same residual `export` syntax was isolated to `export var` and `export {}` forms in the parser graph. | Ours. Completed general handling for uninitialized exports and empty export statements; the focused boundary oracle covers both. |
+| `citgm-1789064809341` / `artifacts/citgm-top-100/rank-009-chalk/citgm-rerun-3/` | `Cannot use 'import.meta' outside a module` from `yargs`'s `import.meta.resolve()` path. | Ours, exposed by a nested dependency. Lowered `import.meta.url` and `import.meta.resolve()` for synchronous ESM execution. |
+| `citgm-1789064961903` / `artifacts/citgm-top-100/rank-009-chalk/citgm-rerun-4/` | `TypeError: Yargs is not a function`; `export { yargsParser as 'module.exports' }` was emitted as an ordinary quoted property instead of direct CommonJS interop. | Ours, exposed by `yargs-parser`. Implemented the Node-compatible special `module.exports` export name and added a callable interop oracle. |
+| `citgm-1789065205654` / `artifacts/citgm-top-100/rank-009-chalk/citgm-final/` | Published package install and upstream test execution completed with exit code 0. The artifact retains a non-fatal foreground-child watchdog probe for `/node/10006`; c8 and tsc both exited 0. | PASS. No nested dependency or upstream package/repository blocker remained. |
+
+## Rank 9 CITGM evidence
+
+The real Chromium CITGM commands were run in order and their complete logs
+and CITGM artifacts are preserved under
+`artifacts/citgm-top-100/rank-009-chalk/`:
+
+```text
+NACELLE_CITGM_ARTIFACT_DIR=/tmp/nacelle-citgm-top-100 npm run citgm:browser:chromium -- chalk 2>&1 | tee /tmp/chalk-citgm-initial.log
+NACELLE_CITGM_ARTIFACT_DIR=/tmp/nacelle-citgm-top-100 npm run citgm:browser:chromium -- chalk 2>&1 | tee /tmp/chalk-citgm-rerun.log
+NACELLE_CITGM_ARTIFACT_DIR=/tmp/nacelle-citgm-top-100 npm run citgm:browser:chromium -- chalk 2>&1 | tee /tmp/chalk-citgm-rerun-2.log
+NACELLE_CITGM_ARTIFACT_DIR=/tmp/nacelle-citgm-top-100 npm run citgm:browser:chromium -- chalk 2>&1 | tee /tmp/chalk-citgm-rerun-3.log
+NACELLE_CITGM_ARTIFACT_DIR=/tmp/nacelle-citgm-top-100 npm run citgm:browser:chromium -- chalk 2>&1 | tee /tmp/chalk-citgm-rerun-4.log
+NACELLE_CITGM_ARTIFACT_DIR=/tmp/nacelle-citgm-top-100 npm run citgm:browser:chromium -- chalk 2>&1 | tee /tmp/chalk-citgm-rerun-5.log
+```
+
+The exact native checkout at chalk commit `661317e6f91fe7c90306c2c48ea9354562ee9146`
+also passed its own `npm test` (58 tests, including c8, XO, and tsc). This
+confirmed the CITGM failures were ours rather than an upstream package or
+repository failure.
+
+## Rank 9 gate evidence
+
+Commands were run from the repository root after the final CITGM pass and
+after the runtime fix:
+
+```text
+npm run build -- --node-version=v22                         PASS
+npm test                                                     PASS — 296/296
+npm run test:browser:chromium                               PASS — 243/243
+npm run test:browser:firefox                                 PASS — 243/243
+```
+
+The focused `esm-boundaries` oracle passed 8/8 in Chromium and 8/8 in
+Firefox. Its pre-fix red run and post-fix build/green runs are preserved under
+`artifacts/citgm-top-100/rank-009-chalk/`.

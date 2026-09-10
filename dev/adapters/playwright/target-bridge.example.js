@@ -12,6 +12,59 @@ function decodeBase64(data) {
 
 const materializationCache = new Map();
 const runtimes = new Map();
+const NativeMessageChannel = globalThis.MessageChannel;
+const NativeWorker = globalThis.Worker;
+
+function createWorkerBrokerPort() {
+  if (typeof NativeMessageChannel !== 'function' || typeof NativeWorker !== 'function') return undefined;
+  const channel = new NativeMessageChannel();
+  const brokerPort = channel.port1;
+  brokerPort.onmessage = (event) => {
+    const request = event.data;
+    if (request?.type !== 'create' || !request.port) return;
+    const worker = new NativeWorker(request.source, request.options || {});
+    const clientPort = request.port;
+    let initialized = false;
+    clientPort.onmessage = (clientEvent) => {
+      const message = clientEvent.data;
+      if (message?.type === 'postMessage') {
+        const transfers = [...(message.transfers || [])];
+        let value = message.value;
+        if (!initialized) {
+          initialized = true;
+          const childBrokerPort = createWorkerBrokerPort();
+          value = { ...value, workerBrokerPort: childBrokerPort };
+          transfers.push(childBrokerPort);
+        }
+        worker.postMessage(value, transfers);
+      } else if (message?.type === 'terminate') {
+        worker.terminate();
+        clientPort.close();
+      }
+    };
+    clientPort.start?.();
+    worker.addEventListener('message', (workerEvent) => {
+      clientPort.postMessage({ type: 'message', value: workerEvent.data });
+    });
+    worker.addEventListener('messageerror', (workerEvent) => {
+      clientPort.postMessage({ type: 'messageerror', error: { message: String(workerEvent?.message || 'worker message error') } });
+    });
+    worker.addEventListener('error', (workerEvent) => {
+      clientPort.postMessage({
+        type: 'error',
+        error: {
+          name: workerEvent?.error?.name || workerEvent?.name || 'Error',
+          message: String(workerEvent?.error?.message || workerEvent?.message || 'worker failed'),
+          stack: workerEvent?.error?.stack || workerEvent?.error?.stack || null,
+        },
+      });
+    });
+  };
+  brokerPort.start?.();
+  return channel.port2;
+}
+
+globalThis.__BNH_CREATE_WORKER_BROKER_PORT__ = createWorkerBrokerPort;
 
 function runtimeFor(variant) {
   const profile = resolveNodeVersionProfile(variant || 'lts');

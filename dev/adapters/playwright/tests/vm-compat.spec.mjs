@@ -75,4 +75,23 @@ test.describe('browser-native node:vm builtin', () => {
     await expectPass(expect, result);
   });
 
+  test('preserves structured Error.captureStackTrace inside a context realm', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (() => {
+        const assert = require('node:assert');
+        const vm = require('node:vm');
+        const context = vm.createContext({});
+        const stack = vm.runInContext(
+          '(() => { const previous = Error.prepareStackTrace; Error.prepareStackTrace = (_, sites) => sites; const target = { stack: [] }; Error.captureStackTrace(target); Error.prepareStackTrace = previous; return target.stack; })()',
+          context,
+        );
+        assert(Array.isArray(stack));
+        assert(stack.length > 0);
+        assert.strictEqual(typeof stack[0].getFileName, 'function');
+      })();
+    `);
+
+    await expectPass(expect, result);
+  });
+
 });

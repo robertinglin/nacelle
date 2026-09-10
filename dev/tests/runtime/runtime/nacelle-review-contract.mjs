@@ -61,8 +61,31 @@ test('nested synchronous children restore host scheduling globals before the nex
     const { spawnSync } = require('node:child_process');
     spawnSync('node', ['-e', 'process.stdout.write("child")']);
   `);
-  assert.equal(await child.exit, 0);
+  assert.equal(await child.exit, 0, await child.stderrText());
   assert.equal(globalThis.queueMicrotask, hostQueueMicrotask);
+});
+
+test('internal process ownership markers stay out of the enumerable global surface', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/global-surface.js': `
+        const descriptor = Object.getOwnPropertyDescriptor(globalThis, '__bnhActiveProcess');
+        process.stdout.write(JSON.stringify({
+          enumerable: Object.keys(globalThis).includes('__bnhActiveProcess'),
+          descriptorEnumerable: descriptor?.enumerable,
+        }));
+      `,
+    },
+  });
+  const child = await node.run({
+    entry: '/node/global-surface.js',
+  });
+  assert.equal(await child.exit, 0, await child.stderrText());
+  assert.deepEqual(JSON.parse(await child.stdoutText()), {
+    enumerable: false,
+    descriptorEnumerable: false,
+  });
 });
 
 test('gateway initialization waits until the service worker controls the page', async () => {
@@ -191,6 +214,21 @@ test('node -e resolves packages relative to its child cwd', async () => {
   const child = await node.run({ entry: '/node/app/runner.js', cwd: '/node/app' });
   assert.equal(await child.exit, 0);
   assert.equal(await child.stdoutText(), 'child-cwd');
+});
+
+test('path/posix resolves relative paths against the child cwd', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/app/paths.js': [
+        "const path = require('node:path/posix');",
+        "process.stdout.write(`${path.resolve('dist/index.js')}|${path.relative('src', 'dist')}\n`);",
+      ].join('\n'),
+    },
+  });
+  const child = await node.run({ entry: '/node/app/paths.js', cwd: '/node/app' });
+  assert.equal(await child.exit, 0);
+  assert.equal(await child.stdoutText(), '/node/app/dist/index.js|../dist\n');
 });
 
 test('CommonJS resolution honors exports, directory main, and extension boundaries', async () => {

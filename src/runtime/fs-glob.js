@@ -221,11 +221,20 @@ export function createGlob({
     };
   }
 
-  function allCandidates(cwd, patterns) {
+  function allCandidates(cwd, patterns, excludePatterns) {
     const candidates = new Set([cwd]);
     const walked = new Set();
+    const excludedPath = (path) => excludePatterns.some((pattern) => {
+      let current = path;
+      while (true) {
+        if (matchesPattern(pattern, current)) return true;
+        if (current === '/') return false;
+        current = current.slice(0, current.lastIndexOf('/')) || '/';
+      }
+    });
     const walk = (path, depth, symlinkDepth = 0) => {
       if (depth > 40) return;
+      if (excludedPath(path)) return;
       let isSymlink = false;
       try { isSymlink = lstatPath(path).isSymbolicLink(); } catch { /* path vanished */ }
       if (isSymlink && symlinkDepth >= 12) return;
@@ -237,6 +246,7 @@ export function createGlob({
       try { entries = listEntries(path); } catch { return; }
       for (const entry of entries) {
         const child = path === '/' ? `/${entry.name}` : `${path}/${entry.name}`;
+        if (excludedPath(child)) continue;
         candidates.add(child);
         try {
           if (statPath(child).isDirectory()) walk(child, depth + 1, nextSymlinkDepth);
@@ -338,7 +348,7 @@ export function createGlob({
 
   function collect(patternValue, optionsValue) {
     const config = prepare(patternValue, optionsValue);
-    const candidates = allCandidates(config.cwd, config.patterns);
+    const candidates = allCandidates(config.cwd, config.patterns, config.excludePatterns);
     const matches = new Map();
     for (const pattern of config.patterns) {
       const isAbsolute = absolutePattern(pattern);

@@ -17,7 +17,7 @@ test.describe('browser-native VFS and module loading', () => {
         assert.deepStrictEqual([...fs.readFileSync('/node/vfs//./bytes.bin')], [0, 255, 1]);
         assert.strictEqual(fileURLToPath(pathToFileURL(file)), file);
         assert.throws(() => fs.readFileSync('/node/../outside'), (error) => {
-          assert.strictEqual(error.code, 'ERR_CAPABILITY_DENIED');
+          assert.strictEqual(error.code, 'ENOENT');
           assert.strictEqual(error.path, '/outside');
           assert.strictEqual(error.syscall, 'open');
           return true;

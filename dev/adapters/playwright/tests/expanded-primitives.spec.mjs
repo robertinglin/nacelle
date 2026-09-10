@@ -3,6 +3,103 @@ import { browserRuntimeURL, expectPass, test } from './harness-test-helpers.mjs'
 
 test.skip(!browserRuntimeURL, 'set BNH_TEST_URL to a browser runtime harness page');
 
+test('file worker with unref can satisfy a synchronous Atomics waiter', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const assert = require('node:assert/strict');
+    const { Worker } = require('node:worker_threads');
+    (async () => {
+      const dataBuffer = new SharedArrayBuffer(4);
+      const syncBuffer = new SharedArrayBuffer(4);
+      const cells = new Int32Array(syncBuffer);
+      const worker = new Worker('/node/unref-sync-worker.cjs', {
+        workerData: {
+          dataBuffer,
+          syncBuffer,
+          firstMessage: { value: 7, projectDir: '/node/citgm/tmp/f7215f77/ansi-regex' },
+        },
+      });
+      worker.unref();
+      assert.strictEqual(Atomics.wait(cells, 0, 0, 5000), 'ok');
+      assert.strictEqual(cells[0], 7);
+      assert.strictEqual(new Int32Array(dataBuffer)[0], 7);
+      const message = await new Promise((resolve, reject) => {
+        worker.once('message', resolve);
+        worker.once('error', reject);
+      });
+      assert.strictEqual(message, 'ready');
+      await worker.terminate();
+    })().catch((error) => { console.error(error); process.exitCode = 1; });
+  `, {
+    files: {
+      '/node/unref-sync-worker.cjs': [
+        "const { parentPort, workerData } = require('node:worker_threads');",
+        "const fs = require('node:fs/promises');",
+        "const v8 = require('node:v8');",
+        "const data = new Int32Array(workerData.dataBuffer);",
+        "const sync = new Int32Array(workerData.syncBuffer);",
+        "(async () => {",
+        "  let current = workerData.firstMessage.projectDir;",
+        "  while (true) {",
+        "    const candidate = current + '/package.json';",
+        "    try { await fs.access(candidate); await fs.readFile(candidate, 'utf8'); break; } catch {}",
+        "    if (current === '/') break;",
+        "    current = current.slice(0, current.lastIndexOf('/')) || '/';",
+        "  }",
+        "  const encoded = v8.serialize({ value: workerData.firstMessage.value });",
+        "  data[0] = encoded.length > 0 ? 7 : 0;",
+        "  Atomics.store(sync, 0, 7);",
+        "  Atomics.notify(sync, 0);",
+        "  parentPort.postMessage('ready');",
+        "})().catch((error) => { parentPort.postMessage({ error: error.message }); });",
+        "setInterval(() => {}, 1000);",
+      ].join('\n'),
+      '/node/package.json': '{}',
+      '/node/citgm/tmp/f7215f77/ansi-regex/package.json': '{}',
+    },
+    timeoutMs: 10_000,
+  });
+  await expectPass(expect, result);
+});
+
+test('callback-style fs access completes in a synchronously-waited worker', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const assert = require('node:assert/strict');
+    const { Worker } = require('node:worker_threads');
+    (async () => {
+      const syncBuffer = new SharedArrayBuffer(4);
+      const cells = new Int32Array(syncBuffer);
+      const worker = new Worker('/node/access-callback-worker.cjs', {
+        workerData: { syncBuffer, path: '/node/package.json' },
+      });
+      worker.unref();
+      assert.strictEqual(Atomics.wait(cells, 0, 0, 5000), 'ok');
+      assert.strictEqual(Atomics.load(cells, 0), 1);
+      const message = await new Promise((resolve, reject) => {
+        worker.once('message', resolve);
+        worker.once('error', reject);
+      });
+      assert.strictEqual(message, 'accessed');
+      await worker.terminate();
+    })().catch((error) => { console.error(error); process.exitCode = 1; });
+  `, {
+    files: {
+      '/node/access-callback-worker.cjs': [
+        "const { parentPort, workerData } = require('node:worker_threads');",
+        "const fs = require('node:fs');",
+        "const cells = new Int32Array(workerData.syncBuffer);",
+        "fs.access(workerData.path, (error) => {",
+        "  Atomics.store(cells, 0, error ? -1 : 1);",
+        "  Atomics.notify(cells, 0);",
+        "  parentPort.postMessage(error ? error.code : 'accessed');",
+        "});",
+      ].join('\n'),
+      '/node/package.json': '{}',
+    },
+    timeoutMs: 10_000,
+  });
+  await expectPass(expect, result);
+});
+
 const contracts = {
   'http-fetch': `
     const assert = require('node:assert');
@@ -98,6 +195,25 @@ const contracts = {
         assert.strictEqual(Atomics.load(cells, 0), 3);
         assert.strictEqual(Atomics.add(cells, 0, 2), 3);
         assert.strictEqual(Atomics.load(cells, 0), 5);
+        Atomics.store(cells, 0, 0);
+        const waiter = new Worker(
+          \`const {parentPort, workerData} = require('node:worker_threads');
+          const cells = new Int32Array(workerData);
+          setTimeout(() => {
+            Atomics.store(cells, 0, 1);
+            Atomics.notify(cells, 0);
+            parentPort.postMessage('ready');
+          }, 10);\`,
+          {eval: true, workerData: shared},
+        );
+        const waiterMessage = new Promise((resolve, reject) => {
+          waiter.once('message', resolve);
+          waiter.once('error', reject);
+        });
+        assert.strictEqual(Atomics.wait(cells, 0, 0, 5000), 'ok');
+        assert.strictEqual(Atomics.load(cells, 0), 1);
+        assert.strictEqual(await waiterMessage, 'ready');
+        assert.strictEqual(await waiter.terminate(), 1);
       }
     })().catch((error) => { console.error(error); process.exitCode = 1; });
   `,

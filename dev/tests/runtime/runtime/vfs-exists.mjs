@@ -33,6 +33,15 @@ test('stat APIs honor throwIfNoEntry:false for optional package probes', async (
   }));
 });
 
+test('read-only virtual root is visible above a scoped mount', () => {
+  const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write' }] });
+
+  assert.equal(vfs.fs.statSync('/').isDirectory(), true);
+  assert.deepEqual(vfs.fs.readdirSync('/'), ['node']);
+  assert.throws(() => vfs.fs.readFileSync('/package.json'), { code: 'ENOENT' });
+  assert.throws(() => vfs.fs.mkdirSync('/outside'), { code: 'ERR_CAPABILITY_DENIED' });
+});
+
 test('mount invalidates cached directory entries like the host filesystem', () => {
   const hostRoot = mkdtempSync(join(tmpdir(), 'bnh-vfs-'));
   try {
@@ -53,4 +62,17 @@ test('mount invalidates cached directory entries like the host filesystem', () =
   } finally {
     rmSync(hostRoot, { recursive: true, force: true });
   }
+});
+
+test('glob excludes prune ignored directory trees', () => {
+  const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write' }] });
+  vfs.mount({
+    '/node/project/index.js': 'export default 1;',
+    '/node/project/node_modules/dependency/index.js': 'export default 2;',
+  });
+
+  assert.deepEqual(
+    vfs.fs.globSync('**/*.js', { cwd: '/node/project', exclude: ['node_modules'] }),
+    ['index.js'],
+  );
 });

@@ -20,6 +20,30 @@ test('canonicalizes bare and node: builtin names without VFS fallback', () => {
   assert.throws(() => loader.require('node:missing'), { code: 'ERR_UNKNOWN_BUILTIN_MODULE' });
 });
 
+test('resolves VFS-relative imports when the browser reports a generated Blob importer', () => {
+  const scope = { Blob, URL, location: { href: 'https://runtime.example.test/harness.html' } };
+  const options = {
+    globalObject: scope,
+    files: new Map([
+      ['/node/app/entry.mjs', 'export const value = 1;'],
+      ['/node/dep.mjs', 'export const value = 2;'],
+    ]),
+    builtins: { buffer: { Buffer } },
+  };
+  const loader = createModuleLoader(options);
+  const siblingLoader = createModuleLoader(options);
+
+  try {
+    const generated = loader.moduleURL('/node/app/entry.mjs');
+    assert.match(generated, /^blob:/);
+    assert.equal(loader.resolve('../dep.mjs', generated), '/node/dep.mjs');
+    assert.equal(siblingLoader.resolve('../dep.mjs', generated), '/node/dep.mjs');
+  } finally {
+    loader.dispose();
+    siblingLoader.dispose();
+  }
+});
+
 test('aggregates async node:test suites, hooks, and subtests', async () => {
   const output = [];
   const errors = [];

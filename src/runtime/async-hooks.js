@@ -385,7 +385,7 @@ function withResourceProcess(asyncId, callback) {
   try {
     return callback();
   } finally {
-    if (previousActiveProcess === undefined) delete globalThis.__bnhActiveProcess;
+    if (previousActiveProcess === undefined) globalThis.__bnhActiveProcess = undefined;
     else globalThis.__bnhActiveProcess = previousActiveProcess;
   }
 }

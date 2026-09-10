@@ -76,6 +76,30 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     const source = processStateSource;
     const nodeTest = source?.__bnhNodeTestState;
     const activity = source?.__bnhChildActivity;
+    const activeEsmChildren = [...(source?.__bnhEsmChildren || [])].slice(-4).map((child) => ({
+      runtimeState: child.handle?.runtimeState || null,
+      entry: String(child.entry || '').slice(0, 256),
+      cwd: typeof child.handle?.cwd === 'function' ? String(child.handle.cwd()).slice(0, 256) : null,
+      mode: child.mode == null ? null : String(child.mode).slice(0, 32),
+      state: child.handle?.state == null ? null : String(child.handle.state).slice(0, 32),
+      runtimePhase: child.handle?.runtimeState?.phase == null
+        ? null
+        : String(child.handle.runtimeState.phase).slice(0, 64),
+      files: Number(child.files) || 0,
+      bytes: Number(child.bytes) || 0,
+      lifecycle: child.handle?.runtimeState?.lifecycle
+        ? {
+            pending: Number(child.handle.runtimeState.lifecycle.pending) || 0,
+            tasks: Array.isArray(child.handle.runtimeState.lifecycle.tasks)
+              ? child.handle.runtimeState.lifecycle.tasks.slice(-4).map((task) => ({
+                  id: Number(task.id) || 0,
+                  label: task.label == null ? null : String(task.label).slice(0, 128),
+                  stack: task.stack == null ? null : String(task.stack).slice(0, 512),
+                }))
+              : [],
+          }
+        : null,
+    }));
     const uncaught = source?.__bnhUncaughtException;
     const exitRequest = source?.__bnhExitRequest;
     const boundedList = (value) => Array.isArray(value)
@@ -134,8 +158,10 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         completed: Number(activity.completed) || 0,
         failed: Number(activity.failed) || 0,
         npmPhase: activity.npmPhase == null ? null : String(activity.npmPhase).slice(0, 160),
-        activeEsmChildren: Array.isArray(activity.activeEsmChildren)
-          ? activity.activeEsmChildren.slice(-4).map((child) => ({
+        activeEsmChildren: activeEsmChildren.length
+          ? activeEsmChildren
+          : Array.isArray(activity.activeEsmChildren)
+            ? activity.activeEsmChildren.slice(-4).map((child) => ({
               entry: String(child.entry || '').slice(0, 256),
               phase: child.phase == null ? null : String(child.phase).slice(0, 64),
               mode: child.mode == null ? null : String(child.mode).slice(0, 32),
@@ -144,8 +170,8 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
               symlinks: Number(child.symlinks) || 0,
               state: child.state == null ? null : String(child.state).slice(0, 32),
               runtimePhase: child.runtimePhase == null ? null : String(child.runtimePhase).slice(0, 64),
-            }))
-          : [],
+              }))
+            : [],
         firstCommand: (activity.first?.command || activity.first?.entry) ? String(activity.first.command || activity.first.entry).split('/').pop().slice(0, 80) : null,
         lastCommand: (activity.last?.command || activity.last?.entry) ? String(activity.last.command || activity.last.entry).split('/').pop().slice(0, 80) : null,
         recent: Array.isArray(activity.recent) ? activity.recent.slice(-4).map((record) => ({
@@ -756,9 +782,12 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     runtimeStateTimer = typeof setInterval === 'function'
       ? setInterval(sendRuntimeState, 100)
       : undefined;
+    const initialVfs = message.vfs && message.workerData !== undefined
+      ? { ...message.vfs, workerData: message.workerData }
+      : message.vfs;
     const vfsPromise = message.vfsDeferred
       ? new Promise((resolve) => { deferredVfsResolver = resolve; })
-      : Promise.resolve(message.vfs);
+      : Promise.resolve(initialVfs);
     const output = {
       stdout: (value) => process.stdout.write(value),
       stderr: (value) => process.stderr.write(value),
@@ -768,10 +797,11 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       ipc: process,
       stdout: output.stdout,
       stderr: output.stderr,
-      vfs: message.vfsDeferred ? undefined : message.vfs,
+      vfs: message.vfsDeferred ? undefined : initialVfs,
       signal: process,
       networkPort: message.networkPort,
       vfsUpdatePort: message.vfsUpdatePort,
+      workerBrokerPort: message.workerBrokerPort,
     };
     process.__bnhRuntimePhase = 'dispatch-queued';
     sendRuntimeState();

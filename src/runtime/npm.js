@@ -916,6 +916,27 @@ export class BrowserNpm {
           parentPackageDir: pkgDir,
         });
       }
+      // npm resolves peer dependencies alongside the package that requests
+      // them (or reuses a compatible ancestor). This matters for tooling
+      // packages whose executable is supplied by a peer, such as eslint
+      // configurations installed by a project's devDependencies.
+      const peerDeps = {
+        ...(versionDoc?.peerDependencies || {}),
+        ...(parsedPkgJson?.peerDependencies || {}),
+      };
+      for (const [depName, depRange] of Object.entries(peerDeps)) {
+        // Optional peers describe integrations the consumer may provide; npm
+        // does not auto-install them when the project has not requested one.
+        if (parsedPkgJson?.peerDependenciesMeta?.[depName]?.optional === true) continue;
+        const dependencyDir = dependencyLocation(depName, depRange, itemNodeModulesDir, pkgDir);
+        if (dependencyDir) queue.push({
+          name: depName,
+          range: depRange,
+          optional: false,
+          nodeModulesDir: dependencyDir,
+          parentPackageDir: pkgDir,
+        });
+      }
       if (includeDevDependencies && !parentPackageDir) {
         for (const [depName, depRange] of Object.entries(parsedPkgJson?.devDependencies || {})) {
           const dependencyDir = dependencyLocation(depName, depRange, itemNodeModulesDir, pkgDir);

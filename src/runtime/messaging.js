@@ -1173,6 +1173,66 @@ export function createWorkerFactory(scope = globalThis, { bootstrap = '' } = {})
   };
 }
 
+/**
+ * Route a worker through a host-owned broker. Chromium does not schedule a
+ * dedicated worker spawned by a dedicated worker while the owner is blocked
+ * in Atomics.wait; a top-level host broker keeps that child independently
+ * runnable for Node's synchronous worker helpers.
+ */
+export function createWorkerBrokerFactory(brokerPort, scope = globalThis) {
+  if (!brokerPort) return null;
+  const broker = brokerPort.raw || brokerPort;
+  return function BrokerWorker(source, options = {}) {
+    const channel = createMessageChannel(scope);
+    const events = new BrowserEventEmitter();
+    let closed = false;
+    const endpoint = channel.port1;
+    endpoint.on('message', (message) => {
+      if (message?.type === 'message') events.emit('message', message.value);
+      else if (message?.type === 'messageerror') events.emit('messageerror', message.error || message);
+      else if (message?.type === 'error') {
+        const error = Object.assign(new Error(message.error?.message || 'worker failed'), message.error || {});
+        events.emit('error', error);
+      } else if (message?.type === 'exit') {
+        events.emit('exit', Number(message.code) || 0);
+      }
+    });
+    const worker = {
+      raw: endpoint.raw,
+      on(name, listener) { events.on(name, listener); return worker; },
+      once(name, listener) { events.once(name, listener); return worker; },
+      off(name, listener) { events.off(name, listener); return worker; },
+      removeListener(name, listener) { events.off(name, listener); return worker; },
+      removeAllListeners(name) { events.removeAllListeners(name); return worker; },
+      postMessage(value, transferList) {
+        if (closed) throw new Error('worker is not running');
+        const transfers = normalizePortTransferList(transferList) || [];
+        endpoint.postMessage({ type: 'postMessage', value, transfers }, transfers);
+      },
+      terminate() {
+        if (closed) return Promise.resolve(1);
+        closed = true;
+        endpoint.postMessage({ type: 'terminate' });
+        endpoint.close?.();
+        return Promise.resolve(1);
+      },
+      ref() { return worker; },
+      unref() { return worker; },
+    };
+    const workerOptions = {
+      ...(options.type !== undefined ? { type: options.type } : {}),
+      ...(options.name !== undefined ? { name: options.name } : {}),
+    };
+    broker.postMessage({
+      type: 'create',
+      source,
+      options: workerOptions,
+      port: channel.raw.port2,
+    }, [channel.raw.port2]);
+    return worker;
+  };
+}
+
 export function createBroadcastChannelFactory(scope = globalThis) {
   if (typeof scope.BroadcastChannel !== 'function') return undefined;
   const channelStates = new WeakMap();

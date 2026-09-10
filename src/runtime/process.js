@@ -1,6 +1,6 @@
 import { EventEmitter } from './events.js';
 import { Readable, Writable, ensureOutputStream } from './streams.js';
-import { adaptMessagePort, adaptWorker, createIpcError, createMessageChannel, createScopedIpcEndpoint, createWorkerFactory } from './messaging.js';
+import { adaptMessagePort, adaptWorker, createIpcError, createMessageChannel, createScopedIpcEndpoint, createWorkerBrokerFactory, createWorkerFactory } from './messaging.js';
 import { createProcessWorkerSource } from './process-worker.js';
 import { browserCryptoVersion } from './crypto.js';
 import { installWarningContract } from './warnings.js';
@@ -112,7 +112,7 @@ function asFileBytes(value) {
  * nested workers receive an owned transfer so Chromium does not synchronously
  * clone a very large SharedArrayBuffer from one worker into another.
  */
-export function prepareWorkerVfs(vfs, scope) {
+export function prepareWorkerVfs(vfs, scope, { eager = false } = {}) {
   if (!vfs?.files) return vfs;
 
   const byteRecords = [];
@@ -151,7 +151,7 @@ export function prepareWorkerVfs(vfs, scope) {
 
   const totalBytes = byteRecords.reduce((total, record) => total + record.source.byteLength, 0);
   const nestedWorker = typeof WorkerGlobalScope === 'function' && scope instanceof WorkerGlobalScope;
-  const chunked = nestedWorker && totalBytes > 16 * 1024 * 1024;
+  const chunked = !eager && nestedWorker && totalBytes > 16 * 1024 * 1024;
   const isolated = !nestedWorker
     && scope.crossOriginIsolated === true
     && typeof scope.SharedArrayBuffer === 'function';
@@ -712,6 +712,14 @@ function transition(state, next) {
 
 function workerFactoryFor(options) {
   if (options.workerFactory) return options.workerFactory;
+  // A broker is required in both page and worker realms when the caller may
+  // synchronously block on Atomics.wait. The page realm cannot service the
+  // native Worker bootstrap while it is blocked, and a worker realm may be
+  // nested behind another broker. An explicitly supplied broker is therefore
+  // authoritative regardless of the current global's realm.
+  if (options.workerBrokerPort) {
+    return createWorkerBrokerFactory(options.workerBrokerPort, options.scope);
+  }
   if (options.Worker) return (source, workerOptions) => {
     const worker = new options.Worker(source, workerOptions);
     return typeof worker.on === 'function' ? worker : adaptWorker(worker);
@@ -1253,17 +1261,28 @@ export function createBrowserProcess(options = {}) {
     };
     if (options.networkPort) initialData.networkPort = options.networkPort;
     if (options.vfsUpdatePort) initialData.vfsUpdatePort = options.vfsUpdatePort;
-    const preparedVfs = options.vfs === undefined ? null : prepareWorkerVfs(options.vfs, scope);
+    const brokeredWorker = Boolean(options.workerBrokerPort
+      && typeof WorkerGlobalScope === 'function'
+      && scope instanceof WorkerGlobalScope);
+    if (options.workerBrokerPort && !brokeredWorker) {
+      initialData.workerBrokerPort = options.workerBrokerPort.raw || options.workerBrokerPort;
+    }
+    // Worker data can contain SharedArrayBuffers used as synchronous
+    // coordination cells. Keep it at the process-init boundary instead of
+    // making it travel only as a nested VFS descriptor field.
+    if (options.workerData !== undefined) initialData.workerData = options.workerData;
+    const preparedVfs = options.vfs === undefined ? null : prepareWorkerVfs(options.vfs, scope, { eager: options.vfsEager === true });
     const vfsTransferList = preparedVfs?.[workerVfsTransferList] || [];
-    if (preparedVfs !== null) initialData.vfsDeferred = true;
+    const eagerVfs = options.vfsEager === true;
+    if (preparedVfs !== null && !eagerVfs) initialData.vfsDeferred = true;
     const transferList = [
       controlChannel.raw.port2,
       userChannel.raw.port2,
       ...(options.networkPort ? [options.networkPort] : []),
       ...(options.vfsUpdatePort ? [options.vfsUpdatePort] : []),
+      ...(options.workerBrokerPort && !brokeredWorker ? [options.workerBrokerPort.raw || options.workerBrokerPort] : []),
       ...(options.workerDataTransferList || []),
     ];
-    worker.postMessage(initialData, transferList);
     if (preparedVfs !== null) {
       const wire = preparedVfs[workerVfsWire] || preparedVfs;
       let vfsMessage = wire;
@@ -1282,7 +1301,7 @@ export function createBrowserProcess(options = {}) {
         vfsRecordChunks = preparedVfs[workerVfsRecordChunks];
         vfsMessage = { ...vfsMessage, vfsFileRecords: undefined };
       }
-      deferredVfsMessage = {
+      const vfsPayload = {
         message: {
           type: 'bnh-process-vfs',
           vfs: vfsMessage,
@@ -1292,7 +1311,13 @@ export function createBrowserProcess(options = {}) {
         recordChunks: vfsRecordChunks,
         transferList: vfsChunks ? [] : vfsTransferList,
       };
+      if (eagerVfs) initialData.vfs = vfsMessage;
+      else deferredVfsMessage = vfsPayload;
     }
+    worker.postMessage(initialData, [
+      ...transferList,
+      ...(eagerVfs ? vfsTransferList : []),
+    ]);
     // The worker now owns the initialized VFS snapshot. Do not retain the
     // parent-side descriptor map through the child lifecycle closures.
     options.vfs = undefined;

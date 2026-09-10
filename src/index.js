@@ -34,6 +34,7 @@ const NPM_SCRIPT_ENV_KEYS = Object.freeze([
   'npm_lifecycle_script',
   'npm_package_name',
   'npm_package_version',
+  'npm_config_local_prefix',
 ]);
 
 function concatenateResponseBytes(chunks) {
@@ -598,6 +599,7 @@ export class Nacelle {
           npm_lifecycle_script: scriptCmd,
           npm_package_name: pkg.name || '',
           npm_package_version: pkg.version || '',
+          npm_config_local_prefix: targetCwd,
           PATH: `${targetCwd}/node_modules/.bin:/node/node_modules/.bin:${this._env.PATH || ''}`,
           ...options.env,
         };

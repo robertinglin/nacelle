@@ -53,6 +53,20 @@ test.describe('browser runtime bridge and core primitives', () => {
     expect(result.stderr).toContain('browser stderr');
   });
 
+  test('does not keep the parent alive for detached unref children', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const { spawn } = require('node:child_process');
+      const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 1000)'], {
+        detached: true,
+        stdio: 'ignore',
+      });
+      child.unref();
+      console.log('detached child released');
+    `);
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('detached child released');
+  });
+
   test('preserves Node events.on argument tuples for async iteration', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       (async () => {
@@ -625,6 +639,7 @@ test.describe('browser runtime bridge and core primitives', () => {
           "process.stdout.write('done\\n');",
         ].join('\n'),
       },
+      isolation: 'worker',
     });
 
     expect(result.timedOut, JSON.stringify(result)).toBe(false);
@@ -662,6 +677,98 @@ test.describe('browser runtime bridge and core primitives', () => {
           scripts: { test: "node -e \"process.stdout.write('npm entrypoint ran\\\\n')\"" },
         }),
         '/node/node_modules/.bin/node': '#!/usr/bin/env node\\n',
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\n',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('runs npm scripts when a package shell launches Node with the npm entrypoint', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn(process.execPath, [
+          '/node/node_modules/.bin/npm', 'test',
+        ], { cwd: '/node' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(output, 'shell npm entrypoint ran\\n');
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/package.json': JSON.stringify({
+          name: 'shell-npm-entrypoint-fixture',
+          version: '1.0.0',
+          scripts: {
+            test: 'node /node/node_modules/.bin/npm run nested',
+            nested: "node -e \"process.stdout.write('shell npm entrypoint ran\\\\n')\"",
+          },
+        }),
+        '/node/node_modules/.bin/node': '#!/usr/bin/env node\\n',
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\\n',
+      },
+      isolation: 'worker',
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('publishes ESM pretest writes before the following npm test script', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/node', [
+          '/node/node_modules/.bin/npm', 'test',
+        ], { cwd: '/node' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(output, 'lifecycle output present\\n');
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/package.json': JSON.stringify({
+          name: 'npm-lifecycle-vfs-fixture',
+          version: '1.0.0',
+          scripts: {
+            pretest: 'node build.mjs',
+            test: 'node check.mjs',
+          },
+        }),
+        '/node/build.mjs': [
+          "import { mkdirSync, writeFileSync } from 'node:fs';",
+          "mkdirSync('/node/dist', { recursive: true });",
+          "writeFileSync('/node/dist/lifecycle.txt', 'lifecycle output present\\n');",
+        ].join('\n'),
+        '/node/check.mjs': [
+          "import { readFileSync } from 'node:fs';",
+          "process.stdout.write(readFileSync('/node/dist/lifecycle.txt', 'utf8'));",
+        ].join('\n'),
+        '/node/node_modules/.bin/node': '#!/usr/bin/env node\n',
         '/node/node_modules/.bin/npm': '#!/usr/bin/env node\n',
       },
     });
@@ -1457,6 +1564,7 @@ test.describe('browser runtime bridge and core primitives', () => {
           "process.stdout.write('esm launcher ran\\n');",
         ].join('\n'),
       },
+      isolation: 'worker',
     });
 
     await expectPass(expect, result);
@@ -1905,6 +2013,184 @@ test.describe('browser runtime bridge and core primitives', () => {
         process.exitCode = 1;
       });
     `);
+
+    await expectPass(expect, result);
+  });
+
+  test('publishes filesystem writes from an isolated ESM child before close', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert');
+        const fs = require('node:fs');
+        const { spawn } = require('node:child_process');
+        const child = spawn(process.execPath, ['/node/build.mjs'], { cwd: '/node' });
+        let errorOutput = '';
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(fs.readFileSync('/node/dist/result.txt', 'utf8'), 'built');
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/build.mjs': [
+          "import { mkdirSync, writeFileSync } from 'node:fs';",
+          "mkdirSync('/node/dist', { recursive: true });",
+          "writeFileSync('/node/dist/result.txt', 'built');",
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('publishes filesystem writes through nested ESM children before close', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert');
+        const fs = require('node:fs');
+        const { spawn } = require('node:child_process');
+        const child = spawn(process.execPath, ['/node/build.mjs'], { cwd: '/node' });
+        let errorOutput = '';
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(fs.readFileSync('/node/dist/nested.txt', 'utf8'), 'nested');
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/build.mjs': [
+          "import { spawn } from 'node:child_process';",
+          "const child = spawn(process.execPath, ['/node/write-child.mjs'], { cwd: '/node' });",
+          "let stderr = '';",
+          "child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });",
+          "const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });",
+          "if (code !== 0) throw new Error(stderr);",
+        ].join('\n'),
+        '/node/write-child.mjs': [
+          "import { mkdirSync, writeFileSync } from 'node:fs';",
+          "mkdirSync('/node/dist', { recursive: true });",
+          "writeFileSync('/node/dist/nested.txt', 'nested');",
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('publishes filesystem writes from synchronous grandchildren before close', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert');
+        const fs = require('node:fs');
+        const { spawn } = require('node:child_process');
+        const child = spawn(process.execPath, ['/node/project/build.mjs'], { cwd: '/node/project' });
+        let errorOutput = '';
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(fs.readFileSync('/node/project/dist/sync-grandchild.txt', 'utf8'), 'sync');
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/project/build.mjs': [
+          "import { spawnSync } from 'node:child_process';",
+          "const result = spawnSync(process.execPath, ['/node/project/write-child.mjs'], { stdio: 'inherit' });",
+          "if (result.status !== 0) throw new Error(result.stderr.toString());",
+        ].join('\n'),
+        '/node/project/write-child.mjs': [
+          "import { mkdirSync, writeFileSync } from 'node:fs';",
+          "mkdirSync('dist', { recursive: true });",
+          "writeFileSync('dist/sync-grandchild.txt', 'sync');",
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('publishes relative build-tree writes from an ESM child cwd before close', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert');
+        const fs = require('node:fs');
+        const { spawn } = require('node:child_process');
+        const child = spawn(process.execPath, ['/node/project/build.mjs'], { cwd: '/node/project' });
+        let errorOutput = '';
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(fs.readFileSync('/node/project/dist/esm/index.js', 'utf8'), 'relative');
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/project/build.mjs': [
+          "import { mkdirSync, renameSync, writeFileSync } from 'node:fs';",
+          "mkdirSync('.tshy-build/esm', { recursive: true });",
+          "mkdirSync('dist/esm', { recursive: true });",
+          "writeFileSync('.tshy-build/esm/index.js', 'relative');",
+          "renameSync('.tshy-build/esm/index.js', 'dist/esm/index.js');",
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('publishes hard-linked build trees from an ESM child before close', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert');
+        const fs = require('node:fs');
+        const { spawn } = require('node:child_process');
+        const child = spawn(process.execPath, ['/node/project/build.mjs'], { cwd: '/node/project' });
+        let errorOutput = '';
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(fs.readFileSync('/node/project/dist/esm/index.js', 'utf8'), 'hard-linked');
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/project/build.mjs': [
+          "import { linkSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';",
+          "mkdirSync('.tshy-build/esm', { recursive: true });",
+          "mkdirSync('dist/esm', { recursive: true });",
+          "writeFileSync('.tshy-build/esm/index.js', 'hard-linked');",
+          "linkSync('.tshy-build/esm/index.js', 'dist/esm/index.js');",
+          "rmSync('.tshy-build', { recursive: true, force: true });",
+        ].join('\n'),
+      },
+    });
 
     await expectPass(expect, result);
   });

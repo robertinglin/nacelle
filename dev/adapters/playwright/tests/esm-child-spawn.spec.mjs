@@ -81,3 +81,43 @@ test('allows an ESM child to launch another ESM child', async ({ harnessPage }) 
 
   await expectPass(expect, result);
 });
+
+test('runs concurrent ESM spawn children without serializing their lifecycles', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const assert = require('node:assert');
+    const { spawn } = require('node:child_process');
+
+    const runChild = (entry) => new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [entry], { timeout: 2_000 });
+      let output = '';
+      let errorOutput = '';
+      child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+      child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+      child.once('error', reject);
+      child.once('close', (code, signal) => resolve({ code, signal, output, errorOutput }));
+    });
+
+    (async () => {
+      const results = await Promise.all(
+        Array.from({ length: 8 }, (_, index) => runChild('/node/concurrent-' + index + '.mjs')),
+      );
+      assert.deepStrictEqual(results, results.map((_, index) => ({
+        code: 0,
+        signal: null,
+        output: 'child-' + index,
+        errorOutput: '',
+      })));
+    })().catch((error) => {
+      console.error(error.stack || error);
+      process.exitCode = 1;
+    });
+  `, {
+    isolation: 'worker',
+    files: Object.fromEntries(Array.from({ length: 8 }, (_, index) => [
+      '/node/concurrent-' + index + '.mjs',
+      `await new Promise((resolve) => setTimeout(resolve, 500));\nprocess.stdout.write('child-${index}');`,
+    ])),
+  });
+
+  await expectPass(expect, result);
+});

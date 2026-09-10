@@ -1,4 +1,5 @@
 import { rewriteDynamicImports } from './dynamic-imports.js';
+import { installErrorStackCompatibility } from './error-stack.js';
 
 const CONTEXT_MARKER = Symbol('browser-node-vm-context');
 const MODULE_KIND = Symbol('browser-node-vm-module-kind');
@@ -665,6 +666,11 @@ export function createVmModule(scope = globalThis) {
       markContext(context);
       const realm = createBrowserRealm(scope);
       if (!realm) installSyntheticRealm(scope, context);
+      // A browser iframe has its own intrinsic Error constructor. Keep the
+      // V8 captureStackTrace contract consistent with the owning runtime so
+      // modules evaluated inside vm contexts (including tap's TypeScript
+      // path) do not receive an unstructured or missing stack.
+      installErrorStackCompatibility(realm?.global || context);
       CONTEXT_REALMS.set(context, realm);
     }
     const realm = CONTEXT_REALMS.get(context);

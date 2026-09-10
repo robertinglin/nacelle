@@ -391,6 +391,108 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     expect(shim).not.toContain('require(');
   });
 
+  test('installs peer dependencies and exposes their bin shims', async () => {
+    const encoder = new TextEncoder();
+    const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
+    const packages = new Map();
+    const archives = new Map();
+    const addPackage = async (name, version, manifest) => {
+      packages.set(name, {
+        name,
+        'dist-tags': { latest: version },
+        versions: {
+          [version]: {
+            name,
+            version,
+            ...manifest,
+            dist: { tarball: `https://registry.test/${name}/-/${name}-${version}.tgz` },
+          },
+        },
+      });
+      archives.set(`${name}@${version}`, await packTarGz([
+        { path: 'package/package.json', data: encoder.encode(JSON.stringify({ name, version, ...manifest })) },
+        ...(manifest.bin
+          ? Object.values(typeof manifest.bin === 'string' ? { [name]: manifest.bin } : manifest.bin)
+            .map((binPath) => ({ path: `package/${binPath}`, data: encoder.encode('#!/usr/bin/env node\n') }))
+          : []),
+      ]));
+    };
+    await addPackage('peer-config', '1.0.0', { peerDependencies: { 'peer-tool': '^1.0.0' } });
+    await addPackage('peer-tool', '1.0.0', { bin: { 'peer-tool': 'cli.js' } });
+
+    const npm = new BrowserNpm({
+      vfs,
+      registry: 'https://registry.test',
+      proxyUrl: null,
+      fetchFn: async (url) => {
+        const pathname = new URL(url).pathname;
+        const packageName = pathname.split('/')[1];
+        if (pathname.endsWith(`/${packageName}`)) {
+          return { ok: true, status: 200, json: async () => packages.get(packageName) };
+        }
+        const match = pathname.match(/\/([^/]+)-([0-9.]+)\.tgz$/);
+        if (match) return { ok: true, status: 200, arrayBuffer: async () => archives.get(`${match[1]}@${match[2]}`).buffer };
+        return { ok: false, status: 404 };
+      },
+    });
+
+    await npm.install('peer-config@1.0.0', { cwd: '/node' });
+
+    expect(vfs.files.has('/node/node_modules/peer-tool/package.json')).toBe(true);
+    expect(vfs.files.has('/node/node_modules/.bin/peer-tool')).toBe(true);
+  });
+
+  test('does not auto-install optional peer dependencies', async () => {
+    const encoder = new TextEncoder();
+    const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
+    const packages = new Map();
+    const archives = new Map();
+    const addPackage = async (name, version, manifest) => {
+      packages.set(name, {
+        name,
+        'dist-tags': { latest: version },
+        versions: {
+          [version]: {
+            name,
+            version,
+            ...manifest,
+            dist: { tarball: `https://registry.test/${name}/-/${name}-${version}.tgz` },
+          },
+        },
+      });
+      archives.set(`${name}@${version}`, await packTarGz([{
+        path: 'package/package.json',
+        data: encoder.encode(JSON.stringify({ name, version, ...manifest })),
+      }]));
+    };
+    await addPackage('optional-config', '1.0.0', {
+      peerDependencies: { 'optional-tool': '^1.0.0' },
+      peerDependenciesMeta: { 'optional-tool': { optional: true } },
+    });
+    await addPackage('optional-tool', '1.0.0', {});
+
+    const npm = new BrowserNpm({
+      vfs,
+      registry: 'https://registry.test',
+      proxyUrl: null,
+      fetchFn: async (url) => {
+        const pathname = new URL(url).pathname;
+        const packageName = pathname.split('/')[1];
+        if (pathname.endsWith(`/${packageName}`)) {
+          return { ok: true, status: 200, json: async () => packages.get(packageName) };
+        }
+        const match = pathname.match(/\/([^/]+)-([0-9.]+)\.tgz$/);
+        if (match) return { ok: true, status: 200, arrayBuffer: async () => archives.get(`${match[1]}@${match[2]}`).buffer };
+        return { ok: false, status: 404 };
+      },
+    });
+
+    await npm.install('optional-config@1.0.0', { cwd: '/node' });
+
+    expect(vfs.files.has('/node/node_modules/optional-config/package.json')).toBe(true);
+    expect(vfs.files.has('/node/node_modules/optional-tool/package.json')).toBe(false);
+  });
+
   test('BrowserNpm nests incompatible concurrent dependency versions', async () => {
     const encoder = new TextEncoder();
     const vfs = createVfs({

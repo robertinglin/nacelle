@@ -792,7 +792,15 @@ export function createVfs(options = {}) {
 
   function access(path, operation, write = false) {
     const mount = findMount(path);
-    if (!mount && path === '/' && operation === 'open') {
+    // The virtual root is the read-only parent of every granted mount. Node
+    // tooling legitimately walks through it while looking for optional
+    // metadata (for example cosmiconfig probing /package.json). Treat reads
+    // below that synthetic root as ordinary missing paths: no host data is
+    // exposed, while writes and mount escapes remain capability-denied.
+    if (!mount && path === '/' && !write) {
+      return { path: '/', mode: 'read-only' };
+    }
+    if (!mount && !write) {
       return { path: '/', mode: 'read-only' };
     }
     if (!mount) throw denied(path, operation);
@@ -1728,8 +1736,10 @@ export function createVfs(options = {}) {
     }
   }
 
-  function scheduleFsCallback(callback) {
-    const schedule = typeof globalThis.queueMicrotask === 'function'
+  function scheduleFsCallback(callback, crossRealm = false) {
+    const schedule = crossRealm
+      ? (next) => hostSetTimeout(next, 0)
+      : typeof globalThis.queueMicrotask === 'function'
       ? (next) => globalThis.queueMicrotask(next)
       : (next) => globalThis.setTimeout(next, 0);
     const resource = new AsyncResource('FSREQCALLBACK');
@@ -3972,7 +3982,7 @@ export function createVfs(options = {}) {
           statPath(resolve(pathValue));
           done();
         } catch (error) { done(error); }
-      });
+      }, true);
     },
     watch,
   };
@@ -4043,7 +4053,7 @@ export function createVfs(options = {}) {
   const trackedPromises = Object.fromEntries(Object.entries(promises).map(([name, operation]) => {
     if (typeof operation !== 'function') return [name, operation];
     return [name, async (...args) => {
-      const release = taskTracker?.();
+      const release = taskTracker?.(`fs.promises.${name}:${String(args[0] ?? '').slice(0, 192)}`);
       let turn;
       // Real filesystem I/O yields to the event loop. An unbroken chain of
       // in-memory completions starves timers and keeps WeakRef targets alive

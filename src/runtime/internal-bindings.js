@@ -1444,6 +1444,15 @@ export function createBrowserInternalBindings({ globalObject = globalThis, const
     crypto: createCryptoBinding(),
     fs: createFsBinding(globalObject),
     process_wrap: createProcessBinding(),
+    spawn_sync: {
+      spawn(options) {
+        const spawnSync = globalObject.__BNH_SPAWN_SYNC__;
+        if (typeof spawnSync !== 'function') {
+          throw bindingError('ERR_UNSUPPORTED_OPERATION', 'synchronous child processes are unavailable in the browser runtime');
+        }
+        return spawnSync(options);
+      },
+    },
     pipe_wrap: {
       Pipe,
       PipeConnectWrap,

@@ -575,6 +575,10 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     TMPDIR: '/node/citgm/tmp',
     npm_config_registry: registry,
     npm_config_loglevel: 'error',
+    // Chromium does not expose V8 precise-coverage data. Keep tap's
+    // functional CITGM result authoritative instead of turning that missing
+    // optional coverage report into a package-test failure.
+    TAP_ALLOW_EMPTY_COVERAGE: '1',
     ...env,
   };
   const controller = new AbortController();
@@ -687,6 +691,33 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
         launched: Number(activity.launched) || 0,
         completed: Number(activity.completed) || 0,
         failed: Number(activity.failed) || 0,
+        activeEsmChildren: Array.isArray(activity.activeEsmChildren)
+          ? activity.activeEsmChildren.slice(-4).map((child) => ({
+              entry: boundedText(child.entry, 256),
+              cwd: boundedText(child.cwd, 256),
+              mode: boundedText(child.mode, 32),
+              state: boundedText(child.state, 32),
+              runtimePhase: boundedText(child.runtimePhase, 64),
+              files: Number(child.files) || 0,
+              bytes: Number(child.bytes) || 0,
+              lifecycle: child.lifecycle ? {
+                pending: Number(child.lifecycle.pending) || 0,
+                tasks: Array.isArray(child.lifecycle.tasks) ? {
+                  count: child.lifecycle.tasks.length,
+                  first: child.lifecycle.tasks[0] ? {
+                    id: Number(child.lifecycle.tasks[0].id) || 0,
+                    label: boundedText(child.lifecycle.tasks[0].label, 128),
+                    stack: boundedText(child.lifecycle.tasks[0].stack, 512),
+                  } : null,
+                  last: child.lifecycle.tasks.at(-1) ? {
+                    id: Number(child.lifecycle.tasks.at(-1).id) || 0,
+                    label: boundedText(child.lifecycle.tasks.at(-1).label, 128),
+                    stack: boundedText(child.lifecycle.tasks.at(-1).stack, 512),
+                  } : null,
+                } : null,
+              } : null,
+            }))
+          : [],
         recent: Array.isArray(activity.recent) ? activity.recent.slice(-4).map((record) => ({
           entry: boundedText(record.entry || record.command, 256),
           argumentCount: Number(record.argumentCount) || 0,
@@ -837,7 +868,6 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     });
     npmCache.clearMemory();
     await runtime.mount({});
-
     const processArgv = createCitgmProcessArgv(CITGM_ENTRY, module, args);
     currentStage = 'child-launch';
     child = await runtime.spawn(

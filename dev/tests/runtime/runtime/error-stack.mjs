@@ -14,6 +14,32 @@ test('does not replace a captureStackTrace implementation with structured output
   assert.equal(target.stack, 'native');
 });
 
+test('retries a structured capture when the constructor filter produces no frames', () => {
+  function StructuredRetryError() {}
+  StructuredRetryError.captureStackTrace = (target, constructorOpt) => {
+    target.stack = constructorOpt ? [] : ['fallback-frame'];
+  };
+
+  assert.equal(installErrorStackCompatibility({ Error: StructuredRetryError }), false);
+  const target = {};
+  StructuredRetryError.captureStackTrace(target, () => {});
+  assert.deepEqual(target.stack, ['fallback-frame']);
+});
+
+test('normalizes a structured capture when the browser materializes no stack', () => {
+  function StructuredMissingStackError() {}
+  let calls = 0;
+  StructuredMissingStackError.captureStackTrace = (target) => {
+    calls += 1;
+    target.stack = calls === 1 ? [] : undefined;
+  };
+
+  assert.equal(installErrorStackCompatibility({ Error: StructuredMissingStackError }), false);
+  const target = {};
+  StructuredMissingStackError.captureStackTrace(target);
+  assert.deepEqual(target.stack, []);
+});
+
 test('adds V8 CallSite output when captureStackTrace ignores prepareStackTrace', () => {
   function BrowserError() {}
   BrowserError.captureStackTrace = (target, constructorOpt) => {

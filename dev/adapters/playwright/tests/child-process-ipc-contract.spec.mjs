@@ -461,6 +461,80 @@ test('settles an asynchronous fork worker after its IPC channel is released', as
   expect(result.stdout).toContain('async fork IPC lifecycle passed');
 });
 
+test('settles an AVA-style fork worker after an IPC ping-pong flush', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const assert = require('node:assert/strict');
+    const { fork } = require('node:child_process');
+
+    const child = fork('/node/ava-style-ipc-worker.cjs', [], { cwd: '/node' });
+    child.on('message', (message) => {
+      if (message?.ava?.type === 'ready-for-options') child.send({ ava: { type: 'options', value: 37 } });
+      else if (message?.ava?.type === 'ping') child.send({ ava: { type: 'pong' } });
+    });
+    child.once('error', (error) => {
+      process.stderr.write(error.stack + '\\n');
+      process.exitCode = 1;
+    });
+    child.once('close', (code, signal) => {
+      assert.strictEqual(code, 0);
+      assert.strictEqual(signal, null);
+      process.stdout.write('AVA-style IPC lifecycle passed');
+    });
+  `, {
+    files: {
+      '/node/ava-style-ipc-worker.cjs': `
+        const assert = require('node:assert/strict');
+        const pEvent = (emitter, event, filter) => new Promise((resolve, reject) => {
+          const onMessage = (message) => {
+            if (!filter(message)) return;
+            emitter.removeListener(event, onMessage);
+            emitter.removeListener('error', onError);
+            resolve(message);
+          };
+          const onError = (error) => {
+            emitter.removeListener(event, onMessage);
+            reject(error);
+          };
+          emitter.on(event, onMessage);
+          emitter.on('error', onError);
+        });
+        const controlFlow = (channel) => {
+          let deliverImmediately = true;
+          const backlog = [];
+          const deliverNext = (error) => {
+            if (error !== null || !channel.connected) return;
+            let accepted = true;
+            while (accepted && backlog.length) accepted = channel.send(backlog.shift(), deliverNext);
+            deliverImmediately = accepted && backlog.length === 0;
+          };
+          return (message) => {
+            if (!channel.connected) return;
+            if (deliverImmediately) deliverImmediately = channel.send(message, deliverNext);
+            else backlog.push(message);
+          };
+        };
+        const send = controlFlow(process);
+        send({ ava: { type: 'ready-for-options' } });
+        (async () => {
+          const options = await pEvent(process, 'message', (message) => message?.ava?.type === 'options');
+          assert.deepStrictEqual(options, { ava: { type: 'options', value: 37 } });
+          process.channel.unref();
+          send({ ava: { type: 'ping' } });
+          await pEvent(process, 'message', (message) => message?.ava?.type === 'pong');
+          process.channel.unref();
+          process.exit(0);
+        })().catch((error) => {
+          process.stderr.write(error.stack + '\\n');
+          process.exit(1);
+        });
+      `,
+    },
+  });
+
+  await expectPass(expect, result);
+  expect(result.stdout).toContain('AVA-style IPC lifecycle passed');
+});
+
 test('forwards fork execArgv through an ESM preload and public IPC channel', async ({ harnessPage }) => {
   const result = await harnessPage.run(`
     const assert = require('node:assert/strict');

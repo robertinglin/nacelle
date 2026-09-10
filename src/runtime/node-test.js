@@ -1031,7 +1031,6 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
   });
   Object.defineProperty(test, 'snapshot', { configurable: true, enumerable: true, value: snapshotApi });
   Object.defineProperty(test, 'assert', { configurable: true, enumerable: true, value: assertionApi });
-  const summaryRelease = trackTask();
   schedule(async () => {
     // Entry evaluation may yield for preloads before it registers its first
     // test. Do not mistake that initial empty window for a test-free process;
@@ -1039,12 +1038,10 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
     await sourceEvaluation;
     await testTail;
     if (!testApiUsed) {
-      summaryRelease?.();
       return;
     }
     try { writeSnapshotFiles(); } catch (error) { failCount += 1; processObject.exitCode ||= 1; stderr(`${formatError(error)}\n`); }
     if (!runOwnsOutput) stdout(`# tests ${testCount}\n# pass ${passCount}\n# fail ${failCount}\n`);
-    summaryRelease?.();
   });
   const instances = new WeakMap([[processObject, test]]);
   const activeInstance = () => {

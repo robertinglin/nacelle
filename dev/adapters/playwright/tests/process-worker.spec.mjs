@@ -232,6 +232,221 @@ test.describe('browser-native worker process boundary', () => {
     expect(result).toEqual({ sharedFile: true, sharedArtifact: true, mode: 0o755, bytes: [1, 2, 3] });
   });
 
+  test('starts a worker with a large packed VFS payload', async ({ page }) => {
+    await openRuntime(page);
+    const result = await page.evaluate(async () => {
+      const { createBrowserProcess } = await import('/runtime/process.js');
+      const files = {};
+      for (let index = 0; index < 4770; index += 1) files[`/node/file-${index}.js`] = new Uint8Array(35000);
+      const started = performance.now();
+      const child = createBrowserProcess({
+        scope: globalThis,
+        vfs: { files },
+        run: ({ process }) => { process.exitCode = 0; },
+      });
+      const terminal = await child.wait();
+      return { elapsed: performance.now() - started, terminal, stateHistory: child.stateHistory };
+    });
+    expect(result.terminal.code).toBe(0);
+    expect(result.stateHistory).toEqual(['created', 'starting', 'running', 'exited']);
+    expect(result.elapsed).toBeLessThan(15000);
+  });
+
+  test('starts the module runtime worker with a large packed VFS payload', async ({ page }) => {
+    await openRuntime(page);
+    const result = await page.evaluate(async () => {
+      const { createBrowserProcess } = await import('/runtime/process.js');
+      const encode = (source) => new TextEncoder().encode(source);
+      const files = {
+        '/node/entry.js': encode(`
+          const { execFile } = require('node:child_process');
+          execFile('/node/node', ['/node/child.mjs'], { cwd: '/node' }, (error, stdout, stderr) => {
+            process.stdout.write(stdout);
+            process.stderr.write(stderr);
+            process.exitCode = error ? 1 : 0;
+          });
+        `),
+        '/node/child.mjs': encode("process.stdout.write('nested-esm-ok\\n');"),
+      };
+      for (let index = 0; index < 4770; index += 1) files[`/node/file-${index}.js`] = new Uint8Array(35000);
+      const symlinks = Array.from({ length: 158 }, (_, index) => [
+        `/node/node_modules/.bin/tool-${index}`,
+        `/node/node_modules/tool-${index}/bin.js`,
+      ]);
+      const artifacts = Object.keys(files);
+      const capabilities = {
+        vfs: { mounts: [{ path: '/node', mode: 'read-write', artifacts }] },
+        workers: { entryModules: ['*'], maxChildren: 4 },
+        ipc: { enabled: true },
+        signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
+        output: { maxBytes: 1024 * 1024, stdoutBytes: 1024 * 1024, stderrBytes: 1024 * 1024 },
+        envVars: { allowed: [] },
+        proxy: { mode: 'proxy', enabled: true, capability: true, rpc: true, operations: ['request'] },
+      };
+      const started = performance.now();
+      const child = createBrowserProcess({
+        scope: globalThis,
+        workerSource: new URL('/runtime/process-entry.js', location.href).href,
+        workerType: 'module',
+        runSource: '((context) => globalThis.__bnhRun(context))',
+        vfs: { capabilities, files, entry: '/node/entry.js', nodeVersion: 'lts', execArgv: [] },
+      });
+      const terminal = await child.wait();
+      return { elapsed: performance.now() - started, terminal, stateHistory: child.stateHistory };
+    });
+    expect(result.terminal.code, JSON.stringify(result.terminal)).toBe(0);
+    expect(result.stateHistory).toEqual(['created', 'starting', 'running', 'exited']);
+    expect(result.elapsed).toBeLessThan(30000);
+  });
+
+  test('starts the module runtime worker with a large packed VFS and bridge ports', async ({ page }) => {
+    await openRuntime(page);
+    const result = await page.evaluate(async () => {
+      const { createBrowserProcess } = await import('/runtime/process.js');
+      const encode = (source) => new TextEncoder().encode(source);
+      const files = {
+        '/node/entry.js': encode(`
+          const { execFile } = require('node:child_process');
+          execFile('/node/node_modules/.bin/npm', ['test'], { cwd: '/node' }, (error) => {
+            process.exitCode = error ? 1 : 0;
+          });
+        `),
+        '/node/package.json': encode(JSON.stringify({
+          name: 'large-npm-esm-fixture',
+          version: '1.0.0',
+          scripts: { test: 'node /node/node_modules/.bin/xo' },
+        })),
+        '/node/node_modules/.bin/npm': encode('#!/usr/bin/env node\\n'),
+        '/node/node_modules/xo/cli.mjs': encode("process.stdout.write('nested-esm-ports-ok\\n');"),
+      };
+      for (let index = 0; index < 4770; index += 1) files[`/node/file-${index}.js`] = new Uint8Array(35000);
+      const symlinks = Array.from({ length: 158 }, (_, index) => [
+        `/node/node_modules/.bin/tool-${index}`,
+        `/node/node_modules/tool-${index}/bin.js`,
+      ]);
+      symlinks[0] = ['/node/node_modules/.bin/xo', '../xo/cli.mjs'];
+      const artifacts = Object.keys(files);
+      const capabilities = {
+        vfs: { mounts: [{ path: '/node', mode: 'read-write', artifacts }] },
+        workers: { entryModules: ['*'], maxChildren: 4 },
+        ipc: { enabled: true },
+        signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
+        output: { maxBytes: 1024 * 1024, stdoutBytes: 1024 * 1024, stderrBytes: 1024 * 1024 },
+        envVars: { allowed: [] },
+        proxy: { mode: 'proxy', enabled: true, capability: true, rpc: true, operations: ['request'] },
+      };
+      const network = new MessageChannel();
+      const updates = new MessageChannel();
+      updates.port1.onmessage = (event) => {
+        if (event.data?.action === 'barrier') updates.port1.postMessage({ action: 'ack', id: event.data.id });
+      };
+      updates.port1.start();
+      const started = performance.now();
+      const child = createBrowserProcess({
+        scope: globalThis,
+        workerSource: new URL('/runtime/process-entry.js', location.href).href,
+        workerType: 'module',
+        runSource: '((context) => globalThis.__bnhRun(context))',
+        networkPort: network.port2,
+        vfsUpdatePort: updates.port2,
+        proxyAdapter: { request: async () => ({ status: 200, statusText: 'OK', headers: {}, body: new Uint8Array() }) },
+        vfs: {
+          capabilities,
+          files,
+          symlinks,
+          entry: '/node/entry.js',
+          nodeVersion: 'lts',
+          execArgv: [],
+          proxy: { mode: 'proxy', enabled: true, capability: true, rpc: true, operations: ['request'] },
+          virtualNetwork: { shared: true },
+          esmNested: true,
+        },
+      });
+      const terminal = await child.wait();
+      network.port1.close();
+      updates.port1.close();
+      return { elapsed: performance.now() - started, terminal, stateHistory: child.stateHistory };
+    });
+    expect(result.terminal.code, JSON.stringify(result.terminal)).toBe(0);
+    expect(result.stateHistory).toEqual(['created', 'starting', 'running', 'exited']);
+    expect(result.elapsed).toBeLessThan(30000);
+  });
+
+  test('starts the module runtime worker with 25000 packed VFS entries', async ({ page }) => {
+    await openRuntime(page);
+    const result = await page.evaluate(async () => {
+      const { createBrowserProcess } = await import('/runtime/process.js');
+      const encode = (source) => new TextEncoder().encode(source);
+      const files = { '/node/entry.js': encode('process.exitCode = 0;') };
+      for (let index = 0; index < 25000; index += 1) files[`/node/file-${index}.js`] = new Uint8Array([index & 0xff]);
+      const capabilities = {
+        vfs: { mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] },
+        workers: { entryModules: ['*'], maxChildren: 4 },
+        ipc: { enabled: true },
+        signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
+        output: { maxBytes: 1024 * 1024, stdoutBytes: 1024 * 1024, stderrBytes: 1024 * 1024 },
+        envVars: { allowed: [] },
+        proxy: { mode: 'proxy', enabled: true, capability: true, rpc: true, operations: ['request'] },
+      };
+      const network = new MessageChannel();
+      const updates = new MessageChannel();
+      updates.port1.onmessage = (event) => {
+        if (event.data?.action === 'barrier') updates.port1.postMessage({ action: 'ack', id: event.data.id });
+      };
+      updates.port1.start();
+      const started = performance.now();
+      const child = createBrowserProcess({
+        scope: globalThis,
+        workerSource: new URL('/runtime/process-entry.js', location.href).href,
+        workerType: 'module',
+        runSource: '((context) => globalThis.__bnhRun(context))',
+        vfs: { capabilities, files, entry: '/node/entry.js', nodeVersion: 'lts', execArgv: [] },
+      });
+      const terminal = await child.wait();
+      return { elapsed: performance.now() - started, terminal, stateHistory: child.stateHistory };
+    });
+    expect(result.terminal.code, JSON.stringify(result.terminal)).toBe(0);
+    expect(result.stateHistory).toEqual(['created', 'starting', 'running', 'exited']);
+    expect(result.elapsed).toBeLessThan(30000);
+  });
+
+  test('starts the module runtime worker with a 238MB packed VFS payload', async ({ page }) => {
+    await openRuntime(page);
+    const result = await page.evaluate(async () => {
+      const { createBrowserProcess } = await import('/runtime/process.js');
+      const encode = (source) => new TextEncoder().encode(source);
+      const files = { '/node/entry.js': encode('process.exitCode = 0;') };
+      for (let index = 0; index < 4770; index += 1) files[`/node/file-${index}.js`] = new Uint8Array(50000);
+      const capabilities = {
+        vfs: { mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] },
+        workers: { entryModules: ['*'], maxChildren: 4 },
+        ipc: { enabled: true },
+        signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
+        output: { maxBytes: 1024 * 1024, stdoutBytes: 1024 * 1024, stderrBytes: 1024 * 1024 },
+        envVars: { allowed: [] },
+      };
+      const network = new MessageChannel();
+      const updates = new MessageChannel();
+      updates.port1.onmessage = (event) => {
+        if (event.data?.action === 'barrier') updates.port1.postMessage({ action: 'ack', id: event.data.id });
+      };
+      updates.port1.start();
+      const started = performance.now();
+      const child = createBrowserProcess({
+        scope: globalThis,
+        workerSource: new URL('/runtime/process-entry.js', location.href).href,
+        workerType: 'module',
+        runSource: '((context) => globalThis.__bnhRun(context))',
+        vfs: { capabilities, files, entry: '/node/entry.js', nodeVersion: 'lts', execArgv: [] },
+      });
+      const terminal = await child.wait();
+      return { elapsed: performance.now() - started, terminal, stateHistory: child.stateHistory };
+    });
+    expect(result.terminal.code, JSON.stringify(result.terminal)).toBe(0);
+    expect(result.stateHistory).toEqual(['created', 'starting', 'running', 'exited']);
+    expect(result.elapsed).toBeLessThan(30000);
+  });
+
   test('handles cooperative signals, abort cancellation, and forced termination', async ({ page }) => {
     await openRuntime(page);
     const result = await page.evaluate(async () => {

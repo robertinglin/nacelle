@@ -78,6 +78,7 @@
     "citgm:browser": "node dev/adapters/playwright/run-citgm.mjs",
     "citgm:browser:chromium": "node dev/adapters/playwright/run-citgm.mjs --browser=chromium",
     "citgm:browser:firefox": "node dev/adapters/playwright/run-citgm.mjs --browser=firefox",
+    "citgm:top-100": "node scripts/run-citgm-top-100.mjs",
     "citgm:precache": "node dev/adapters/playwright/precache-citgm.mjs",
     "test:typescript": "npm --prefix dev/adapters/playwright run test:typescript",
     "test:next": "npm --prefix dev/adapters/playwright run test:next",

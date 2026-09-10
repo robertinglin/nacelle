@@ -299,6 +299,7 @@ export {
   SHARE_ENV,
   prepareTransferPayload,
   createWorkerFactory,
+  createWorkerBrokerFactory,
   createBroadcastChannelFactory,
   createMessagingPrimitives,
 } from './messaging.js';

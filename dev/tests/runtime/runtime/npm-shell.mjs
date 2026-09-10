@@ -190,6 +190,25 @@ test('npm scripts run through the shell compatibility layer', async () => {
   assert.strictEqual(globalThis.AbortSignal?.any, hostAbortSignalAny);
 });
 
+test('npm scripts expose the project prefix npm uses for local tools', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/package.json': JSON.stringify({
+        name: 'npm-prefix-fixture',
+        version: '1.0.0',
+        scripts: {
+          check: "node -e \"require('node:fs').writeFileSync('prefix.txt', process.env.npm_config_local_prefix)\"",
+        },
+      }),
+    },
+  });
+
+  const child = await node.npm.run('check');
+  assert.equal(await child.exit, 0);
+  assert.equal(await node.fs.readFile('/node/prefix.txt', 'utf8'), '/node');
+});
+
 test('package script errors are forwarded when the shell returns them directly', async () => {
   const node = await Nacelle.create({
     gateway: false,

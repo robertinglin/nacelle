@@ -60,11 +60,6 @@ function validateSessionPost(method, params, callback) {
   return { params, callback };
 }
 
-function currentScriptUrl(processObject) {
-  const argv = Array.isArray(processObject?.argv) ? processObject.argv : [];
-  return [...argv].reverse().find((value) => typeof value === 'string' && /\.(?:c|m)?js$/.test(value)) || '';
-}
-
 function remoteObject(value) {
   if (value === undefined) return { type: 'undefined' };
   if (value === null) return { type: 'object', value: null };
@@ -96,8 +91,11 @@ function browserProtocolResult(method, params, processObject) {
     }
     case 'Profiler.enable':
     case 'Profiler.start':
+    case 'Profiler.startPreciseCoverage':
     case 'Profiler.disable':
       return {};
+    case 'Profiler.takePreciseCoverage':
+      return { result: [] };
     case 'Profiler.stop':
       return {
         profile: {

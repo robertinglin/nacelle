@@ -81,11 +81,17 @@ function supportsStructuredCapture(ErrorConstructor) {
 
 function installCaptureStackTrace(ErrorConstructor) {
   const nativeCaptureStackTrace = ErrorConstructor.captureStackTrace;
-  ErrorConstructor.captureStackTrace = function captureStackTrace(target, constructorOpt) {
+  const captureStackTrace = function captureStackTrace(target, constructorOpt) {
     const rawTarget = {};
     nativeCaptureStackTrace(rawTarget, constructorOpt);
-    const rawStack = rawTarget.stack;
-    const callSites = parseCallSites(rawStack);
+    let rawStack = rawTarget.stack;
+    let callSites = parseCallSites(rawStack);
+    if (constructorOpt !== undefined && callSites.length === 0) {
+      const retryTarget = {};
+      nativeCaptureStackTrace(retryTarget);
+      rawStack = retryTarget.stack;
+      callSites = parseCallSites(rawStack);
+    }
     let evaluated = false;
     let value;
 
@@ -109,6 +115,49 @@ function installCaptureStackTrace(ErrorConstructor) {
     });
     return target;
   };
+  ErrorConstructor.captureStackTrace = captureStackTrace;
+}
+
+function installStructuredCaptureFallback(ErrorConstructor) {
+  const nativeCaptureStackTrace = ErrorConstructor.captureStackTrace;
+  ErrorConstructor.captureStackTrace = function captureStackTrace(target, constructorOpt) {
+    // Capture into a disposable object first. Some browser implementations
+    // install an unusable lazy `stack` property on the caller's object; if we
+    // capture there first, that property can prevent the retry from being
+    // installed even though a fresh target would work.
+    const capturedTarget = {};
+    nativeCaptureStackTrace(capturedTarget, constructorOpt);
+    let capturedStack = capturedTarget.stack;
+    // Chromium can return no stack at all when the optional constructor
+    // filter is not present in the current rewritten call stack. Node's
+    // consumers (notably @tapjs/stack) still expect a structured stack in
+    // that case, so retry without the unusable filter.
+    if (capturedStack === undefined || (Array.isArray(capturedStack) && capturedStack.length === 0)) {
+      // Use a fresh object for the retry. V8 may have already installed and
+      // evaluated a lazy `stack` property on the original target, in which
+      // case calling captureStackTrace on that same object does not replace
+      // the unusable value. This also covers callers that omit the optional
+      // constructor filter; Node consumers still require an array there.
+      const retryTarget = {};
+      nativeCaptureStackTrace(retryTarget);
+      const retryStack = retryTarget.stack;
+      // A browser implementation may fail to materialize a stack in both
+      // forms. Keep the V8 contract usable in that case: consumers such as
+      // @tapjs/stack call Array.prototype methods on the result.
+      capturedStack = retryStack === undefined ? [] : retryStack;
+    }
+    try {
+      Object.defineProperty(target, 'stack', {
+        configurable: true,
+        enumerable: false,
+        value: capturedStack,
+        writable: true,
+      });
+    } catch {
+      try { target.stack = capturedStack; } catch { /* best effort */ }
+    }
+    return target;
+  };
 }
 
 export function installErrorStackCompatibility(globalObject = globalThis) {
@@ -116,7 +165,10 @@ export function installErrorStackCompatibility(globalObject = globalThis) {
   if (typeof ErrorConstructor?.captureStackTrace !== 'function') return false;
   if (installedConstructors.has(ErrorConstructor)) return false;
   installedConstructors.add(ErrorConstructor);
-  if (supportsStructuredCapture(ErrorConstructor)) return false;
+  if (supportsStructuredCapture(ErrorConstructor)) {
+    installStructuredCaptureFallback(ErrorConstructor);
+    return false;
+  }
   installCaptureStackTrace(ErrorConstructor);
   return true;
 }

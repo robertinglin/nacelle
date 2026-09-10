@@ -47,6 +47,238 @@ test.describe('browser ESM loader', () => {
     expect(result.stdout).toContain('esm entry completed');
   });
 
+  test('provides a Node-shaped virtual URL when a package receives bare import.meta', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { filenameFromMeta } from './meta-helper.mjs';
+      assert.strictEqual(filenameFromMeta(import.meta), '/node/esm/meta-entry.mjs');
+      process.stdout.write('bare import.meta completed');
+    `, {
+      entryPath: '/node/esm/meta-entry.mjs',
+      files: {
+        '/node/esm/meta-helper.mjs': `
+          import { fileURLToPath } from 'node:url';
+          export const filenameFromMeta = (sourceModule) => fileURLToPath(sourceModule.url);
+        `,
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('bare import.meta completed');
+  });
+
+  test('maps generated Blob paths through node:url back to their VFS source path', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { fileURLToPath, pathToFileURL } from 'node:url';
+      const [blobURL, virtualPath] = [...globalThis.__BNH_BLOB_VIRTUAL_PATHS__.entries()]
+        .find(([, path]) => path.endsWith('/stack-source.mjs'));
+      assert.equal(fileURLToPath(pathToFileURL(blobURL + '#stack')), virtualPath);
+      process.stdout.write('Blob path completed');
+    `, {
+      entryPath: '/node/esm/stack-source.mjs',
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('Blob path completed');
+  });
+
+  test('keeps file URL queries as distinct ESM module identities', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      process.env.BNH_QUERY_IDENTITY = 'first';
+      const first = await import('./query-identity.mjs?first');
+      process.env.BNH_QUERY_IDENTITY = 'second';
+      const second = await import('./query-identity.mjs?second');
+      assert.equal(first.value, 'first');
+      assert.equal(second.value, 'second');
+      assert.notStrictEqual(first, second);
+      process.stdout.write('query identity completed');
+    `, {
+      entryPath: '/node/esm/query-identity-entry.mjs',
+      files: {
+        '/node/esm/query-identity.mjs': 'export const value = process.env.BNH_QUERY_IDENTITY;',
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('query identity completed');
+  });
+
+  test('provides structured capture stacks to V8-compatible consumers', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { externalConstructor } from './external-stack-helper.mjs';
+      function captureFromHere() {
+        const target = {};
+        Error.captureStackTrace(target, captureFromHere);
+        return target.stack;
+      }
+      const originalPrepare = Error.prepareStackTrace;
+      Error.prepareStackTrace = (_error, callSites) => callSites;
+      const stack = captureFromHere();
+      Error.prepareStackTrace = originalPrepare;
+      assert.ok(Array.isArray(stack), typeof stack);
+      assert.ok(stack.length > 0);
+      assert.equal(typeof stack[0].getFileName, 'function');
+      function tapStyleCapture(limit, fn = tapStyleCapture) {
+        const previousPrepare = Error.prepareStackTrace;
+        const previousLimit = Error.stackTraceLimit;
+        Error.prepareStackTrace = (_error, callSites) => callSites;
+        Error.stackTraceLimit = limit + 10;
+        const object = { stack: [] };
+        Error.captureStackTrace(object, fn);
+        const captured = object.stack;
+        Error.prepareStackTrace = previousPrepare;
+        Error.stackTraceLimit = previousLimit;
+        return captured.filter(Boolean).slice(0, limit);
+      }
+      assert.ok(tapStyleCapture(1, captureFromHere).length > 0);
+      const previousPrepare = Error.prepareStackTrace;
+      Error.prepareStackTrace = (_error, callSites) => callSites;
+      const crossModuleTarget = { stack: [] };
+      Error.captureStackTrace(crossModuleTarget, externalConstructor);
+      const crossModuleStack = crossModuleTarget.stack;
+      Error.prepareStackTrace = previousPrepare;
+      assert.ok(Array.isArray(crossModuleStack));
+      process.stdout.write('structured stack completed');
+    `, {
+      entryPath: '/node/esm/structured-stack.mjs',
+      files: { '/node/esm/external-stack-helper.mjs': 'export function externalConstructor() {}' },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('structured stack completed');
+  });
+
+  test('preserves structured capture stacks in nested ESM node processes', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { spawnSync } from 'node:child_process';
+      const child = spawnSync('node', ['/node/esm/nested-structured-stack.mjs'], {
+        encoding: 'utf8',
+      });
+      assert.equal(child.status, 0, child.stderr);
+      assert.equal(child.stdout, 'nested structured stack completed');
+      process.stdout.write('nested structured stack completed');
+    `, {
+      entryPath: '/node/esm/nested-structured-stack-entry.mjs',
+      files: {
+        '/node/esm/nested-structured-stack.mjs': `
+          import assert from 'node:assert/strict';
+          function caller() {}
+          const previousPrepare = Error.prepareStackTrace;
+          Error.prepareStackTrace = (_error, callSites) => callSites;
+          const target = { stack: [] };
+          Error.captureStackTrace(target, caller);
+          const stack = target.stack;
+          Error.prepareStackTrace = previousPrepare;
+          assert.ok(Array.isArray(stack));
+          assert.ok(stack.length > 0);
+          assert.equal(typeof stack[0].getFileName, 'function');
+          process.stdout.write('nested structured stack completed');
+        `,
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('nested structured stack completed');
+  });
+
+  test('preserves structured capture stacks in asynchronously spawned ESM processes', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { spawn } from 'node:child_process';
+      const child = spawn('node', ['/node/esm/async-nested-structured-stack.mjs'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const read = (stream) => new Promise((resolve, reject) => {
+        let value = '';
+        stream.setEncoding('utf8');
+        stream.on('data', (chunk) => { value += chunk; });
+        stream.once('end', () => resolve(value));
+        stream.once('error', reject);
+      });
+      const status = new Promise((resolve) => child.once('close', (code) => resolve(code)));
+      const [exitCode, stdout, stderr] = await Promise.all([
+        status,
+        read(child.stdout),
+        read(child.stderr),
+      ]);
+      assert.equal(exitCode, 0, stderr);
+      assert.equal(stdout, 'async nested structured stack completed');
+      process.stdout.write('async nested structured stack completed');
+    `, {
+      entryPath: '/node/esm/async-nested-structured-stack-entry.mjs',
+      files: {
+        '/node/esm/async-nested-structured-stack.mjs': `
+          import assert from 'node:assert/strict';
+          function caller() {}
+          const previousPrepare = Error.prepareStackTrace;
+          Error.prepareStackTrace = (_error, callSites) => callSites;
+          const target = { stack: [] };
+          Error.captureStackTrace(target, caller);
+          const stack = target.stack;
+          Error.prepareStackTrace = previousPrepare;
+          assert.ok(Array.isArray(stack));
+          assert.ok(stack.length > 0);
+          assert.equal(typeof stack[0].getFileName, 'function');
+          process.stdout.write('async nested structured stack completed');
+        `,
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('async nested structured stack completed');
+  });
+
+  test('preserves structured capture stacks in IPC-backed ESM processes', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { spawn } from 'node:child_process';
+      const child = spawn('node', ['/node/esm/ipc-nested-structured-stack.mjs'], {
+        stdio: [0, 'pipe', 'pipe', 'ipc'],
+      });
+      const read = (stream) => new Promise((resolve, reject) => {
+        let value = '';
+        stream.setEncoding('utf8');
+        stream.on('data', (chunk) => { value += chunk; });
+        stream.once('end', () => resolve(value));
+        stream.once('error', reject);
+      });
+      const exitCode = new Promise((resolve) => child.once('close', (code) => resolve(code)));
+      const [code, stdout, stderr] = await Promise.all([
+        exitCode,
+        read(child.stdout),
+        read(child.stderr),
+      ]);
+      assert.equal(code, 0, stderr);
+      assert.equal(stdout, 'ipc nested structured stack completed');
+      process.stdout.write('ipc nested structured stack completed');
+    `, {
+      entryPath: '/node/esm/ipc-nested-structured-stack-entry.mjs',
+      files: {
+        '/node/esm/ipc-nested-structured-stack.mjs': `
+          import assert from 'node:assert/strict';
+          function caller() {}
+          const previousPrepare = Error.prepareStackTrace;
+          Error.prepareStackTrace = (_error, callSites) => callSites;
+          const target = { stack: [] };
+          Error.captureStackTrace(target, caller);
+          const stack = target.stack;
+          Error.prepareStackTrace = previousPrepare;
+          assert.ok(Array.isArray(stack));
+          assert.ok(stack.length > 0);
+          assert.equal(typeof stack[0].getFileName, 'function');
+          process.stdout.write('ipc nested structured stack completed');
+        `,
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('ipc nested structured stack completed');
+  });
+
   test('exposes the default export of a JSON ESM import', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       import assert from 'node:assert/strict';
@@ -73,6 +305,23 @@ test.describe('browser ESM loader', () => {
 
     await expectPass(expect, result);
     expect(result.stdout).toContain('dynamic builtin completed');
+  });
+
+  test('does not rewrite import call text inside string literals', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      const diagnostic = 'invalid import() specifier';
+      const loaded = await import('./dynamic-string-target.mjs');
+      assert.strictEqual(diagnostic, 'invalid import() specifier');
+      assert.strictEqual(loaded.value, 17);
+      process.stdout.write('dynamic import string completed');
+    `, {
+      entryPath: '/node/esm/dynamic-import-string.mjs',
+      files: { '/node/esm/dynamic-string-target.mjs': 'export const value = 17;' },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('dynamic import string completed');
   });
 
   test('routes global ESM console errors to the child stderr stream', async ({ harnessPage }) => {
@@ -116,6 +365,22 @@ test.describe('browser ESM loader', () => {
 
     await expectPass(expect, result);
     expect(result.stdout).toContain('minified builtin completed');
+  });
+
+  test('rewrites minified static imports after a closing brace', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import marker from './minified-boundary.mjs';
+      if (marker !== 'brace boundary completed') throw new Error(marker);
+      process.stdout.write(marker);
+    `, {
+      entryPath: '/node/esm/minified-boundary-entry.mjs',
+      files: {
+        '/node/esm/minified-boundary.mjs': 'if(true){}import fs from"fs";export default typeof fs.readFileSync === "function" ? "brace boundary completed" : "wrong";',
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('brace boundary completed');
   });
 
   test('rewrites minified imports in a package-scoped .js ESM module', async ({ harnessPage }) => {
@@ -162,6 +427,103 @@ test.describe('browser ESM loader', () => {
 
     await expectPass(expect, result);
     expect(result.stdout).toContain('conditional ESM package completed');
+  });
+
+  test('exposes named exports re-exported through a conditional package entry', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { extraFromError } from 'star-export-package';
+      assert.strictEqual(extraFromError, 're-exported');
+      process.stdout.write('star export completed');
+    `, {
+      entryPath: '/node/star-export-entry.mjs',
+      files: {
+        '/node/node_modules/star-export-package/package.json': JSON.stringify({
+          type: 'module',
+          exports: {
+            '.': {
+              import: { default: './dist/esm/index.js' },
+              require: { default: './dist/commonjs/index.js' },
+            },
+          },
+        }),
+        '/node/node_modules/star-export-package/dist/esm/package.json': JSON.stringify({ type: 'module' }),
+        '/node/node_modules/star-export-package/dist/esm/index.js': "export * from './extra.js';",
+        '/node/node_modules/star-export-package/dist/esm/extra.js': "export const extraFromError = 're-exported';",
+        '/node/node_modules/star-export-package/dist/commonjs/index.js': "module.exports = { extraFromError: 'cjs' };",
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('star export completed');
+  });
+
+  test('exposes named exports forwarded by a CommonJS __exportStar helper', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { extraFromError } from 'cjs-export-star-package';
+      assert.strictEqual(extraFromError, 'forwarded');
+      process.stdout.write('CommonJS export star completed');
+    `, {
+      entryPath: '/node/cjs-export-star-entry.mjs',
+      files: {
+        '/node/node_modules/cjs-export-star-package/package.json': JSON.stringify({
+          type: 'module',
+          exports: { '.': { import: './dist/commonjs/index.js' } },
+        }),
+        '/node/node_modules/cjs-export-star-package/dist/commonjs/package.json': JSON.stringify({ type: 'commonjs' }),
+        '/node/node_modules/cjs-export-star-package/dist/commonjs/index.js': `
+          "use strict";
+          var __createBinding = (this && this.__createBinding) || function (o, m, k, k2) {
+            if (k2 === undefined) k2 = k;
+            Object.defineProperty(o, k2, { enumerable: true, get: function () { return m[k]; } });
+          };
+          var __exportStar = (this && this.__exportStar) || function (m, exports) {
+            for (var p in m) if (p !== "default" && !Object.prototype.hasOwnProperty.call(exports, p)) __createBinding(exports, m, p);
+          };
+          Object.defineProperty(exports, "__esModule", { value: true });
+          __exportStar(require("./extra.js"), exports);
+        `,
+        '/node/node_modules/cjs-export-star-package/dist/commonjs/extra.js': `
+          exports.extraFromError = 'forwarded';
+        `,
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('CommonJS export star completed');
+  });
+
+  test('keeps export-star names available through an ESM cycle', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { extraFromError, proc, cycleMarker } from 'cycle-star-package';
+      assert.strictEqual(extraFromError, 'cycle value');
+      assert.strictEqual(typeof proc, 'object');
+      assert.strictEqual(cycleMarker, 'cycle marker');
+      process.stdout.write('cyclic export star completed');
+    `, {
+      entryPath: '/node/cycle-star-entry.mjs',
+      files: {
+        '/node/node_modules/cycle-star-package/package.json': JSON.stringify({
+          type: 'module',
+          exports: { '.': './index.js' },
+        }),
+        '/node/node_modules/cycle-star-package/index.js': `
+          export * from './value.js';
+          export * from './cycle.js';
+        `,
+        '/node/node_modules/cycle-star-package/value.js': "export const extraFromError = 'cycle value'; export const proc = typeof process === 'object' && process ? process : undefined;",
+        '/node/node_modules/cycle-star-package/cycle.js': `
+          import { extraFromError, proc } from 'cycle-star-package';
+          if (!proc || extraFromError !== 'cycle value') throw new Error('cycle bindings were not initialized');
+          export const cycleMarker = 'cycle marker';
+        `,
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('cyclic export star completed');
   });
 
   test('preserves named exports through dynamic conditional ESM imports', async ({ harnessPage }) => {
@@ -241,7 +603,14 @@ test.describe('browser ESM loader', () => {
         `,
         '/node/node_modules/loader-fixture/hooks.mjs': `
           export async function resolve(specifier, context, nextResolve) {
-            return nextResolve(specifier, context);
+            const result = await nextResolve(specifier, context);
+            // Some production loaders (including ts-node's current ESM hook)
+            // intentionally omit the format field from a short-circuit result.
+            // The following load hook still supplies the format and source.
+            if (String(result.url).endsWith('.ts')) {
+              return { shortCircuit: true, url: result.url };
+            }
+            return result;
           }
           export async function load(url, context, nextLoad) {
             if (!url.endsWith('.ts')) return nextLoad(url, context);

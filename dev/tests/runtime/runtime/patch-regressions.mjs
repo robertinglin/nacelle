@@ -68,6 +68,34 @@ test('Function-created dynamic imports use the virtual module loader', async () 
   assert.equal(stdout, '42\n');
 });
 
+test('child process wrappers can observe virtual spawn contracts', async () => {
+  const { stdout } = await run(`
+    const childProcess = require('child_process');
+    const spawnSyncBinding = process.binding('spawn_sync');
+    const originalSync = spawnSyncBinding.spawn;
+    spawnSyncBinding.spawn = function (options) {
+      options.envPairs.push('BNH_SPAWN_SYNC=observed');
+      return originalSync.call(this, options);
+    };
+    const sync = childProcess.spawnSync(process.execPath, [
+      '-e', 'process.stdout.write(process.env.BNH_SPAWN_SYNC || "missing")',
+    ], { encoding: 'utf8' });
+    if (sync.status !== 0 || sync.stdout !== 'observed') throw new Error(sync.stderr || sync.stdout);
+
+    const originalAsync = childProcess.ChildProcess.prototype.spawn;
+    childProcess.ChildProcess.prototype.spawn = function (options) {
+      if (!Array.isArray(options.envPairs)) throw new Error('spawn envPairs missing');
+      return originalAsync.call(this, options);
+    };
+    const child = childProcess.spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    child.once('close', (code) => {
+      if (code !== 0) throw new Error('virtual child failed');
+      process.stdout.write('spawn wrappers completed');
+    });
+  `);
+  assert.equal(stdout, 'spawn wrappers completed');
+});
+
 test('beforeExit follows the complete microtask queue and pending filesystem work', async () => {
   const { stdout, node } = await run(`
     let complete = false; let pending = Promise.resolve();
@@ -108,6 +136,18 @@ for (const [name, childSource, expected] of [
     assert.equal(stdout, expected);
   });
 }
+
+test('unref detached children do not pin the parent lifecycle', async () => {
+  const { stdout } = await run(`
+    const child = require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 1000)'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+    console.log('PARENT-DONE');
+  `);
+  assert.equal(stdout, 'PARENT-DONE\n');
+});
 
 test('parallel child filesystem requests do not leak sibling lifecycle tokens', async () => {
   const { stdout } = await run(`

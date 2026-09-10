@@ -166,6 +166,7 @@ import { createTraceEventsModule, traceEventsUnavailableError } from './runtime/
 import { createSeaModule } from './runtime/sea.js';
 import { createTtyModule } from './runtime/tty.js';
 import { createBrowserReadline } from './runtime/readline.js';
+import { createBrowserRepl } from './runtime/repl.js';
 import { createVersionedModuleCache } from './runtime/module-cache.js';
 import { BrowserNpm, parsePackageSpec } from './runtime/npm.js';
 
@@ -2475,7 +2476,12 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
     if (bindProcess) prefix = prefix.replace('__bnhImport) {', '__bnhImport, process) {');
     if (bindAsync) prefix = prefix.replace(/\)\s*\{\s*$/u, `, ${prepared.bindingName}) {`);
     const wrappedSource = `${prefix}${sourceText}${moduleWrapper[1]}`;
-    const wrapped = new CommonJsFunction(`return ${wrappedSource}`)();
+    let wrapped;
+    try {
+      wrapped = new CommonJsFunction(`return ${wrappedSource}`)();
+    } catch (error) {
+      throw error;
+    }
     const values = [
       commonJsValues[2],
       commonJsValues[0],
@@ -2505,7 +2511,7 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
       return wrapped(...values);
     } finally {
       globalThis.Function = previousFunction;
-      if (previousActiveProcess === undefined) delete globalThis.__bnhActiveProcess;
+      if (previousActiveProcess === undefined) globalThis.__bnhActiveProcess = undefined;
       else globalThis.__bnhActiveProcess = previousActiveProcess;
       if (previousUserCode === undefined) delete globalThis.__bnhUserCode;
       else globalThis.__bnhUserCode = previousUserCode;
@@ -2536,7 +2542,7 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
     return wrapped(...values);
   } finally {
     globalThis.Function = previousFunction;
-    if (previousActiveProcess === undefined) delete globalThis.__bnhActiveProcess;
+    if (previousActiveProcess === undefined) globalThis.__bnhActiveProcess = undefined;
     else globalThis.__bnhActiveProcess = previousActiveProcess;
     if (previousUserCode === undefined) delete globalThis.__bnhUserCode;
     else globalThis.__bnhUserCode = previousUserCode;
@@ -3873,7 +3879,10 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     configurable: true,
     enumerable: true,
     get: () => exitCode,
-    set: (value) => { exitCode = Number(value) || 0; },
+    set: (value) => {
+      const next = Number(value) || 0;
+      exitCode = next;
+    },
   });
   installProcessFinalization(processObject);
   return { processObject, setTimer, clearTimer };
@@ -4568,8 +4577,24 @@ export function createRuntime({
   nodeProfile,
   wasmBaseUrl,
   runtimeModuleUrl,
+  workerBrokerPort,
   } = {}) {
   const scope = globalObject;
+  // Internal process ownership is a runtime detail. Keep its temporary
+  // marker off the enumerable global surface so compatibility checks such as
+  // tap's global-leak assertion observe the same globals as Node.
+  try {
+    const activeProcess = scope.__bnhActiveProcess;
+    Object.defineProperty(scope, '__bnhActiveProcess', {
+      configurable: true,
+      enumerable: false,
+      value: activeProcess,
+      writable: true,
+    });
+  } catch {
+    // Some host globals expose non-configurable properties. The runtime can
+    // still use the marker; only its enumerability is best-effort there.
+  }
   const runtimeQueueMicrotask = typeof scope.queueMicrotask === 'function'
     ? scope.queueMicrotask.bind(scope)
     : (callback) => scope.setTimeout(callback, 0);
@@ -5105,11 +5130,13 @@ export function createRuntime({
       ref() {
         this._referenced = true;
         this._handle?.ref?.();
+        this._bnhReferenceChange?.(true);
       }
 
       unref() {
         this._referenced = false;
         this._handle?.unref?.();
+        this._bnhReferenceChange?.(false);
       }
     }
     if (Symbol.dispose && Symbol.dispose !== Symbol.for('nodejs.dispose')) {
@@ -5201,7 +5228,49 @@ export function createRuntime({
         return path.relative(path.resolve(cwd, from), path.resolve(cwd, to));
       },
     };
-    const nodeUrl = createUrlModule(scope, { pathToFileURL, fileURLToPath });
+    // `node:path/posix` and `node:path/win32` have the same cwd-sensitive
+    // resolve/relative contract as `node:path`. Keep their platform-specific
+    // helpers anchored to the active virtual process too; build tools such as
+    // tshy import `path/posix` directly before moving relative output trees.
+    const nodePosixPath = {
+      ...path.posix,
+      resolve(...parts) {
+        return path.posix.resolve(currentPathProcess().cwd?.() || '/node', ...parts);
+      },
+      relative(from, to) {
+        const cwd = currentPathProcess().cwd?.() || '/node';
+        return path.posix.relative(path.posix.resolve(cwd, from), path.posix.resolve(cwd, to));
+      },
+    };
+    const nodeWin32Path = {
+      ...path.win32,
+      resolve(...parts) {
+        return path.win32.resolve(currentPathProcess().cwd?.() || '/node', ...parts);
+      },
+      relative(from, to) {
+        const cwd = currentPathProcess().cwd?.() || '/node';
+        return path.win32.relative(path.win32.resolve(cwd, from), path.win32.resolve(cwd, to));
+      },
+    };
+    nodePath.posix = nodePosixPath;
+    nodePath.win32 = nodeWin32Path;
+    nodePosixPath.posix = nodePosixPath;
+    nodePosixPath.win32 = nodeWin32Path;
+    nodeWin32Path.posix = nodePosixPath;
+    nodeWin32Path.win32 = nodeWin32Path;
+    const nodePathToFileURL = (value) => {
+      const rawValue = String(value);
+      if (rawValue.startsWith('blob:')) {
+        const blobURL = rawValue.split('#', 1)[0];
+        const virtualPath = scope.__BNH_BLOB_VIRTUAL_PATHS__?.get(blobURL);
+        if (typeof virtualPath === 'string') return pathToFileURL(virtualPath);
+      }
+      return pathToFileURL(value);
+    };
+    const nodeUrl = createUrlModule(scope, {
+      pathToFileURL: nodePathToFileURL,
+      fileURLToPath,
+    });
     processObject.report = createProcessReport({
       processObject,
       os: platform.os,
@@ -6174,7 +6243,7 @@ export function createRuntime({
           return callback();
         } finally {
           Object.assign(scope, previousTimers);
-          if (previousActiveProcess === undefined) delete scope.__bnhActiveProcess;
+          if (previousActiveProcess === undefined) scope.__bnhActiveProcess = undefined;
           else scope.__bnhActiveProcess = previousActiveProcess;
           scope.process = previousProcess;
         }
@@ -6200,7 +6269,7 @@ export function createRuntime({
         scope.__bnhActiveProcess = owner;
         try { return callback(); }
         finally {
-          if (previousActiveProcess === undefined) delete scope.__bnhActiveProcess;
+          if (previousActiveProcess === undefined) scope.__bnhActiveProcess = undefined;
           else scope.__bnhActiveProcess = previousActiveProcess;
           scope.process = previous;
         }
@@ -6597,6 +6666,7 @@ export function createRuntime({
     });
     const timerPromises = createTimerPromises(scope, trackTask);
     const readline = createBrowserReadline({ EventEmitter });
+    const repl = ensureReplDispose(createBrowserRepl({ EventEmitter, readline }));
     const nodeTest = createNodeTest({ scope, processObject, stdout, stderr, trackTask, assert: assert.strict, timers, timerPromises, sourcePath, execArgv: runtimeOptions.execArgv });
     const vm = createVmModule(scope);
     const asyncHooks = createAsyncHooksModule(scope);
@@ -6674,7 +6744,7 @@ export function createRuntime({
           };
         },
       },
-      path: nodePath, 'path/posix': path.posix, 'path/win32': path.win32, process: processObject, querystring: createQuerystring(Buffer),
+      path: nodePath, 'path/posix': nodePosixPath, 'path/win32': nodeWin32Path, process: processObject, querystring: createQuerystring(Buffer),
       stream: streamApi, 'stream/consumers': streamConsumers, 'stream/web': streamWebApi,
       'internal/webstreams/adapters': streamAdapters,
       'stream/promises': streamPromises,
@@ -6734,6 +6804,7 @@ export function createRuntime({
       trace_events: traceEvents,
       readline,
       'readline/promises': readline.promises,
+      repl,
       tty: createTtyModule(processObject, { stream: streamApi, net }),
       child_process: (() => {
         let childSequence = 0;
@@ -7231,6 +7302,13 @@ export function createRuntime({
           const prepared = directScript
             ? prepareChild(ownerProcess.execPath, [commandPath, ...(Array.isArray(args) ? args : [])], options, ownerProcess)
             : prepareChild(file, args, options, ownerProcess);
+          const spawnOptions = (extra = {}) => ({
+            file,
+            args: Array.isArray(args) ? args : [],
+            cwd: prepared.cwd,
+            envPairs: Object.entries(prepared.env || {}).map(([name, value]) => `${name}=${value}`),
+            ...extra,
+          });
           const processResource = new AsyncResource('PROCESSWRAP');
           const pipeResources = [
             new AsyncResource('PIPEWRAP'),
@@ -7294,6 +7372,15 @@ export function createRuntime({
             : trackTask;
           const childTaskLabel = `child:${String(file || '<unknown>').split('/').pop() || '<unknown>'} args:${Array.isArray(args) ? args.length : 0}`.slice(0, 128);
           let releaseChildTask = trackOwnedTask?.(childTaskLabel) || null;
+          const updateChildReference = (referenced) => {
+            if (referenced) {
+              if (!releaseChildTask) releaseChildTask = trackOwnedTask?.(childTaskLabel) || null;
+            } else if (releaseChildTask) {
+              const release = releaseChildTask;
+              releaseChildTask = null;
+              release();
+            }
+          };
           let abortListener = null;
           let childProcess = null;
           let timeoutHandle = null;
@@ -7315,6 +7402,7 @@ export function createRuntime({
             stderrBytes: 0,
             stdoutExcerpt: '',
             stderrExcerpt: '',
+            phase: 'prepared',
             terminal: null,
             ipcMessageCount: 0,
             ipcMessageTypes: [],
@@ -7330,6 +7418,9 @@ export function createRuntime({
             writable: true,
             value: null,
           });
+          const setActivityPhase = (phase) => {
+            activityRecord.phase = String(phase).slice(0, 64);
+          };
           const publishChildOutput = () => {
             const outputRecord = {
               ...activityRecord,
@@ -7393,7 +7484,7 @@ export function createRuntime({
             try {
               return callback();
             } finally {
-              if (previous.activeProcess === undefined) delete scope.__bnhActiveProcess;
+              if (previous.activeProcess === undefined) scope.__bnhActiveProcess = undefined;
               else scope.__bnhActiveProcess = previous.activeProcess;
               Object.assign(scope, previous);
             }
@@ -7417,7 +7508,7 @@ export function createRuntime({
             try {
               return callback();
             } finally {
-              if (previous.activeProcess === undefined) delete scope.__bnhActiveProcess;
+              if (previous.activeProcess === undefined) scope.__bnhActiveProcess = undefined;
               else scope.__bnhActiveProcess = previous.activeProcess;
               Object.assign(scope, previous);
             }
@@ -7525,6 +7616,7 @@ export function createRuntime({
             return wrapped;
           };
           child.pid = 10000 + childSequence;
+          child._bnhReferenceChange = updateChildReference;
           const childInput = stdioIgnored(0) ? null : outputStream();
           const stdinSource = stdioInherited(0) ? ownerProcess.stdin : childInput;
           child.stdout = stdioIgnored(1) || stdioInherited(1) ? null : wrapOutputStream(stdoutStream);
@@ -7741,6 +7833,7 @@ export function createRuntime({
             }
           }
           if (invalidCwdError) {
+            setActivityPhase('invalid-cwd');
             child.pid = undefined;
             scope.queueMicrotask(() => finish(-1, null, invalidCwdError));
             return child;
@@ -7769,6 +7862,7 @@ export function createRuntime({
             );
           }
           if (prepared.command === 'cat') {
+            setActivityPhase('cat');
             const stdinStream = outputStream();
             child.stdin = stdioIgnored(0) || stdioInherited(0) ? null : stdinStream;
             if (stdinSource) {
@@ -7802,11 +7896,12 @@ export function createRuntime({
             && (prepared.scriptPath === prepared.entryPath
               || prepared.commandArgs[0] === prepared.entryPath);
           if (launchesNpmEntrypoint) {
+            setActivityPhase('npm-entrypoint');
             // npm's own CLI is a Node launcher.  A real `spawn('node',
             // [npmBin, ...args])` must preserve that invocation contract,
             // while the browser runtime provides npm through its virtual
             // package-manager implementation.
-            child.spawn({ file, args });
+            child.spawn(spawnOptions());
             scope.queueMicrotask(() => child.emit('spawn'));
             const npmPrepared = {
               ...prepared,
@@ -7869,6 +7964,7 @@ export function createRuntime({
           scope.queueMicrotask(() => {
             if (closed) return;
             try {
+              setActivityPhase('dispatch');
               const signalCommand = file === 'kill' && args.length >= 2
                 ? String(args[0]).replace(/^-/, '').toUpperCase()
                 : null;
@@ -7891,7 +7987,8 @@ export function createRuntime({
               }
               const commandName = prepared.command.split('/').pop();
               if (commandName === 'npm' || commandName === 'yarn' || commandName === 'yarnpkg') {
-                child.spawn({ file, args });
+                setActivityPhase('npm-command');
+                child.spawn(spawnOptions());
                 scope.queueMicrotask(() => child.emit('spawn'));
                 runNpmChild(prepared, ownerProcess, {
                   ...options,
@@ -7920,12 +8017,13 @@ export function createRuntime({
                 && prepared.scriptPath === prepared.entryPath
                 && prepared.commandArgs[0] === prepared.entryPath;
               if (launchesNpmEntrypoint) {
+                setActivityPhase('npm-entrypoint');
                 // npm invokes its own executable through Node when a package
                 // manager test is spawned. Route that standard entrypoint to
                 // the same virtual npm implementation used by direct npm
                 // children instead of treating the shebang-only launcher as
                 // an empty JavaScript file.
-                child.spawn({ file, args });
+                child.spawn(spawnOptions());
                 scope.queueMicrotask(() => child.emit('spawn'));
                 const npmPrepared = {
                   ...prepared,
@@ -7960,6 +8058,7 @@ export function createRuntime({
                 || prepared.experimentalLoader
                 || isRuntimeEsmModule(prepared.entryPath, prepared.executionArgv);
               if (useEsm) {
+                setActivityPhase('esm-child');
                 const processHandle = runPreparedESM(prepared, childOptions, (value) => {
                   stdout += normalizeOutputChunk(value);
                   writeStdout(value);
@@ -7997,7 +8096,7 @@ export function createRuntime({
                   });
                   processHandle.on('disconnect', ipc.onChildDisconnect);
                 }
-                child.spawn({ processHandle, file, args });
+                child.spawn(spawnOptions({ processHandle }));
                 processHandle.wait().then((terminal) => {
                   childTerminal = terminal;
                   if (terminal.code !== 0 || terminal.signal) {
@@ -8008,6 +8107,7 @@ export function createRuntime({
                 }, (error) => finish(1, null, error));
                 return;
               }
+              setActivityPhase('sync-child');
               const result = runPreparedSync(prepared, {
                 ...childOptions,
                 stdinSource,
@@ -8034,7 +8134,7 @@ export function createRuntime({
               const terminalCode = terminalSignal ? null : result.status;
               childProcess = result.process;
               activityRecord.processHandle = childProcess;
-              child.spawn({ processHandle: childProcess, file, args });
+              child.spawn(spawnOptions({ processHandle: childProcess }));
               stdout = result.stdout?.toString?.() || String(result.stdout || '');
               stderr = result.stderr?.toString?.() || String(result.stderr || '');
               if (ipc) {
@@ -8407,7 +8507,7 @@ export function createRuntime({
             throw requireEsmError(entryPath, parentImport, fromEval);
           }
           if (esmEntry) source = synchronousEsmSource(text, entryPath);
-          let moduleSource = typeof source === 'string' ? source : text;
+          const moduleSource = typeof source === 'string' ? source : text;
           const tagDirName = `${resolvedProfile.runtimeVersion}-browser-1-1`;
           const tagDir = cacheDir ? (fs.mkdirSync ? (fs.mkdirSync(cacheDir, { recursive: true }), fs.mkdirSync(cacheDir + '/' + tagDirName, { recursive: true }), cacheDir + '/' + tagDirName) : '') : '';
           let compileCacheFile = '';
@@ -8522,10 +8622,7 @@ export function createRuntime({
               const processBuiltin = processObj?._bnhBuiltinOverrides?.[builtin];
               if (processBuiltin !== undefined) return processBuiltin;
               if (builtin === 'stream/web' && syncStreamWebApi) return syncStreamWebApi;
-              if (builtin === 'repl') {
-                const resolved = resolveFileSync(name, entryPath, processObj);
-                return ensureReplDispose(loadModuleSync(resolved, entryPath, processObj, scopeObj, bufferClass, stderrArr, undefined, moduleState, false, compileCacheState, text.includes('eval('), syncStreamWebApi));
-              }
+              if (builtin === 'repl') return repl;
               if (builtin === 'module') return createModuleApi(processObj, (value) => stderrArr.push(value));
               if (builtin === 'process') return processObj;
               if (builtin === 'internal/test/binding') {
@@ -8612,7 +8709,7 @@ export function createRuntime({
             if (siblings?.includes(moduleRecord)) siblings.splice(siblings.indexOf(moduleRecord), 1);
             throw error;
           } finally {
-            if (previousActiveProcess === undefined) delete scopeObj.__bnhActiveProcess;
+            if (previousActiveProcess === undefined) scopeObj.__bnhActiveProcess = undefined;
             else scopeObj.__bnhActiveProcess = previousActiveProcess;
             if (previousRuntimeActiveProcess === undefined) delete processObject.__bnhActiveProcess;
             else processObject.__bnhActiveProcess = previousRuntimeActiveProcess;
@@ -8941,7 +9038,7 @@ export function createRuntime({
                 scope.__bnhActiveProcess = owner;
                 try { return callback(); }
                 finally {
-                  if (previousActiveProcess === undefined) delete scope.__bnhActiveProcess;
+                  if (previousActiveProcess === undefined) scope.__bnhActiveProcess = undefined;
                   else scope.__bnhActiveProcess = previousActiveProcess;
                   scope.process = previousProcess;
                 }
@@ -8963,7 +9060,7 @@ export function createRuntime({
                   // parent that happened to launch this child.
                   childContextResource = new AsyncResource('PROCESSWRAP', { triggerAsyncId: 1 });
                 } finally {
-                  if (previousActiveProcess === undefined) delete scope.__bnhActiveProcess;
+                  if (previousActiveProcess === undefined) scope.__bnhActiveProcess = undefined;
                   else scope.__bnhActiveProcess = previousActiveProcess;
                   scope.process = previousProcess;
                 }
@@ -8992,7 +9089,7 @@ export function createRuntime({
               } finally {
                 Object.assign(scope, previousTimers);
                 scope.console = previousConsole;
-                if (previousActiveProcess === undefined) delete scope.__bnhActiveProcess;
+                if (previousActiveProcess === undefined) scope.__bnhActiveProcess = undefined;
                 else scope.__bnhActiveProcess = previousActiveProcess;
                 scope.process = previousProcess;
               }
@@ -9482,8 +9579,8 @@ export function createRuntime({
           // child's module evaluation and terminal frame.
           const workerIsolation = Boolean(
             options.ipc
+            || options.asyncLifecycle
             || esmExecutionDepth > 0
-            || processObject.__bnhEsmNested,
           );
           // The child process boundary owns the transferred/shared bytes. A
           // copied snapshot here needlessly duplicates the complete virtual
@@ -9542,18 +9639,36 @@ export function createRuntime({
               ? { ...(capabilities.manifest.proxy || {}), operations: proxyOperations, rpc: true }
               : capabilities.manifest.proxy
             : proxyCapability.adapter ? proxyCapability : capabilities.manifest.proxy;
+          // The child receives the complete file payload separately. Sending
+          // the same tens-of-thousands of paths again as the mount artifact
+          // allowlist needlessly multiplies the worker structured-clone cost;
+          // writes remain connected through vfsUpdateBridge below.
+          const childCapabilities = {
+            ...capabilities.manifest,
+            vfs: {
+              ...capabilities.manifest.vfs,
+              mounts: capabilities.manifest.vfs.mounts.map((mount) => ({
+                ...mount,
+                artifacts: [],
+              })),
+            },
+          };
           const esmDescriptor = {
-            capabilities: capabilities.manifest,
+            capabilities: childCapabilities,
             nodeVersion: resolvedProfile.id,
             files,
             symlinks: snapshot.symlinks,
             entry: esmPrepared.entryPath,
             execArgv: childExecArgv,
             proxy: childProxy,
-            virtualNetwork: workerIsolation ? { shared: true } : { shared: true, network: virtualNetwork },
-            esmNested: workerIsolation,
-          };
-          const vfsUpdateBridge = workerIsolation ? createVfsUpdateBridge() : null;
+          virtualNetwork: workerIsolation ? { shared: true } : { shared: true, network: virtualNetwork },
+          esmNested: workerIsolation,
+        };
+          // The child receives a VFS snapshot even when the process uses the
+          // in-memory fallback. Keep its writes connected to the owning VFS
+          // in both modes; otherwise build tools can exit successfully while
+          // leaving generated files stranded in the child snapshot.
+          const vfsUpdateBridge = createVfsUpdateBridge();
           const run = async (context) => {
             const previous = esmExecutionTail;
             let release;
@@ -9562,7 +9677,18 @@ export function createRuntime({
             esmExecutionDepth += 1;
             try {
               const { runProcessEntry } = await import('./runtime/process-entry.js');
-              const result = await runProcessEntry({ ...context, vfs: esmDescriptor });
+              const result = await runProcessEntry({
+                ...context,
+                vfs: esmDescriptor,
+                vfsUpdatePort: vfsUpdateBridge.port,
+                runtimeInstance: workerIsolation
+                  ? undefined
+                  : createRuntime({
+                      globalObject: scope,
+                      nodeProfile: resolvedProfile,
+                      workerBrokerPort,
+                    }),
+              });
               return result;
             } finally {
               esmExecutionDepth = Math.max(0, esmExecutionDepth - 1);
@@ -9590,10 +9716,25 @@ export function createRuntime({
             forceFallback: !workerIsolation,
             preserveReferences: true,
             networkPort: networkChannel?.raw.port2,
-            vfsUpdatePort: vfsUpdateBridge?.port,
+            vfsUpdatePort: vfsUpdateBridge.port,
+            workerBrokerPort,
             proxyAdapter: workerIsolation ? proxyCapability.adapter : undefined,
             stdout: forwardStdout,
             stderr: forwardStderr,
+          });
+          const activeEsmChildrenOwner = options.ownerProcess || processObject;
+          const activeEsmChildren = activeEsmChildrenOwner.__bnhEsmChildren ||= [];
+          const activeEsmChild = {
+            entry: esmPrepared.entryPath,
+            mode: workerIsolation ? 'worker' : 'same-realm',
+            handle: processHandle,
+            files: Object.keys(files).length,
+            bytes: Object.values(files).reduce((total, value) => total + (value?.byteLength || 0), 0),
+          };
+          activeEsmChildren.push(activeEsmChild);
+          processHandle.wait().finally(() => {
+            const index = activeEsmChildren.indexOf(activeEsmChild);
+            if (index >= 0) activeEsmChildren.splice(index, 1);
           });
           if (workerNetworkBridge) {
             processHandle.wait().then(
@@ -9653,6 +9794,15 @@ export function createRuntime({
             }
             return { name: '', index: -1 };
           })();
+          let npmPhase = `command:${command.name || '(empty)'}`;
+          const setNpmPhase = (phase) => {
+            npmPhase = String(phase).slice(0, 160);
+            processObject.__bnhNpmPhase = npmPhase;
+            ownerProcess.__bnhNpmPhase = npmPhase;
+            if (processObject.__bnhChildActivity) processObject.__bnhChildActivity.npmPhase = npmPhase;
+            if (ownerProcess.__bnhChildActivity) ownerProcess.__bnhChildActivity.npmPhase = npmPhase;
+          };
+          setNpmPhase(`command:${command.name || '(empty)'}`);
           // Package managers receive the environment assembled for this
           // child. Reading only the owner drops child-specific npm/TMP
           // settings from nested lifecycle commands.
@@ -9721,11 +9871,14 @@ export function createRuntime({
             last: null,
             recent: [],
           };
+          childActivity.npmPhase = npmPhase;
           childActivity.recent ||= [];
           const runVirtualCommandInternal = ({ entry, argv, cwd, commandEnv, stdin, signal, timeout, onNetwork, onStdout, onStderr }) => {
             const isNodeExecutable = (pathname) => /(?:^|\/)node(?:js)?$/.test(String(pathname));
             const commandName = String(entry).split('/').pop();
+            childActivity.npmPhase = `virtual:${commandName}`;
             if (['npm', 'yarn', 'yarnpkg'].includes(commandName)) {
+              childActivity.npmPhase = `virtual-manager:${commandName}`;
               const managerPrepared = prepareChild(entry, argv || [], {
                 cwd,
                 env: commandEnv,
@@ -9765,6 +9918,51 @@ export function createRuntime({
               // The virtual child path below handles commands that are not
               // executable files mounted in the VFS.
             }
+            if (isNodeExecutable(entry) && Array.isArray(argv) && argv.length
+              && typeof argv[0] === 'string' && !argv[0].startsWith('-')) {
+              const prepared = prepareChild(entry, argv, {
+                cwd,
+                env: commandEnv,
+                input: stdin,
+                signal,
+                timeout,
+              }, ownerProcess);
+              const launchesNpmEntrypoint = prepared.entryPath.endsWith('/node_modules/.bin/npm')
+                && (prepared.scriptPath === prepared.entryPath
+                  || prepared.commandArgs[0] === prepared.entryPath);
+              if (launchesNpmEntrypoint) {
+                childActivity.npmPhase = 'virtual-node-npm-entrypoint';
+                const npmPrepared = {
+                  ...prepared,
+                  command: prepared.entryPath,
+                  commandArgs: prepared.commandArgs.slice(1),
+                  argv: [prepared.entryPath, ...prepared.commandArgs.slice(1)],
+                  executionArgv: [prepared.entryPath, ...prepared.commandArgs.slice(1)],
+                };
+                return (async () => {
+                  let streamedOutput = false;
+                  const result = await runNpmChild(npmPrepared, ownerProcess, {
+                    signal,
+                    timeout,
+                    stdin,
+                    onNetwork,
+                    onStdout: (value) => {
+                      streamedOutput = true;
+                      onStdout?.(value);
+                    },
+                    onStderr: (value) => {
+                      streamedOutput = true;
+                      onStderr?.(value);
+                    },
+                  });
+                  if (!streamedOutput) {
+                    if (result.stdout) onStdout?.(result.stdout);
+                    if (result.stderr) onStderr?.(result.stderr);
+                  }
+                  return result;
+                })();
+              }
+            }
             if (shebangScript && entry !== processObject.execPath && !isNodeExecutable(entry)) {
               const prepared = prepareChild(processObject.execPath, [entry, ...(argv || [])], {
                 cwd,
@@ -9782,6 +9980,7 @@ export function createRuntime({
                 const processHandle = runPreparedESM(prepared, {
                   signal,
                   timeout,
+                  ownerProcess,
                   // A shell-launched ESM script is an asynchronous child
                   // process even when its launcher has no explicit IPC. Keep
                   // its module cache, event loop, and terminal frame in the
@@ -9943,6 +10142,7 @@ export function createRuntime({
                 const processHandle = runPreparedESM(prepared, {
                   signal,
                   timeout,
+                  ownerProcess,
                   asyncLifecycle: true,
                 }, (value) => {
                   const chunk = normalizeOutputChunk(value);
@@ -10138,6 +10338,7 @@ export function createRuntime({
               cwd: boundedText(options.cwd, 256),
               code: result?.code ?? null,
               pending: Boolean(result?.pending),
+              phase: boundedText(childActivity.npmPhase, 64),
               stdoutBytes: outputBytes(result?.stdout || ''),
               stderrBytes: outputBytes(result?.stderr || ''),
               stdoutExcerpt: boundedText(result?.stdout),
@@ -10239,6 +10440,7 @@ export function createRuntime({
             const processHandle = runPreparedESM(prepared, {
               signal: nodeOptions.signal,
               timeout: nodeOptions.timeout,
+              ownerProcess,
               asyncLifecycle: true,
             }, (value) => {
               const chunk = normalizeOutputChunk(value);
@@ -10285,6 +10487,7 @@ export function createRuntime({
               npm_lifecycle_script: script,
               npm_package_name: packageJson.name || '',
               npm_package_version: packageJson.version || '',
+              npm_config_local_prefix: scriptCwd,
               npm_execpath: '/node/node_modules/.bin/npm',
               npm_node_execpath: '/node/node_modules/.bin/node',
               PATH: `${scriptCwd}/node_modules/.bin:/node/node_modules/.bin:${baseEnv.PATH || ''}`,
@@ -10351,8 +10554,10 @@ export function createRuntime({
           };
 
           const runPackageScript = async (scriptName, scriptOptions = {}) => {
+            setNpmPhase(`read-package:${scriptName}`);
             const npm = createNpm();
             const packageJson = await npm.readPackageJson(scriptOptions.cwd || prepared.cwd);
+            setNpmPhase(`package-read:${scriptName}:${packageJson ? 'found' : 'missing'}`);
             if (!packageJson?.scripts?.[scriptName]) {
               return {
                 code: 1,
@@ -10366,6 +10571,7 @@ export function createRuntime({
             const stderr = [];
             let forwarded = false;
             for (const name of lifecycle) {
+              setNpmPhase(`script:${name}`);
               let result;
               try {
                 result = await runScriptBody(name, packageJson, {
@@ -10579,6 +10785,23 @@ export function createRuntime({
           return { code: 0, stdout: '', stderr: '' };
         };
 
+        scope.__BNH_SPAWN_SYNC__ = (spawnOptions) => {
+          const request = spawnOptions || {};
+          const originalOptions = request.__bnhOptions || {};
+          const envPairs = Array.isArray(request.envPairs)
+            ? request.envPairs
+            : Object.entries(originalOptions.env || processObject.env || {})
+              .map(([name, value]) => `${name}=${value}`);
+          const env = Object.fromEntries(envPairs.map((pair) => {
+            const value = String(pair);
+            const separator = value.indexOf('=');
+            return separator < 0 ? [value, ''] : [value.slice(0, separator), value.slice(separator + 1)];
+          }));
+          const options = { ...originalOptions, env };
+          const prepared = prepareChild(request.file, request.args || [], options);
+          return runPreparedSync(prepared, options);
+        };
+
         return {
           ChildProcess: BrowserChildProcess,
           spawnSync(file, args, options = {}) {
@@ -10590,7 +10813,14 @@ export function createRuntime({
               file = parsed.file;
               args = parsed.args;
             }
-            return runPreparedSync(prepareChild(file, args, options), options);
+            const env = options.env || processObject.env || {};
+            return internalBindingContract.bindings.spawn_sync.spawn({
+              file,
+              args,
+              cwd: options.cwd,
+              envPairs: Object.entries(env).map(([name, value]) => `${name}=${value}`),
+              __bnhOptions: options,
+            });
           },
           execFileSync,
           execSync,
@@ -10873,7 +11103,12 @@ export function createRuntime({
       for (const worker of scope.__BNH_BROWSER_WORKERS__ || []) {
         if (worker.threadId === -1) continue;
         if (worker.terminal || ['exited', 'failed'].includes(worker.state)) continue;
-        if (typeof worker.hasRef === 'function' && !worker.hasRef()) continue;
+        // An unref'd worker still has to finish bootstrapping. Node's
+        // Worker#unref() only removes an already-running worker from the
+        // event-loop keepalive set; dropping a `starting` child here can
+        // terminate it before a synchronous parent (for example AVA's
+        // Atomics.wait helper) ever receives its first result.
+        if (typeof worker.hasRef === 'function' && !worker.hasRef() && worker.state !== 'starting') continue;
         return true;
       }
       return false;
@@ -11013,6 +11248,11 @@ export function createRuntime({
       : fullProcessData;
     reportExecutePhase('process-bound');
     const processObject = processData.processObject;
+    // The process-entry boundary carries this marker on the injected worker
+    // process. Mirror it onto the runtime-owned process object used by child
+    // spawning so asynchronous ESM grandchildren can select an isolated
+    // browser worker.
+    if (injectedProcess?.__bnhEsmNested) processObject.__bnhEsmNested = true;
     markTaskActivity = () => processObject._bnhMarkActive?.();
     processObject._bnhTaskTracker = trackTask;
     const childActivity = processObject.__bnhChildActivity ||= {
@@ -11029,7 +11269,21 @@ export function createRuntime({
     if (injectedProcess && processObject.__bnhNodeTestState) {
       injectedProcess.__bnhNodeTestState = processObject.__bnhNodeTestState;
     }
-    if (injectedProcess) injectedProcess.__bnhChildActivity = childActivity;
+    if (injectedProcess) {
+      injectedProcess.__bnhChildActivity = childActivity;
+      for (const property of ['__bnhEsmChildren', '__bnhNpmPhase']) {
+        try {
+          Object.defineProperty(injectedProcess, property, {
+            configurable: true,
+            get: () => processObject[property],
+            set: (value) => { processObject[property] = value; },
+          });
+        } catch {
+          // The injected process may expose a non-configurable compatibility
+          // field; live diagnostics remain best-effort in that case.
+        }
+      }
+    }
     if (typeof injectedProcess?.__bnhNetworkEvent === 'function') {
       processObject.__bnhNetworkEvent = injectedProcess.__bnhNetworkEvent;
     }
@@ -11245,11 +11499,18 @@ export function createRuntime({
         signalGrants: capabilities.manifest.signals.allowed,
         workerSource: new URL('./runtime/process-entry.js', import.meta.url).href,
         workerType: 'module',
+        // A worker thread may synchronously block its parent with Atomics.wait
+        // while bootstrapping (AVA's ESLint helper does this). Deliver its
+        // VFS in the initial worker message so the parent is not required to
+        // service the ready handshake before the child can execute.
+        vfsEager: true,
+        workerBrokerPort,
         runSource: '((context) => globalThis.__bnhRun(context))',
-        vfs: {
-          capabilities: capabilities.manifest,
-          nodeVersion: resolvedProfile.id,
-          files,
+        workerData,
+      vfs: {
+        capabilities: capabilities.manifest,
+        nodeVersion: resolvedProfile.id,
+        files,
           entry: workerPath,
           execArgv: workerOptions.execArgv || ownerProcess.execArgv,
           proxy: capabilities.manifest.proxy,
@@ -12353,7 +12614,7 @@ export function createRuntime({
           type: 'DeprecationWarning',
         });
       }
-      if (name === 'repl') return ensureReplDispose(loadModule('/node/lib/repl.js', importer, false, processObj));
+      if (name === 'repl') return builtins.repl;
       if (BUILTIN_NAMES.includes(name)) {
         if (name === 'internal/test/binding') processObj.__bnhEmitInternalTestBindingWarning?.(processObj);
         if (name === 'dns') scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ = Math.max(1, Number(scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ || 0));
@@ -12599,11 +12860,6 @@ export function createRuntime({
       }
       return module.exports;
     };
-    Object.defineProperty(builtins, 'repl', {
-      configurable: true,
-      enumerable: true,
-      get: () => ensureReplDispose(loadModule('/node/lib/repl.js', entry)),
-    });
     const esmLoader = createModuleLoader({
       files: {
         has: (pathname) => vfs.files.has(pathname),
@@ -12946,6 +13202,7 @@ export function createRuntime({
           }
         });
         if (options.isCancelled?.() || options.signal?.aborted || processObject._exitRequested?.()) break;
+        reportExecutePhase(`lifecycle:p${pending}:m${pendingMicrotasks}:t${hasReferencedRuntimeTimers(allRuntimeTimers()) ? 1 : 0}:v${hasLiveVirtualProcess() ? 1 : 0}:i${hasReferencedIpc() ? 1 : 0}:w${hasReferencedWorkerParentPort() ? 1 : 0}`);
         if (pending === 0 && pendingMicrotasks === 0
           && !hasReferencedRuntimeTimers(allRuntimeTimers()) && !hasLiveVirtualProcess()
           && !hasReferencedIpc() && !hasReferencedWorkerParentPort()) {
@@ -12965,8 +13222,7 @@ export function createRuntime({
       if (injectedProcess && processObject.__bnhChildActivity) {
         injectedProcess.__bnhChildActivity = processObject.__bnhChildActivity;
       }
-      const naturalCode = processObject.getCode();
-      return naturalCode;
+      return processObject.getCode();
     } catch (error) {
       stderr(`${error?.stack || error}\n`);
       processObject.exitCode = 1;
@@ -13143,6 +13399,9 @@ export function createRuntime({
       // The bridge injects this metadata key for every versioned browser run;
       // it is not an ambient user-controlled environment grant.
       if (runSpec?.variant) allowedEnvironment.add('BNH_VARIANT');
+      // npm supplies the project prefix to package scripts. It is derived
+      // from the virtual cwd and does not expose ambient host environment.
+      allowedEnvironment.add('npm_config_local_prefix');
       for (const key of Object.keys(options.env || {})) {
         if (!allowedEnvironment.has(key)) {
           const error = new Error(`environment key is not granted: ${key}`);
@@ -13151,8 +13410,9 @@ export function createRuntime({
         }
       }
       const workerSource = new URL('./runtime/process-entry.js', import.meta.url).href;
+      const snapshot = vfs.snapshot({ copy: false });
       const files = Object.fromEntries(
-        vfs.snapshot({ copy: false }).artifacts.map(({ path, bytes }) => [path, {
+        snapshot.artifacts.map(({ path, bytes }) => [path, {
           data: bytes,
           mode: vfs.stat(path).mode & 0o777,
         }]),
@@ -13201,6 +13461,7 @@ export function createRuntime({
           capabilities: capabilities.manifest,
           nodeVersion: resolvedProfile.id,
           files,
+          symlinks: snapshot.symlinks,
           npmCache: options.npmCache,
           entry,
           execArgv: childExecArgv,
@@ -13214,11 +13475,20 @@ export function createRuntime({
             ? { shared: true, network: virtualNetwork }
             : { shared: true },
           networkTelemetry: typeof options.onNetwork === 'function',
-        },
+        // A worker-spawned Node process can itself spawn asynchronous ESM
+        // children (tap does this for each test file). Mark that boundary so
+        // those grandchildren receive their own browser worker instead of
+        // serializing through the parent's same-realm ESM gate.
+        esmNested: true,
+      },
         stdout: capabilities.output.stdout,
         stderr: capabilities.output.stderr,
         networkPort: networkChannel?.raw.port2,
         proxyAdapter: workerIsolation ? proxyCapability.adapter : undefined,
+        workerBrokerPort: scope.__BNH_WORKER_BROKER_PORT__
+          || (typeof scope.__BNH_CREATE_WORKER_BROKER_PORT__ === 'function'
+            ? scope.__BNH_CREATE_WORKER_BROKER_PORT__()
+            : undefined),
         onStdout: options.onStdout,
         onStderr: options.onStderr,
         onNetwork: options.onNetwork,

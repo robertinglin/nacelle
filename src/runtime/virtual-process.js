@@ -307,6 +307,24 @@ function createInMemoryProcess(options) {
     get connected() { return ipcPair.parent.connected; },
     get terminal() { return terminal; },
     get terminalRecord() { return terminal; },
+    get runtimeState() {
+      if (terminal?.runtimeState) return terminal.runtimeState;
+      const activeEsmChildren = [...(childProcess.__bnhEsmChildren || [])].slice(-4).map((child) => ({
+        state: child.handle?.state || null,
+        entry: child.entry || null,
+        runtimePhase: child.handle?.process?.__bnhRuntimePhase || null,
+        lifecycle: child.handle?.process?.__bnhRuntimeLifecycle || null,
+        childActivity: child.handle?.process?.__bnhChildActivity || null,
+      }));
+      return {
+        phase: childProcess.__bnhRuntimePhase || null,
+        npmPhase: childProcess.__bnhNpmPhase || childProcess.__bnhChildActivity?.npmPhase || null,
+        lifecycle: childProcess.__bnhRuntimeLifecycle || null,
+        nodeTest: childProcess.__bnhNodeTestState || null,
+        childActivity: childProcess.__bnhChildActivity || null,
+        activeEsmChildren,
+      };
+    },
     pid: identity.pid,
     ppid: identity.ppid,
     argv: [...identity.argv],
@@ -361,7 +379,11 @@ function createInMemoryProcess(options) {
   };
 
   transition('starting');
-  queueMicrotask(() => {
+  const nativeTimers = options.scope?.__BNH_NATIVE_TIMERS__;
+  const scheduleStart = nativeTimers?.setTimeout
+    ? (callback) => nativeTimers.setTimeout(callback, 0)
+    : (callback) => Promise.resolve().then(callback);
+  scheduleStart(() => {
     if (terminal) return;
     transition('running');
     const startEntry = () => {
@@ -378,6 +400,8 @@ function createInMemoryProcess(options) {
           stdout: output.stdout,
           stderr: output.stderr,
           vfs: options.vfs,
+          vfsUpdatePort: options.vfsUpdatePort,
+          workerBrokerPort,
           signal: abortController?.signal || childProcess,
           cluster: options.cluster,
           clusterGroupId: options.clusterGroupId,
@@ -424,15 +448,17 @@ function createInMemoryProcess(options) {
 /** Choose a browser Worker when available and retain a deterministic local fallback for tests and constrained pages. */
 export function createVirtualProcess(options = {}) {
   const scope = options.scope || globalThis;
+  const workerBrokerPort = options.workerBrokerPort || scope.__BNH_WORKER_BROKER_PORT__;
   const canUseBrowserWorker = !options.forceFallback
     && typeof (options.Worker || scope.Worker) === 'function'
     && typeof (options.MessageChannel || scope.MessageChannel) === 'function';
   let processHandle;
   if (canUseBrowserWorker) {
-    if (!hasVfsEntry(options)) processHandle = createBrowserProcess({ ...options, scope });
+    if (!hasVfsEntry(options)) processHandle = createBrowserProcess({ ...options, scope, workerBrokerPort });
     else processHandle = createBrowserProcess({
       ...options,
       scope,
+      workerBrokerPort,
       runSource: options.runSource || '((context) => globalThis.__bnhRun(context))',
       workerSource: options.workerSource || new URL('./process-entry.js', import.meta.url).href,
       workerType: 'module',

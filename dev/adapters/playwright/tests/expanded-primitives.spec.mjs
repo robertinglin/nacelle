@@ -3,6 +3,36 @@ import { browserRuntimeURL, expectPass, test } from './harness-test-helpers.mjs'
 
 test.skip(!browserRuntimeURL, 'set BNH_TEST_URL to a browser runtime harness page');
 
+test('unrefed worker parent ports allow natural worker exit', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const assert = require('node:assert/strict');
+    const { Worker } = require('node:worker_threads');
+    (async () => {
+      const worker = new Worker('/node/unref-parent-port-worker.cjs');
+      let ready = false;
+      const outcome = await new Promise((resolve, reject) => {
+        worker.once('message', (value) => {
+          ready = value === 'ready';
+        });
+        worker.once('error', reject);
+        worker.once('exit', (code) => resolve({ code, ready }));
+      });
+      assert.deepStrictEqual(outcome, { code: 0, ready: true });
+    })().catch((error) => { console.error(error); process.exitCode = 1; });
+  `, {
+    files: {
+      '/node/unref-parent-port-worker.cjs': [
+        "const { parentPort } = require('node:worker_threads');",
+        'parentPort.on(\'message\', () => {});',
+        "parentPort.postMessage('ready');",
+        'parentPort.unref();',
+      ].join('\n'),
+    },
+    timeoutMs: 10_000,
+  });
+  await expectPass(expect, result);
+});
+
 test('file worker with unref can satisfy a synchronous Atomics waiter', async ({ harnessPage }) => {
   const result = await harnessPage.run(`
     const assert = require('node:assert/strict');

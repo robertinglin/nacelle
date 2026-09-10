@@ -19,7 +19,7 @@ not being reclassified as newly rerun here.
 | 5 | ansi-regex | PASS | prior result | CITGM-green at continuation baseline. |
 | 6 | supports-color | PASS | ours | Final Chromium CITGM run `citgm-1789059865080`; XO, AVA (55 tests), and TSD all exited 0. Required gates: build passed; `npm test` 296/296; Chromium Playwright 243/243; Firefox Playwright 243/243. |
 | 7 | ms | PASS | none observed | First Chromium CITGM attempt `citgm-1789061171244` passed for published `ms@2.1.3`; npm install, upstream mocha tests, and all four child phases exited 0. No runtime defect was observed. Required gates: build passed; `npm test` 296/296; Chromium Playwright 243/243; Firefox Playwright 243/243. |
-| 8 | ansi-styles | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 8 | ansi-styles | PASS | ours | First Chromium CITGM attempt `citgm-1789062097927` exposed an AVA worker-exit defect after 10 tests passed; fixed generally by tracking worker parent-port ref state. Final rerun `citgm-1789062714781` passed. Required gates: build passed; `npm test` 296/296; Chromium Playwright 243/243; Firefox Playwright 243/243. |
 | 9 | chalk | PENDING | — | Not attempted; rank 6 was required to commit first. |
 | 10 | emoji-regex | PENDING | — | Not attempted; rank 6 was required to commit first. |
 | 11 | wrap-ansi | PENDING | — | Not attempted; rank 6 was required to commit first. |
@@ -169,3 +169,44 @@ npm test                                                     PASS — 296/296
 npm run test:browser:chromium                               PASS — 243/243
 npm run test:browser:firefox                                 PASS — 243/243
 ```
+
+## Rank 8 failure record
+
+All failures below occurred while running the real package through Chromium
+CITGM 10.0.2. The package's own tests passed before the process-lifecycle
+failure; the defect was in the browser runtime, not in `ansi-styles` or AVA.
+
+| Run / log | Observed failure | Classification and resolution |
+| --- | --- | --- |
+| `citgm-1789062097927` / `artifacts/citgm-top-100/rank-008-ansi-styles/citgm-initial/` | Published `ansi-styles@7.0.0` ran all 10 AVA tests successfully, then reported `Timed out while running tests` and `Failed to exit when running test/test.js`; CITGM exited 1. | Ours. An exact native checkout at `ansi-styles` git head passed its upstream `npm test`. A focused browser oracle reproduced the hang with a persistent `parentPort` message listener followed by `parentPort.unref()`. The runtime treated any message listener as a referenced parent port, so AVA's intentionally unrefed worker port kept the virtual process alive. |
+| `artifacts/citgm-top-100/rank-008-ansi-styles/gates/worker-unref-red-2.log` | Focused Chromium oracle failed with `ERR_RUN_TIMEOUT`, with the worker exit code unresolved. | Ours. Added ref-state tracking to the general worker parent-port implementation; `ref()`, `unref()`, and `close()` now update lifecycle state independently of listener presence. |
+| `citgm-1789062714781` / `artifacts/citgm-top-100/rank-008-ansi-styles/citgm-final/` | The same published package completed its AVA, XO, and TSD child phases with exit code 0. | PASS after the general runtime fix. No nested dependency or upstream package/repository failure was observed. |
+
+## Rank 8 CITGM evidence
+
+The first and final real Chromium CITGM commands were:
+
+```text
+NACELLE_CITGM_ARTIFACT_DIR=/tmp/nacelle-citgm-top-100 npm run citgm:browser:chromium -- ansi-styles 2>&1 | tee /tmp/ansi-styles-citgm-initial.log
+NACELLE_CITGM_ARTIFACT_DIR=/tmp/nacelle-citgm-top-100 npm run citgm:browser:chromium -- ansi-styles 2>&1 | tee /tmp/ansi-styles-citgm-rerun.log
+```
+
+The final run used published `ansi-styles@7.0.0` and completed with exit code
+0. The initial failure, final run, focused oracle logs, and child summaries
+are preserved under `artifacts/citgm-top-100/rank-008-ansi-styles/`.
+
+## Rank 8 gate evidence
+
+Commands were run from the repository root after the final CITGM pass and
+after the runtime fix:
+
+```text
+npm run build -- --node-version=v22                         PASS
+npm test                                                     PASS — 296/296
+npm run test:browser:chromium                               PASS — 243/243
+npm run test:browser:firefox                                 PASS — 243/243
+```
+
+The focused `expanded-primitives` oracle also passed 6/6 in Chromium and 6/6
+in Firefox. Its pre-fix red run and post-fix build/green runs are preserved
+under `artifacts/citgm-top-100/rank-008-ansi-styles/gates/`.

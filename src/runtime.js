@@ -11323,8 +11323,9 @@ export function createRuntime({
     };
     const hasReferencedWorkerParentPort = () => {
       if (!options.workerThread || !workerThreadParentPort) return false;
-      return workerThreadParentPort.listenerCount?.('message') > 0
-        || typeof workerThreadParentPort.onmessage === 'function';
+      return workerParentPortRefed
+        && (workerThreadParentPort.listenerCount?.('message') > 0
+          || typeof workerThreadParentPort.onmessage === 'function');
     };
     reportExecutePhase('process-create');
     const fullProcessData = createProcess(scope, {
@@ -11554,6 +11555,7 @@ export function createRuntime({
       delete processObject.connected;
       delete processObject.disconnect;
     }
+    let workerParentPortRefed = true;
     const workerThreadParentPort = options.workerThread
       ? (() => {
           const parentPort = new EventEmitter();
@@ -11632,8 +11634,8 @@ export function createRuntime({
           });
           parentPort.postMessage = (value, transferList) => workerParentSend?.(value, transferList);
           parentPort.start = () => parentPort;
-          parentPort.ref = () => parentPort;
-          parentPort.unref = () => parentPort;
+          parentPort.ref = () => { workerParentPortRefed = true; return parentPort; };
+          parentPort.unref = () => { workerParentPortRefed = false; return parentPort; };
           Object.defineProperty(parentPort, 'onmessage', {
             configurable: true,
             get: () => assignedOnMessage,
@@ -11643,6 +11645,7 @@ export function createRuntime({
             },
           });
           parentPort.close = () => {
+            workerParentPortRefed = false;
             processObject.removeListener('message', onMessage);
             workerParentDisconnect?.();
           };

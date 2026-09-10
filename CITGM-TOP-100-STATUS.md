@@ -21,7 +21,7 @@ not being reclassified as newly rerun here.
 | 7 | ms | PASS | none observed | First Chromium CITGM attempt `citgm-1789061171244` passed for published `ms@2.1.3`; npm install, upstream mocha tests, and all four child phases exited 0. No runtime defect was observed. Required gates: build passed; `npm test` 296/296; Chromium Playwright 243/243; Firefox Playwright 243/243. |
 | 8 | ansi-styles | PASS | ours | First Chromium CITGM attempt `citgm-1789062097927` exposed an AVA worker-exit defect after 10 tests passed; fixed generally by tracking worker parent-port ref state. Final rerun `citgm-1789062714781` passed. Required gates: build passed; `npm test` 296/296; Chromium Playwright 243/243; Firefox Playwright 243/243. |
 | 9 | chalk | PASS | ours | Published `chalk@6.0.0` initially failed in the shared ESM lowering path; six Chromium CITGM runs were preserved. Final run `citgm-1789065205654` passed after general ESM binding, export, `import.meta`, and `module.exports` interop fixes. Required gates: build passed; `npm test` 296/296; Chromium Playwright 243/243; Firefox Playwright 243/243. |
-| 10 | emoji-regex | PENDING | — | Not attempted; rank 6 was required to commit first. |
+| 10 | emoji-regex | PASS | none observed | Published `emoji-regex@10.6.0` passed on the first Chromium CITGM run `citgm-1789065974177`; install and all four child phases exited 0. No runtime, nested-dependency, or upstream package/repository failure was observed. Required gates: build passed; `npm test` 296/296; Chromium Playwright 243/243; Firefox Playwright 243/243. |
 | 11 | wrap-ansi | PENDING | — | Not attempted; rank 6 was required to commit first. |
 | 12 | lru-cache | PENDING | — | Not attempted; rank 6 was required to commit first. |
 | 13 | tslib | PENDING | — | Not attempted; rank 6 was required to commit first. |
@@ -263,3 +263,28 @@ npm run test:browser:firefox                                 PASS — 243/243
 The focused `esm-boundaries` oracle passed 8/8 in Chromium and 8/8 in
 Firefox. Its pre-fix red run and post-fix build/green runs are preserved under
 `artifacts/citgm-top-100/rank-009-chalk/`.
+
+## Rank 10 CITGM evidence
+
+The real Chromium CITGM command was:
+
+```text
+NACELLE_CITGM_ARTIFACT_DIR=/tmp/nacelle-citgm-top-100 npm run citgm:browser:chromium -- emoji-regex 2>&1 | tee /tmp/emoji-regex-citgm-initial.log
+```
+
+The published `emoji-regex@10.6.0` run `citgm-1789065974177` passed with
+CITGM 10.0.2. Complete stdout, stderr, child output, terminal summary, and
+network/progress artifacts are preserved under
+`artifacts/citgm-top-100/rank-010-emoji-regex/`. No package-specific runtime
+workaround or source change was needed.
+
+## Rank 10 gate evidence
+
+Commands were run from the repository root after the successful CITGM pass:
+
+```text
+npm run build -- --node-version=v22                         PASS
+npm test                                                     PASS — 296/296
+npm run test:browser:chromium                               PASS — 243/243
+npm run test:browser:firefox                                 PASS — 243/243
+```

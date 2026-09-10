@@ -25,7 +25,10 @@ function isValidExportName(value) {
 }
 
 function hasEsmSyntax(source) {
-  return /(?:^|[;\n])\s*(?:export\s+(?:default\b|(?:const|let|var|function|class)\b|[*{])|import\s*(?:(?:[^'";]*?from\s*)?['"]))/m.test(source);
+  const stripped = String(source)
+    .replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '')
+    .replace(/'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`/g, '""');
+  return /(?:^|[;\n])\s*(?:export\s+(?:default\b|(?:const|let|var|function|class)\b|[*{])|import\s*(?:(?:[^'";]*?from\s*)?['"]))/m.test(stripped);
 }
 
 function decodeStaticString(value) {
@@ -40,6 +43,14 @@ function stripHashbang(source) {
   return String(source).replace(/^#![^\r\n]*(?:\r\n|\n|$)/, (hashbang) => (
     hashbang.endsWith('\n') ? '\n' : ''
   ));
+}
+
+function stripPathIdentity(path) {
+  const value = String(path);
+  const query = value.indexOf('?');
+  const hash = value.indexOf('#');
+  const end = query < 0 ? hash : hash < 0 ? query : Math.min(query, hash);
+  return end < 0 ? value : value.slice(0, end);
 }
 
 function isWellFormedString(value) {
@@ -258,6 +269,7 @@ export function createModuleLoader({
   const registeredHooks = sharedRunModuleHook ? [] : wrapSynchronousLoadHook(builtins?.module);
   const cache = Object.create(null);
   const moduleURLs = new Map();
+  const buildingModuleKeys = new Set();
   const importCache = new Map();
   const nativeSpecifierHints = new Map();
   const cycleModuleURLs = new Map();
@@ -329,7 +341,7 @@ export function createModuleLoader({
     // this resolver boundary before delegating to it; otherwise a missing
     // `sub//internal/test` target aliases an existing `sub/internal/test.js`.
     const filesystemPath = typeof path === 'string' && path.startsWith('/')
-      ? path.split(/[?#]/, 1)[0]
+      ? stripPathIdentity(path)
       : path;
     if (typeof filesystemPath === 'string' && filesystemPath.startsWith('/') && filesystemPath.includes('//')) return false;
     return typeof files?.has === 'function'
@@ -338,7 +350,7 @@ export function createModuleLoader({
   };
   const readFile = (path) => {
     const filesystemPath = typeof path === 'string' && path.startsWith('/')
-      ? path.split(/[?#]/, 1)[0]
+      ? stripPathIdentity(path)
       : path;
     return typeof files?.get === 'function' ? files.get(filesystemPath) : files[filesystemPath];
   };
@@ -346,7 +358,7 @@ export function createModuleLoader({
   // formats continue through the byte-oriented files seam below.
   const readTextFile = (path) => {
     const filesystemPath = typeof path === 'string' && path.startsWith('/')
-      ? path.split(/[?#]/, 1)[0]
+      ? stripPathIdentity(path)
       : path;
     return typeof readSource === 'function' ? readSource(filesystemPath) : readFile(filesystemPath);
   };
@@ -460,7 +472,7 @@ export function createModuleLoader({
     };
   };
 
-  const runResolveHooks = (specifier, importer, conditions = ['node', 'import']) => {
+  const runResolveHooks = (specifier, importer, conditions = ['node', 'import'], processOverride) => {
     const context = hookContext(specifier, importer, conditions);
     const fallback = (nextSpecifier, nextContext) => defaultResolve(
       nextSpecifier,
@@ -469,7 +481,7 @@ export function createModuleLoader({
         : importer,
       nextContext?.conditions || ['node', 'import'],
     );
-    if (sharedRunModuleHook) return sharedRunModuleHook('resolve', specifier, context, fallback);
+    if (sharedRunModuleHook) return sharedRunModuleHook('resolve', specifier, context, fallback, processOverride);
     let next = (nextSpecifier, nextContext) => defaultResolve(
       nextSpecifier,
       nextContext?.parentURL?.startsWith('file:')
@@ -490,8 +502,8 @@ export function createModuleLoader({
     return result;
   };
 
-  const runResolveHooksAsync = async (specifier, importer, conditions = ['node', 'import']) => {
-    if (!sharedRunModuleHook) return runResolveHooks(specifier, importer, conditions);
+  const runResolveHooksAsync = async (specifier, importer, conditions = ['node', 'import'], processOverride) => {
+    if (!sharedRunModuleHook) return runResolveHooks(specifier, importer, conditions, processOverride);
     const context = hookContext(specifier, importer, conditions);
     const fallback = (nextSpecifier, nextContext) => defaultResolve(
       nextSpecifier,
@@ -500,7 +512,7 @@ export function createModuleLoader({
         : importer,
       nextContext?.conditions || ['node', 'import'],
     );
-    const result = await sharedRunModuleHook('resolve', specifier, context, fallback);
+    const result = await sharedRunModuleHook('resolve', specifier, context, fallback, processOverride);
     if (!result || typeof result !== 'object' || typeof result.url !== 'string') {
       throw new TypeError('module resolve hook must return an object with a string url');
     }
@@ -530,7 +542,7 @@ export function createModuleLoader({
     };
   };
 
-  const runLoadHooks = (resolved, format) => {
+  const runLoadHooks = (resolved, format, processOverride) => {
     const url = format === 'builtin'
       ? `node:${builtinName(resolved)}`
       : resolved.startsWith('custom-') ? resolved
@@ -542,7 +554,7 @@ export function createModuleLoader({
       parentURL: fileURL(resolved),
     };
     if (sharedRunModuleHook) {
-      const result = sharedRunModuleHook('load', url, context, (nextURL, nextContext) => defaultLoad(nextURL, nextContext));
+      const result = sharedRunModuleHook('load', url, context, (nextURL, nextContext) => defaultLoad(nextURL, nextContext), processOverride);
       if (!result || typeof result !== 'object') throw new TypeError('module load hook must return an object');
       return { ...result, url: result.url || url };
     }
@@ -620,7 +632,7 @@ export function createModuleLoader({
   };
 
   const moduleFormat = (resolved) => {
-    const filesystemPath = String(resolved).split(/[?#]/, 1)[0];
+    const filesystemPath = stripPathIdentity(resolved);
     if (filesystemPath.endsWith('.mjs')) return 'module';
     if (filesystemPath.endsWith('.cjs')) return 'commonjs';
     const extension = posix.extname(filesystemPath);
@@ -987,8 +999,8 @@ export function createModuleLoader({
     throw packageError('MODULE_NOT_FOUND', `Cannot find module '${value}'`);
   };
 
-  const read = (specifier, importer) => {
-    const resolved = resolve(specifier, importer);
+  const read = (specifier, importer, conditions = ['node', 'import']) => {
+    const resolved = resolve(specifier, importer, conditions);
     if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) unsupportedNativeAddon(resolved);
     let value;
     try {
@@ -1017,7 +1029,7 @@ export function createModuleLoader({
     const names = new Set(metadata.names);
     for (const specifier of metadata.reexports) {
       try {
-        const child = read(specifier, resolved);
+        const child = read(specifier, resolved, ['node', 'require']);
         if (child.resolved.endsWith('.mjs') || child.resolved.endsWith('.json')) continue;
         const childValue = child.resolved.endsWith('.wasm') || child.resolved.endsWith('.node')
           ? child.value : readTextFile(child.resolved);
@@ -1158,6 +1170,8 @@ export function createModuleLoader({
     const token = register(() => state);
     const key = cacheKey(resolved, processOverride);
     cycleRegistrations.set(key, {
+      resolved,
+      processOverride,
       names: analysis.names,
       bindings: analysis.bindings,
       defaultBinding: analysis.defaultBinding,
@@ -1236,6 +1250,44 @@ export function createModuleLoader({
     return url;
   };
 
+  const publishCycleModuleSource = (key, source) => {
+    const registration = cycleRegistrations.get(key);
+    if (!registration) return source;
+    const publication = [];
+    const publishedNames = new Set();
+    for (const name of registration.names) {
+      const binding = registration.bindings.get(name);
+      if (binding) {
+        publication.push(`${quote(name)}: ${binding}`);
+        publishedNames.add(name);
+      }
+    }
+    if (registration.defaultBinding) {
+      publication.push(`default: ${registration.defaultBinding}`);
+      publishedNames.add('default');
+    }
+    const reexportImports = [];
+    for (const [index, reexport] of (registration.reexports || []).entries()) {
+      const url = cycleReexportURLs.get(cycleReexportKey(
+        registration.resolved,
+        reexport.specifier,
+        registration.processOverride,
+      ));
+      if (!url) continue;
+      const alias = `__bnhCycleReexport${index}`;
+      reexportImports.push(`import * as ${alias} from ${quote(url)};`);
+      for (const name of reexport.names) {
+        if (publishedNames.has(name)) continue;
+        publication.push(`${quote(name)}: ${alias}[${quote(name)}]`);
+        publishedNames.add(name);
+      }
+    }
+    const publishSource = publication.length
+      ? `globalThis[${quote(registryName)}][${quote(registration.token)}]().publish({${publication.join(',')}});`
+      : '';
+    return `${reexportImports.join('\n')}${reexportImports.length ? '\n' : ''}${source}${publishSource ? `\n${publishSource}` : ''}`;
+  };
+
   const invalidCjsModuleURL = (specifier, exportName) => {
     const message = `The requested module '${specifier}' does not provide an export named '${exportName}'`;
     const source = `export default undefined;\nthrow new SyntaxError(${quote(message)});`;
@@ -1245,6 +1297,7 @@ export function createModuleLoader({
   const cjsHasEsmSyntax = (resolved) => {
     if (resolved.endsWith('.mjs') || resolved.endsWith('.json') || isBuiltinSpecifier(resolved)) return false;
     try {
+      if (moduleFormat(resolved) === 'module') return false;
       const source = sourceText(read(resolved, resolved).value);
       return cjsExportNames(resolved, source).esmSyntax;
     } catch {
@@ -1268,7 +1321,7 @@ export function createModuleLoader({
 
   function rewriteSpecifier(specifier, importer, exportName, processOverride) {
     specifier = decodeStaticString(specifier);
-    const resolvedResult = runResolveHooks(specifier, importer);
+    const resolvedResult = runResolveHooks(specifier, importer, ['node', 'import'], processOverride);
     const resolved = hookURLToSpecifier(resolvedResult.url);
     if (exportName && cjsHasEsmSyntax(resolved)) return invalidCjsModuleURL(specifier, exportName);
     const formatHint = Object.hasOwn(resolvedResult, 'format') ? resolvedResult.format : null;
@@ -1398,22 +1451,27 @@ export function createModuleLoader({
     const rewriteStatic = (pattern, exportAware) => {
       const masked = maskJavaScriptLiterals(rewritten);
       const matches = [...masked.matchAll(pattern)];
-      const originalPattern = new RegExp(pattern.source, pattern.flags.replace('g', ''));
-      for (let index = matches.length - 1; index >= 0; index -= 1) {
-        const match = matches[index];
-        const original = rewritten.slice(match.index, match.index + match[0].length).match(originalPattern);
-        if (!original) continue;
-        const specifier = original[4];
-        const prefix = original[2];
-        const quoteOffset = original[0].indexOf(original[3], original[1].length + prefix.length);
-        const start = match.index + quoteOffset;
-        const replacement = quote(rewriteSpecifier(
+      const replacements = [];
+      for (const match of matches) {
+        const prefixStart = match.index + match[1].length;
+        const prefix = rewritten.slice(prefixStart, prefixStart + match[2].length);
+        const quoteOffset = match[0].indexOf(match[3], match[1].length + match[2].length);
+        if (quoteOffset < 0) continue;
+        const specifierStart = match.index + quoteOffset + 1;
+        const specifier = rewritten.slice(specifierStart, specifierStart + match[4].length);
+        replacements.push({
+          start: match.index + quoteOffset,
+          end: match.index + quoteOffset + specifier.length + 2,
+          replacement: quote(rewriteSpecifier(
           specifier,
           importer,
           exportAware ? requestedExportName(prefix) : undefined,
           processOverride,
-        ));
-        rewritten = `${rewritten.slice(0, start)}${replacement}${rewritten.slice(start + specifier.length + 2)}`;
+          )),
+        });
+      }
+      for (const replacement of replacements.reverse()) {
+        rewritten = `${rewritten.slice(0, replacement.start)}${replacement.replacement}${rewritten.slice(replacement.end)}`;
       }
     };
     rewriteStatic(
@@ -1477,7 +1535,7 @@ export function createModuleLoader({
     }
     if (/\bimport\.meta\.resolve\b/.test(rewritten)) {
       const token = register((specifier) => {
-        const hooked = runResolveHooks(specifier, importer);
+        const hooked = runResolveHooks(specifier, importer, ['node', 'import'], processOverride);
         if (hooked && typeof hooked.then === 'function') hooked.catch(() => {});
         const resolved = hooked && typeof hooked.url === 'string'
           ? hookURLToSpecifier(hooked.url)
@@ -1568,7 +1626,7 @@ export function createModuleLoader({
       : isBuiltinSpecifier(resolved) ? 'builtin'
       : resolved.startsWith('data:') ? 'module'
       : resolved.endsWith('.json') ? 'json' : moduleFormatForHook(resolved);
-    const loaded = runLoadHooks(resolved, format);
+    const loaded = runLoadHooks(resolved, format, processOverride);
     const loadedResolved = loaded.url ? hookURLToSpecifier(loaded.url) : resolved;
     if (loaded.format === 'builtin' && isBuiltinSpecifier(loadedResolved)) {
       return builtinModuleSource(loadedResolved, builtin(loadedResolved, processOverride));
@@ -1578,7 +1636,7 @@ export function createModuleLoader({
       const loadedText = sourceText(loaded.source);
       if (loaded.format === 'json') return `export default ${JSON.stringify(JSON.parse(loadedText))};`;
       if (loaded.format === 'module' || hasEsmSyntax(loadedText)) {
-        return `${bindProcess(rewriteImports(loadedText, loadedResolved, processOverride), processOverride)}\n//# sourceURL=${loadedResolved}`;
+        return `${bindProcess(rewriteImports(stripHashbang(loadedText), loadedResolved, processOverride), processOverride)}\n//# sourceURL=${loadedResolved}`;
       }
       return cjsModuleSource(loadedResolved, loadedText, processOverride);
     }
@@ -1618,19 +1676,28 @@ export function createModuleLoader({
     }
     const loadedText = sourceText(value);
     if (moduleFormat(resolved) !== 'module' && !hasEsmSyntax(loadedText)) return cjsModuleSource(resolved, loadedText, processOverride);
-    return `${bindProcess(rewriteImports(loadedText, resolved, processOverride), processOverride)}\n//# sourceURL=${resolved}`;
+    return `${bindProcess(rewriteImports(stripHashbang(loadedText), resolved, processOverride), processOverride)}\n//# sourceURL=${resolved}`;
   }
 
   function moduleURL(resolved, processOverride, formatHint = null) {
     const key = cacheKey(resolved, processOverride);
     if (moduleURLs.has(key)) return moduleURLs.get(key);
-    const source = moduleSource(resolved, processOverride, formatHint);
-    // Native ESM caches by URL for the lifetime of the browser realm. Give
-    // each runtime loader a private fragment so a second virtual child using
-    // the same VFS path executes its own module instance.
-    const url = generatedModuleURL(source, `${registryName}${processKey(processOverride)}`, resolved);
-    moduleURLs.set(key, url);
-    return url;
+    if (buildingModuleKeys.has(key)) return cycleModuleURL(resolved, resolved, processOverride);
+    buildingModuleKeys.add(key);
+    try {
+      const source = publishCycleModuleSource(
+        key,
+        moduleSource(resolved, processOverride, formatHint),
+      );
+      // Native ESM caches by URL for the lifetime of the browser realm. Give
+      // each runtime loader a private fragment so a second virtual child using
+      // the same VFS path executes its own module instance.
+      const url = generatedModuleURL(source, `${registryName}${processKey(processOverride)}`, resolved);
+      moduleURLs.set(key, url);
+      return url;
+    } finally {
+      buildingModuleKeys.delete(key);
+    }
   }
 
   const evaluate = (specifier, importer, globals, processOverride) => {
@@ -1778,7 +1845,7 @@ export function createModuleLoader({
   // before invoking the browser evaluator so HTTP imports work from both
   // --import preloads and --input-type=module entry points.
   const asyncModuleURLs = new Map();
-  const runLoadHooksAsync = async (resolved, format) => {
+  const runLoadHooksAsync = async (resolved, format, processOverride) => {
     const url = format === 'builtin'
       ? `node:${builtinName(resolved)}`
       : /^[A-Za-z][A-Za-z\d+.-]*:/.test(resolved)
@@ -1791,8 +1858,8 @@ export function createModuleLoader({
         ? resolved : fileURL(resolved),
     };
     const result = sharedRunModuleHook
-      ? await sharedRunModuleHook('load', url, context, (nextURL, nextContext) => defaultLoad(nextURL, nextContext))
-      : runLoadHooks(resolved, format);
+      ? await sharedRunModuleHook('load', url, context, (nextURL, nextContext) => defaultLoad(nextURL, nextContext), processOverride)
+      : runLoadHooks(resolved, format, processOverride);
     if (!result || typeof result !== 'object') throw new TypeError('module load hook must return an object');
     return { ...result, url: result.url || url };
   };
@@ -1812,15 +1879,15 @@ export function createModuleLoader({
     for (const { pattern, exportAware } of patterns) {
       const masked = maskJavaScriptLiterals(rewritten);
       const matches = [...masked.matchAll(pattern)];
-      const originalPattern = new RegExp(pattern.source, pattern.flags.replace('g', ''));
       const replacements = [];
-      for (const match of matches) {
-        const original = rewritten.slice(match.index, match.index + match[0].length).match(originalPattern);
-        if (!original) continue;
-        const specifier = original[4];
-        const prefix = original[2];
-        const quoteOffset = original[0].indexOf(original[3], original[1].length + prefix.length);
-        const resolvedResult = await runResolveHooksAsync(specifier, importer);
+      const resolveReplacement = async (match) => {
+        const prefixStart = match.index + match[1].length;
+        const prefix = rewritten.slice(prefixStart, prefixStart + match[2].length);
+        const quoteOffset = match[0].indexOf(match[3], match[1].length + match[2].length);
+        if (quoteOffset < 0) return null;
+        const specifierStart = match.index + quoteOffset + 1;
+        const specifier = rewritten.slice(specifierStart, specifierStart + match[4].length);
+        const resolvedResult = await runResolveHooksAsync(specifier, importer, ['node', 'import'], processOverride);
         const resolved = hookURLToSpecifier(resolvedResult.url);
         const formatHint = Object.hasOwn(resolvedResult, 'format') ? resolvedResult.format : null;
         const url = await moduleURLAsync(resolved, processOverride, importer, ancestors, formatHint);
@@ -1829,22 +1896,25 @@ export function createModuleLoader({
         // JSON modules expose one ESM binding: default. Preserve a default
         // import while retaining the native-style failure for named imports.
         if (exportName && exportName !== 'default' && resolved.endsWith('.json')) {
-          replacements.push({
+          return {
             start: match.index + quoteOffset,
             end: match.index + quoteOffset + specifier.length + 2,
             replacement: quote(invalidCjsModuleURL(specifier, exportName)),
             exportAware,
             prefix,
-          });
-          continue;
+          };
         }
-        replacements.push({
+        return {
           start: match.index + quoteOffset,
           end: match.index + quoteOffset + specifier.length + 2,
           replacement: quote(url),
           exportAware,
           prefix,
-        });
+        };
+      };
+      for (const match of matches) {
+        const replacement = await resolveReplacement(match);
+        if (replacement) replacements.push(replacement);
       }
       for (const replacement of replacements.filter(Boolean).reverse()) {
         rewritten = `${rewritten.slice(0, replacement.start)}${replacement.replacement}${rewritten.slice(replacement.end)}`;
@@ -1913,7 +1983,7 @@ export function createModuleLoader({
     }
     if (/\bimport\.meta\.resolve\b/.test(rewritten)) {
       const token = register((specifier) => {
-        const hooked = runResolveHooks(specifier, importer);
+        const hooked = runResolveHooks(specifier, importer, ['node', 'import'], processOverride);
         if (hooked && typeof hooked.then === 'function') hooked.catch(() => {});
         const resolved = hooked && typeof hooked.url === 'string'
           ? hookURLToSpecifier(hooked.url)
@@ -1937,7 +2007,7 @@ export function createModuleLoader({
       : isBuiltinSpecifier(resolved) ? 'builtin'
       : /^[A-Za-z][A-Za-z\d+.-]*:/.test(resolved) ? 'module'
       : resolved.endsWith('.json') ? 'json' : moduleFormatForHook(resolved);
-    const loaded = await runLoadHooksAsync(resolved, format);
+    const loaded = await runLoadHooksAsync(resolved, format, processOverride);
     const loadedResolved = loaded.url ? hookURLToSpecifier(loaded.url) : resolved;
     if (loaded.format === 'builtin' && isBuiltinSpecifier(loadedResolved)) {
       return builtinModuleSource(loadedResolved, builtin(loadedResolved, processOverride));
@@ -2099,7 +2169,7 @@ export function createModuleLoader({
   };
 
   const importModule = async (specifier, importer, globals, options, processOverride) => {
-    const resolvedResult = await runResolveHooksAsync(specifier, importer);
+    const resolvedResult = await runResolveHooksAsync(specifier, importer, ['node', 'import'], processOverride);
     const resolved = hookURLToSpecifier(resolvedResult.url);
     if (resolved.startsWith('data:')) return importData(resolved, options, processOverride);
     if (resolved.startsWith('http:') || resolved.startsWith('https:')) {
@@ -2201,6 +2271,7 @@ export function createModuleLoader({
       generatedObjectURLs.clear();
       for (const collection of [moduleURLs, importCache, nativeSpecifierHints, cycleModuleURLs,
         cycleRegistrations, remoteImportCache, asyncModuleURLs]) collection.clear();
+      buildingModuleKeys.clear();
       for (const key of Object.keys(cache)) delete cache[key];
     },
   };

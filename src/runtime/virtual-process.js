@@ -178,6 +178,7 @@ function makeTerminal(identity, state, kind, code, signal, error, forced, runtim
 function createInMemoryProcess(options) {
   const events = new BrowserEventEmitter();
   const ipcPair = makeInMemoryIpcPair(options.scope || globalThis, { preserveReferences: options.preserveReferences });
+  const workerBrokerPort = options.workerBrokerPort || options.scope?.__BNH_WORKER_BROKER_PORT__;
   const identity = {
     runId: String(options.runId || 'virtual-run'),
     childId: String(options.childId || 'virtual-child'),

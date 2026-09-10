@@ -93,7 +93,7 @@ async function resolveCommand(name, context) {
   // a materialized .bin shim because the runtime handles their registry and
   // lifecycle operations directly, but shell lookup must still match Node's
   // PATH-visible command contract.
-  if (name === 'yarn' || name === 'yarnpkg') {
+  if (name === 'yarn' || name === 'yarnpkg' || name === 'pnpm') {
     return { type: 'external', path: `${String(context.cwd || '/node').replace(/\/$/, '')}/node_modules/.bin/${name}`, name };
   }
   if (name === 'sh' || name === 'bash' || name === '/bin/sh' || name === '/bin/bash') return { type: 'shell', name };
@@ -660,8 +660,9 @@ async function runBuiltin(name, args, input, context, runProgram, options) {
     return result(0);
   }
   if (name === 'rm') {
-    const force = args.includes('-f');
-    const recursive = args.some((arg) => arg === '-r' || arg === '-R' || arg.includes('r'));
+    const flags = args.filter((arg) => arg.startsWith('-') && arg !== '--').join('');
+    const force = flags.includes('f');
+    const recursive = flags.includes('r') || flags.includes('R');
     for (const target of args.filter((arg) => !arg.startsWith('-'))) {
       try { await context.fs.remove(shellPath(target, context.cwd), { recursive, force }); }
       catch (error) {

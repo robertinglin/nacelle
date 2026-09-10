@@ -2166,7 +2166,18 @@ export function createVfs(options = {}) {
     const path = resolvePath(resolve(pathValue));
     const writable = flags.includes('w') || flags.includes('a') || flags.includes('+');
     access(path, 'open', writable);
-    if (directories.has(path)) throw isDirectory(path, 'open');
+    if (directories.has(path)) {
+      if (writable) throw isDirectory(path, 'open');
+      const fd = nextDescriptor++;
+      descriptors.set(fd, {
+        fd,
+        path,
+        flags,
+        directory: true,
+        position: 0,
+      });
+      return fd;
+    }
     if (!files.has(path) && !flags.includes('w') && !flags.includes('a')) throw missing(path, 'open');
     if (flags.includes('x') && files.has(path)) throw existsError(path, 'open');
     if (!files.has(path)) setFile(path, new Uint8Array(), false, 'open');
@@ -2220,6 +2231,7 @@ export function createVfs(options = {}) {
     if (length === undefined) length = buffer.byteLength - offset;
     if (length === 0) return { bytesRead: 0, buffer };
     const record = descriptor(value);
+    if (record.directory) throw isDirectory(record.path, 'read');
     const source = readBytes(record.path, 'read');
     const at = position === null || position === undefined ? record.position : position;
     const chunk = source.subarray(at, at + length);

@@ -168,12 +168,12 @@ import { createTtyModule } from './runtime/tty.js';
 import { createBrowserReadline } from './runtime/readline.js';
 import { createBrowserRepl } from './runtime/repl.js';
 import { createVersionedModuleCache } from './runtime/module-cache.js';
-import { BrowserNpm, parsePackageSpec } from './runtime/npm.js';
+import { BrowserNpm, parsePackageSpec, satisfiesSemver } from './runtime/npm.js';
 
 const BUILTIN_NAMES = Object.freeze([
   'assert', 'assert/strict', 'buffer', 'console', 'constants', 'crypto', 'domain', 'events', 'fs', 'fs/promises', 'http', 'https', 'module', 'os',
   'path', 'path/posix', 'path/win32', 'process', 'querystring', 'stream', 'stream/consumers', 'stream/promises', 'stream/web',
-  'string_decoder', 'timers', 'timers/promises', 'url', 'util', 'sys', 'util/types', 'worker_threads', 'zlib', 'perf_hooks', 'async_hooks', 'diagnostics_channel', 'punycode',
+  'string_decoder', 'timers', 'timers/promises', 'url', 'util', 'sys', 'util/types', 'wasi', 'worker_threads', 'zlib', 'perf_hooks', 'async_hooks', 'diagnostics_channel', 'punycode',
   'child_process', 'cluster', 'dgram', 'dns', 'dns/promises', 'http2', 'inspector', 'inspector/promises', 'net', 'readline', 'readline/promises', 'repl', 'tls', 'test', 'v8', 'vm', '_http_server',
   'sea', 'sqlite', 'test/reporters', '_http_common', '_http_outgoing', 'trace_events', 'tty',
   'internal/event_target', 'internal/async_context_frame', 'internal/async_hooks', 'internal/test/binding', 'internal/test/transfer',
@@ -4899,6 +4899,28 @@ export function createRuntime({
 
   function makeBuiltins(processObject, runtimeRequire, diagnosticsChannels, runtimeOptions, performancePrimitives, trackTask, stdout, stderr, readSource, sourcePath, runtimeFetchRef, workerTransport) {
     const fs = vfs.fs;
+    let guestWasi;
+    const wasi = {
+      WASI: class BrowserWASI {
+        constructor(options = {}) {
+          if (!guestWasi) {
+            const activeProcess = scope.__bnhActiveProcess || scope.process || processObject;
+            const importer = activeProcess.__bnhActiveModulePath || sourcePath;
+            guestWasi = runtimeRequire('@tybys/wasm-util', importer, activeProcess)?.WASI;
+          }
+          if (typeof guestWasi !== 'function') throw new Error('WASI implementation is unavailable');
+          const wasiOptions = {
+            ...options,
+            fs: options.fs || fs,
+          };
+          this._bnhWasi = new guestWasi(wasiOptions);
+        }
+        getImportObject() { return this._bnhWasi.getImportObject(); }
+        initialize(...args) { return this._bnhWasi.initialize(...args); }
+        start(...args) { return this._bnhWasi.start(...args); }
+        get wasiImport() { return this._bnhWasi.wasiImport; }
+      },
+    };
     const cjsPackageConfigCache = new Map();
     const readCjsPackageConfig = (packageBase) => {
       const manifest = `${packageBase}/package.json`;
@@ -5377,19 +5399,26 @@ export function createRuntime({
         require.cache = moduleApi._cache || new Map();
         require.extensions = moduleApi._extensions;
         this.require = require;
-        return runCommonJSWrapper(
-          compileSource,
-          resolved,
-          [require, this, this.exports, resolved, path.dirname(resolved),
-            (specifier, options) => {
-              if (typeof processObj.__bnhModuleImport === 'function') {
-                return processObj.__bnhModuleImport(specifier, resolved, options);
-              }
-              throw new Error('The owning process module loader is unavailable');
-            }],
-          currentModuleWrapper,
-          processObj,
-        );
+        const previousActiveModulePath = processObj.__bnhActiveModulePath;
+        processObj.__bnhActiveModulePath = resolved;
+        try {
+          return runCommonJSWrapper(
+            compileSource,
+            resolved,
+            [require, this, this.exports, resolved, path.dirname(resolved),
+              (specifier, options) => {
+                if (typeof processObj.__bnhModuleImport === 'function') {
+                  return processObj.__bnhModuleImport(specifier, resolved, options);
+                }
+                throw new Error('The owning process module loader is unavailable');
+              }],
+            currentModuleWrapper,
+            processObj,
+          );
+        } finally {
+          if (previousActiveModulePath === undefined) delete processObj.__bnhActiveModulePath;
+          else processObj.__bnhActiveModulePath = previousActiveModulePath;
+        }
       };
       const compileCacheStatus = Object.freeze({
         FAILED: 'failed',
@@ -6791,6 +6820,7 @@ export function createRuntime({
         };
       })(),
       'util/types': utilTypes,
+      wasi,
       worker_threads: { ...createBrowserIO(scope), isMainThread: true, parentPort: null, workerData: undefined },
       zlib: createZlibShimModule(scope, Buffer, trackTask), perf_hooks: performancePrimitives.perfHooks, v8,
       async_hooks: asyncHooks,
@@ -7986,7 +8016,7 @@ export function createRuntime({
                 prepared.source = input;
               }
               const commandName = prepared.command.split('/').pop();
-              if (commandName === 'npm' || commandName === 'yarn' || commandName === 'yarnpkg') {
+              if (commandName === 'npm' || commandName === 'yarn' || commandName === 'yarnpkg' || commandName === 'pnpm') {
                 setActivityPhase('npm-command');
                 child.spawn(spawnOptions());
                 scope.queueMicrotask(() => child.emit('spawn'));
@@ -8689,9 +8719,11 @@ export function createRuntime({
           };
           const previousActiveProcess = scopeObj.__bnhActiveProcess;
           const previousRuntimeActiveProcess = processObject.__bnhActiveProcess;
+          const previousActiveModulePath = processObj.__bnhActiveModulePath;
           const previousPermissionProcess = scopeObj.__bnhModulePermissionProcess;
           scopeObj.__bnhActiveProcess = processObj;
           processObject.__bnhActiveProcess = processObj;
+          processObj.__bnhActiveModulePath = entryPath;
           scopeObj.__bnhModulePermissionProcess = processObj;
           nodeTest.__bnhSetActiveProcess?.(processObj);
           try {
@@ -8713,6 +8745,8 @@ export function createRuntime({
             else scopeObj.__bnhActiveProcess = previousActiveProcess;
             if (previousRuntimeActiveProcess === undefined) delete processObject.__bnhActiveProcess;
             else processObject.__bnhActiveProcess = previousRuntimeActiveProcess;
+            if (previousActiveModulePath === undefined) delete processObj.__bnhActiveModulePath;
+            else processObj.__bnhActiveModulePath = previousActiveModulePath;
             if (previousPermissionProcess === undefined) delete scopeObj.__bnhModulePermissionProcess;
             else scopeObj.__bnhModulePermissionProcess = previousPermissionProcess;
             nodeTest.__bnhSetActiveProcess?.(previousRuntimeActiveProcess);
@@ -9390,6 +9424,112 @@ export function createRuntime({
                 } else {
                   throw new Error(`npm config key is not available in the browser runtime: ${key}`);
                 }
+              } else if (commandName === 'pnpm') {
+                const commandArgs = prepared.commandArgs.map(String);
+                if (commandArgs.includes('--version') || commandArgs.includes('-v')) {
+                  childProc.processObject.stdout.write('10.0.0-browser\n');
+                } else if (commandArgs[0] === 'config' && commandArgs[1] === 'get') {
+                  const key = String(commandArgs[2] || '');
+                  if (key === 'registry') {
+                    const registry = String(prepared.env.npm_config_registry || 'https://registry.npmjs.org/');
+                    childProc.processObject.stdout.write(`${registry.replace(/\/+$/, '')}/\n`);
+                  } else {
+                    throw new Error(`pnpm config key is not available in the browser runtime: ${key}`);
+                  }
+                } else {
+                  const commandIndex = commandArgs.findIndex((argument) => !argument.startsWith('-'));
+                  const command = commandIndex < 0 ? '' : commandArgs[commandIndex];
+                  if (!['install', 'i', 'add'].includes(command)) {
+                    throw new Error(`pnpm ${command || '(empty command)'} is not available in the browser runtime`);
+                  }
+                  const specs = commandArgs.slice(commandIndex + 1)
+                    .filter((argument) => argument !== '--' && !argument.startsWith('-'));
+                  if (specs.length === 0) {
+                    throw new Error('pnpm install without a package spec is not available in the synchronous browser runtime');
+                  }
+                  const excludedPackageRoots = new Set();
+                  const copiedPackageRoots = new Set();
+                  const findInstalledPackage = (name, range) => {
+                    const packageRoots = [];
+                    const visitedDirectories = new Set();
+                    const findPackageRoots = (directory) => {
+                      if (visitedDirectories.has(directory)) return;
+                      visitedDirectories.add(directory);
+                      let entries;
+                      try { entries = vfs.entries(directory); } catch { return; }
+                      for (const entry of entries) {
+                        if (!entry.isDirectory?.()) continue;
+                        const child = path.join(directory, entry.name);
+                        if (entry.name === 'node_modules') {
+                          const candidate = path.join(child, name);
+                          if (vfs.files.has(path.join(candidate, 'package.json'))) packageRoots.push(candidate);
+                          for (const packageEntry of vfs.entries(child)) {
+                            if (packageEntry.isDirectory?.()) {
+                              findPackageRoots(path.join(child, packageEntry.name, 'node_modules'));
+                            }
+                          }
+                          continue;
+                        }
+                        findPackageRoots(child);
+                      }
+                    };
+                    findPackageRoots('/');
+                    return packageRoots
+                      .filter((packageRoot) => !excludedPackageRoots.has(packageRoot))
+                      .map((packageRoot) => {
+                        try {
+                          const manifest = JSON.parse(String(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8')));
+                          return satisfiesSemver(manifest.version, range) ? { packageRoot, manifest } : null;
+                        } catch {
+                          return null;
+                        }
+                      })
+                      .filter(Boolean)
+                      .sort((left, right) => left.packageRoot.length - right.packageRoot.length)[0];
+                  };
+                  const copyInstalledPackage = (name, range, targetRoot) => {
+                    const copyKey = `${targetRoot}:${name}@${range}`;
+                    if (copiedPackageRoots.has(copyKey)) return;
+                    excludedPackageRoots.add(targetRoot);
+                    const sourceManifest = findInstalledPackage(name, range);
+                    if (!sourceManifest) {
+                      throw new Error(`pnpm could not find an installed compatible package for ${name}@${range}`);
+                    }
+                    copiedPackageRoots.add(copyKey);
+                    const sourceFiles = [];
+                    const collectSourceFiles = (directory) => {
+                      let entries;
+                      try { entries = vfs.entries(directory); } catch { return; }
+                      for (const entry of entries) {
+                        const sourcePath = path.join(directory, entry.name);
+                        if (entry.isDirectory?.()) collectSourceFiles(sourcePath);
+                        else if (entry.isFile?.()) sourceFiles.push(sourcePath);
+                      }
+                    };
+                    collectSourceFiles(sourceManifest.packageRoot);
+                    for (const sourcePath of sourceFiles) {
+                      const relativePath = sourcePath.slice(sourceManifest.packageRoot.length);
+                      const targetPath = `${targetRoot}${relativePath}`;
+                      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+                      fs.writeFileSync(targetPath, fs.readFileSync(sourcePath));
+                    }
+                    const dependencies = {
+                      ...sourceManifest.manifest.dependencies,
+                      ...sourceManifest.manifest.optionalDependencies,
+                    };
+                    for (const [dependencyName, dependencyRange] of Object.entries(dependencies)) {
+                      copyInstalledPackage(
+                        dependencyName,
+                        dependencyRange,
+                        path.join(prepared.cwd, 'node_modules', dependencyName),
+                      );
+                    }
+                  };
+                  for (const spec of specs) {
+                    const parsed = parsePackageSpec(spec);
+                    copyInstalledPackage(parsed.name, parsed.range, path.join(prepared.cwd, 'node_modules', parsed.name));
+                  }
+                }
               } else {
                 if (prepared.source === null) {
                   childProc.processObject.__bnhModuleIsPreloading = true;
@@ -9780,8 +9920,9 @@ export function createRuntime({
           return execFileSync(parsed.file, parsed.args, { ...options, stdinPath: parsed.stdinPath });
         }
 
-          const runNpmChild = async (prepared, ownerProcess, childOptions = {}) => {
+        const runNpmChild = async (prepared, ownerProcess, childOptions = {}) => {
           const args = prepared.commandArgs.map(String);
+          const packageManagerName = String(prepared.command).split('/').pop();
           const optionsWithValues = new Set([
             '--cache', '--prefix', '--registry', '--userconfig', '--loglevel', '--workspace', '-w',
           ]);
@@ -9790,7 +9931,8 @@ export function createRuntime({
               const argument = String(args[index]);
               if (argument === '--') return { name: args[index + 1] || '', index: index + 1 };
               if (!argument.startsWith('-')) return { name: argument, index };
-              if (!argument.includes('=') && optionsWithValues.has(argument)) index += 1;
+              if (!argument.includes('=') && optionsWithValues.has(argument)
+                && !(packageManagerName === 'pnpm' && argument === '-w')) index += 1;
             }
             return { name: '', index: -1 };
           })();
@@ -9877,7 +10019,7 @@ export function createRuntime({
             const isNodeExecutable = (pathname) => /(?:^|\/)node(?:js)?$/.test(String(pathname));
             const commandName = String(entry).split('/').pop();
             childActivity.npmPhase = `virtual:${commandName}`;
-            if (['npm', 'yarn', 'yarnpkg'].includes(commandName)) {
+            if (['npm', 'yarn', 'yarnpkg', 'pnpm'].includes(commandName)) {
               childActivity.npmPhase = `virtual-manager:${commandName}`;
               const managerPrepared = prepareChild(entry, argv || [], {
                 cwd,
@@ -10605,7 +10747,6 @@ export function createRuntime({
             return { code: 0, stdout: stdout.join(''), stderr: stderr.join(''), streamed: true, forwarded };
           };
 
-          const packageManagerName = String(prepared.command).split('/').pop();
           const isYarn = packageManagerName === 'yarn' || packageManagerName === 'yarnpkg';
           if (isYarn && command.name && !new Set([
             '--version', '-v', 'add', 'config', 'info', 'install', 'link', 'pack', 'remove', 'run', 'run-script', 'test', 'upgrade',
@@ -10649,6 +10790,42 @@ export function createRuntime({
             try { await vfs.fs.promises.rm(linkPath, { recursive: true, force: true }); } catch { /* absent link */ }
             vfs.fs.symlinkSync(target, linkPath);
             return { code: 0, stdout: '', stderr: '' };
+          }
+
+          if (packageManagerName === 'pnpm' && command.name === 'exec') {
+            const executable = commandArguments[0];
+            const executableArgs = commandArguments.slice(1);
+            if (!executable) return { code: 1, stdout: '', stderr: 'pnpm exec requires a command\n' };
+            const pathSegments = new Set([
+              path.join(prepared.cwd, 'node_modules/.bin'),
+              '/node/node_modules/.bin',
+              ...String(env.PATH || '').split(':'),
+            ]);
+            const candidates = [...pathSegments].map((segment) => path.join(segment || prepared.cwd, executable));
+            const executablePath = candidates.find((candidate) => vfs.fs.existsSync(candidate));
+            if (!executablePath) {
+              return { code: 1, stdout: '', stderr: `pnpm exec command not found: ${executable}\n` };
+            }
+            return runVirtualCommand({
+              entry: executablePath,
+              argv: executableArgs,
+              cwd: prepared.cwd,
+              commandEnv: env,
+              stdin: prepared.stdin,
+              signal: childOptions.signal,
+              timeout: childOptions.timeout,
+              onNetwork: childOptions.onNetwork,
+              onStdout: childOptions.onStdout,
+              onStderr: childOptions.onStderr,
+            }).then((result) => ({
+              ...result,
+              // The nested command already delivered these bytes through the
+              // callbacks. Do not let the shell append the returned capture a
+              // second time at the pnpm boundary.
+              stdout: '',
+              stderr: '',
+              streamed: true,
+            }));
           }
 
           if (command.name === 'view' || command.name === 'info') {
@@ -12482,8 +12659,8 @@ export function createRuntime({
       parentURL: pathToFileURL(importer).href,
       importAttributes: {},
     });
-    const runModuleHook = (kind, value, context, fallback) => {
-      const hooks = processObject.__bnhModuleHooks || [];
+      const runModuleHook = (kind, value, context, fallback, processOverride) => {
+        let hooks = processObject.__bnhModuleHooks || [];
       const invoke = (index, currentValue, currentContext) => {
         if (index < 0) return fallback(currentValue, currentContext);
         const hook = hooks[index]?.[kind];
@@ -12495,8 +12672,11 @@ export function createRuntime({
         return result === undefined ? next() : result;
       };
       const pending = processObject.__bnhModuleRegistrationPromises;
-      if (!processObject.__bnhModuleRegistrationLoading && pending?.length) {
-        return Promise.all([...pending]).then(() => invoke(hooks.length - 1, value, context));
+      if (!processOverride?.__bnhModuleRegistrationInternal && pending?.length) {
+        return Promise.all([...pending]).then(() => {
+          hooks = processObject.__bnhModuleHooks || [];
+          return invoke(hooks.length - 1, value, context);
+        });
       }
       return invoke(hooks.length - 1, value, context);
     };
@@ -12912,7 +13092,15 @@ export function createRuntime({
         processObject.__bnhModuleRegistrationLoading = true;
         const registrationParent = registration.parentURL || entry;
         try {
-          const hook = await esmLoader.import(registration.specifier, registrationParent, {}, undefined, processObject);
+          const internalProcess = Object.create(processObject);
+          Object.defineProperty(internalProcess, '__bnhModuleRegistrationInternal', { value: true });
+          const hook = await esmLoader.import(
+            registration.specifier,
+            registrationParent,
+            {},
+            undefined,
+            internalProcess,
+          );
           await hook?.initialize?.(registration.options?.data);
           const hooks = processObject.__bnhModuleHooks || [];
           hooks.push({ resolve: hook?.resolve, load: hook?.load });

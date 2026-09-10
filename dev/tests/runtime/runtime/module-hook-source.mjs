@@ -27,3 +27,20 @@ for (const value of ['export default "café";', new TextEncoder().encode('export
     }
   });
 }
+
+test('rewrites export-from specifiers when an exported name contains from', async () => {
+  const loader = createModuleLoader({
+    files: new Map([
+      ['/node/index.mjs', "export {default as 'prefer-export-from'} from './dependency.mjs';"],
+      ['/node/dependency.mjs', 'export default 42;'],
+    ]),
+    builtins: {},
+    defaultModuleType: 'module',
+  });
+  try {
+    const namespace = await loader.import('/node/index.mjs');
+    assert.equal(namespace['prefer-export-from'], 42);
+  } finally {
+    loader.dispose();
+  }
+});

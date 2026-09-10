@@ -494,6 +494,116 @@ test.describe('browser ESM loader', () => {
     expect(result.stdout).toContain('CommonJS export star completed');
   });
 
+  test('exposes named exports from nested CommonJS __exportStar chains', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { TSESTree } from 'nested-cjs-export-star-package';
+      assert.strictEqual(TSESTree, 'forwarded through a nested chain');
+      process.stdout.write('nested CommonJS export star completed');
+    `, {
+      entryPath: '/node/nested-cjs-export-star-entry.mjs',
+      files: {
+        '/node/node_modules/nested-cjs-export-star-package/package.json': JSON.stringify({
+          type: 'module',
+          exports: { '.': { import: './dist/index.js' } },
+        }),
+        '/node/node_modules/nested-cjs-export-star-package/dist/package.json': JSON.stringify({ type: 'commonjs' }),
+        '/node/node_modules/nested-cjs-export-star-package/dist/index.js': `
+          "use strict";
+          Object.defineProperty(exports, "__esModule", { value: true });
+          var __exportStar = (this && this.__exportStar) || function (m, exports) {
+            for (var p in m) if (p !== "default" && !Object.prototype.hasOwnProperty.call(exports, p)) exports[p] = m[p];
+          };
+          __exportStar(require("./ts-estree.js"), exports);
+        `,
+        '/node/node_modules/nested-cjs-export-star-package/dist/ts-estree.js': `
+          "use strict";
+          Object.defineProperty(exports, "__esModule", { value: true });
+          var ast_spec_1 = require("./generated/ast-spec.js");
+          Object.defineProperty(exports, "TSESTree", { enumerable: true, get: function () { return ast_spec_1.TSESTree; } });
+        `,
+        '/node/node_modules/nested-cjs-export-star-package/dist/generated/ast-spec.js': `
+          "use strict";
+          exports.TSESTree = 'forwarded through a nested chain';
+        `,
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('nested CommonJS export star completed');
+  });
+
+  test('exposes TSESTree from the TypeScript ESLint CommonJS build shape', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { TSESTree } from '@typescript-eslint/types';
+      assert.strictEqual(TSESTree.TSESTreeMarker, 'typescript-eslint shape');
+      process.stdout.write('typescript-eslint CommonJS exports completed');
+    `, {
+      entryPath: '/node/typescript-eslint-entry.mjs',
+      files: {
+        '/node/node_modules/@typescript-eslint/types/package.json': JSON.stringify({
+          name: '@typescript-eslint/types',
+          main: 'dist/index.js',
+        }),
+        '/node/node_modules/@typescript-eslint/types/dist/index.js': `
+          "use strict";
+          /*
+           * This comment mirrors the ESM usage examples in typescript-eslint's
+           * generated CommonJS entry point.
+           * import tseslint from '@typescript-eslint/types';
+           * export default tseslint;
+           */
+          var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+            if (k2 === undefined) k2 = k;
+            var desc = Object.getOwnPropertyDescriptor(m, k);
+            if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+              desc = { enumerable: true, get: function() { return m[k]; } };
+            }
+            Object.defineProperty(o, k2, desc);
+          }) : (function(o, m, k, k2) { if (k2 === undefined) k2 = k; o[k2] = m[k]; }));
+          var __exportStar = (this && this.__exportStar) || function(m, exports) {
+            for (var p in m) if (p !== "default" && !Object.prototype.hasOwnProperty.call(exports, p)) __createBinding(exports, m, p);
+          };
+          Object.defineProperty(exports, "__esModule", { value: true });
+          __exportStar(require("./ts-estree"), exports);
+        `,
+        '/node/node_modules/@typescript-eslint/types/dist/ts-estree.js': `
+          "use strict";
+          var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+            if (k2 === undefined) k2 = k;
+            var desc = Object.getOwnPropertyDescriptor(m, k);
+            if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+              desc = { enumerable: true, get: function() { return m[k]; } };
+            }
+            Object.defineProperty(o, k2, desc);
+          }) : (function(o, m, k, k2) { if (k2 === undefined) k2 = k; o[k2] = m[k]; }));
+          var __setModuleDefault = (this && this.__setModuleDefault) || function(o, v) {
+            Object.defineProperty(o, "default", { enumerable: true, value: v });
+          };
+          var __importStar = (this && this.__importStar) || function (mod) {
+            if (mod && mod.__esModule) return mod;
+            var result = {};
+            if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+            __setModuleDefault(result, mod);
+            return result;
+          };
+          Object.defineProperty(exports, "__esModule", { value: true });
+          exports.TSESTree = void 0;
+          exports.TSESTree = __importStar(require("./generated/ast-spec"));
+        `,
+        '/node/node_modules/@typescript-eslint/types/dist/generated/ast-spec.js': `
+          "use strict";
+          Object.defineProperty(exports, "__esModule", { value: true });
+          exports.TSESTreeMarker = 'typescript-eslint shape';
+        `,
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('typescript-eslint CommonJS exports completed');
+  });
+
   test('keeps export-star names available through an ESM cycle', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       import assert from 'node:assert/strict';

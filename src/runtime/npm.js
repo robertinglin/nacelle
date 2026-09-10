@@ -30,7 +30,7 @@ function isBrowserNativePackage(name, platform) {
 
 function isBrowserWasmPackage(name, platform) {
   if (platform !== 'browser') return false;
-  return /(?:^|[-/])wasm(?:[-/]|$)/i.test(String(name));
+  return /(?:^|[-/])wasm\d*(?:[-/]|$)/i.test(String(name));
 }
 
 function optionalPackageSupportsTarget(name, manifest, platform, arch, libc) {

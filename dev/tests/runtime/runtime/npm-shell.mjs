@@ -162,6 +162,80 @@ test('bash exposes common file, process, and text commands', async () => {
   assert.equal(await node.fs.readFile('/node/work/tee.txt'), 'tee\n');
 });
 
+test('rm accepts bundled force and recursive options', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: { '/node/keep.txt': 'keep\n' },
+  });
+  const child = await node.bash('rm -rf missing && cat keep.txt');
+  assert.equal(await child.exit, 0);
+  assert.equal(await child.stdoutText(), 'keep\n');
+});
+
+test('synchronous pnpm installs an already-mounted compatible package', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/node_modules/fixture/package.json': JSON.stringify({
+        name: 'fixture',
+        version: '1.2.3',
+        main: 'index.js',
+        dependencies: { 'fixture-dep': '1.0.0' },
+      }),
+      '/node/node_modules/fixture/index.js': 'module.exports = { value: require("fixture-dep").value };\n',
+      '/node/node_modules/fixture-dep/package.json': JSON.stringify({ name: 'fixture-dep', version: '1.0.0', main: 'index.js' }),
+      '/node/node_modules/fixture-dep/index.js': 'module.exports = { value: "mounted" };\n',
+    },
+  });
+  const child = await node.execute(`
+    const { spawnSync } = require('node:child_process');
+    const result = spawnSync('pnpm', ['i', 'fixture@1.2.3'], { cwd: '/node/.pnpm-temp', encoding: 'utf8' });
+    if (result.status !== 0) throw new Error(JSON.stringify(result));
+    process.stdout.write(require('/node/.pnpm-temp/node_modules/fixture').value);
+  `);
+  assert.equal(await child.exit, 0, await child.stderrText());
+  assert.equal(await child.stdoutText(), 'mounted');
+});
+
+test('synchronous pnpm reports the configured registry', async () => {
+  const node = await Nacelle.create({ gateway: false });
+  const child = await node.execute(`
+    const { spawnSync } = require('node:child_process');
+    const result = spawnSync('pnpm', ['config', 'get', 'registry'], { encoding: 'utf8' });
+    if (result.status !== 0) throw new Error(JSON.stringify(result));
+    process.stdout.write(result.stdout);
+  `);
+  assert.equal(await child.exit, 0, await child.stderrText());
+  assert.equal(await child.stdoutText(), 'https://registry.npmjs.org/\n');
+});
+
+test('pnpm exec runs a workspace binary', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/package.json': JSON.stringify({
+        name: 'pnpm-exec-fixture',
+        version: '1.0.0',
+      }),
+      '/node/node_modules/.bin/fixture-bin': '#!/usr/bin/env node\nprocess.stdout.write(process.argv.slice(2).join(":"));\n',
+    },
+  });
+  const child = await node.execute(`
+    const { spawn } = require('node:child_process');
+    const processHandle = spawn('pnpm', ['-w', 'exec', 'fixture-bin', 'hello'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    processHandle.stdout.on('data', (chunk) => { stdout += chunk; });
+    processHandle.stderr.on('data', (chunk) => { stderr += chunk; });
+    processHandle.on('close', (code) => {
+      if (code !== 0) throw new Error(stderr || 'pnpm exec failed');
+      process.stdout.write(stdout);
+    });
+  `);
+  assert.equal(await child.exit, 0, await child.stderrText());
+  assert.equal(await child.stdoutText(), 'hello');
+});
+
 test('npm scripts run through the shell compatibility layer', async () => {
   const hostProcess = globalThis.process;
   const hostConsole = globalThis.console;

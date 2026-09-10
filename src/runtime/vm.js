@@ -666,11 +666,11 @@ export function createVmModule(scope = globalThis) {
       markContext(context);
       const realm = createBrowserRealm(scope);
       if (!realm) installSyntheticRealm(scope, context);
-      // A browser iframe has its own intrinsic Error constructor. Keep the
-      // V8 captureStackTrace contract consistent with the owning runtime so
-      // modules evaluated inside vm contexts (including tap's TypeScript
-      // path) do not receive an unstructured or missing stack.
-      installErrorStackCompatibility(realm?.global || context);
+      // Worker contexts do not have a separate browser realm, so make sure
+      // their owning global has the V8 stack contract before evaluation. A
+      // browser iframe already supplies its own native Error implementation;
+      // patching every iframe would add substantial work to vm-heavy builds.
+      if (!realm) installErrorStackCompatibility(scope);
       CONTEXT_REALMS.set(context, realm);
     }
     const realm = CONTEXT_REALMS.get(context);

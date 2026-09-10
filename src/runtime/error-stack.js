@@ -92,35 +92,36 @@ function installCaptureStackTrace(ErrorConstructor) {
       rawStack = retryTarget.stack;
       callSites = parseCallSites(rawStack);
     }
-    let evaluated = false;
-    let value;
-
+    // Browser fallbacks need to preserve a structured formatter selected at
+    // capture time. Consumers such as tap temporarily install
+    // `prepareStackTrace`, capture the stack, and restore it before reading
+    // the result.
+    const prepareStackTrace = ErrorConstructor.prepareStackTrace;
+    const value = typeof prepareStackTrace === 'function'
+      ? prepareStackTrace(target, callSites)
+      : formatCallSites(target, callSites);
     Object.defineProperty(target, 'stack', {
       configurable: true,
       enumerable: false,
-      get() {
-        if (!evaluated) {
-          evaluated = true;
-          const prepareStackTrace = ErrorConstructor.prepareStackTrace;
-          value = typeof prepareStackTrace === 'function'
-            ? prepareStackTrace(target, callSites)
-            : formatCallSites(target, callSites);
-        }
-        return value;
-      },
-      set(nextValue) {
-        evaluated = true;
-        value = nextValue;
-      },
+      value,
+      writable: true,
     });
     return target;
   };
-  ErrorConstructor.captureStackTrace = captureStackTrace;
+  try {
+    Object.defineProperty(ErrorConstructor, 'captureStackTrace', {
+      configurable: true,
+      writable: true,
+      value: captureStackTrace,
+    });
+  } catch {
+    ErrorConstructor.captureStackTrace = captureStackTrace;
+  }
 }
 
 function installStructuredCaptureFallback(ErrorConstructor) {
   const nativeCaptureStackTrace = ErrorConstructor.captureStackTrace;
-  ErrorConstructor.captureStackTrace = function captureStackTrace(target, constructorOpt) {
+  const captureStackTrace = function captureStackTrace(target, constructorOpt) {
     // Capture into a disposable object first. Some browser implementations
     // install an unusable lazy `stack` property on the caller's object; if we
     // capture there first, that property can prevent the retry from being
@@ -146,6 +147,14 @@ function installStructuredCaptureFallback(ErrorConstructor) {
       // @tapjs/stack call Array.prototype methods on the result.
       capturedStack = retryStack === undefined ? [] : retryStack;
     }
+    if (Array.isArray(capturedStack)
+      && capturedStack.some((site) => site && typeof site === 'object'
+        && typeof site.getFileName !== 'function')) {
+      // Firefox can expose an array from prepareStackTrace while its entries
+      // are still browser-native strings/objects rather than Node CallSites.
+      // Normalize those entries before returning the structured contract.
+      capturedStack = parseCallSites(capturedStack.join('\n'));
+    }
     try {
       Object.defineProperty(target, 'stack', {
         configurable: true,
@@ -158,6 +167,15 @@ function installStructuredCaptureFallback(ErrorConstructor) {
     }
     return target;
   };
+  try {
+    Object.defineProperty(ErrorConstructor, 'captureStackTrace', {
+      configurable: true,
+      writable: true,
+      value: captureStackTrace,
+    });
+  } catch {
+    ErrorConstructor.captureStackTrace = captureStackTrace;
+  }
 }
 
 export function installErrorStackCompatibility(globalObject = globalThis) {

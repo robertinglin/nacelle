@@ -630,10 +630,29 @@ export default nextConfig;
     }
 
     // Global navigation function
-    window.navigateFrame = (route = '/') => {
+    window.navigateFrame = async (route = '/') => {
       urlInput.value = route;
       logNetwork(`HTTP GET ${route}`);
       if (node) {
+        if (route.startsWith('/api/')) {
+          const navigation = (async () => {
+            try {
+              const response = await fetch(node.getVirtualUrl(3000, route));
+              const text = await response.text();
+              const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+              const previewDocument = iframe.contentDocument;
+              previewDocument.open();
+              previewDocument.write(`<pre>${escaped}</pre>`);
+              previewDocument.close();
+              logNetwork(`${response.status} ${route} · virtual fetch`);
+            } catch (error) {
+              logNetwork(`ERROR GET ${route} · ${error?.message || error}`);
+            }
+          })();
+          window.__bnhNavigationPromise = navigation;
+          await navigation;
+          return;
+        }
         node.connectIframe(iframe, {
           port: 3000,
           path: route,

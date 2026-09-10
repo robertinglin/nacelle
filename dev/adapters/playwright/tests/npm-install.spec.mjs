@@ -69,6 +69,14 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     expect([...vfs.fs.readFileSync('/node/numeric.txt')]).toEqual([7, 8, 9]);
   });
 
+  test('VFS opens read-only directories for fd metadata consumers', () => {
+    const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
+    const fd = vfs.fs.openSync('/node', 'r');
+    expect(vfs.fs.fstatSync(fd).isDirectory()).toBe(true);
+    vfs.fs.closeSync(fd);
+    expect(() => vfs.fs.openSync('/node', 'r+')).toThrow(/EISDIR/);
+  });
+
   test('semver utilities parse and match version specs', () => {
     expect(parsePackageSpec('express@4.19.2')).toEqual({ name: 'express', range: '4.19.2' });
     expect(parsePackageSpec('@types/node@^20.0.0')).toEqual({ name: '@types/node', range: '^20.0.0' });
@@ -491,6 +499,59 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
 
     expect(vfs.files.has('/node/node_modules/optional-config/package.json')).toBe(true);
     expect(vfs.files.has('/node/node_modules/optional-tool/package.json')).toBe(false);
+  });
+
+  test('installs browser-compatible wasm32 optional dependencies', async () => {
+    const encoder = new TextEncoder();
+    const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
+    const packages = new Map();
+    const archives = new Map();
+    const addPackage = async (name, version, manifest) => {
+      packages.set(name, {
+        name,
+        'dist-tags': { latest: version },
+        versions: {
+          [version]: {
+            name,
+            version,
+            ...manifest,
+            dist: { tarball: `https://registry.test/${name}/-/${name}-${version}.tgz` },
+          },
+        },
+      });
+      archives.set(`${name}@${version}`, await packTarGz([{
+        path: 'package/package.json',
+        data: encoder.encode(JSON.stringify({ name, version, ...manifest })),
+      }, {
+        path: 'package/binding.wasi.cjs',
+        data: encoder.encode('module.exports = {};'),
+      }]));
+    };
+    await addPackage('resolver', '1.0.0', {
+      optionalDependencies: { 'resolver-binding-wasm32-wasi': '1.0.0' },
+    });
+    await addPackage('resolver-binding-wasm32-wasi', '1.0.0', { os: ['linux'] });
+
+    const npm = new BrowserNpm({
+      vfs,
+      registry: 'https://registry.test',
+      proxyUrl: null,
+      fetchFn: async (url) => {
+        const pathname = new URL(url).pathname;
+        const packageName = pathname.split('/')[1];
+        if (pathname.endsWith(`/${packageName}`)) {
+          return { ok: true, status: 200, json: async () => packages.get(packageName) };
+        }
+        const match = pathname.match(/\/([^/]+)-([0-9.]+)\.tgz$/);
+        if (match) return { ok: true, status: 200, arrayBuffer: async () => archives.get(`${match[1]}@${match[2]}`).buffer };
+        return { ok: false, status: 404 };
+      },
+    });
+
+    await npm.install('resolver@1.0.0', { cwd: '/node' });
+
+    expect(vfs.files.has('/node/node_modules/resolver-binding-wasm32-wasi/package.json')).toBe(true);
+    expect(vfs.files.has('/node/node_modules/resolver-binding-wasm32-wasi/binding.wasi.cjs')).toBe(true);
   });
 
   test('BrowserNpm nests incompatible concurrent dependency versions', async () => {

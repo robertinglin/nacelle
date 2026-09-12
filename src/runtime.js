@@ -3515,10 +3515,12 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       }
       if (!handled) handled = processObject.emit('uncaughtException', error, origin);
       if (!handled) {
+        const errorText = error?.stack
+          || (error && typeof error === 'object' ? nodeInspect(error) : error);
         if (typeof stderr === 'function') {
-          stderr(`${error?.stack || error}\n`);
+          stderr(`${errorText}\n`);
         } else if (processObject.stderr?.write) {
-          processObject.stderr.write(`${error?.stack || error}\n`);
+          processObject.stderr.write(`${errorText}\n`);
         }
         if (options.abortOnUncaughtException) terminateBySignal('SIGABRT');
         else {
@@ -14092,6 +14094,11 @@ export function createRuntime({
     }
     const earlyUnhandledRejections = new WeakSet();
     const dispatchUnhandledRejection = (promise, reason) => {
+      // A virtual process uses a private rejection value to unwind an
+      // explicit process.exit() through async worker boundaries. The worker
+      // owns that terminal signal; it is never a user-visible rejection in
+      // the process that launched the worker.
+      if (reason?.[Symbol.for('bnh.process-exit')] === true) return;
       // Node stops observing user work once process.exit() has been requested.
       // Browser promise callbacks can still surface one already-queued
       // rejection on the following host turn; do not let that late delivery

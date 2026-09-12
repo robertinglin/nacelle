@@ -26,7 +26,7 @@ not being reclassified as newly rerun here.
 | 10 | emoji-regex | PASS | none observed | Published `emoji-regex@10.6.0` passed on the first Chromium CITGM run `citgm-1789065974177`; install and all four child phases exited 0. No runtime, nested-dependency, or upstream package/repository failure was observed. Required gates: build passed; `npm test` 296/296; Chromium Playwright 243/243; Firefox Playwright 243/243. |
 | 11 | wrap-ansi | PASS | ours | Published `wrap-ansi@10.0.1` passed final Chromium CITGM `citgm-1789070077131`; the package-level failures were fixed in the shared ESM literal scanner and bare `node --test` discovery. Required gates passed after rebuilding the generated bundle: `npm test` 296/296; Chromium Playwright 246/246; Firefox Playwright 246/246. |
 | 12 | lru-cache | PASS | ours | Published `lru-cache@11.5.2` now passes exact CITGM in both browsers: Firefox `citgm-1789211689248` and Chromium `citgm-1789211984176`; all 29 upstream TAP subtests and 19,628 assertions pass, including all six `esbuild-wasm` build invocations. Required final gates passed after the fix: build; `npm test` 333/333; Chromium Playwright 266/266; Firefox Playwright 266/266. The native esbuild, timer-drain, process-output, async ordering, and late post-exit rejection behaviors were fixed in the shared browser runtime; ranks 13–100 remain pending until this rank-12 commit is clean. |
-| 13 | tslib | PENDING | — | Not attempted; rank 12 requires a successful commit first. |
+| 13 | tslib | BLOCKED | upstream package/repository (CITGM test contract) | Published `tslib@2.8.1` installs successfully in Chromium (`citgm-1789213425873`) and Firefox (`citgm-1789213473799`), but both CITGM runs stop before package execution with `Module does not support npm-test!`. The package metadata has no `scripts.test`; there is no browser-runtime behavior to fix and no safe test shim to add. The blocker is recorded and ranks 14–100 remain pending until this status commit is clean. |
 | 14 | picomatch | PENDING | — | Not attempted; rank 12 requires a successful commit first. |
 | 15 | glob | PENDING | — | Not attempted; rank 12 requires a successful commit first. |
 | 16 | minipass | PENDING | — | Not attempted; rank 12 requires a successful commit first. |
@@ -237,6 +237,32 @@ worker termination, async dynamic imports, Promise pressure, and the six
 successful `esbuild-wasm` build invocations in the real CITGM run. Historical
 failures remain preserved above and are classified as harness-owned runtime
 compatibility issues; no fake native package shim was added.
+
+## Rank 13 failure record
+
+Both browser CITGM runs used the published `tslib@2.8.1` candidate and
+successfully completed npm installation. CITGM 10.0.2 then loaded its generic
+package-manager test phase and rejected the candidate before launching any
+tslib test command because its package metadata has no `scripts.test` entry.
+The complete artifacts are preserved under
+`artifacts/citgm-top-100/rank-013-tslib/`.
+
+| Run / log | Observed failure | Classification and resolution |
+| --- | --- | --- |
+| `citgm-1789213425873` / `citgm-chromium-1/` | Install completed, then CITGM reported `Module does not support npm-test!` for `tslib@2.8.1`; no package test command was launched. | Upstream package/repository and CITGM contract blocker. The package tarball has no `scripts.test`; adding a fake test entry would misrepresent upstream coverage, so no harness change is appropriate. |
+| `citgm-1789213473799` / `citgm-firefox-1/` | Firefox reproduced the identical pre-test rejection after successful installation. | Same upstream package/repository and CITGM contract blocker; not a browser runtime or nested dependency failure. |
+
+## Rank 13 gate evidence
+
+The package-level CITGM result cannot become green without upstream adding a
+supported test command or CITGM adding an explicit package-specific test
+definition. Repository gates for this blocker record remain green:
+
+```text
+npm test                                                   PASS — 333/333
+npm run test:browser:chromium                             PASS — 266/266
+npm run test:browser:firefox                              PASS — 266/266
+```
 
 ## Rank 7 CITGM evidence
 

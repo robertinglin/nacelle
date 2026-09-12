@@ -309,10 +309,15 @@ function browserHeapMemory(globalObject) {
 
 function browserHeapStatistics(globalObject) {
   const { total, used, limit } = browserHeapMemory(globalObject);
+  // Chromium does not expose performance.memory on every harness page. Keep
+  // the Node shape meaningful in that case: zero heap sizes make ordinary
+  // growth comparisons produce NaN even when the runtime is collecting
+  // normally.
+  const observedTotal = Math.max(total, used, 1);
   return {
-    total_heap_size: total,
+    total_heap_size: observedTotal,
     total_heap_size_executable: 0,
-    total_physical_size: total,
+    total_physical_size: observedTotal,
     total_available_size: limit - used,
     used_heap_size: used,
     heap_size_limit: limit,

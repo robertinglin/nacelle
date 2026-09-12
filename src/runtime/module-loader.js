@@ -271,6 +271,13 @@ export function createModuleLoader({
   const moduleURLs = new Map();
   const buildingModuleKeys = new Set();
   const importCache = new Map();
+  // Native dynamic imports from one module are prepared in request order,
+  // even though their evaluations may overlap.  This matters to runners
+  // such as tap that register tests from a series of unawaited imports: the
+  // browser evaluator must see the same module-job order as Node.
+  const dynamicImportLanes = new Map();
+  const dynamicImportHandoffs = new WeakMap();
+  const dynamicImportHandoffIdleTurns = 64;
   const nativeSpecifierHints = new Map();
   const cycleModuleURLs = new Map();
   const cycleRegistrations = new Map();
@@ -573,17 +580,47 @@ export function createModuleLoader({
     return { ...result, url: result.url || url };
   };
 
-  const hookURLToSpecifier = (url) => {
+  // tap's mock loader identifies a mock service by putting `tapmock=...` on
+  // the importing module URL. A resolve hook is allowed to return a fresh
+  // file URL for an ordinary child, but that child still belongs to the same
+  // mock graph. Preserve the service identity at this boundary so a
+  // transitive import cannot accidentally fall back to the shared module
+  // cache or the unmocked VFS source.
+  const inheritTapmockIdentity = (resolved, importer) => {
+    if (typeof resolved !== 'string' || typeof importer !== 'string') return resolved;
+    let parentURL;
+    try {
+      parentURL = new URL(importer.startsWith('file:') ? importer : fileURL(importer));
+    } catch {
+      return resolved;
+    }
+    const identity = parentURL.searchParams.get('tapmock');
+    if (!identity || resolved.startsWith('tapmock:')) return resolved;
+    let childURL;
+    try {
+      childURL = new URL(resolved.startsWith('file:') ? resolved : fileURL(resolved));
+    } catch {
+      return resolved;
+    }
+    if (childURL.protocol !== 'file:' || childURL.searchParams.has('tapmock')) return resolved;
+    childURL.searchParams.set('tapmock', identity);
+    return `${fileURLToPath(String(childURL))}${childURL.search}${childURL.hash}`;
+  };
+
+  const hookURLToSpecifier = (url, importer = null) => {
     if (url.startsWith('file:')) {
       // Queries are part of Node's module identity. tap's mock loader uses a
       // `?tapmock=...` query to force each mock service to get a fresh module
       // instance. Keep that identity when crossing the file-URL boundary;
       // VFS reads strip it at the filesystem seam above.
       const parsed = new URL(url);
-      return `${fileURLToPath(url)}${parsed.search}${parsed.hash}`;
+      return inheritTapmockIdentity(
+        `${fileURLToPath(url)}${parsed.search}${parsed.hash}`,
+        importer,
+      );
     }
     if (url.startsWith('node:')) return url;
-    return url;
+    return inheritTapmockIdentity(url, importer);
   };
 
   const sourceText = (value) => typeof value === 'string'
@@ -834,9 +871,11 @@ export function createModuleLoader({
     const parts = specifier.split('/');
     const packageName = specifier.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
     const subpath = parts.slice(packageName.split('/').length).join('/');
+    const resolutionTrace = [];
     let directory = posix.dirname(importer);
     for (;;) {
       const packageRoot = posix.join(directory, 'node_modules', packageName);
+      resolutionTrace.push(`${packageRoot}:${hasFile(posix.join(packageRoot, 'package.json')) ? 'present' : 'missing'}`);
       let config;
       try {
         config = packageConfig(packageRoot);
@@ -879,7 +918,11 @@ export function createModuleLoader({
       if (directory === '/' || directory === '.' || directory === '') break;
       directory = posix.dirname(directory);
     }
-    return undefined;
+    const error = packageError(
+      'MODULE_NOT_FOUND',
+      `Cannot find package '${specifier}' imported from '${importer}' (searched ${resolutionTrace.join(', ')})`,
+    );
+    throw error;
   };
 
   const resolveInternalModule = (specifier) => {
@@ -1322,7 +1365,7 @@ export function createModuleLoader({
   function rewriteSpecifier(specifier, importer, exportName, processOverride) {
     specifier = decodeStaticString(specifier);
     const resolvedResult = runResolveHooks(specifier, importer, ['node', 'import'], processOverride);
-    const resolved = hookURLToSpecifier(resolvedResult.url);
+    const resolved = hookURLToSpecifier(resolvedResult.url, importer);
     if (exportName && cjsHasEsmSyntax(resolved)) return invalidCjsModuleURL(specifier, exportName);
     const formatHint = Object.hasOwn(resolvedResult, 'format') ? resolvedResult.format : null;
     const url = moduleURL(resolved, processOverride, formatHint);
@@ -1545,13 +1588,22 @@ export function createModuleLoader({
     };
     if (dynamicImportPattern.test(maskJavaScriptLiterals(rewritten))) {
       dynamicImportPattern.lastIndex = 0;
-      const token = register((dynamicSpecifier, options) => importModule(
-        dynamicSpecifier,
-        importer,
-        {},
-        options,
-        processOverride,
-      ));
+      const token = register((dynamicSpecifier, options) => {
+        const result = importModule(
+          dynamicSpecifier,
+          importer,
+          {},
+          options,
+          processOverride,
+          importer,
+        );
+        const trackedResult = Promise.resolve(result);
+        processOverride?._bnhTrackEsmImport?.(trackedResult, {
+          waitForZeroTimer: isBuiltinSpecifier(dynamicSpecifier)
+            || String(dynamicSpecifier).startsWith('node:'),
+        });
+        return trackedResult;
+      });
       rewritten = rewriteDynamicImports(rewritten, `globalThis[${quote(registryName)}][${quote(token)}](`);
     }
     if (/(?<![\w$?.])eval\s*\(/.test(maskJavaScriptLiterals(rewritten))) {
@@ -1563,6 +1615,7 @@ export function createModuleLoader({
           {},
           options,
           processOverride,
+          importer,
         ));
         const evaluated = rewriteDynamicImports(
           value,
@@ -1577,7 +1630,7 @@ export function createModuleLoader({
         const hooked = runResolveHooks(specifier, importer, ['node', 'import'], processOverride);
         if (hooked && typeof hooked.then === 'function') hooked.catch(() => {});
         const resolved = hooked && typeof hooked.url === 'string'
-          ? hookURLToSpecifier(hooked.url)
+          ? hookURLToSpecifier(hooked.url, importer)
           : resolve(specifier, importer, ['node', 'import']);
         if (isBuiltinSpecifier(resolved) || resolved.startsWith('node:')) return `node:${builtinName(resolved)}`;
         return resolved.startsWith('data:') ? resolved : fileURL(resolved);
@@ -1666,7 +1719,7 @@ export function createModuleLoader({
       : resolved.startsWith('data:') ? 'module'
       : resolved.endsWith('.json') ? 'json' : moduleFormatForHook(resolved);
     const loaded = runLoadHooks(resolved, format, processOverride);
-    const loadedResolved = loaded.url ? hookURLToSpecifier(loaded.url) : resolved;
+    const loadedResolved = loaded.url ? hookURLToSpecifier(loaded.url, resolved) : resolved;
     if (loaded.format === 'builtin' && isBuiltinSpecifier(loadedResolved)) {
       return builtinModuleSource(loadedResolved, builtin(loadedResolved, processOverride));
     }
@@ -1884,6 +1937,17 @@ export function createModuleLoader({
   // before invoking the browser evaluator so HTTP imports work from both
   // --import preloads and --input-type=module entry points.
   const asyncModuleURLs = new Map();
+  const asyncModuleDependencies = new Map();
+  const asyncModuleDependsOn = (key, ancestors, seen = new Set()) => {
+    if (seen.has(key)) return false;
+    seen.add(key);
+    const dependencies = asyncModuleDependencies.get(key);
+    if (!dependencies) return false;
+    for (const dependency of dependencies) {
+      if (ancestors.has(dependency) || asyncModuleDependsOn(dependency, ancestors, seen)) return true;
+    }
+    return false;
+  };
   const runLoadHooksAsync = async (resolved, format, processOverride) => {
     const url = format === 'builtin'
       ? `node:${builtinName(resolved)}`
@@ -1901,6 +1965,62 @@ export function createModuleLoader({
       : runLoadHooks(resolved, format, processOverride);
     if (!result || typeof result !== 'object') throw new TypeError('module load hook must return an object');
     return { ...result, url: result.url || url };
+  };
+
+  const acquireDynamicImportHandoff = (processOverride, tracker) => {
+    const owner = processOverride || globalObject.process;
+    if ((typeof owner !== 'object' && typeof owner !== 'function') || typeof tracker !== 'function') return null;
+    let state = dynamicImportHandoffs.get(owner);
+    if (!state) {
+      state = {
+        active: 0,
+        idleTurns: 0,
+        timer: null,
+        released: false,
+        release: tracker('esm-dynamic-handoff'),
+      };
+      dynamicImportHandoffs.set(owner, state);
+    }
+    state.active += 1;
+    state.idleTurns = 0;
+    let settled = false;
+    return () => {
+      if (settled) return;
+      settled = true;
+      state.active -= 1;
+      state.idleTurns = 0;
+      if (state.active !== 0 || state.released || state.timer !== null) return;
+      const pendingTaskCount = owner._bnhPendingTaskCount;
+      // This is loader lifecycle bookkeeping, not guest-visible work. A
+      // package may replace global setTimeout (test fake clocks are a common
+      // example) before an awaited dynamic import settles; scheduling the
+      // handoff probe through that replacement would leave the process alive
+      // forever because the package clock never advances the probe.
+      const lifecycleSetTimeout = globalObject.__BNH_NATIVE_TIMERS__?.setTimeout
+        || globalObject.setTimeout;
+      const schedule = typeof lifecycleSetTimeout === 'function'
+        ? (callback) => lifecycleSetTimeout.call(globalObject, callback, 0)
+        : (callback) => Promise.resolve().then(callback);
+      const check = () => {
+        state.timer = null;
+        if (state.released) return;
+        const count = typeof pendingTaskCount === 'function' ? pendingTaskCount() : undefined;
+        if (state.active !== 0 || (count !== undefined && count > 1)) {
+          state.idleTurns = 0;
+          state.timer = schedule(check);
+          return;
+        }
+        state.idleTurns += 1;
+        if (state.idleTurns < dynamicImportHandoffIdleTurns) {
+          state.timer = schedule(check);
+          return;
+        }
+        state.released = true;
+        dynamicImportHandoffs.delete(owner);
+        state.release?.();
+      };
+      state.timer = schedule(check);
+    };
   };
 
   const rewriteImportsAsync = async (source, importer, processOverride, ancestors) => {
@@ -1927,7 +2047,7 @@ export function createModuleLoader({
         const specifierStart = match.index + quoteOffset + 1;
         const specifier = rewritten.slice(specifierStart, specifierStart + match[4].length);
         const resolvedResult = await runResolveHooksAsync(specifier, importer, ['node', 'import'], processOverride);
-        const resolved = hookURLToSpecifier(resolvedResult.url);
+        const resolved = hookURLToSpecifier(resolvedResult.url, importer);
         const formatHint = Object.hasOwn(resolvedResult, 'format') ? resolvedResult.format : null;
         const url = await moduleURLAsync(resolved, processOverride, importer, ancestors, formatHint);
         nativeSpecifierHints.set(url, specifier);
@@ -1985,9 +2105,9 @@ export function createModuleLoader({
       dynamicImportPattern.lastIndex = 0;
       const token = register((dynamicSpecifier, options) => {
         const pending = globalObject.process?.__bnhModuleRegistrationPromises;
-        const load = () => importModule(dynamicSpecifier, importer, {}, options, processOverride);
+        const load = () => importModule(dynamicSpecifier, importer, {}, options, processOverride, importer);
         const tracker = processOverride?._bnhTaskTracker || globalObject.process?._bnhTaskTracker;
-        const release = typeof tracker === 'function' ? tracker() : null;
+        const release = acquireDynamicImportHandoff(processOverride, tracker);
         let result;
         try {
           result = pending?.length ? Promise.all([...pending]).then(load) : load();
@@ -1995,10 +2115,15 @@ export function createModuleLoader({
           release?.();
           throw error;
         }
-        return Promise.resolve(result).then(
+        const trackedResult = Promise.resolve(result).then(
           (value) => { release?.(); return value; },
           (error) => { release?.(); throw error; },
         );
+        processOverride?._bnhTrackEsmImport?.(trackedResult, {
+          waitForZeroTimer: isBuiltinSpecifier(dynamicSpecifier)
+            || String(dynamicSpecifier).startsWith('node:'),
+        });
+        return trackedResult;
       });
       rewritten = rewriteDynamicImports(rewritten, `globalThis[${quote(registryName)}][${quote(token)}](`);
     }
@@ -2011,6 +2136,7 @@ export function createModuleLoader({
           {},
           options,
           processOverride,
+          importer,
         ));
         const evaluated = rewriteDynamicImports(
           value,
@@ -2025,7 +2151,7 @@ export function createModuleLoader({
         const hooked = runResolveHooks(specifier, importer, ['node', 'import'], processOverride);
         if (hooked && typeof hooked.then === 'function') hooked.catch(() => {});
         const resolved = hooked && typeof hooked.url === 'string'
-          ? hookURLToSpecifier(hooked.url)
+          ? hookURLToSpecifier(hooked.url, importer)
           : resolve(specifier, importer, ['node', 'import']);
         if (isBuiltinSpecifier(resolved) || resolved.startsWith('node:')) return `node:${builtinName(resolved)}`;
         return resolved.startsWith('data:') ? resolved : fileURL(resolved);
@@ -2047,7 +2173,7 @@ export function createModuleLoader({
       : /^[A-Za-z][A-Za-z\d+.-]*:/.test(resolved) ? 'module'
       : resolved.endsWith('.json') ? 'json' : moduleFormatForHook(resolved);
     const loaded = await runLoadHooksAsync(resolved, format, processOverride);
-    const loadedResolved = loaded.url ? hookURLToSpecifier(loaded.url) : resolved;
+    const loadedResolved = loaded.url ? hookURLToSpecifier(loaded.url, resolved) : resolved;
     if (loaded.format === 'builtin' && isBuiltinSpecifier(loadedResolved)) {
       return builtinModuleSource(loadedResolved, builtin(loadedResolved, processOverride));
     }
@@ -2084,13 +2210,26 @@ export function createModuleLoader({
 
   const moduleURLAsync = async (resolved, processOverride, importer = resolved, ancestors = new Set(), formatHint = null) => {
     const key = cacheKey(resolved, processOverride);
+    const parentKey = typeof importer === 'string' ? cacheKey(importer, processOverride) : null;
+    if (parentKey && asyncModuleDependencies.has(parentKey)) asyncModuleDependencies.get(parentKey).add(key);
     if (moduleURLs.has(key)) return moduleURLs.get(key);
     if (isBuiltinSpecifier(resolved)) return moduleURL(resolved, processOverride);
     if (ancestors.has(key)) {
       return cycleModuleURL(resolved, importer, processOverride);
     }
     if (cycleModuleURLs.has(key)) return cycleModuleURLs.get(key);
-    if (asyncModuleURLs.has(key)) return asyncModuleURLs.get(key);
+    if (asyncModuleURLs.has(key)) {
+      // Concurrent graph preparation can reach a module that is already being
+      // built by a sibling branch. Awaiting that promise is safe for a root
+      // import, but it can deadlock when the pending module's graph reaches
+      // back into the current branch (dual-package CJS preloads make this
+      // shape common). Use the same live cycle proxy as an explicit ancestor;
+      // the owner graph will publish the real bindings when it completes.
+      if (ancestors.size && asyncModuleDependsOn(key, ancestors)) return cycleModuleURL(resolved, importer, processOverride);
+      return asyncModuleURLs.get(key);
+    }
+    const dependencies = new Set();
+    asyncModuleDependencies.set(key, dependencies);
     const promise = (async () => {
       const nextAncestors = new Set(ancestors);
       nextAncestors.add(key);
@@ -2140,46 +2279,66 @@ export function createModuleLoader({
     asyncModuleURLs.set(key, promise);
     promise.catch(() => {
       if (asyncModuleURLs.get(key) === promise) asyncModuleURLs.delete(key);
+      if (asyncModuleDependencies.get(key) === dependencies) asyncModuleDependencies.delete(key);
     });
     return promise;
   };
 
-  const importNative = async (resolved, processOverride, formatHint = null) => {
+  const importNative = async (resolved, processOverride, formatHint = null, dynamicLaneKey = null) => {
     const key = cacheKey(resolved, processOverride);
     if (!importCache.has(key)) {
-      let url;
-      try {
-        url = await moduleURLAsync(resolved, processOverride, resolved, new Set(), formatHint);
-      } catch (error) {
-        if (error?.code === 'MODULE_NOT_FOUND') {
-          error.code = 'ERR_MODULE_NOT_FOUND';
-          error.name = 'Error [ERR_MODULE_NOT_FOUND]';
-        }
-        throw error;
-      }
+      const laneId = dynamicLaneKey === null || dynamicLaneKey === undefined
+        ? null
+        : cacheKey(String(dynamicLaneKey), processOverride);
+      const previousLane = laneId ? (dynamicImportLanes.get(laneId) || Promise.resolve()) : null;
+      let releaseLane;
+      const laneReady = laneId ? new Promise((resolve) => { releaseLane = resolve; }) : null;
+      if (laneId) dynamicImportLanes.set(laneId, previousLane.then(() => laneReady));
       let pendingImport;
-      pendingImport = import(url).then((namespace) => {
-        storeSharedNamespace(resolved, processOverride, namespace);
-        return namespace;
-      }).catch((error) => {
-        if (error?.code === 'MODULE_NOT_FOUND') {
-          error.code = 'ERR_MODULE_NOT_FOUND';
-          error.name = 'Error [ERR_MODULE_NOT_FOUND]';
+      pendingImport = (async () => {
+        let url;
+        try {
+          if (previousLane) await previousLane;
+          url = moduleURLs.has(key)
+            ? moduleURLs.get(key)
+            : await moduleURLAsync(resolved, processOverride, resolved, new Set(), formatHint);
+          // Release the next request after graph preparation, immediately
+          // before invoking the browser's native import job.
+          releaseLane?.();
+          releaseLane = null;
+        } catch (error) {
+          releaseLane?.();
+          releaseLane = null;
+          if (error?.code === 'MODULE_NOT_FOUND') {
+            error.code = 'ERR_MODULE_NOT_FOUND';
+            error.name = 'Error [ERR_MODULE_NOT_FOUND]';
+          }
+          throw error;
         }
-        const message = String(error?.message || '');
-        const hint = [...nativeSpecifierHints.entries()].find(([internalURL]) => message.includes(internalURL));
-        if (hint) {
-          const [internalURL, originalSpecifier] = hint;
-          error.message = message.replaceAll(internalURL, originalSpecifier);
-          if (typeof error.stack === 'string') error.stack = error.stack.replaceAll(internalURL, originalSpecifier);
+        try {
+          const namespace = await import(url);
+          storeSharedNamespace(resolved, processOverride, namespace);
+          return namespace;
+        } catch (error) {
+          if (error?.code === 'MODULE_NOT_FOUND') {
+            error.code = 'ERR_MODULE_NOT_FOUND';
+            error.name = 'Error [ERR_MODULE_NOT_FOUND]';
+          }
+          const message = String(error?.message || '');
+          const hint = [...nativeSpecifierHints.entries()].find(([internalURL]) => message.includes(internalURL));
+          if (hint) {
+            const [internalURL, originalSpecifier] = hint;
+            error.message = message.replaceAll(internalURL, originalSpecifier);
+            if (typeof error.stack === 'string') error.stack = error.stack.replaceAll(internalURL, originalSpecifier);
+          }
+          // A failed native import must not poison this specifier forever.
+          // Packages may be installed into the VFS after an initial lookup, so
+          // a later import must be allowed to resolve and evaluate the module
+          // again just as it would in a normal Node process after installation.
+          if (importCache.get(key) === pendingImport) importCache.delete(key);
+          throw error;
         }
-        // A failed native import must not poison this specifier forever.
-        // Packages may be installed into the VFS after an initial lookup, so
-        // a later import must be allowed to resolve and evaluate the module
-        // again just as it would in a normal Node process after installation.
-        if (importCache.get(key) === pendingImport) importCache.delete(key);
-        throw error;
-      });
+      })();
       importCache.set(key, pendingImport);
     }
     return importCache.get(key);
@@ -2207,9 +2366,9 @@ export function createModuleLoader({
     throw packageError('ERR_IMPORT_ATTRIBUTE_UNSUPPORTED', `Import attribute type "${attributes.type}" is not supported`);
   };
 
-  const importModule = async (specifier, importer, globals, options, processOverride) => {
+  const importModule = async (specifier, importer, globals, options, processOverride, dynamicLaneKey = null) => {
     const resolvedResult = await runResolveHooksAsync(specifier, importer, ['node', 'import'], processOverride);
-    const resolved = hookURLToSpecifier(resolvedResult.url);
+    const resolved = hookURLToSpecifier(resolvedResult.url, importer);
     if (resolved.startsWith('data:')) return importData(resolved, options, processOverride);
     if (resolved.startsWith('http:') || resolved.startsWith('https:')) {
       validateImportAttributes(resolved, options);
@@ -2243,6 +2402,11 @@ export function createModuleLoader({
       throw packageError('ERR_UNKNOWN_BUILTIN_MODULE', `No such built-in module: ${resolved.slice(5)}`);
     }
     if (resolved.endsWith(NATIVE_ADDON_EXTENSION) && hasFile(resolved)) unsupportedNativeAddon(resolved);
+    // A resolve hook may intentionally omit `format` and leave classification
+    // to its load hook (ts-node does this for .ts files). Preserve that
+    // distinction: `undefined` lets the load hook see the unknown extension,
+    // while an explicit null remains a hook-provided value.
+    const resolvedFormat = Object.hasOwn(resolvedResult, 'format') ? resolvedResult.format : undefined;
     const key = cacheKey(resolved, processOverride);
     if (importCache.has(key)) return importCache.get(key);
     // Native ESM modules are materialized into data URLs before evaluation. Keep
@@ -2251,19 +2415,12 @@ export function createModuleLoader({
     // Node's ESM cache is keyed by the module URL rather than fresh file reads.
     // moduleURLs is the canonical cache; retaining the generated source beside
     // its encoded URL needlessly keeps a second copy of every ESM module alive.
-    if (moduleURLs.has(key)) {
-      return import(moduleURLs.get(key));
-    }
-    // A resolve hook may intentionally omit `format` and leave classification
-    // to its load hook (ts-node does this for .ts files). Preserve that
-    // distinction: `undefined` lets the load hook see the unknown extension,
-    // while an explicit null remains a hook-provided value.
-    const resolvedFormat = Object.hasOwn(resolvedResult, 'format') ? resolvedResult.format : undefined;
+    if (moduleURLs.has(key)) return importNative(resolved, processOverride, resolvedFormat, dynamicLaneKey);
     if (isBuiltinSpecifier(resolved)
       || resolvedFormat === 'module'
       || resolvedFormat === undefined
       || (resolvedFormat === null && moduleFormat(resolved) === 'module')) {
-      return importNative(resolved, processOverride, resolvedFormat);
+      return importNative(resolved, processOverride, resolvedFormat, dynamicLaneKey);
     }
     let exports;
     try {
@@ -2309,7 +2466,7 @@ export function createModuleLoader({
       }
       generatedObjectURLs.clear();
       for (const collection of [moduleURLs, importCache, nativeSpecifierHints, cycleModuleURLs,
-        cycleRegistrations, remoteImportCache, asyncModuleURLs]) collection.clear();
+        cycleRegistrations, remoteImportCache, asyncModuleURLs, asyncModuleDependencies]) collection.clear();
       buildingModuleKeys.clear();
       for (const key of Object.keys(cache)) delete cache[key];
     },

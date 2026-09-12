@@ -2157,6 +2157,44 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('publishes synchronous-grandchild writes before explicit process exit', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert');
+        const fs = require('node:fs');
+        const { spawn } = require('node:child_process');
+        const child = spawn(process.execPath, ['/node/project/build.mjs'], { cwd: '/node/project' });
+        let errorOutput = '';
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(fs.readFileSync('/node/project/dist/explicit-exit.txt', 'utf8'), 'explicit');
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/project/build.mjs': [
+          "import { spawnSync } from 'node:child_process';",
+          "const result = spawnSync(process.execPath, ['/node/project/write-child.cjs'], { stdio: 'inherit' });",
+          "if (result.status !== 0) throw new Error(result.stderr.toString());",
+        ].join('\n'),
+        '/node/project/write-child.cjs': [
+          "const { mkdirSync, writeFileSync } = require('node:fs');",
+          "mkdirSync('dist', { recursive: true });",
+          "writeFileSync('dist/explicit-exit.txt', 'explicit');",
+          "process.exit(0);",
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
   test('publishes relative build-tree writes from an ESM child cwd before close', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       (async () => {
@@ -2255,6 +2293,42 @@ test.describe('browser runtime bridge and core primitives', () => {
           "process.stdout.write(path.resolve('test.js') + '\\n');",
           "process.stdout.write(path.dirname(path.resolve('.')) + '\\n');",
         ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('keeps a child path module bound after its wrapper yields', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn(process.execPath, ['/node/workspace/path-later.js'], {
+          cwd: '/node/workspace',
+        });
+        let output = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, output);
+        assert.strictEqual(output, JSON.stringify({
+          cwd: '/node/workspace',
+          resolved: '/node/workspace/dist/later.txt',
+        }));
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/workspace/path-later.js': [
+          "const path = require('node:path');",
+          "setTimeout(() => process.stdout.write(JSON.stringify({ cwd: process.cwd(), resolved: path.resolve('dist/later.txt') })), 0);",
+        ].join(String.fromCharCode(10)),
       },
     });
 

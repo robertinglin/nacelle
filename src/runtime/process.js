@@ -109,10 +109,11 @@ function asFileBytes(value) {
  * to walk thousands of nested objects and allocations. Pack the byte views
  * into one backing buffer and retain the logical file map as lightweight
  * views. Page-owned workers can share that backing buffer in isolated pages;
- * nested workers receive an owned transfer so Chromium does not synchronously
- * clone a very large SharedArrayBuffer from one worker into another.
+ * nested workers reuse that backing store when possible and otherwise receive
+ * an owned transfer so Chromium does not synchronously clone a very large
+ * SharedArrayBuffer from one worker into another.
  */
-export function prepareWorkerVfs(vfs, scope, { eager = false } = {}) {
+export function prepareWorkerVfs(vfs, scope, { eager = false, nested = false } = {}) {
   if (!vfs?.files) return vfs;
 
   const byteRecords = [];
@@ -120,9 +121,12 @@ export function prepareWorkerVfs(vfs, scope, { eager = false } = {}) {
   const recordFor = (value) => {
     const bytes = asFileBytes(value);
     if (!bytes) return null;
+    const candidateBacking = bytes.buffer;
+    const sharedArrayBuffer = typeof scope?.SharedArrayBuffer === 'function'
+      && candidateBacking instanceof scope.SharedArrayBuffer;
     let record = byteOffsets.get(value);
     if (!record) {
-      record = { source: bytes, offset: 0 };
+      record = { source: bytes, offset: 0, shared: sharedArrayBuffer };
       byteOffsets.set(value, record);
       byteRecords.push(record);
     }
@@ -150,19 +154,60 @@ export function prepareWorkerVfs(vfs, scope, { eager = false } = {}) {
   if (!byteRecords.length) return vfs;
 
   const totalBytes = byteRecords.reduce((total, record) => total + record.source.byteLength, 0);
-  const nestedWorker = typeof WorkerGlobalScope === 'function' && scope instanceof WorkerGlobalScope;
-  const chunked = !eager && nestedWorker && totalBytes > 16 * 1024 * 1024;
+  // The runtime can be hosted by a worker-global-compatible scope whose
+  // WorkerGlobalScope constructor is not exposed (notably Firefox and some
+  // bundled worker realms). The caller marks a known nested ESM boundary so
+  // large mixed snapshots do not get repacked into a fresh set of chunks.
+  const nestedWorker = nested === true
+    || (typeof WorkerGlobalScope === 'function' && scope instanceof WorkerGlobalScope);
+  // A VFS that arrived through the page boundary is already backed by shared
+  // bytes. Nested workers must keep those views by reference: repacking the
+  // complete dependency tree for every test file eventually exhausts the
+  // browser's ArrayBuffer budget. Newly written regular buffers are packed
+  // into one small shared backing store, while the inherited shared views are
+  // retained as-is.
+  const allShared = byteRecords.every((record) => record.shared);
+  const sharedBackings = new Set(byteRecords
+    .filter((record) => record.shared)
+    .map((record) => record.source.buffer));
+  // A page-owned worker already packed the complete tree into one
+  // SharedArrayBuffer. Preserve that backing store for grandchildren and send
+  // only the compact path/offset table across the next worker boundary.
+  const directShared = allShared && sharedBackings.size === 1;
+  // A nested worker can retain shared views even when the parent accumulated
+  // more than one SharedArrayBuffer backing store. Do not allocate a chunk
+  // array merely to repack those immutable shared files; that path is what
+  // exhausts Chromium's ArrayBuffer budget during large test suites.
+  const directNested = nestedWorker && (allShared || totalBytes > 16 * 1024 * 1024);
+  const mixedShared = nestedWorker
+    && !allShared
+    && !directNested
+    && byteRecords.some((record) => record.shared)
+    && typeof scope?.SharedArrayBuffer === 'function';
+  const mixedBytes = mixedShared
+    ? byteRecords.filter((record) => !record.shared).reduce((total, record) => total + record.source.byteLength, 0)
+    : totalBytes;
+  const chunked = !eager && nestedWorker && totalBytes > 16 * 1024 * 1024
+    && !directShared && !directNested && !mixedShared;
   const isolated = !nestedWorker
     && scope.crossOriginIsolated === true
     && typeof scope.SharedArrayBuffer === 'function';
   const chunkSize = 1 * 1024 * 1024;
-  const backing = chunked ? null : isolated ? new scope.SharedArrayBuffer(totalBytes) : new ArrayBuffer(totalBytes);
+  const backing = directShared || directNested
+    ? null
+    : mixedShared
+      ? new scope.SharedArrayBuffer(mixedBytes)
+      : chunked ? null : isolated ? new scope.SharedArrayBuffer(totalBytes) : new ArrayBuffer(totalBytes);
   const chunks = chunked
     ? Array.from({ length: Math.ceil(totalBytes / chunkSize) }, (_, index) => new ArrayBuffer(Math.min(chunkSize, totalBytes - index * chunkSize)))
     : null;
   const target = backing ? new Uint8Array(backing) : null;
   let offset = 0;
   for (const record of byteRecords) {
+    if (directShared || directNested || (mixedShared && record.shared)) {
+      record.offset = record.source.byteOffset;
+      continue;
+    }
     if (target) target.set(record.source, offset);
     else {
       let sourceOffset = 0;
@@ -181,9 +226,12 @@ export function prepareWorkerVfs(vfs, scope, { eager = false } = {}) {
     record.offset = offset;
     offset += record.source.byteLength;
   }
-  const viewFor = (record) => backing
-    ? new Uint8Array(backing, record.offset, record.source.byteLength)
-    : record.source;
+  const viewFor = (record) => (directShared || directNested || (mixedShared && record.shared))
+    ? record.source
+    : backing
+      ? new Uint8Array(backing, record.offset, record.source.byteLength)
+      : record.source;
+  const packedWire = (Boolean(backing) || directShared) && !mixedShared && !directNested;
   const markerFor = (record) => ({
     [packedVfsFile]: true,
     offset: record.offset,
@@ -202,16 +250,18 @@ export function prepareWorkerVfs(vfs, scope, { eager = false } = {}) {
       : artifact)
     : vfs.artifacts;
   const prepared = { ...vfs, files, artifacts };
-  const wireFiles = Object.fromEntries(Object.entries(vfs.files).map(([path, value]) => {
+  const wireFiles = packedWire ? Object.fromEntries(Object.entries(vfs.files).map(([path, value]) => {
     const info = fileRecords.get(path);
     if (!info) return [path, value];
     const marker = markerFor(info.record);
     if (!info.descriptor) return [path, marker];
     return [path, { ...info.descriptor, [info.key]: marker }];
-  }));
-  const canPackFiles = Object.keys(vfs.files).length > 0
+  })) : files;
+  const canPackFiles = packedWire && Object.keys(vfs.files).length > 0
     && Object.keys(vfs.files).every((path) => fileRecords.has(path));
-  const wireArtifacts = canPackFiles
+  const wireArtifacts = !packedWire
+    ? artifacts
+    : canPackFiles
     ? []
     : artifactRecords
       ? artifactRecords.map(({ artifact, record }) => record
@@ -251,8 +301,10 @@ export function prepareWorkerVfs(vfs, scope, { eager = false } = {}) {
     // snapshots use the path table below, avoiding one cloned object per file.
     files: canPackFiles ? {} : wireFiles,
     artifacts: wireArtifacts,
-    ...(backing ? { vfsBuffer: backing } : {}),
-    vfsPacked: true,
+    ...(packedWire ? {
+      vfsBuffer: backing || byteRecords[0].source.buffer,
+      vfsPacked: true,
+    } : {}),
     ...(chunked ? { vfsChunked: true, vfsByteLength: totalBytes } : {}),
     ...(canPackFiles ? {
       ...(pathChunks ? {
@@ -273,7 +325,7 @@ export function prepareWorkerVfs(vfs, scope, { eager = false } = {}) {
   if (chunks) Object.defineProperty(prepared, workerVfsChunks, { configurable: true, value: chunks });
   if (pathChunks) Object.defineProperty(prepared, workerVfsPathChunks, { configurable: true, value: pathChunks });
   if (recordChunks) Object.defineProperty(prepared, workerVfsRecordChunks, { configurable: true, value: recordChunks });
-  if (!isolated && !chunked) {
+  if (packedWire && backing && !isolated && !chunked && !mixedShared) {
     Object.defineProperty(prepared, workerVfsTransferList, {
       configurable: true,
       value: [backing],
@@ -807,6 +859,7 @@ export function createProcess({
   pid = 1,
   ppid = 0,
   ipc,
+  exposeIpc = Boolean(ipc),
   signalGrants,
   scope = globalThis,
   nodeVersion = 'lts',
@@ -833,8 +886,8 @@ export function createProcess({
   process.execve = createBrowserExecve(process);
   process.exitCode = 0;
   process.title = 'node';
-  process.connected = Boolean(ipc);
-  if (ipc) process.channel = ipc;
+  process.connected = Boolean(ipc && exposeIpc);
+  if (ipc && exposeIpc) process.channel = ipc;
   process.state = 'running';
   process.cwd = () => logicalCwd;
   process.chdir = (value) => { logicalCwd = resolveLogicalCwd(value, logicalCwd); };
@@ -877,28 +930,33 @@ export function createProcess({
     if (!handled || name === 'SIGKILL') process.exit(1);
     return true;
   };
-  process.send = (...args) => {
-    if (!ipc) throw errorWithCode('ERR_IPC_CLOSED', 'IPC channel is closed');
-    if (typeof ipc.sendWithHandle === 'function') {
-      const [value, sendHandle, sendOptions, callback] = args;
-      if (typeof sendHandle === 'function') return ipc.sendWithHandle(value, undefined, undefined, sendHandle);
-      if (typeof sendOptions === 'function') return ipc.sendWithHandle(value, sendHandle, undefined, sendOptions);
-      return ipc.sendWithHandle(value, sendHandle, undefined, callback);
-    }
-    return ipc.send(...args);
-  };
-  process.__bnhSendInternal = (value) => {
-    if (!ipc) return false;
-    if (typeof ipc.sendInternal === 'function') return ipc.sendInternal(value);
-    return ipc.send(value);
-  };
-  process.disconnect = () => {
-    if (!ipc) return false;
-    process.connected = false;
-    const result = ipc.disconnect();
-    if (result) process.emit('disconnect');
-    return result;
-  };
+  if (ipc && exposeIpc) {
+    process.send = (...args) => {
+      if (typeof ipc.sendWithHandle === 'function') {
+        const [value, sendHandle, sendOptions, callback] = args;
+        if (typeof sendHandle === 'function') return ipc.sendWithHandle(value, undefined, undefined, sendHandle);
+        if (typeof sendOptions === 'function') return ipc.sendWithHandle(value, sendHandle, undefined, sendOptions);
+        return ipc.sendWithHandle(value, sendHandle, undefined, callback);
+      }
+      return ipc.send(...args);
+    };
+    process.disconnect = () => {
+      process.connected = false;
+      const result = ipc.disconnect();
+      if (result) process.emit('disconnect');
+      return result;
+    };
+  }
+  if (ipc) {
+    // This private channel carries runtime state and artifacts across the
+    // worker boundary. It must not imply that the guest was launched with an
+    // IPC stdio entry: packages use process.send's presence to decide
+    // whether to enable their own child IPC protocols.
+    process.__bnhSendInternal = (value) => {
+      if (typeof ipc.sendInternal === 'function') return ipc.sendInternal(value);
+      return ipc.send(value);
+    };
+  }
   process.stdout = makeWritableEndpoint(output.stdout);
   process.stderr = makeWritableEndpoint(output.stderr);
   installProcessStdoutSurface(process.stdout);
@@ -1019,7 +1077,14 @@ export function createBrowserProcess(options = {}) {
       if (terminalRecord) throw errorWithCode('ERR_PROCESS_EXITED', 'process has already exited');
       if (name === 'SIGKILL') {
         moveTo('stopping');
-        finalize({ status: 'failed', kind: 'signal', code: null, signal: name, forced: true, error: null });
+        // Node emits exit/close asynchronously after kill() returns. In
+        // particular, foreground-child kills its watchdog from the watched
+        // child's exit handler and expects the watched close event to be
+        // observable before the watchdog close event.
+        queueMicrotask(() => {
+          if (terminalRecord) return;
+          finalize({ status: 'failed', kind: 'signal', code: null, signal: name, forced: true, error: null });
+        });
         return true;
       }
       moveTo('stopping');
@@ -1125,7 +1190,10 @@ export function createBrowserProcess(options = {}) {
     if (frame.type === 'signal-result') return;
     if (frame.type === 'runtime-state') { child.runtimeState = frame.runtimeState || null; return; }
     if (frame.type === 'child-output') {
-      if (frame.record && typeof frame.record === 'object') childOutputs.push(frame.record);
+      if (frame.record && typeof frame.record === 'object') {
+        childOutputs.push(frame.record);
+        events.emit('child-output', frame.record);
+      }
       return;
     }
     if (frame.type === 'output') { outputWrite(frame.stream === 'stderr' ? child.stderr : child.stdout, frame.value); return; }
@@ -1262,6 +1330,7 @@ export function createBrowserProcess(options = {}) {
       childId,
       identity,
       execArgv: Array.isArray(options.execArgv) ? options.execArgv.map(String) : [],
+      exposeIpc: options.exposeIpc === true || options.clusterGroupId !== undefined,
       runSource: makeRunSource(options),
       controlPort: controlChannel.raw.port2,
       userPort: userChannel.raw.port2,
@@ -1278,7 +1347,10 @@ export function createBrowserProcess(options = {}) {
     // coordination cells. Keep it at the process-init boundary instead of
     // making it travel only as a nested VFS descriptor field.
     if (options.workerData !== undefined) initialData.workerData = options.workerData;
-    const preparedVfs = options.vfs === undefined ? null : prepareWorkerVfs(options.vfs, scope, { eager: options.vfsEager === true });
+    const preparedVfs = options.vfs === undefined ? null : prepareWorkerVfs(options.vfs, scope, {
+      eager: options.vfsEager === true,
+      nested: options.vfsNested === true,
+    });
     const vfsTransferList = preparedVfs?.[workerVfsTransferList] || [];
     const eagerVfs = options.vfsEager === true;
     if (preparedVfs !== null && !eagerVfs) initialData.vfsDeferred = true;

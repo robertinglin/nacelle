@@ -225,6 +225,7 @@ function createInMemoryProcess(options) {
     ppid: identity.ppid,
     output,
     ipc: ipcPair.child,
+    exposeIpc: options.exposeIpc === true || options.clusterGroupId !== undefined,
     signalGrants: options.signalGrants,
     scope: options.scope || globalThis,
     nodeVersion: options.nodeVersion || options.vfs?.nodeVersion,
@@ -361,7 +362,7 @@ function createInMemoryProcess(options) {
         pendingFailure = null;
         transition('stopping');
         abortController?.abort();
-        finish('signal', null, name, null, true);
+        queueMicrotask(() => finish('signal', null, name, null, true));
         return true;
       }
       transition('stopping');
@@ -375,7 +376,18 @@ function createInMemoryProcess(options) {
       }
       return true;
     },
-    terminate() { return processHandle.kill('SIGKILL'); },
+    terminate() {
+      if (terminal) return false;
+      // cluster primary exit listeners run synchronously with process.exit in
+      // Node and observe workers as already dead. The ordinary SIGKILL path
+      // intentionally queues its terminal frame, so give terminate() the
+      // synchronous terminal boundary required by cluster.Worker#isDead().
+      pendingFailure = null;
+      pendingSignal = 'SIGKILL';
+      abortController?.abort();
+      finish('signal', null, pendingSignal, null, true);
+      return true;
+    },
     wait() { return completion; },
   };
 

@@ -1,4 +1,5 @@
 const installedConstructors = new WeakSet();
+function CallSite() {}
 
 function parseLocation(location) {
   const match = String(location || '').match(/^(.*?)(?::(\d+))(?::(\d+))$/);
@@ -37,6 +38,7 @@ function createCallSite(line) {
     getLineNumber: () => parsed.lineNumber,
     getColumnNumber: () => parsed.columnNumber,
     getFunctionName: () => functionName || null,
+    getFunction: () => undefined,
     getTypeName: () => null,
     getMethodName: () => null,
     getEvalOrigin: () => undefined,
@@ -48,7 +50,18 @@ function createCallSite(line) {
     getThis: () => undefined,
     toString: () => line,
   };
-  return Object.freeze(site);
+  // @tapjs/stack recognizes structured V8 call sites by their constructor
+  // name before wrapping them in its richer CallSiteLike implementation.
+  // Browser stack parsing produces ordinary objects, so preserve that small
+  // observable part of the Node CallSite contract explicitly.
+  Object.defineProperty(site, 'constructor', {
+    configurable: true,
+    value: CallSite,
+  });
+  // Node's CallSite objects are extensible. Consumers such as @tapjs/stack
+  // attach bounded metadata (for example, the owning cwd) while cleaning a
+  // captured stack, so freezing the browser fallback breaks that contract.
+  return site;
 }
 
 function parseCallSites(stack) {
@@ -81,14 +94,27 @@ function supportsStructuredCapture(ErrorConstructor) {
 
 function installCaptureStackTrace(ErrorConstructor) {
   const nativeCaptureStackTrace = ErrorConstructor.captureStackTrace;
+  const captureRawStack = (target, constructorOpt) => {
+    const previousPrepare = ErrorConstructor.prepareStackTrace;
+    try {
+      // Firefox may invoke prepareStackTrace from inside its native capture
+      // implementation. Keep that engine-specific call-site representation
+      // away from Node consumers such as @tapjs/stack; the formatter is
+      // applied below after the raw stack has been normalized.
+      ErrorConstructor.prepareStackTrace = undefined;
+      nativeCaptureStackTrace(target, constructorOpt);
+    } finally {
+      ErrorConstructor.prepareStackTrace = previousPrepare;
+    }
+  };
   const captureStackTrace = function captureStackTrace(target, constructorOpt) {
     const rawTarget = {};
-    nativeCaptureStackTrace(rawTarget, constructorOpt);
+    captureRawStack(rawTarget, constructorOpt);
     let rawStack = rawTarget.stack;
     let callSites = parseCallSites(rawStack);
     if (constructorOpt !== undefined && callSites.length === 0) {
       const retryTarget = {};
-      nativeCaptureStackTrace(retryTarget);
+      captureRawStack(retryTarget);
       rawStack = retryTarget.stack;
       callSites = parseCallSites(rawStack);
     }
@@ -147,13 +173,26 @@ function installStructuredCaptureFallback(ErrorConstructor) {
       // @tapjs/stack call Array.prototype methods on the result.
       capturedStack = retryStack === undefined ? [] : retryStack;
     }
-    if (Array.isArray(capturedStack)
-      && capturedStack.some((site) => site && typeof site === 'object'
-        && typeof site.getFileName !== 'function')) {
-      // Firefox can expose an array from prepareStackTrace while its entries
-      // are still browser-native strings/objects rather than Node CallSites.
-      // Normalize those entries before returning the structured contract.
-      capturedStack = parseCallSites(capturedStack.join('\n'));
+    if (Array.isArray(capturedStack)) {
+      if (capturedStack.some((site) => site && typeof site === 'object'
+        && typeof site.getFileName !== 'function'
+        && !('fileName' in site))) {
+        // Firefox can expose an array from prepareStackTrace while its
+        // entries are still browser-native strings/objects rather than Node
+        // CallSites. Normalize those entries before returning the structured
+        // contract.
+        capturedStack = parseCallSites(capturedStack.join('\n'));
+      } else {
+        // Chromium can expose native-looking CallSites that are not
+        // extensible. Node consumers are allowed to annotate CallSites (tap
+        // records the owning cwd), so put those objects behind an extensible
+        // wrapper while retaining their prototype methods and values.
+        capturedStack = capturedStack.map((site) => (
+          site && typeof site === 'object' && !Object.isExtensible(site)
+            ? Object.create(site)
+            : site
+        ));
+      }
     }
     try {
       Object.defineProperty(target, 'stack', {

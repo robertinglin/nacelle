@@ -5,7 +5,10 @@ test.skip(!browserRuntimeURL, 'set BNH_TEST_URL to a browser runtime harness pag
 
 test.describe('browser runtime ALS promise pressure', () => {
   test('keeps the ALS store alive across a long await chain', async ({ harnessPage }) => {
-    test.setTimeout(180000);
+    // Firefox's browser-native Promise scheduler needs more wall-clock budget
+    // for two million tracked awaits when this test runs in the full suite.
+    const pressureTimeoutMs = 240000;
+    test.setTimeout(pressureTimeoutMs);
     const result = await harnessPage.run(`
       const assert = require('node:assert');
       const { AsyncLocalStorage } = require('node:async_hooks');
@@ -23,7 +26,7 @@ test.describe('browser runtime ALS promise pressure', () => {
         console.error(error);
         process.exitCode = 1;
       });
-    `, { timeoutMs: 180000 });
+    `, { timeoutMs: pressureTimeoutMs });
 
     await expectPass(expect, result);
   });

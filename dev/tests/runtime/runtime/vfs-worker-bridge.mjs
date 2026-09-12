@@ -32,6 +32,28 @@ test('worker writes, directory renames, and deletions reach the parent before dr
   }
 });
 
+test('worker symlink updates preserve the link node across the worker boundary', async () => {
+  const parent = createVfs();
+  const worker = createVfs();
+  parent.mount({ '/node/plugins/clock.js': 'module.exports = 1;' });
+  worker.mount({ '/node/plugins/clock.js': 'module.exports = 1;' });
+  const channel = new MessageChannel();
+  const parentBridge = connectVfsUpdates(parent, channel.port1);
+  const workerBridge = connectVfsUpdates(worker, channel.port2);
+  try {
+    worker.fs.mkdirSync('/node/test-built', { recursive: true });
+    worker.fs.symlinkSync('../plugins', '/node/test-built/node_modules');
+    await workerBridge.drain();
+    assert.deepEqual(parent.snapshot({ includeAllFiles: true }).symlinks, [
+      ['/node/test-built/node_modules', '../plugins'],
+    ]);
+    assert.equal(parent.fs.readFileSync('/node/test-built/node_modules/clock.js', 'utf8'), 'module.exports = 1;');
+  } finally {
+    parentBridge.close();
+    workerBridge.close();
+  }
+});
+
 test('a parent relays worker changes to siblings without echoing them back', async () => {
   const parent = createVfs();
   const first = createVfs();

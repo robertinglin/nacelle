@@ -47,6 +47,69 @@ test.describe('browser ESM loader', () => {
     expect(result.stdout).toContain('esm entry completed');
   });
 
+  test('updates an ESM diagnostics polyfill from a mocked builtin', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { registerHooks } from 'node:module';
+
+      const actual = (await import('node:diagnostics_channel')).default;
+      const key = Symbol.for('bnh-polyfill-mock');
+      global[key] = { mocks: { 'node:diagnostics_channel': actual } };
+      registerHooks({
+        resolve(specifier, context, nextResolve) {
+          if (specifier === 'node:diagnostics_channel' && context.parentURL.endsWith('/polyfill-target.mjs')) {
+            return { url: 'custom-bnh-polyfill:node:diagnostics_channel', format: 'module', shortCircuit: true };
+          }
+          return nextResolve(specifier, context);
+        },
+        load(url, context, nextLoad) {
+          if (url !== 'custom-bnh-polyfill:node:diagnostics_channel') return nextLoad(url, context);
+          return {
+            format: 'module',
+            shortCircuit: true,
+            source: [
+              \"const mock = global[Symbol.for('bnh-polyfill-mock')].mocks['node:diagnostics_channel'];\",
+              'const exp0 = mock.channel;',
+              'export { exp0 as "channel" };',
+              'const exp1 = mock.tracingChannel;',
+              'export { exp1 as "tracingChannel" };',
+              'const defExp = mock;',
+              'export default defExp;',
+            ].join('\\n'),
+          };
+        },
+      });
+      const dc = await import('./polyfill-target.mjs');
+      actual.subscribe('lru-cache:metrics', () => {});
+      const tracing = actual.tracingChannel('lru-cache');
+      tracing.subscribe({ start: () => {}, asyncStart: () => {}, asyncEnd: () => {}, error: () => {}, end: () => {} });
+      assert.strictEqual(dc.metrics.hasSubscribers, false);
+      assert.strictEqual(dc.tracing.hasSubscribers, false);
+      assert.strictEqual(actual.channel('lru-cache:metrics').hasSubscribers, true);
+      assert.strictEqual(tracing.hasSubscribers, true);
+      await new Promise((resolve) => setTimeout(resolve));
+      assert.strictEqual(dc.metrics.hasSubscribers, true);
+      assert.strictEqual(dc.tracing.hasSubscribers, true);
+      process.stdout.write('diagnostics polyfill completed');
+    `, {
+      entryPath: '/node/esm/polyfill-entry.mjs',
+      files: {
+        '/node/esm/polyfill-target.mjs': `
+          const dummy = { hasSubscribers: false };
+          export let metrics = dummy;
+          export let tracing = dummy;
+          import('node:diagnostics_channel').then((dc) => {
+            metrics = dc.channel('lru-cache:metrics');
+            tracing = dc.tracingChannel('lru-cache');
+          });
+        `,
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('diagnostics polyfill completed');
+  });
+
   test('provides a Node-shaped virtual URL when a package receives bare import.meta', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       import assert from 'node:assert/strict';
@@ -105,6 +168,453 @@ test.describe('browser ESM loader', () => {
     expect(result.stdout).toContain('query identity completed');
   });
 
+  test('keeps query identity on transitive ESM dependencies', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { register } from 'node:module';
+      await register(new URL('./query-identity-loader.mjs', import.meta.url));
+      global.performance = { now: () => 41 };
+      const first = await import('./query-parent.mjs?identity=first');
+      global.performance = { now: () => 82 };
+      const second = await import('./query-parent.mjs?identity=second');
+      assert.equal(first.value, 41);
+      assert.equal(second.value, 82);
+      assert.notStrictEqual(first, second);
+      process.stdout.write('transitive query identity completed');
+    `, {
+      entryPath: '/node/esm/query-parent-entry.mjs',
+      files: {
+        '/node/esm/query-identity-loader.mjs': `
+          export async function resolve(specifier, context, nextResolve) {
+            const result = await nextResolve(specifier, context);
+            const identity = new URL(context.parentURL).searchParams.get('identity');
+            if (!identity || !result.url.startsWith('file:')) return result;
+            const url = new URL(result.url);
+            url.searchParams.set('identity', identity);
+            return { ...result, url: String(url) };
+          }
+        `,
+        '/node/esm/query-parent.mjs': "export { value } from './query-child.mjs';",
+        '/node/esm/query-child.mjs': 'export const value = performance.now();',
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('transitive query identity completed');
+  });
+
+  test('allows a clock mock to replace the global performance clock', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      const perfHooks = (await import('node:perf_hooks')).performance;
+      const performanceObject = global.performance;
+      const originalNow = performanceObject.now;
+      Object.defineProperty(performanceObject, 'now', {
+        configurable: true,
+        value: () => 102,
+      });
+      assert.strictEqual(global.performance.now(), 102);
+      assert.strictEqual(perfHooks.now(), 102);
+      Object.defineProperty(performanceObject, 'now', {
+        configurable: true,
+        value: originalNow,
+      });
+      process.stdout.write('performance clock completed');
+    `, { entryPath: '/node/esm/performance-clock-entry.mjs' });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('performance clock completed');
+  });
+
+  test('keeps promise reactions asynchronous after abort', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      const events = [];
+      let resolve;
+      const promise = new Promise(done => { resolve = done; });
+      promise.then(() => events.push('reaction'));
+      const controller = new AbortController();
+      controller.signal.addEventListener('abort', () => resolve());
+      events.push('before');
+      controller.abort();
+      events.push('after');
+      assert.deepStrictEqual(events, ['before', 'after']);
+      await promise;
+      assert.deepStrictEqual(events, ['before', 'after', 'reaction']);
+      process.stdout.write('abort promise ordering completed');
+    `, { entryPath: '/node/esm/abort-promise-entry.mjs' });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('abort promise ordering completed');
+  });
+
+  test('keeps chained promise reactions usable after abort', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      let resolve;
+      const promise = new Promise(done => { resolve = done; });
+      const chained = promise.then(value => value + 1);
+      const controller = new AbortController();
+      controller.signal.addEventListener('abort', () => resolve(41));
+      controller.abort();
+      assert.equal(await chained, 42);
+      process.stdout.write('abort promise chain completed');
+    `, { entryPath: '/node/esm/abort-promise-chain-entry.mjs' });
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('abort promise chain completed');
+  });
+
+  test('keeps rejected abort chains awaitable after eviction', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      let resolveFetch;
+      const fetchMethodPromise = new Promise(resolve => { resolveFetch = resolve; });
+      const returned = new Promise((resolve, reject) => {
+        fetchMethodPromise.then(value => resolve(value), reject);
+      }).then(() => {
+        throw new Error('evicted');
+      });
+      resolveFetch(undefined);
+      await assert.rejects(returned, { message: 'evicted' });
+      process.stdout.write('rejected abort chain completed');
+    `, { entryPath: '/node/esm/rejected-abort-chain-entry.mjs' });
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('rejected abort chain completed');
+  });
+
+  test('keeps query identity on transitive ESM dependencies with sync hooks', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { registerHooks } from 'node:module';
+      registerHooks({
+        resolve(specifier, context, nextResolve) {
+          const result = nextResolve(specifier, context);
+          const identity = new URL(context.parentURL).searchParams.get('identity');
+          if (!identity || !result.url.startsWith('file:')) return result;
+          const url = new URL(result.url);
+          url.searchParams.set('identity', identity);
+          return { ...result, url: String(url) };
+        },
+      });
+      global.performance = { now: () => 41 };
+      const first = await import('./query-parent.mjs?identity=first');
+      global.performance = { now: () => 82 };
+      const second = await import('./query-parent.mjs?identity=second');
+      assert.equal(first.value, 41);
+      assert.equal(second.value, 82);
+      assert.notStrictEqual(first, second);
+      process.stdout.write('transitive query identity completed');
+    `, {
+      entryPath: '/node/esm/query-parent-entry.mjs',
+      files: {
+        '/node/esm/query-parent.mjs': "export { value } from './query-child.mjs';",
+        '/node/esm/query-child.mjs': 'export const value = performance.now();',
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('transitive query identity completed');
+  });
+
+  test('inherits tapmock identity when a sync hook returns a bare child URL', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { registerHooks } from 'node:module';
+      registerHooks({
+        resolve(specifier, context, nextResolve) {
+          const result = nextResolve(specifier, context);
+          const parent = new URL(context.parentURL);
+          if (!parent.searchParams.has('tapmock') || !result.url.startsWith('file:')) return result;
+          const url = new URL(result.url);
+          url.search = '';
+          return { ...result, url: String(url) };
+        },
+      });
+      global.performance = { now: () => 41 };
+      const first = await import('./query-parent.mjs?tapmock=service.first');
+      global.performance = { now: () => 82 };
+      const second = await import('./query-parent.mjs?tapmock=service.second');
+      assert.equal(first.value, 41);
+      assert.equal(second.value, 82);
+      assert.notStrictEqual(first, second);
+      process.stdout.write('tapmock identity completed');
+    `, {
+      entryPath: '/node/esm/query-parent-entry.mjs',
+      files: {
+        '/node/esm/query-parent.mjs': "export { value } from './query-child.mjs';",
+        '/node/esm/query-child.mjs': 'export const value = performance.now();',
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('tapmock identity completed');
+  });
+
+  test('resolves createRequire from a generated blob module back to its VFS path', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { createRequire } from 'node:module';
+      const require = createRequire(import.meta.url);
+      const dependency = require('./blob-require-dependency.cjs');
+      assert.equal(dependency.value, 'blob-require-ok');
+      process.stdout.write('blob createRequire completed');
+    `, {
+      entryPath: '/node/esm/blob-require-entry.mjs',
+      files: {
+        '/node/esm/blob-require-dependency.cjs': "exports.value = 'blob-require-ok';",
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('blob createRequire completed');
+  });
+
+  test('prepares unawaited dynamic imports in request order', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      globalThis.__bnhDynamicImportOrder = [];
+      const imports = [0, 1, 2, 3, 4].map((index) => import('./dynamic-order-' + index + '.mjs'));
+      await Promise.all(imports);
+      assert.deepStrictEqual(globalThis.__bnhDynamicImportOrder, [0, 1, 2, 3, 4]);
+      process.stdout.write('dynamic import order completed');
+    `, {
+      entryPath: '/node/esm/dynamic-order-entry.mjs',
+      files: Object.fromEntries(Array.from({ length: 5 }, (_, index) => [
+        `/node/esm/dynamic-order-${index}.mjs`,
+        `globalThis.__bnhDynamicImportOrder.push(${index}); export default ${index};`,
+      ])),
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('dynamic import order completed');
+  });
+
+  test('lets unawaited entry work settle before beforeExit', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import process from 'node:process';
+      globalThis.__bnhEntryWorkDone = false;
+      process.once('beforeExit', () => {
+        if (!globalThis.__bnhEntryWorkDone) process.stdout.write('premature beforeExit');
+      });
+      (async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        globalThis.__bnhEntryWorkDone = true;
+        process.stdout.write('unawaited entry work completed');
+      })();
+    `, { entryPath: '/node/esm/unawaited-entry-work.mjs' });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('unawaited entry work completed');
+    expect(result.stdout).not.toContain('premature beforeExit');
+  });
+
+  test('keeps an ESM runner continuation alive after dynamic import', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import process from 'node:process';
+      globalThis.__bnhDynamicRunnerDone = false;
+      process.once('beforeExit', () => {
+        if (!globalThis.__bnhDynamicRunnerDone) process.stdout.write('premature dynamic beforeExit');
+      });
+      import('./dynamic-runner-launcher.mjs');
+    `, {
+      entryPath: '/node/esm/dynamic-runner-entry.mjs',
+      files: {
+        '/node/esm/dynamic-runner-launcher.mjs': `
+          const { start } = await import('./dynamic-runner.mjs');
+          start();
+        `,
+        '/node/esm/dynamic-runner.mjs': `
+          export async function start() {
+            await Promise.resolve();
+            await Promise.resolve();
+            globalThis.__bnhDynamicRunnerDone = true;
+            process.stdout.write('dynamic runner completed');
+          }
+        `,
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('dynamic runner completed');
+    expect(result.stdout).not.toContain('premature dynamic beforeExit');
+  });
+
+  test('keeps captured fs promises alive for an unawaited ESM runner', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import process from 'node:process';
+      globalThis.__bnhFsRunnerDone = false;
+      process.once('beforeExit', () => {
+        if (!globalThis.__bnhFsRunnerDone) process.stdout.write('premature fs beforeExit');
+      });
+      import('./fs-runner-launcher.mjs');
+    `, {
+      entryPath: '/node/esm/fs-runner-entry.mjs',
+      files: {
+        '/node/esm/fs-runner-launcher.mjs': `
+          import { stat } from 'node:fs/promises';
+          async function run() {
+            const metadata = await stat('/node/esm/fs-runner-target.mjs');
+            if (!metadata.isFile()) throw new Error('target is not a file');
+            globalThis.__bnhFsRunnerDone = true;
+            process.stdout.write('fs runner completed');
+          }
+          run();
+        `,
+        '/node/esm/fs-runner-target.mjs': 'export const target = true;',
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('fs runner completed');
+    expect(result.stdout).not.toContain('premature fs beforeExit');
+  });
+
+  test('keeps synchronously resolved promise walkers alive for an unawaited ESM runner', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import process from 'node:process';
+      globalThis.__bnhWalkerDone = false;
+      process.once('beforeExit', () => {
+        if (!globalThis.__bnhWalkerDone) process.stdout.write('premature walker beforeExit');
+      });
+      import('./walker-runner-launcher.mjs');
+    `, {
+      entryPath: '/node/esm/walker-runner-entry.mjs',
+      files: {
+        '/node/esm/walker-runner-launcher.mjs': `
+          async function walk() {
+            const results = await new Promise((resolve) => resolve([]));
+            if (results.length !== 0) throw new Error('unexpected walker result');
+            globalThis.__bnhWalkerDone = true;
+            process.stdout.write('walker completed');
+          }
+          walk();
+        `,
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('walker completed');
+    expect(result.stdout).not.toContain('premature walker beforeExit');
+  });
+
+  test('keeps nested async walker continuations alive for an unawaited ESM runner', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import process from 'node:process';
+      globalThis.__bnhNestedWalkerDone = false;
+      process.once('beforeExit', () => {
+        if (!globalThis.__bnhNestedWalkerDone) process.stdout.write('premature nested walker beforeExit');
+      });
+      import('./nested-walker-launcher.mjs');
+    `, {
+      entryPath: '/node/esm/nested-walker-entry.mjs',
+      files: {
+        '/node/esm/nested-walker-launcher.mjs': `
+          class Walker {
+            async walk() {
+              await new Promise((resolve) => {
+                const done = () => resolve();
+                done();
+              });
+              return [];
+            }
+          }
+          class Glob {
+            async walk() {
+              return [...(await new Walker().walk())];
+            }
+          }
+          async function run() {
+            const matches = await new Glob().walk();
+            if (matches.length !== 0) throw new Error('unexpected walker result');
+            globalThis.__bnhNestedWalkerDone = true;
+            process.stdout.write('nested walker completed');
+          }
+          run();
+        `,
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('nested walker completed');
+    expect(result.stdout).not.toContain('premature nested walker beforeExit');
+  });
+
+  test('keeps captured callback filesystem walkers alive for an unawaited ESM runner', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import process from 'node:process';
+      globalThis.__bnhCapturedFsWalkerDone = false;
+      process.once('beforeExit', () => {
+        if (!globalThis.__bnhCapturedFsWalkerDone) process.stdout.write('premature captured fs walker beforeExit');
+      });
+      import('./captured-fs-walker-launcher.mjs');
+    `, {
+      entryPath: '/node/esm/captured-fs-walker-entry.mjs',
+      files: {
+        '/node/esm/captured-fs-walker-launcher.mjs': `
+          import { readdir } from 'node:fs';
+          import { lstat } from 'node:fs/promises';
+          const capturedFs = { readdir, promises: { lstat } };
+          class Path {
+            constructor(path) { this.path = path; }
+            async lstat() {
+              await capturedFs.promises.lstat(this.path);
+              return this;
+            }
+            readdirCB(callback) {
+              capturedFs.readdir(this.path, { withFileTypes: true }, callback);
+            }
+          }
+          class GlobWalker {
+            constructor(path) { this.path = path; }
+            async walk() {
+              await this.path.lstat();
+              await new Promise((resolve, reject) => {
+                this.path.readdirCB((error, entries) => {
+                  if (error) reject(error);
+                  else resolve(entries);
+                });
+              });
+              return [];
+            }
+          }
+          async function run() {
+            const matches = await new GlobWalker(new Path('/node/esm')).walk();
+            if (matches.length !== 0) throw new Error('unexpected captured fs walker result');
+            globalThis.__bnhCapturedFsWalkerDone = true;
+            process.stdout.write('captured fs walker completed');
+          }
+          run();
+        `,
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('captured fs walker completed');
+    expect(result.stdout).not.toContain('premature captured fs walker beforeExit');
+  });
+
+  test('keeps a large batch of unawaited walker continuations alive', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import process from 'node:process';
+      const total = 20000;
+      let completed = 0;
+      process.once('beforeExit', () => {
+        if (completed !== total) process.stdout.write('premature batch beforeExit ' + completed);
+        else process.stdout.write('walker batch completed');
+      });
+      async function walk() {
+        await new Promise((resolve) => resolve([]));
+        completed += 1;
+      }
+      for (let index = 0; index < total; index += 1) walk();
+    `, { entryPath: '/node/esm/walker-batch-entry.mjs' });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('walker batch completed');
+    expect(result.stdout).not.toContain('premature batch beforeExit');
+  });
+
   test('provides structured capture stacks to V8-compatible consumers', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       import assert from 'node:assert/strict';
@@ -149,6 +659,31 @@ test.describe('browser ESM loader', () => {
 
     await expectPass(expect, result);
     expect(result.stdout).toContain('structured stack completed');
+  });
+
+  test('supports CallSite-compatible custom stack formatters', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      class CallSiteLike {
+        constructor(error, callSite) {
+          assert.equal(callSite.constructor.name, 'CallSite');
+          this.typeName = callSite.getTypeName();
+          this.functionName = callSite.getFunctionName();
+          this.error = error;
+        }
+      }
+      const previousPrepare = Error.prepareStackTrace;
+      Error.prepareStackTrace = (error, callSites) => callSites.map((callSite) => new CallSiteLike(error, callSite));
+      const target = {};
+      Error.captureStackTrace(target);
+      Error.prepareStackTrace = previousPrepare;
+      assert.ok(Array.isArray(target.stack));
+      assert.ok(target.stack.length > 0);
+      process.stdout.write('custom formatter completed');
+    `, { entryPath: '/node/esm/custom-stack-formatter.mjs' });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('custom formatter completed');
   });
 
   test('preserves structured capture stacks in nested ESM node processes', async ({ harnessPage }) => {
@@ -919,4 +1454,5 @@ test.describe('browser ESM loader', () => {
     await expectPass(expect, result);
     expect(result.stdout).toContain('hashbang esm completed');
   });
+
 });

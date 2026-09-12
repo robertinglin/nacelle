@@ -736,7 +736,7 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
     // leaves reporters without the real per-test error context.
     const file = activeRun?.file || sourcePath || processObject.argv?.[1];
     const result = new Promise((resolve) => {
-      const node = { children: [], fullName, file, before: [], after: [], beforeEach: [], afterEach: [], beforeReady: null, context: null, mock: null };
+      const node = { children: [], fullName, file, before: [], after: [], beforeEach: [], afterEach: [], beforeReady: null, context: null, mock: null, runTail: Promise.resolve() };
       const run = async () => {
         const release = trackTask();
         runtimeState.activeTest = { name: label, fullName, file, state: 'running' };
@@ -881,8 +881,16 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
         }
       };
       const finish = (value) => { recordResult(value); resolve(value); };
-      if (ownerNode) schedule(() => run().then(finish, (error) => finish({ name: label, status: 'fail', error, file })));
-      else {
+      if (ownerNode) {
+        // Tap runs a parent's child tests in registration order. This is
+        // observable when a suite deliberately shares mutable test fixtures,
+        // such as @tapjs/clock's patched Date/performance globals.
+        const previous = ownerNode.runTail;
+        ownerNode.runTail = previous.then(() => testStartGate).then(() => run()).then(
+          finish,
+          (error) => finish({ name: label, status: 'fail', error, file }),
+        );
+      } else {
         const previous = testTail;
         testTail = previous.then(() => testStartGate).then(() => run()).then(
           finish,

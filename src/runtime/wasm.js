@@ -77,7 +77,7 @@ function streamingCompileError(wasm, error) {
   return error;
 }
 
-function runtimePromise(promise, PromiseClass) {
+function runtimePromise(promise, PromiseClass, processContext = null) {
   try {
     Object.defineProperty(promise, 'constructor', {
       configurable: true,
@@ -86,23 +86,54 @@ function runtimePromise(promise, PromiseClass) {
   } catch {
     // Native promises may be non-extensible in restricted browser realms.
   }
-  if (promise.constructor === PromiseClass) return promise;
+  const runInProcessContext = processContext?.run;
+  const owner = processContext?.owner;
+  const wrapCallback = (callback) => {
+    if (typeof callback !== 'function' || typeof runInProcessContext !== 'function' || !owner) return callback;
+    return (...args) => runInProcessContext(owner, () => Reflect.apply(callback, this, args));
+  };
+  if (promise.constructor === PromiseClass && !processContext) return promise;
   return new Proxy(promise, {
     get(target, property, receiver) {
       if (property === 'constructor') return PromiseClass;
-      if (property === 'then' || property === 'catch' || property === 'finally') {
-        return target[property].bind(target);
+      if (property === 'then') {
+        return (onFulfilled, onRejected) => runtimePromise(
+          target.then(wrapCallback(onFulfilled), wrapCallback(onRejected)),
+          PromiseClass,
+          processContext,
+        );
+      }
+      if (property === 'catch') {
+        return (onRejected) => runtimePromise(
+          target.catch(wrapCallback(onRejected)),
+          PromiseClass,
+          processContext,
+        );
+      }
+      if (property === 'finally') {
+        return (onFinally) => runtimePromise(
+          target.finally(wrapCallback(onFinally)),
+          PromiseClass,
+          processContext,
+        );
       }
       return Reflect.get(target, property, receiver);
     },
   });
 }
 
-function compileFromResponse(wasm, globalObject, method, response, args) {
+function processContext(globalObject, runInProcessContext) {
+  const owner = globalObject.__bnhActiveProcess || globalObject.process;
+  return owner && typeof runInProcessContext === 'function'
+    ? { owner, run: runInProcessContext }
+    : null;
+}
+
+function compileFromResponse(wasm, globalObject, method, response, args, context) {
   const PromiseClass = globalObject.Promise || Promise;
   const nativeMethod = wasm[method];
   const responseError = webAssemblyResponseError(response);
-  if (responseError) return runtimePromise(PromiseClass.reject(responseError), PromiseClass);
+  if (responseError) return runtimePromise(PromiseClass.reject(responseError), PromiseClass, context);
   const contentLengthHeader = responseHeader(response, 'Content-Length');
   const hasContentLength = contentLengthHeader !== null && contentLengthHeader !== undefined
     && contentLengthHeader !== '';
@@ -114,10 +145,10 @@ function compileFromResponse(wasm, globalObject, method, response, args) {
       }
       return value;
     });
-    return runtimePromise(result, PromiseClass);
+    return runtimePromise(result, PromiseClass, context);
   }
   if (typeof response.arrayBuffer !== 'function') {
-    return runtimePromise(PromiseClass.reject(new TypeError('WebAssembly response body is unavailable')), PromiseClass);
+    return runtimePromise(PromiseClass.reject(new TypeError('WebAssembly response body is unavailable')), PromiseClass, context);
   }
   return runtimePromise(PromiseClass.resolve(response.arrayBuffer()).then((bytes) => {
     try {
@@ -134,7 +165,7 @@ function compileFromResponse(wasm, globalObject, method, response, args) {
     }
   }).catch((error) => {
     throw streamingCompileError(wasm, error);
-  }), PromiseClass);
+  }), PromiseClass, context);
 }
 
 function rewriteWasmStack(error, url) {
@@ -174,29 +205,57 @@ function createInstanceConstructor(wasm) {
   return Instance;
 }
 
-function createStreamingMethod(wasm, globalObject, method) {
+function createStreamingMethod(wasm, globalObject, method, runInProcessContext) {
   if (typeof wasm[method] !== 'function') return undefined;
   const PromiseClass = globalObject.Promise || Promise;
   return (source, ...args) => {
-    if (isResponse(source, globalObject)) return compileFromResponse(wasm, globalObject, method, source, args);
-    if (!isPromiseLike(source)) return PromiseClass.reject(invalidStreamingSource(source));
+    const context = processContext(globalObject, runInProcessContext);
+    if (isResponse(source, globalObject)) return compileFromResponse(wasm, globalObject, method, source, args, context);
+    if (!isPromiseLike(source)) return runtimePromise(PromiseClass.reject(invalidStreamingSource(source)), PromiseClass, context);
     return runtimePromise(PromiseClass.resolve(source).then((response) => {
       if (!isResponse(response, globalObject)) throw invalidStreamingSource(response);
-      return compileFromResponse(wasm, globalObject, method, response, args);
-    }), PromiseClass);
+      return compileFromResponse(wasm, globalObject, method, response, args, context);
+    }), PromiseClass, context);
   };
 }
 
-export function createWasmContract(globalObject = globalThis) {
+export function createWasmContract(globalObject = globalThis, {
+  mutable = false,
+  runInProcessContext = null,
+} = {}) {
   const wasm = requireWebAssembly(globalObject);
+  const contextForCall = () => processContext(globalObject, runInProcessContext);
   const contract = Object.create(wasm);
   Object.defineProperties(contract, {
     validate: { configurable: true, enumerable: true, writable: true, value: (bytes) => wasm.validate(bytes) },
     compile: { configurable: true, enumerable: true, writable: true, value: (bytes) => wasm.compile(bytes) },
-    instantiate: { configurable: true, enumerable: true, writable: true, value: (source, imports) => wasm.instantiate(source, imports) },
+    instantiate: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: (source, imports) => runtimePromise(
+        wasm.instantiate(source, imports),
+        globalObject.Promise || Promise,
+        contextForCall(),
+      ),
+    },
     Instance: { configurable: true, enumerable: true, writable: true, value: createInstanceConstructor(wasm) },
-    compileStreaming: { configurable: true, enumerable: true, writable: true, value: createStreamingMethod(wasm, globalObject, 'compileStreaming') },
-    instantiateStreaming: { configurable: true, enumerable: true, writable: true, value: createStreamingMethod(wasm, globalObject, 'instantiateStreaming') },
+    compileStreaming: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: createStreamingMethod(wasm, globalObject, 'compileStreaming', runInProcessContext),
+    },
+    instantiateStreaming: {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: createStreamingMethod(wasm, globalObject, 'instantiateStreaming', runInProcessContext),
+    },
   });
-  return Object.freeze(contract);
+  // Go's wasm_exec loader derives a child object with Object.create() and
+  // replaces instantiate on that child. A frozen prototype property prevents
+  // that standard WebAssembly pattern from working, so guest-facing contracts
+  // may be sealed while the public runtime contract remains frozen.
+  return mutable ? Object.seal(contract) : Object.freeze(contract);
 }

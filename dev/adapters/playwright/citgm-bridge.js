@@ -511,7 +511,10 @@ function capabilitiesFor(env) {
     : null;
   return {
     vfs: { mounts: [{ path: '/node', mode: 'read-write' }] },
-    workers: { entryModules: ['*'], maxChildren: 32 },
+    // CITGM's npm test can materialize a very large package VFS in each
+    // child. Keep the browser-side fan-out bounded so buffered test output
+    // cannot exhaust the page before the package reports its result.
+    workers: { entryModules: ['*'], maxChildren: 8 },
     ipc: { enabled: true },
     signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
     output: { maxBytes: 16 * 1024 * 1024, stdoutBytes: 8 * 1024 * 1024, stderrBytes: 8 * 1024 * 1024 },
@@ -700,6 +703,52 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
               runtimePhase: boundedText(child.runtimePhase, 64),
               files: Number(child.files) || 0,
               bytes: Number(child.bytes) || 0,
+              nestedActivity: child.runtimeState?.childActivity ? {
+                launched: Number(child.runtimeState.childActivity.launched) || 0,
+                completed: Number(child.runtimeState.childActivity.completed) || 0,
+                failed: Number(child.runtimeState.childActivity.failed) || 0,
+                active: Array.isArray(child.runtimeState.childActivity.active)
+                  ? child.runtimeState.childActivity.active.slice(-4).map((record) => ({
+                    entry: boundedText(record.entry || record.command, 256),
+                    argumentCount: Number(record.argumentCount) || 0,
+                    phase: boundedText(record.phase, 64),
+                    pending: Boolean(record.pending),
+                    ipcMessageCount: Number(record.ipcMessageCount) || 0,
+                    childState: record.childState || null,
+                  }))
+                  : [],
+                recent: Array.isArray(child.runtimeState.childActivity.recent)
+                  ? child.runtimeState.childActivity.recent.slice(-4).map((record) => ({
+                    entry: boundedText(record.entry || record.command, 256),
+                    argumentCount: Number(record.argumentCount) || 0,
+                    phase: boundedText(record.phase, 64),
+                    pending: Boolean(record.pending),
+                    code: record.code ?? null,
+                    signal: record.signal ?? null,
+                    childState: record.childState || null,
+                  }))
+                  : [],
+                liveVirtualProcesses: Array.isArray(child.runtimeState.childActivity.liveVirtualProcesses)
+                  ? child.runtimeState.childActivity.liveVirtualProcesses.slice(-8).map((record) => ({
+                    pid: Number(record.pid) || 0,
+                    state: boundedText(record.state, 32),
+                    terminal: Boolean(record.terminal),
+                    ppid: Number(record.ppid) || 0,
+                    cwd: boundedText(record.cwd, 256),
+                    argv: Array.isArray(record.argv) ? record.argv.slice(0, 12).map((value) => boundedText(value, 256)) : [],
+                    runtimePhase: boundedText(record.runtimePhase, 64),
+                    lifecycle: record.lifecycle || null,
+                  }))
+                  : [],
+                liveBrowserWorkers: Array.isArray(child.runtimeState.childActivity.liveBrowserWorkers)
+                  ? child.runtimeState.childActivity.liveBrowserWorkers.slice(-8).map((record) => ({
+                    threadId: Number(record.threadId) || -1,
+                    state: boundedText(record.state, 32),
+                    refed: record.refed == null ? null : Boolean(record.refed),
+                    terminal: Boolean(record.terminal),
+                  }))
+                  : [],
+              } : null,
               lifecycle: child.lifecycle ? {
                 pending: Number(child.lifecycle.pending) || 0,
                 tasks: Array.isArray(child.lifecycle.tasks) ? {
@@ -730,6 +779,26 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
           stderrExcerpt: boundedText(record.stderrExcerpt, 512) || '',
           nestedState: record.nestedState || compactNestedState(record),
         })) : [],
+        liveVirtualProcesses: Array.isArray(activity.liveVirtualProcesses)
+          ? activity.liveVirtualProcesses.slice(-8).map((record) => ({
+            pid: Number(record.pid) || 0,
+            state: boundedText(record.state, 32),
+            terminal: Boolean(record.terminal),
+            ppid: Number(record.ppid) || 0,
+            cwd: boundedText(record.cwd, 256),
+            argv: Array.isArray(record.argv) ? record.argv.slice(0, 12).map((value) => boundedText(value, 256)) : [],
+            runtimePhase: boundedText(record.runtimePhase, 64),
+            lifecycle: record.lifecycle || null,
+          }))
+          : [],
+        liveBrowserWorkers: Array.isArray(activity.liveBrowserWorkers)
+          ? activity.liveBrowserWorkers.slice(-8).map((record) => ({
+            threadId: Number(record.threadId) || -1,
+            state: boundedText(record.state, 32),
+            refed: record.refed == null ? null : Boolean(record.refed),
+            terminal: Boolean(record.terminal),
+          }))
+          : [],
       } : null,
       terminal: child?.terminal || worker?.terminal ? {
         code: child?.terminal?.code ?? worker?.terminal?.code ?? null,

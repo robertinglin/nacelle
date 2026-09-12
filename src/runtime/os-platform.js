@@ -21,6 +21,14 @@ const MACHINE_BY_ARCH = Object.freeze({
   x64: 'x86_64',
 });
 
+function browserParallelism() {
+  // The virtual machine exposes a fixed 512 MiB memory budget. Host browser
+  // hardwareConcurrency is not a usable process limit here: on a desktop it
+  // can cause Node tooling such as tap to launch dozens of full-runtime child
+  // workers against the same virtual filesystem.
+  return 1;
+}
+
 function freezeConstants() {
   return Object.freeze({
     UV_UDP_REUSEADDR: 4,
@@ -98,6 +106,7 @@ export function createPlatformContract({
   tmpdir = '/tmp',
   eol = '\n',
   env = {},
+  parallelism = undefined,
 } = {}) {
   validateChoice(platform, VALID_PLATFORMS, 'platform');
   validateChoice(arch, VALID_ARCHES, 'architecture');
@@ -106,6 +115,7 @@ export function createPlatformContract({
   if (eol !== '\n' && eol !== '\r\n') throw new RangeError('eol must be LF or CRLF');
 
   let priority = 0;
+  const cpuCount = Number.isInteger(parallelism) && parallelism > 0 ? parallelism : browserParallelism();
   const constants = freezeConstants();
   const homedir = '/home/browser';
   const machine = MACHINE_BY_ARCH[arch] || arch;
@@ -130,8 +140,11 @@ export function createPlatformContract({
     endianness: createPrimitiveMethod(() => 'LE'),
     totalmem: createPrimitiveMethod(() => BROWSER_TOTAL_MEMORY),
     freemem: createPrimitiveMethod(() => BROWSER_FREE_MEMORY),
-    availableParallelism: createPrimitiveMethod(() => 1),
-    cpus: () => [{ ...BROWSER_CPU, times: { ...BROWSER_CPU.times } }],
+    availableParallelism: createPrimitiveMethod(() => cpuCount),
+    cpus: () => Array.from({ length: cpuCount }, () => ({
+      ...BROWSER_CPU,
+      times: { ...BROWSER_CPU.times },
+    })),
     homedir: createCheckedPrimitiveMethod(() => homedir),
     hostname: createCheckedPrimitiveMethod(() => 'browser'),
     uptime: createCheckedPrimitiveMethod(() => 1),

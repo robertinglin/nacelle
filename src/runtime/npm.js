@@ -28,6 +28,19 @@ function isBrowserNativePackage(name, platform) {
     || /(?:^|-)\b(?:aix|android|darwin|freebsd|linux|openbsd|sunos|win32)\b(?:-|$)/i.test(packageName);
 }
 
+// Some packages publish a first-party WebAssembly distribution under a
+// separate package name instead of declaring it as an npm platform variant.
+// Keep these substitutions explicit and version-matched: this is an official
+// package alternative, not a fabricated native package or a general resolver
+// alias.
+const BROWSER_PACKAGE_ALTERNATIVES = Object.freeze({
+  esbuild: Object.freeze({ name: 'esbuild-wasm', reason: 'official-wasm-distribution' }),
+});
+
+function browserPackageAlternative(name, platform) {
+  return platform === 'browser' ? BROWSER_PACKAGE_ALTERNATIVES[String(name)] || null : null;
+}
+
 function isBrowserWasmPackage(name, platform) {
   if (platform !== 'browser') return false;
   return /(?:^|[-/])wasm\d*(?:[-/]|$)/i.test(String(name));
@@ -822,12 +835,44 @@ export class BrowserNpm {
         return;
       }
 
+      const browserAlternative = browserPackageAlternative(resolutionName, this.platform);
+      const packageName = browserAlternative?.name || resolutionName;
       let versionDoc = null;
       let version = null;
       let tarballBytes = null;
 
-      const locked = lockPackageEntry(itemNodeModulesDir, name, resolutionRange);
-      if (locked) {
+      const locked = browserAlternative ? null : lockPackageEntry(itemNodeModulesDir, name, resolutionRange);
+      if (browserAlternative) {
+        // The lockfile records the normal native package. Resolve the
+        // first-party browser alternative at the same version when possible,
+        // so browser installs remain semantically aligned with the lockfile.
+        const alternativeMetadata = await this.fetchPackageMetadata(packageName, { onProgress });
+        const lockVersion = lockPackageEntry(itemNodeModulesDir, name, resolutionRange)?.version;
+        if (lockVersion && alternativeMetadata.versions?.[lockVersion]) {
+          version = lockVersion;
+          versionDoc = alternativeMetadata.versions[lockVersion];
+        } else {
+          const resolved = this.resolveVersion(alternativeMetadata, resolutionRange);
+          version = resolved.version;
+          versionDoc = resolved.doc;
+        }
+        onProgress?.({
+          phase: 'browser-package-alternative',
+          name,
+          requestedName: resolutionName,
+          packageName,
+          version,
+          reason: browserAlternative.reason,
+        });
+        const tarballUrl = versionDoc?.dist?.tarball;
+        if (!tarballUrl) throw new Error(`Missing tarball URL for ${packageName}@${version}`);
+        tarballBytes = await this.fetchTarball(tarballUrl, {
+          name: packageName,
+          version,
+          integrity: versionDoc.dist.integrity,
+          onProgress,
+        });
+      } else if (locked) {
         version = locked.version;
         versionDoc = locked.doc;
         tarballBytes = await this.fetchTarball(versionDoc.dist.tarball, {
@@ -896,10 +941,11 @@ export class BrowserNpm {
       Object.assign(filesToMount, packageFiles);
 
       // Link package "bin" scripts into node_modules/.bin/
-      if (parsedPkgJson && parsedPkgJson.bin) {
-        const binEntries = typeof parsedPkgJson.bin === 'string'
-          ? [[parsedPkgJson.name || name, parsedPkgJson.bin]]
-          : Object.entries(parsedPkgJson.bin);
+      const packageBin = parsedPkgJson?.bin || versionDoc?.bin;
+      if (packageBin) {
+        const binEntries = typeof packageBin === 'string'
+          ? [[parsedPkgJson?.name || name, packageBin]]
+          : Object.entries(packageBin);
 
         for (const [binName, binRel] of binEntries) {
           const binPath = `${itemNodeModulesDir}/.bin/${binName}`;

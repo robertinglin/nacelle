@@ -69,6 +69,261 @@ test('Function-created dynamic imports use the virtual module loader', async () 
   assert.equal(stdout, '42\n');
 });
 
+test('nested guest Function constructors do not duplicate the import parameter', async () => {
+  const { stdout } = await run(`
+    require('./nested.cjs');
+    console.log('ok');
+  `, {
+    '/node/nested.cjs': `
+      const generated = 'const value = go.importObject;';
+      new Function('require', 'WebAssembly', generated);
+    `,
+  });
+  assert.equal(stdout, 'ok\n');
+});
+
+test('async filesystem callbacks retain the owning child working directory', async () => {
+  const { stdout } = await run(`
+    const fs = require('fs');
+    process.chdir('/node/work');
+    setTimeout(() => fs.stat('missing.txt', (error) => {
+      if (process.cwd() !== '/node/work') throw new Error('child cwd was lost');
+      if (error?.code !== 'ENOENT' || error.path !== '/node/work/missing.txt') throw error;
+      console.log('ok');
+    }), 0);
+  `, { '/node/work/placeholder': '' });
+  assert.equal(stdout, 'ok\n');
+});
+
+test('process-bound fs resolves WASM-style relative paths after child bootstrap', async () => {
+  const { stdout } = await run(`
+    const fs = require('fs');
+    process.chdir('/node/work');
+    setTimeout(() => fs.stat('present.txt', (error, stats) => {
+      if (error || !stats.isFile()) throw error || new Error('relative stat failed');
+      console.log('ok');
+    }), 0);
+  `, { '/node/work/present.txt': 'ok' });
+  assert.equal(stdout, 'ok\n');
+});
+
+test('high-volume unobserved timers do not pay destroy grace per callback', async () => {
+  const { stdout } = await run(`
+    (async () => {
+      const work = [];
+      for (let i = 0; i < 10_000; i++) {
+        work.push(new Promise(resolve => setTimeout(resolve, 0)));
+      }
+      await Promise.all(work);
+      console.log('timers done');
+    })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
+  `);
+  assert.equal(stdout, 'timers done\n');
+});
+
+test('unref timers still run while a process-owned refed timer keeps the loop alive', async () => {
+  const { stdout } = await run(`
+    const unrefed = setTimeout(() => console.log('unref fired'), 0);
+    unrefed.unref();
+    setTimeout(() => console.log('ref fired'), 20);
+  `);
+  assert.equal(stdout, 'unref fired\nref fired\n');
+});
+
+test('process-bound fs preserves stream and promisifier behavior', async () => {
+  const { stdout } = await run(`
+    const fs = require('fs');
+    const { promisify } = require('util');
+    process.chdir('/node/work');
+    (async () => {
+      const exists = await promisify(fs.exists)('present.txt');
+      if (!exists) throw new Error('promisified exists failed');
+      const chunks = [];
+      await new Promise((resolve, reject) => {
+        const stream = fs.createReadStream('present.txt');
+        stream.on('data', (chunk) => chunks.push(chunk));
+        stream.on('error', reject);
+        stream.on('end', resolve);
+      });
+      if (Buffer.concat(chunks).toString() !== 'stream-ok') throw new Error('relative stream read failed');
+      console.log('ok');
+    })().catch((error) => { throw error; });
+  `, { '/node/work/present.txt': 'stream-ok' });
+  assert.equal(stdout, 'ok\n');
+});
+
+test('WebAssembly promise callbacks retain the owning child process', async () => {
+  const { stdout } = await run(`
+    process.chdir('/node/work');
+    const bytes = Buffer.from('0061736d01000000', 'hex');
+    WebAssembly.instantiate(bytes).then(() => {
+      if (process.cwd() !== '/node/work') throw new Error('WASM promise lost child cwd');
+      console.log('ok');
+    });
+  `, { '/node/work/placeholder': '' });
+  assert.equal(stdout, 'ok\n');
+});
+
+test('nested virtual children receive process-bound fs modules', async () => {
+  const { stdout } = await run(`
+    const { spawnSync } = require('child_process');
+    const child = spawnSync(process.execPath, ['-e',
+      'const fs = require("fs"); if (!fs.statSync("present.txt").isFile()) process.exit(2); console.log(process.cwd())',
+    ], { cwd: '/node/work', encoding: 'utf8' });
+    if (child.status !== 0) throw new Error(child.stderr || 'nested fs child failed');
+    process.stdout.write(child.stdout);
+  `, { '/node/work/present.txt': 'ok' });
+  assert.equal(stdout, '/node/work\n');
+});
+
+test('async ESM child filesystem mutations return to the parent VFS', async () => {
+  const { stdout } = await run(`
+    const fs = require('fs');
+    const child = require('child_process').spawn(process.execPath, ['/node/write.mjs'], { cwd: '/node/work' });
+    child.on('error', (error) => { throw error; });
+    child.on('close', (code) => {
+      if (code !== 0) throw new Error('ESM child failed: ' + code);
+      console.log(fs.readFileSync('/node/work/generated.txt', 'utf8'));
+    });
+  `, {
+    '/node/write.mjs': `import { writeFile } from 'node:fs/promises'; await writeFile('generated.txt', 'child-ok');`,
+    '/node/work/placeholder': '',
+  });
+  assert.equal(stdout, 'child-ok\n');
+});
+
+test('ESM children settle concurrent fs.promises probes during top-level await', async () => {
+  const { stdout } = await run(`
+    const child = require('child_process').spawn(
+      process.execPath,
+      ['/node/probe.mjs'],
+      { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] },
+    );
+    child.stdout.on('data', (chunk) => process.stdout.write(chunk));
+    child.stderr.on('data', (chunk) => process.stderr.write(chunk));
+    child.on('error', (error) => { throw error; });
+    child.on('close', (code) => { if (code !== 0) throw new Error('probe child failed: ' + code); });
+  `, {
+    '/node/probe.mjs': `
+      import { lstat, readdir, readFile } from 'node:fs/promises';
+      const results = await Promise.all([
+        lstat('/node/probe.mjs'),
+        readdir('/node'),
+        readFile('/node/probe.mjs', 'utf8'),
+        lstat('/node/probe.mjs'),
+      ]);
+      if (!results[0].isFile() || !results[1].includes('probe.mjs') || !results[2].includes('Promise.all')) throw new Error('probe mismatch');
+      console.log('probes done');
+    `,
+  });
+  assert.equal(stdout, 'probes done\n');
+});
+
+test('ordinary ESM children do not expose the internal runtime channel as process.send', async () => {
+  const { stdout } = await run(`
+    const child = require('child_process').spawn(process.execPath, ['/node/check-ipc.mjs']);
+    child.stdout.on('data', (chunk) => process.stdout.write(chunk));
+    child.on('error', (error) => { throw error; });
+  `, { '/node/check-ipc.mjs': `console.log(typeof process.send);` });
+  assert.equal(stdout, 'undefined\n');
+});
+
+test('guest WebAssembly contracts allow standard loader child overrides', async () => {
+  const { stdout } = await run(`
+    const child = Object.create(WebAssembly);
+    const instantiate = () => 'custom';
+    Object.assign(child, { instantiate });
+    if (child.instantiate !== instantiate) throw new Error('WebAssembly child override was blocked');
+    console.log('ok');
+  `);
+  assert.equal(stdout, 'ok\n');
+});
+
+test('HTTP agents tolerate subclasses with post-super protocol accessors', async () => {
+  const { stdout } = await run(`
+    const http = require('http');
+    const state = Symbol('state');
+    class AgentBase extends http.Agent {
+      constructor(options) {
+        super(options);
+        this[state] = {};
+      }
+      get protocol() { return this[state].protocol || 'http:'; }
+      set protocol(value) { if (this[state]) this[state].protocol = value; }
+    }
+    const agent = new AgentBase({ protocol: 'http:' });
+    if (agent.defaultPort !== 80 || agent.protocol !== 'http:') throw new Error('agent defaults were lost');
+    console.log('ok');
+  `);
+  assert.equal(stdout, 'ok\n');
+});
+
+test('HTTP requests normalize omitted URL ports before custom agents connect', async () => {
+  const { stdout } = await run(`
+    const http = require('http');
+    const https = require('https');
+    class Agent extends http.Agent {
+      createSocket(request, options, callback) {
+        if (options.port !== 443) throw new Error('omitted HTTPS port was not normalized');
+        const error = new Error('stop');
+        error.code = 'TEST_STOP';
+        callback(error);
+      }
+    }
+    const request = https.request({
+      hostname: 'registry.npmjs.org',
+      port: '',
+      path: '/@tapjs%2fclock',
+      agent: new Agent({ protocol: 'https:' }),
+    });
+    request.once('error', (error) => {
+      if (error.code !== 'TEST_STOP') throw error;
+      console.log('ok');
+    });
+    request.end();
+  `);
+  assert.equal(stdout, 'ok\n');
+});
+
+test('HTTP responses do not double-decompress already decoded gzip bodies', async () => {
+  const { stdout } = await run(`
+    const http = require('http');
+    const { EventEmitter } = require('events');
+    const payload = 'already decoded';
+    class Agent extends http.Agent {
+      createConnection() {
+        const socket = new EventEmitter();
+        socket.writable = true;
+        socket.destroyed = false;
+        socket.setTimeout = () => socket;
+        socket.setNoDelay = () => socket;
+        socket.setKeepAlive = () => socket;
+        socket.ref = () => socket;
+        socket.unref = () => socket;
+        socket.destroy = () => { socket.destroyed = true; socket.writable = false; socket.emit('close'); };
+        socket.write = () => {
+          setTimeout(() => socket.emit(
+            'data',
+            Buffer.from('HTTP/1.1 200 OK\\r\\nContent-Encoding: gzip\\r\\nContent-Length: 15\\r\\n\\r\\nalready decoded'),
+          ), 0);
+          return true;
+        };
+        return socket;
+      }
+    }
+    http.get('http://decoded.test/', { agent: new Agent() }, (res) => {
+      if (res.headers['content-encoding'] !== undefined) throw new Error('stale gzip metadata');
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        if (Buffer.concat(chunks).toString() !== payload) throw new Error('decoded body changed');
+        console.log('ok');
+      });
+    }).on('error', (error) => { throw error; });
+  `);
+  assert.equal(stdout, 'ok\n');
+});
+
 test('child process wrappers can observe virtual spawn contracts', async () => {
   const { stdout } = await run(`
     const childProcess = require('child_process');
@@ -95,6 +350,332 @@ test('child process wrappers can observe virtual spawn contracts', async () => {
     });
   `);
   assert.equal(stdout, 'spawn wrappers completed');
+});
+
+test('same-realm children that call process.exit close promptly', async () => {
+  const { stdout } = await run(`
+    const child = require('child_process').spawn(process.execPath, ['-e', 'process.exit(0)']);
+    child.on('error', (error) => { throw error; });
+    child.on('close', (code, signal) => console.log(code, signal));
+  `);
+  assert.equal(stdout, '0 null\n');
+});
+
+test('ESM children with Node flags and IPC close promptly', async () => {
+  const { stdout } = await run(`
+    const child = require('child_process').spawn(
+      process.execPath,
+      ['--no-warnings', '--expose-gc', '/node/exit.mjs'],
+      { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] },
+    );
+    child.on('error', (error) => { throw error; });
+    child.on('message', () => {});
+    child.on('close', (code, signal) => console.log(code, signal));
+  `, { '/node/exit.mjs': `console.log('child');` });
+  assert.equal(stdout, '0 null\n');
+});
+
+test('IPC ESM children can finish after a synchronous nested spawn', async () => {
+  const { stdout } = await run(`
+    const child = require('child_process').spawn(
+      process.execPath,
+      ['--no-warnings', '--expose-gc', '/node/build.mjs'],
+      { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] },
+    );
+    child.on('error', (error) => { throw error; });
+    child.stdout.on('data', (chunk) => process.stdout.write('stdout:' + chunk));
+    child.stderr.on('data', (chunk) => process.stdout.write('stderr:' + chunk));
+    child.on('close', (code, signal) => console.log(code, signal));
+  `, {
+    '/node/build.mjs': `
+      await Promise.resolve();
+      import { spawnSync } from 'node:child_process';
+      const nested = spawnSync(process.execPath, ['-e', 'process.stdout.write("nested" + String.fromCharCode(10))'], { stdio: 'inherit' });
+      if (nested.status !== 0) throw new Error(nested.stderr?.toString() || 'nested spawn failed');
+      console.log('built');
+    `,
+  });
+  // The nested same-realm child's inherited stdout is intentionally not
+  // replayed through the outer worker stream; the contract under test is that
+  // the synchronous spawn does not strand the ESM child before close.
+  assert.match(stdout, /stdout:built\n0 null\n/);
+});
+
+test('ESM children with foreground-child stdio inherit and close', async () => {
+  const { stdout } = await run(`
+    const runner = require('child_process').spawn(
+      process.execPath,
+      ['/node/runner.mjs'],
+      { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] },
+    );
+    runner.on('error', (error) => { throw error; });
+    runner.stdout.on('data', (chunk) => process.stdout.write(chunk));
+    runner.stderr.on('data', (chunk) => process.stdout.write(chunk));
+    runner.on('close', (code, signal) => console.log('runner', code, signal));
+  `, {
+    '/node/runner.mjs': `
+      import { spawn } from 'node:child_process';
+      process.on('message', () => {});
+      const watched = spawn(process.execPath, ['--no-warnings', '--expose-gc', '/node/build.mjs'], { stdio: [0, 1, 2, 'ipc'] });
+      const watchdog = spawn(process.execPath, ['-e', 'const timer = setInterval(() => {}, 60000);'], { stdio: ['ignore', 'ignore', 'pipe'] });
+      let watchedClosed = false;
+      watched.on('error', (error) => { throw error; });
+      watchdog.on('error', (error) => { throw error; });
+      watched.on('close', (code, signal) => {
+        watchedClosed = true;
+        watchdog.kill('SIGKILL');
+        console.log('watched', code, signal);
+      });
+      watchdog.on('close', (code, signal) => {
+        if (!watchedClosed) throw new Error('watchdog closed first');
+        console.log('watchdog', code, signal);
+        process.exit(0);
+      });
+    `,
+    '/node/build.mjs': `
+      import { spawnSync } from 'node:child_process';
+      const nested = spawnSync(process.execPath, ['-e', 'process.stdout.write("nested" + String.fromCharCode(10))'], { stdio: 'inherit' });
+      if (nested.status !== 0) throw new Error(nested.stderr?.toString() || 'nested spawn failed');
+      console.log('built');
+    `,
+  });
+  assert.match(stdout, /built\nwatched 0 null\nwatchdog null SIGKILL\n/);
+});
+
+test('ESM export-star cycles do not deadlock module graph preparation', async () => {
+  const { stdout } = await run(`
+    const child = require('child_process').spawn(process.execPath, ['/node/entry.mjs'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    child.stdout.on('data', (chunk) => process.stdout.write(chunk));
+    child.stderr.on('data', (chunk) => process.stderr.write(chunk));
+    child.on('close', (code) => { if (code !== 0) throw new Error('cycle child failed: ' + code); });
+  `, {
+    '/node/entry.mjs': `import { plugin } from '@tapjs/chdir'; console.log(typeof plugin);`,
+    '/node/node_modules/@tapjs/chdir/package.json': JSON.stringify({ type: 'module', exports: { '.': './index.js' } }),
+    '/node/node_modules/@tapjs/chdir/index.js': `import { cwd, proc } from '@tapjs/core'; export const plugin = () => [cwd, proc];`,
+    '/node/node_modules/@tapjs/core/package.json': JSON.stringify({ type: 'module', exports: { '.': './index.js' } }),
+    '/node/node_modules/@tapjs/core/index.js': `export * from './tap.js'; export const cwd = 'cwd'; export const proc = {};`,
+    '/node/node_modules/@tapjs/core/tap.js': `import { Test } from '@tapjs/test'; export const tap = Test;`,
+    '/node/node_modules/@tapjs/test/package.json': JSON.stringify({ type: 'module', exports: { '.': './index.js' } }),
+    '/node/node_modules/@tapjs/test/index.js': `export * from './test-built.js';`,
+    '/node/node_modules/@tapjs/test/test-built.js': `import { cwd } from '@tapjs/core'; export const Test = cwd;`,
+  });
+  assert.equal(stdout, 'function\n');
+});
+
+test('dynamic ESM import settles when its graph contains a static back-edge', async () => {
+  const { stdout } = await run(`
+    const child = require('child_process').spawn(process.execPath, ['/node/entry.mjs'], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+    child.stdout.on('data', (chunk) => process.stdout.write(chunk));
+    child.stderr.on('data', (chunk) => process.stderr.write(chunk));
+    child.on('close', (code) => { if (code !== 0) throw new Error('dynamic cycle child failed: ' + code); });
+  `, {
+    '/node/entry.mjs': `const value = await import('./plugin.mjs'); console.log(value.plugin);`,
+    '/node/plugin.mjs': `import { core } from './core.mjs'; export const plugin = core + '-plugin';`,
+    '/node/core.mjs': `import { plugin } from './plugin.mjs'; export const core = 'core'; void plugin;`,
+  });
+  assert.equal(stdout, 'core-plugin\n');
+});
+
+test('nested ESM createRequire plus concurrent file URL imports settle', async () => {
+  const { stdout } = await run(`
+    const child = require('child_process').spawn(process.execPath, ['/node/entry.mjs'], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+    child.stdout.on('data', (chunk) => process.stdout.write(chunk));
+    child.stderr.on('data', (chunk) => process.stderr.write(chunk));
+    child.on('close', (code) => { if (code !== 0) throw new Error('nested file import child failed: ' + code); });
+  `, {
+    '/node/entry.mjs': `
+      import { createRequire } from 'node:module';
+      const require = createRequire(import.meta.url);
+      require('./preload.cjs');
+      const files = ['one', 'two', 'three', 'four'];
+      await Promise.all(files.map((name) => import(new URL('./' + name + '.mjs', import.meta.url).href)));
+      console.log('file imports done');
+    `,
+    '/node/preload.cjs': `module.exports = { ok: true };`,
+    '/node/one.mjs': `export const one = true;`,
+    '/node/two.mjs': `export const two = true;`,
+    '/node/three.mjs': `export const three = true;`,
+    '/node/four.mjs': `export const four = true;`,
+  });
+  assert.equal(stdout, 'file imports done\n');
+});
+
+test('dual package ESM imports can follow CJS preloads through a cyclic graph', async () => {
+  const { stdout } = await run(`
+    const child = require('child_process').spawn(process.execPath, ['/node/entry.mjs'], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+    child.stdout.on('data', (chunk) => process.stdout.write(chunk));
+    child.stderr.on('data', (chunk) => process.stdout.write('stderr:' + chunk));
+    child.on('close', (code) => { if (code !== 0) throw new Error('dual package child failed: ' + code); });
+  `, {
+    '/node/entry.mjs': `
+      import { createRequire } from 'node:module';
+      const require = createRequire(import.meta.url);
+      try {
+        for (const name of ['spawn', 'stdin', 'typescript', 'worker']) require('@tapjs/' + name);
+        await Promise.all(['spawn', 'stdin', 'typescript', 'worker'].map((name) => import('file:///node/node_modules/@tapjs/' + name + '/index.js')));
+        console.log('dual imports done');
+      } catch (error) { console.log('dual imports error:' + (error.stack || error)); }
+    `,
+    '/node/node_modules/@tapjs/core/package.json': JSON.stringify({ type: 'module', main: './common.cjs', exports: { '.': { import: './index.js', require: './common.cjs' } } }),
+    '/node/node_modules/@tapjs/core/common.cjs': `module.exports = { cwd: 'cwd', Spawn: class Spawn {}, Stdin: class Stdin {}, Worker: class Worker {} };`,
+    '/node/node_modules/@tapjs/core/index.js': `export * from './proc.js'; export * from './tap.js'; export const cwd = 'cwd'; export class Spawn {} export class Stdin {} export class Worker {}`,
+    '/node/node_modules/@tapjs/core/proc.js': `export const proc = typeof process === 'object' && process ? process : undefined;`,
+    '/node/node_modules/@tapjs/core/tap.js': `import { Test } from '@tapjs/test'; export const tap = Test;`,
+    '/node/node_modules/@tapjs/test/package.json': JSON.stringify({ type: 'module', exports: { '.': './index.js' } }),
+    '/node/node_modules/@tapjs/test/index.js': `export * from './test-built.js';`,
+    '/node/node_modules/@tapjs/test/test-built.js': `import { cwd } from '@tapjs/core'; import * as SpawnPlugin from '@tapjs/spawn'; import * as StdinPlugin from '@tapjs/stdin'; import * as TypescriptPlugin from '@tapjs/typescript'; import * as WorkerPlugin from '@tapjs/worker'; export const Test = cwd; export { SpawnPlugin, StdinPlugin, TypescriptPlugin, WorkerPlugin };`,
+    ...Object.fromEntries(['spawn', 'stdin', 'typescript', 'worker'].map((name) => [
+      `/node/node_modules/@tapjs/${name}/package.json`,
+      JSON.stringify({ type: 'module', main: './common.cjs', exports: { '.': { import: './index.js', require: './common.cjs' } } }),
+    ])),
+    ...Object.fromEntries(['spawn', 'stdin', 'typescript', 'worker'].map((name) => [
+      `/node/node_modules/@tapjs/${name}/common.cjs`,
+      `module.exports = require('@tapjs/core');`,
+    ])),
+    '/node/node_modules/@tapjs/spawn/index.js': `import { Spawn, proc } from '@tapjs/core'; if (!proc) throw new Error('missing process'); export const plugin = () => Spawn;`,
+    '/node/node_modules/@tapjs/stdin/index.js': `import { Stdin, proc } from '@tapjs/core'; if (!proc) throw new Error('missing process'); export const plugin = () => Stdin;`,
+    '/node/node_modules/@tapjs/typescript/index.js': `import { cwd, proc } from '@tapjs/core'; if (!proc) throw new Error('missing process'); export const plugin = () => cwd;`,
+    '/node/node_modules/@tapjs/worker/index.js': `import { Worker, proc } from '@tapjs/core'; if (!proc) throw new Error('missing process'); export const plugin = () => Worker;`,
+  });
+  assert.match(stdout, /dual imports done\n/);
+});
+
+test('conditional ESM plugin packages retain their named plugin export', async () => {
+  const { stdout } = await run(`
+    const child = require('child_process').spawn(process.execPath, ['/node/entry.mjs'], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+    child.stdout.on('data', (chunk) => process.stdout.write(chunk));
+    child.stderr.on('data', (chunk) => process.stdout.write('stderr:' + chunk));
+    child.on('close', (code) => { if (code !== 0) throw new Error('plugin child failed: ' + code); });
+  `, {
+    '/node/entry.mjs': `
+      import { createRequire } from 'node:module';
+      const require = createRequire(import.meta.url);
+      require('@tapjs/node-serialize');
+      const namespace = await import('@tapjs/node-serialize');
+      console.log(typeof namespace.plugin, typeof (await import('file:///node/node_modules/@tapjs/node-serialize/dist/esm/index.js')).plugin);
+    `,
+    '/node/node_modules/@tapjs/core/package.json': JSON.stringify({ type: 'module', exports: { '.': { import: './index.js', require: './common.cjs' } } }),
+    '/node/node_modules/@tapjs/core/common.cjs': `module.exports = { env: {} };`,
+    '/node/node_modules/@tapjs/core/index.js': `export const env = {};`,
+    '/node/node_modules/@tapjs/node-serialize/package.json': JSON.stringify({ type: 'module', main: './dist/commonjs/index.js', exports: { '.': { import: './dist/esm/index.js', require: './dist/commonjs/index.js' } } }),
+    '/node/node_modules/@tapjs/node-serialize/dist/esm/index.js': `import { env } from '@tapjs/core'; export const plugin = () => env;`,
+    '/node/node_modules/@tapjs/node-serialize/dist/commonjs/index.js': `exports.plugin = () => require('@tapjs/core').env;`,
+  });
+  assert.equal(stdout, 'function function\n');
+});
+
+test('killing a referenced async child does not race its close event', async () => {
+  const { stdout } = await run(`
+    const child = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 60000)']);
+    child.on('error', (error) => { throw error; });
+    child.on('close', (code, signal) => console.log(code, signal));
+    setTimeout(() => child.kill('SIGKILL'), 5);
+  `);
+  assert.equal(stdout, 'null SIGKILL\n');
+});
+
+test('child exit cleanup can kill a sibling without preceding its close event', async () => {
+  const { stdout } = await run(`
+    const childProcess = require('child_process');
+    const watched = childProcess.spawn(process.execPath, ['-e', '']);
+    const watchdog = childProcess.spawn(process.execPath, ['-e', 'setInterval(() => {}, 60000)']);
+    let watchedClosed = false;
+    watched.on('exit', () => watchdog.kill('SIGKILL'));
+    watched.on('close', () => { watchedClosed = true; });
+    watchdog.on('close', () => {
+      if (!watchedClosed) throw new Error('watchdog closed before watched child');
+      console.log('ok');
+    });
+  `);
+  assert.equal(stdout, 'ok\n');
+});
+
+test('worker-backed ESM child cleanup preserves watched close before watchdog close', async () => {
+  const { stdout } = await run(`
+    const childProcess = require('child_process');
+    const watched = childProcess.spawn(process.execPath, ['/node/watched.mjs']);
+    const watchdog = childProcess.spawn(
+      process.execPath,
+      ['-e', 'setInterval(() => {}, 60000)'],
+      { stdio: ['ignore', 'ignore', 'pipe'] },
+    );
+    let watchedClosed = false;
+    watched.on('error', (error) => { throw error; });
+    watchdog.on('error', (error) => { throw error; });
+    watched.on('exit', () => watchdog.kill('SIGKILL'));
+    watched.on('close', () => { watchedClosed = true; });
+    watchdog.on('close', () => {
+      if (!watchedClosed) throw new Error('watchdog closed before watched ESM child');
+      console.log('ok');
+    });
+  `, { '/node/watched.mjs': `console.log('watched');` });
+  assert.equal(stdout, 'ok\n');
+});
+
+test('foreground-child watchdog keeps its exact worker child alive until watched exit', async () => {
+  const { stdout } = await run(`
+    const { spawn } = require('child_process');
+    const watched = spawn(process.execPath, ['-e', '']);
+    const watchdogCode = ${JSON.stringify(`
+      const pid = parseInt(process.argv[1], 10);
+      process.title = 'node (foreground-child watchdog pid=' + pid + ')';
+      if (!isNaN(pid)) {
+        let barked = false;
+        const interval = setInterval(() => {}, 60000);
+        const bark = () => {
+          clearInterval(interval);
+          if (barked) return;
+          barked = true;
+          process.removeListener('SIGHUP', bark);
+          setTimeout(() => {
+            try {
+              process.kill(pid, 'SIGKILL');
+              setTimeout(() => process.exit(), 200);
+            } catch (_) {}
+          }, 500);
+        };
+        process.on('SIGHUP', bark);
+      }
+    `)};
+    const dog = spawn(process.execPath, ['-e', watchdogCode, String(watched.pid)], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let watchedClosed = false;
+    let dogExited = false;
+    watched.on('exit', (code, signal) => {
+      console.log('watched-exit', code, signal);
+      if (!dogExited) dog.kill('SIGKILL');
+    });
+    watched.on('close', () => { watchedClosed = true; console.log('watched-close'); });
+    dog.on('exit', (code, signal) => { dogExited = true; console.log('dog-exit', code, signal); });
+    dog.on('close', (code, signal) => {
+      console.log('dog-close', code, signal);
+      if (!watchedClosed) throw new Error('exact watchdog closed before watched child');
+      console.log('ok');
+    });
+  `);
+  assert.match(stdout, /watched-exit 0 null\nwatched-close\n/);
+  assert.match(stdout, /dog-exit null SIGKILL\ndog-close null SIGKILL\nok\n/);
+});
+
+test('watchdog-style ignored stdio children stay alive until killed', async () => {
+  const { stdout } = await run(`
+    const childProcess = require('child_process');
+    const watched = childProcess.spawn(process.execPath, ['-e', '']);
+    const watchdog = childProcess.spawn(
+      process.execPath,
+      ['-e', "const interval = setInterval(() => {}, 60000); process.on('SIGHUP', () => clearInterval(interval));"],
+      { stdio: ['ignore', 'ignore', 'pipe'] },
+    );
+    let watchedClosed = false;
+    watchdog.on('close', () => {
+      if (!watchedClosed) throw new Error('watchdog closed before watched child');
+      console.log('ok');
+    });
+    watched.on('exit', () => watchdog.kill('SIGKILL'));
+    watched.on('close', () => { watchedClosed = true; });
+  `);
+  assert.equal(stdout, 'ok\n');
 });
 
 test('beforeExit follows the complete microtask queue and pending filesystem work', async () => {
@@ -205,6 +786,15 @@ test('public VFS mounts and writes retain their own bytes', () => {
   assert.deepEqual([...vfs.fs.readFileSync('/node/input')], [4, 5, 6]);
 });
 
+test('VFS preserves Linux stat behavior for WASM Windows-platform probes', async () => {
+  const vfs = createVfs();
+  assert.throws(() => vfs.fs.statSync('C:\\'), (error) => error.code === 'ENOENT');
+  assert.equal(vfs.fs.statSync('C:\\', { throwIfNoEntry: false }), undefined);
+  await assert.rejects(new Promise((resolve, reject) => {
+    vfs.fs.stat('C:\\', (error) => error ? reject(error) : resolve());
+  }), (error) => error.code === 'ENOENT');
+});
+
 test('VFS source versions change on mutation and large appends preserve bytes', () => {
   const vfs = createVfs(); vfs.mount({ '/node/source': 'first' });
   const before = vfs.fileVersion('/node/source');
@@ -295,6 +885,62 @@ test('npm install honors a package-lock dependency graph', async () => {
   assert.equal(npm.installed.get('fixture'), '1.0.0');
   assert.equal(vfs.fs.readFileSync('/node/node_modules/fixture/index.js', 'utf8'), 'module.exports = "locked";');
   assert.deepEqual(selectedUrls, ['https://registry.example/fixture-1.0.0.tgz']);
+});
+
+test('browser npm uses an official WASM alternative for esbuild', async () => {
+  const vfs = createVfs();
+  const wasmTarball = await packTarGz([{
+    path: 'package/package.json',
+    data: new TextEncoder().encode(JSON.stringify({
+      name: 'esbuild-wasm',
+      version: '0.28.0',
+      main: 'lib/main.js',
+      directories: { bin: 'bin' },
+    })),
+  }, {
+    path: 'package/bin/esbuild',
+    data: new TextEncoder().encode('#!/usr/bin/env node\nprocess.stdout.write("wasm");'),
+  }, {
+    path: 'package/lib/main.js',
+    data: new TextEncoder().encode('module.exports = { version: "0.28.0" };'),
+  }]);
+  const selectedUrls = [];
+  const npm = new BrowserNpm({
+    vfs,
+    registry: 'https://registry.example',
+    fetchFn: async (url) => {
+      selectedUrls.push(String(url));
+      if (String(url) === 'https://registry.example/esbuild-wasm') {
+        return new Response(JSON.stringify({
+          name: 'esbuild-wasm',
+          versions: {
+            '0.28.0': {
+              version: '0.28.0',
+              bin: { esbuild: 'bin/esbuild' },
+              dist: { tarball: 'https://registry.example/esbuild-wasm-0.28.0.tgz' },
+            },
+          },
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      if (String(url) === 'https://registry.example/esbuild-wasm-0.28.0.tgz') return new Response(wasmTarball);
+      throw new Error(`unexpected URL: ${url}`);
+    },
+  });
+
+  await npm.install('esbuild@0.28.0');
+
+  assert.equal(npm.installed.get('esbuild'), '0.28.0');
+  assert.equal(vfs.fs.readFileSync('/node/node_modules/esbuild/package.json', 'utf8'), JSON.stringify({
+    name: 'esbuild-wasm',
+    version: '0.28.0',
+    main: 'lib/main.js',
+    directories: { bin: 'bin' },
+  }));
+  assert.match(vfs.fs.readFileSync('/node/node_modules/.bin/esbuild', 'utf8'), /node_modules\/esbuild\/bin\/esbuild/);
+  assert.deepEqual(selectedUrls, [
+    'https://registry.example/esbuild-wasm',
+    'https://registry.example/esbuild-wasm-0.28.0.tgz',
+  ]);
 });
 
 test('wildcard caret and tilde ranges keep their respective upper bounds', () => {

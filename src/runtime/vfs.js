@@ -10,6 +10,7 @@ const textEncoder = new TextEncoder();
 const hostSetTimeout = globalThis.setTimeout.bind(globalThis);
 const SymbolDispose = Symbol.for('nodejs.dispose');
 const SymbolAsyncDispose = Symbol.for('nodejs.asyncDispose');
+export const VFS_MUTATION_ORIGIN = Symbol('bnh.vfsMutationOrigin');
 const READ_FILE_ASYNC_STAGES = 4;
 const S_IFMT = 0o170000;
 const S_IFIFO = 0o010000;
@@ -391,6 +392,16 @@ function sourcePath(value) {
   return value;
 }
 
+function isForeignPlatformPath(value) {
+  const source = sourcePath(value);
+  // Node on Linux treats Windows drive/UNC probes as ordinary missing paths.
+  // WASM tools use this probe to detect their host platform before using the
+  // POSIX paths supplied by the caller. Keep the VFS's POSIX path validation
+  // strict for real operations, but preserve the native stat contract for
+  // this cross-platform probe.
+  return /^[A-Za-z]:[\\/]/.test(source) || source.startsWith('\\\\');
+}
+
 function normalizePath(value, cwd = '/node', logicalRoot = cwd) {
   const source = sourcePath(value);
   if (!source || source.includes('\\') || source.includes('\0')) throw invalidPath();
@@ -765,10 +776,12 @@ export function createVfs(options = {}) {
   let nextDescriptor = 100;
   let nextTemporaryDirectory = 0;
   let mutationQueue = Promise.resolve();
+  let mutationOrigin = null;
   let promiseOperations = 0;
   let ioTurn = null;
   let warningEmitter = null;
   const mutationListeners = new Set();
+  let sharedSourceDecodeBuffer = null;
   let nonPortableTemplateWarningEmitted = false;
   let directoryChildrenIndex = null;
   const invalidateDirectoryChildrenIndex = () => {
@@ -891,7 +904,53 @@ export function createVfs(options = {}) {
     else metadata.delete(path);
   }
 
+  function sharedStorageBytes(bytes) {
+    if (!(bytes instanceof Uint8Array)
+      || globalThis.crossOriginIsolated !== true
+      || typeof SharedArrayBuffer !== 'function'
+      || bytes.buffer instanceof SharedArrayBuffer) return bytes;
+    const shared = new Uint8Array(new SharedArrayBuffer(bytes.byteLength));
+    shared.set(bytes);
+    return shared;
+  }
+
+  // VFS records are replaced, rather than mutated, when a file changes. A
+  // view is therefore safe for mutation replication and avoids allocating a
+  // second copy of large package files at every worker boundary.
+  function viewFileBytes(bytes) {
+    if (bytes instanceof Uint8Array) return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    if (ArrayBuffer.isView(bytes)) return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return bytes;
+  }
+
+  function decodeSourceBytes(bytes) {
+    if (!(typeof SharedArrayBuffer === 'function' && bytes?.buffer instanceof SharedArrayBuffer)) {
+      return new TextDecoder().decode(bytes);
+    }
+    // Chromium deliberately rejects SharedArrayBuffer-backed input to
+    // TextDecoder. Decode through one reusable ordinary buffer instead of
+    // allocating a full-size copy for every module in a nested package tree.
+    const decoder = new TextDecoder();
+    const chunkSize = 64 * 1024;
+    const bufferSize = Math.min(chunkSize, bytes.byteLength || 1);
+    if (!sharedSourceDecodeBuffer || sharedSourceDecodeBuffer.byteLength < bufferSize) {
+      sharedSourceDecodeBuffer = new ArrayBuffer(bufferSize);
+    }
+    const chunk = new Uint8Array(sharedSourceDecodeBuffer, 0, bufferSize);
+    let source = '';
+    for (let offset = 0; offset < bytes.byteLength; offset += bufferSize) {
+      const length = Math.min(bufferSize, bytes.byteLength - offset);
+      chunk.set(bytes.subarray(offset, offset + length));
+      source += decoder.decode(chunk.subarray(0, length), { stream: offset + length < bytes.byteLength });
+    }
+    const empty = new Uint8Array(0);
+    if (!bytes.byteLength) source = decoder.decode(empty);
+    else source += decoder.decode(empty);
+    return source;
+  }
+
   function setFileBytes(path, bytes) {
+    bytes = sharedStorageBytes(bytes);
     const attributes = metadataFor(path);
     if (files.has(path)) {
       attributes.mtimeMs = Date.now();
@@ -961,6 +1020,13 @@ export function createVfs(options = {}) {
 
   function emitMutation(update) {
     if (!update || typeof update !== 'object') return;
+    if (mutationOrigin !== null && !Object.hasOwn(update, VFS_MUTATION_ORIGIN)) {
+      Object.defineProperty(update, VFS_MUTATION_ORIGIN, {
+        configurable: true,
+        enumerable: false,
+        value: mutationOrigin,
+      });
+    }
     for (const listener of [...mutationListeners]) {
       try { listener(update); } catch { /* observers must not affect filesystem mutations */ }
     }
@@ -968,12 +1034,16 @@ export function createVfs(options = {}) {
 
 
   function describePath(pathValue) {
-    const path = resolvePath(pathValue);
+    // Mutation replication must describe the link node itself. Following the
+    // final symlink here turns a symlink update into a directory/file update
+    // at the link path, which loses package-manager links across a worker
+    // boundary (tap's generated test-built/node_modules link is one example).
+    const path = resolvePath(pathValue, false);
     if (files.has(path)) {
       return {
         path,
         type: 'file',
-        bytes: new Uint8Array(files.get(path)),
+        bytes: viewFileBytes(files.get(path)),
         mode: metadata.get(path)?.mode,
       };
     }
@@ -984,13 +1054,16 @@ export function createVfs(options = {}) {
 
   function exportState() {
     return {
-      files: Object.fromEntries([...files.entries()].map(([path, bytes]) => [path, new Uint8Array(bytes)])),
+      files: Object.fromEntries([...files.entries()].map(([path, bytes]) => [path, viewFileBytes(bytes)])),
       directories: [...directories],
       symlinks: [...symlinks.entries()],
     };
   }
 
-  function applyUpdate(update = {}) {
+  function applyUpdate(update = {}, options = {}) {
+    const previousOrigin = mutationOrigin;
+    mutationOrigin = options.origin || null;
+    try {
     invalidateDirectoryChildrenIndex();
     const removed = Array.isArray(update.removed) ? update.removed : [];
     for (const pathValue of removed) {
@@ -1010,7 +1083,7 @@ export function createVfs(options = {}) {
     const symlinksToApply = state?.symlinks || update.symlinks || [];
     for (const item of symlinksToApply) {
       const [pathValue, targetValue] = Array.isArray(item) ? item : [item.path, item.target];
-      const path = resolvePath(pathValue);
+      const path = resolvePath(pathValue, false);
       try {
         if (nodeExists(path)) removeTree(path, true, true);
         ensureParent(path, 'sync');
@@ -1034,7 +1107,7 @@ export function createVfs(options = {}) {
 
     const changes = Array.isArray(update.changes) ? update.changes : [];
     for (const change of changes) {
-      const path = resolvePath(change.path);
+        const path = resolvePath(change.path, change.type !== 'symlink');
       if (change.type === 'remove') {
         if (path !== '/') {
           try { removeTree(path, true, true); } catch { /* already absent */ }
@@ -1059,6 +1132,9 @@ export function createVfs(options = {}) {
           if (change.mode !== undefined) metadataFor(path).mode = modeValue(change.mode);
         } catch { /* a concurrent local update may have won the race */ }
       }
+    }
+    } finally {
+      mutationOrigin = previousOrigin;
     }
   }
 
@@ -1160,7 +1236,7 @@ export function createVfs(options = {}) {
     metadataFor(path);
     notify(path, previous ? 'change' : 'rename');
     if (mutationListeners.size) {
-      emitMutation({ action: 'change', path, type: 'file', bytes: new Uint8Array(files.get(path)), mode: metadata.get(path)?.mode });
+      emitMutation({ action: 'change', path, type: 'file', bytes: viewFileBytes(files.get(path)), mode: metadata.get(path)?.mode });
     }
     return mount;
   }
@@ -1372,6 +1448,18 @@ export function createVfs(options = {}) {
     throw missing(path, 'stat');
   }
 
+  function statNodePath(pathValue, optionsValue, operation = 'stat') {
+    if (isForeignPlatformPath(pathValue)) {
+      if (optionsValue?.throwIfNoEntry === false) return undefined;
+      throw missing(sourcePath(pathValue), operation);
+    }
+    return operation === 'lstat'
+      ? lstatPath(resolve(pathValue), optionsValue)
+      : operation === 'statfs'
+        ? statFsPath(resolve(pathValue), optionsValue)
+        : statPath(resolve(pathValue), optionsValue);
+  }
+
   function statFsPath(pathValue, optionsValue) {
     const path = resolvePath(pathValue);
     access(path, 'statfs');
@@ -1575,7 +1663,7 @@ export function createVfs(options = {}) {
     attributes.nlink += 1;
     metadata.set(destination, attributes);
     notify(destination, 'rename');
-    emitMutation({ action: 'change', path: destination, type: files.has(destination) ? 'file' : 'symlink', bytes: files.has(destination) ? new Uint8Array(files.get(destination)) : undefined, target: symlinks.get(destination), mode: metadata.get(destination)?.mode });
+    emitMutation({ action: 'change', path: destination, type: files.has(destination) ? 'file' : 'symlink', bytes: files.has(destination) ? viewFileBytes(files.get(destination)) : undefined, target: symlinks.get(destination), mode: metadata.get(destination)?.mode });
   }
 
   function link(existingPath, newPath, callback) {
@@ -2149,7 +2237,7 @@ export function createVfs(options = {}) {
           return {
             path,
             type: 'file',
-            bytes: new Uint8Array(files.get(path)),
+            bytes: viewFileBytes(files.get(path)),
             mode: metadata.get(item)?.mode,
           };
         }),
@@ -3441,7 +3529,11 @@ export function createVfs(options = {}) {
       }
     }
     if (files.has(path) && directories.has(path)) throw invalidPath();
-    files.set(path, decode(entryValue.data ?? entryValue.bytes ?? entryValue.content ?? entryValue, undefined, copyBuffers));
+    files.set(path, sharedStorageBytes(decode(
+      entryValue.data ?? entryValue.bytes ?? entryValue.content ?? entryValue,
+      undefined,
+      copyBuffers,
+    )));
     if (entryValue.mode !== undefined) metadataFor(path).mode = modeValue(entryValue.mode);
   }
 
@@ -3529,8 +3621,9 @@ export function createVfs(options = {}) {
     return (declared.length ? declared : [...files.keys()]).sort(lexicalCompare);
   }
 
-  function snapshot({ copy = true, includeBackend = false } = {}) {
-    const artifactList = (includeBackend ? [] : artifactPaths()).filter((path) => files.has(path)).map((path) => {
+  function snapshot({ copy = true, includeBackend = false, includeAllFiles = false } = {}) {
+    const paths = includeAllFiles ? [...files.keys()] : includeBackend ? [] : artifactPaths();
+    const artifactList = paths.filter((path) => files.has(path)).map((path) => {
       const bytes = files.get(path);
       return {
         path,
@@ -3670,8 +3763,8 @@ export function createVfs(options = {}) {
   function stat(pathValue, optionsValue, callback) {
     const done = typeof optionsValue === 'function' ? optionsValue : callback;
     const options = typeof optionsValue === 'object' && optionsValue !== null ? optionsValue : {};
-    resolve(pathValue);
-    asyncFsOperation(done, () => statPath(resolve(pathValue), options));
+    if (!isForeignPlatformPath(pathValue)) resolve(pathValue);
+    asyncFsOperation(done, () => statNodePath(pathValue, options));
   }
 
   function statfs(pathValue, optionsValue, callback) {
@@ -3684,9 +3777,8 @@ export function createVfs(options = {}) {
   function lstat(pathValue, optionsValue, callback) {
     const done = typeof optionsValue === 'function' ? optionsValue : callback;
     const options = typeof optionsValue === 'object' && optionsValue !== null ? optionsValue : {};
-    resolve(pathValue);
-    const resolvedPath = resolve(pathValue);
-    asyncFsOperation(done, () => lstatPath(resolvedPath, options));
+    if (!isForeignPlatformPath(pathValue)) resolve(pathValue);
+    asyncFsOperation(done, () => statNodePath(pathValue, options, 'lstat'));
   }
 
   function readdir(pathValue, optionsValue, callback) {
@@ -3879,9 +3971,9 @@ export function createVfs(options = {}) {
       removeDirectory(resolve(pathValue), optionsValue.recursive);
     },
     mkdirSync(pathValue, optionsValue = {}) { return makeDirectory(resolve(pathValue), optionsValue.recursive); },
-    statSync(pathValue, optionsValue) { return statPath(resolve(pathValue), optionsValue); },
-    lstatSync(pathValue, optionsValue) { return lstatPath(resolve(pathValue), optionsValue); },
-    statfsSync(pathValue, optionsValue) { return statFsPath(resolve(pathValue), optionsValue); },
+    statSync(pathValue, optionsValue) { return statNodePath(pathValue, optionsValue); },
+    lstatSync(pathValue, optionsValue) { return statNodePath(pathValue, optionsValue, 'lstat'); },
+    statfsSync(pathValue, optionsValue) { return statNodePath(pathValue, optionsValue, 'statfs'); },
     readdirSync(pathValue, optionsValue) {
       return entriesFor(pathValue, optionsValue);
     },
@@ -4187,10 +4279,7 @@ export function createVfs(options = {}) {
       if (bytes === undefined) throw missing(path, 'open');
       if (path.endsWith('.node')) unsupportedNativeAddon(path);
       // Worker snapshots may share storage; browser TextDecoder requires unshared input.
-      const sourceBytes = typeof SharedArrayBuffer !== 'undefined' && bytes.buffer instanceof SharedArrayBuffer
-        ? new Uint8Array(bytes)
-        : bytes;
-      return new TextDecoder().decode(sourceBytes);
+      return decodeSourceBytes(bytes);
     },
     fileVersion(pathValue) {
       const path = resolvePath(resolve(pathValue));

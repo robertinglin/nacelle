@@ -12,6 +12,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
   let identity;
   let terminalSent = false;
   let disconnected = false;
+  let exitRequested = false;
   let userSequence = 0;
   let lastUserSequence = 0;
   let proxySequence = 0;
@@ -23,6 +24,9 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
   let deferredVfsChunks = [];
   let deferredVfsPathChunks = [];
   let deferredVfsRecordChunks = [];
+  let outputFlushQueued = false;
+  let pendingStdout = '';
+  let pendingStderr = '';
   // The control terminal frame is the reliable end-of-process boundary. Keep
   // the injected process here so state produced immediately before natural
   // completion cannot be stranded behind a separately ordered IPC message.
@@ -66,6 +70,37 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
   function sendControl(type, fields = {}) {
     if (!control) return;
     control.postMessage({ channel: CONTROL, key, runId: identity.runId, childId: identity.childId, type, ...fields });
+  }
+
+  // A TAP reporter can emit thousands of short lines synchronously. Sending
+  // one MessagePort frame per write makes a large, otherwise CPU-bound test
+  // spend most of its time crossing the browser worker boundary. Node's stdio
+  // writes are asynchronous, so coalesce the current turn and retain the
+  // separate stdout/stderr ordering guarantees of the two streams.
+  function flushOutput() {
+    outputFlushQueued = false;
+    if (pendingStdout) {
+      const value = pendingStdout;
+      pendingStdout = '';
+      sendControl('output', { stream: 'stdout', value });
+    }
+    if (pendingStderr) {
+      const value = pendingStderr;
+      pendingStderr = '';
+      sendControl('output', { stream: 'stderr', value });
+    }
+  }
+
+  function queueOutput(stream, value) {
+    if (stream === 'stderr') pendingStderr += value;
+    else pendingStdout += value;
+    if (pendingStdout.length + pendingStderr.length >= 64 * 1024) {
+      flushOutput();
+      return;
+    }
+    if (outputFlushQueued) return;
+    outputFlushQueued = true;
+    queueMicrotask(flushOutput);
   }
 
   function sendUserFrame(type, payload) {
@@ -489,6 +524,9 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
   function finish(kind, code = exitCode, signal = signalCode, error = null, forced = false) {
     if (terminalSent) return;
     terminalSent = true;
+    // Preserve all writes that occurred immediately before process.exit or a
+    // natural completion ahead of the terminal control frame.
+    flushOutput();
     if (runtimeStateTimer) {
       clearInterval(runtimeStateTimer);
       runtimeStateTimer = undefined;
@@ -519,6 +557,8 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     user = message.userPort;
     key = message.key;
     identity = message.identity;
+    const exposeIpc = message.exposeIpc === true;
+    const deferExitUntilCleanup = Boolean(message.vfsUpdatePort);
     const process = makeEmitter();
     processStateSource = process;
     const pendingMessages = [];
@@ -658,10 +698,15 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       },
       kill: (signal = 'SIGTERM') => { sendControl('child-signal-request', { signal }); return true; },
       exit(code = 0) {
+        if (exitRequested) throw processExitSignal;
+        exitRequested = true;
         exitCode = Number(code) || 0;
         process.exitCode = exitCode;
         process.emit('exit', exitCode);
-        finish('exit', exitCode);
+        // The runtime entry boundary must drain its VFS bridge before the
+        // terminal control frame closes the parent-side connection. A direct
+        // process-worker caller without a VFS bridge can terminate here.
+        if (!deferExitUntilCleanup) finish('exit', exitCode);
         throw processExitSignal;
       },
     });
@@ -678,7 +723,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       _pendingEncoding: '',
       write(value, encoding, callback) {
         if (typeof encoding === 'function') callback = encoding;
-        sendControl('output', { stream: 'stdout', value: outputText(value) });
+        queueOutput('stdout', outputText(value));
         callback?.();
         return true;
       },
@@ -694,7 +739,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       isTTY: false,
       write(value, encoding, callback) {
         if (typeof encoding === 'function') callback = encoding;
-        sendControl('output', { stream: 'stderr', value: outputText(value) });
+        queueOutput('stderr', outputText(value));
         callback?.();
         return true;
       },
@@ -811,10 +856,11 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       context.vfs = await vfsPromise;
       return run(context);
     }).then(() => {
-      if (!terminalSent) finish('natural', process.exitCode || 0, null);
+      if (!terminalSent) finish(exitRequested ? 'exit' : 'natural', process.exitCode || 0, null);
     }, (error) => {
       error.code ||= 'ERR_WORKER_EXCEPTION';
-      finish('rejection', 1, null, error);
+      if (exitRequested || error === processExitSignal) finish('exit', process.exitCode || exitCode, null);
+      else finish('rejection', 1, null, error);
     });
   }
 

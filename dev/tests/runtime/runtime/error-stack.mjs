@@ -107,6 +107,43 @@ test('formats a captured stack when no custom formatter is installed', () => {
   assert.match(target.stack, /^TypeError: bad input\n\s+at @https:\/\/cdn\.example\/main\.js:4:2$/);
 });
 
+test('structured call sites accept consumer metadata', () => {
+  function BrowserError() {}
+  BrowserError.captureStackTrace = (target) => {
+    Object.defineProperty(target, 'stack', {
+      configurable: true,
+      value: '@https://cdn.example/main.js:4:2',
+    });
+  };
+
+  installErrorStackCompatibility({ Error: BrowserError });
+  const target = {};
+  BrowserError.prepareStackTrace = (_error, callSites) => callSites;
+  BrowserError.captureStackTrace(target);
+  target.stack[0].cwd = '/node';
+  assert.equal(target.stack[0].cwd, '/node');
+});
+
+test('structured call sites remain extensible when the browser freezes them', () => {
+  function BrowserError() {}
+  const frozenSite = Object.freeze({
+    getFileName: () => '/node/main.js',
+    getLineNumber: () => 4,
+    getColumnNumber: () => 2,
+  });
+  BrowserError.captureStackTrace = (target) => {
+    target.stack = BrowserError.prepareStackTrace?.(target, [frozenSite]) || 'native';
+  };
+
+  installErrorStackCompatibility({ Error: BrowserError });
+  const target = {};
+  BrowserError.prepareStackTrace = (_error, callSites) => callSites;
+  BrowserError.captureStackTrace(target);
+  target.stack[0].cwd = '/node';
+  assert.equal(target.stack[0].getFileName(), '/node/main.js');
+  assert.equal(target.stack[0].cwd, '/node');
+});
+
 test('leaves constructors without captureStackTrace untouched', () => {
   function PlainError() {}
   assert.equal(installErrorStackCompatibility({ Error: PlainError }), false);

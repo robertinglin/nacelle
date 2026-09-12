@@ -16,3 +16,6 @@ node_modules/
 dev/adapters/playwright/.cache/
 .tshy/
 test-results/
+
+# Preserve local CITGM evidence without staging run artifacts.
+artifacts/citgm-top-100/rank-012-lru-cache/

@@ -442,6 +442,9 @@
   <script type="module">
     import { Nacelle } from '/index.js';
 
+    const BrowserURL = globalThis.URL;
+    const BrowserBlob = globalThis.Blob;
+
     // This is a normal Next.js App Router project. Nacelle only supplies the
     // Node runtime and VFS; Next owns the compiler, renderer, router, and CLI.
     const files = {
@@ -563,7 +566,7 @@ export default nextConfig;
     const fileStats = document.getElementById('file-stats');
     const termOutput = document.getElementById('term-output');
     const termNetwork = document.getElementById('term-network');
-    const iframe = document.getElementById('app-preview');
+    let iframe = document.getElementById('app-preview');
     const urlInput = document.getElementById('url-input');
     const serverStatus = document.getElementById('server-status');
 
@@ -571,6 +574,8 @@ export default nextConfig;
     let node = null;
     let activeProcess = null;
     let currentMode = 'dev';
+    let disconnectIframe = null;
+    let apiPreviewUrl = null;
 
     codeEditor.value = files[currentFile];
     updateStats();
@@ -635,15 +640,23 @@ export default nextConfig;
       logNetwork(`HTTP GET ${route}`);
       if (node) {
         if (route.startsWith('/api/')) {
+          disconnectIframe?.();
+          disconnectIframe = null;
           const navigation = (async () => {
             try {
               const response = await fetch(node.getVirtualUrl(3000, route));
               const text = await response.text();
               const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-              const previewDocument = iframe.contentDocument;
-              previewDocument.open();
-              previewDocument.write(`<pre>${escaped}</pre>`);
-              previewDocument.close();
+              if (apiPreviewUrl) BrowserURL.revokeObjectURL(apiPreviewUrl);
+              apiPreviewUrl = BrowserURL.createObjectURL(new BrowserBlob([`<pre>${escaped}</pre>`], {
+                type: 'text/html',
+              }));
+              const replacement = iframe.cloneNode(false);
+              replacement.removeAttribute('src');
+              replacement.removeAttribute('srcdoc');
+              replacement.src = apiPreviewUrl;
+              iframe.replaceWith(replacement);
+              iframe = replacement;
               logNetwork(`${response.status} ${route} · virtual fetch`);
             } catch (error) {
               logNetwork(`ERROR GET ${route} · ${error?.message || error}`);
@@ -653,7 +666,13 @@ export default nextConfig;
           await navigation;
           return;
         }
-        node.connectIframe(iframe, {
+        disconnectIframe?.();
+        if (apiPreviewUrl) {
+          BrowserURL.revokeObjectURL(apiPreviewUrl);
+          apiPreviewUrl = null;
+        }
+        iframe.removeAttribute('srcdoc');
+        disconnectIframe = node.connectIframe(iframe, {
           port: 3000,
           path: route,
           autoLoad: true,
@@ -687,6 +706,17 @@ export default nextConfig;
 
     const stopNextApp = () => {
       readinessController?.abort();
+      disconnectIframe?.();
+      disconnectIframe = null;
+      // Detach the preview before killing its server. Otherwise the iframe's
+      // current virtual document races the shutdown and reports a 404 or a
+      // hydration error while the surrounding demo page is being torn down.
+      iframe.removeAttribute('srcdoc');
+      iframe.src = 'about:blank';
+      if (apiPreviewUrl) {
+        BrowserURL.revokeObjectURL(apiPreviewUrl);
+        apiPreviewUrl = null;
+      }
       const processHandle = activeProcess;
       activeProcess = null;
       try {

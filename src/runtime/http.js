@@ -1182,13 +1182,45 @@ function createDeferredBody() {
   return body;
 }
 
+function responseHeadersForBody(headers, bytes) {
+  const body = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || 0);
+  const encoding = typeof headers?.get === 'function'
+    ? headers.get('content-encoding')
+    : headers?.['content-encoding'] ?? headers?.['Content-Encoding'];
+  const normalizedEncoding = String(encoding || '').split(',', 1)[0].trim().toLowerCase();
+  // Browser fetch implementations transparently decode content encodings, but
+  // a raw socket exposed by a proxy adapter can still carry the original
+  // Content-Encoding header. Passing that pair to a Node client makes it
+  // decode an already-decoded body a second time. Gzip has an unambiguous
+  // wire signature, so normalize only when the body proves that the browser
+  // transport has already decoded it.
+  if (normalizedEncoding !== 'gzip' || body.byteLength < 2
+    || (body[0] === 0x1f && body[1] === 0x8b)) return headers;
+  if (typeof headers?.delete === 'function') {
+    const HeaderClass = headers.constructor;
+    if (typeof HeaderClass !== 'function') return headers;
+    const normalized = new HeaderClass(headers);
+    normalized.delete('content-encoding');
+    normalized.set('content-length', String(body.byteLength));
+    return normalized;
+  }
+  const normalized = { ...headers };
+  delete normalized['content-encoding'];
+  delete normalized['Content-Encoding'];
+  if (Object.hasOwn(normalized, 'content-length') || Object.hasOwn(normalized, 'Content-Length')) {
+    normalized['content-length'] = String(body.byteLength);
+    delete normalized['Content-Length'];
+  }
+  return normalized;
+}
+
 function responseFromBytes(url, statusCode, headers, bytes, scope, socket = null, bodyStream = undefined) {
   const body = new Uint8Array(bytes || 0);
   return {
     url,
     status: statusCode,
     statusText: STATUS_CODES[statusCode] || '',
-    headers,
+    headers: responseHeadersForBody(headers, body),
     arrayBuffer: async () => body.slice().buffer,
     __bnhBodyDiagnostic: () => ({ byteLength: body.byteLength, prefix: body.subarray(0, 512) }),
     body: bodyStream,
@@ -2102,6 +2134,14 @@ class VirtualServerResponse extends Writable {
   }
 
   write(...args) {
+    // A client reset has already made the response unwritable. Node drops
+    // body writes racing that reset; do the same instead of emitting a new
+    // ERR_STREAM_DESTROYED error from a late piped chunk.
+    if (this._bnhPeerReset && this.destroyed) {
+      const callback = typeof args.at(-1) === 'function' ? args.at(-1) : null;
+      callback?.();
+      return false;
+    }
     this.flushHeaders();
     return Writable.prototype.write.apply(this, args);
   }
@@ -2476,7 +2516,16 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
       // that Express uses to produce ECONNABORTED.
       if (!socketError) socket.emit?.('error', error);
       if (activeResponse && !activeResponse.destroyed) {
-        activeResponse.destroy(error);
+        // The socket still reports ECONNRESET, but stream.finished() observes
+        // the server response as a premature close. Passing the transport
+        // error into ServerResponse.destroy() makes finished() reject with
+        // ECONNRESET instead of Node's ERR_STREAM_PREMATURE_CLOSE contract.
+        if (error?.code === 'ECONNRESET' && !activeResponse.finished) {
+          activeResponse._bnhPeerReset = true;
+        }
+        activeResponse.destroy(
+          error?.code === 'ECONNRESET' && !activeResponse.finished ? undefined : error,
+        );
       }
     };
     socket.once?.('close', finishConnection);
@@ -3444,8 +3493,24 @@ class BrowserAgent extends EventEmitter {
     super();
     validateProxyEnvironment(options.proxyEnv);
     this.options = { ...options };
-    this.protocol = options.protocol || protocol;
-    this.defaultPort = Number(options.defaultPort || (this.protocol === DEFAULT_HTTPS_PROTOCOL ? 443 : 80));
+    // A number of Node-compatible agent implementations subclass
+    // http.Agent and expose protocol/defaultPort accessors whose backing
+    // state is initialized immediately after super(). Do not invoke those
+    // accessors while this base constructor is still running; native
+    // http.Agent construction permits this subclass pattern.
+    const resolvedProtocol = options.protocol || protocol;
+    Object.defineProperty(this, 'protocol', {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: resolvedProtocol,
+    });
+    Object.defineProperty(this, 'defaultPort', {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: Number(options.defaultPort || (resolvedProtocol === DEFAULT_HTTPS_PROTOCOL ? 443 : 80)),
+    });
     this.keepAlive = Boolean(options.keepAlive);
     this.maxSockets = options.maxSockets || this.constructor.defaultMaxSockets;
     this.maxFreeSockets = options.maxFreeSockets ?? 256;
@@ -5246,6 +5311,13 @@ function createProtocolModule(protocol, ClientRequest, Server, Agent, scope, Buf
   const request = (input, options, callback) => {
     const parsed = parseArguments(input, options, callback, scope);
     const requestOptions = { ...parsed.options, protocol: protocolName(parsed.options.protocol, protocol) };
+    // WHATWG URL objects expose an empty string for an omitted port. Node's
+    // http(s) request path treats that as the protocol default before handing
+    // options to custom agents; preserve that contract for agent-base and
+    // proxy-agent connectors as well.
+    if (requestOptions.port === '') {
+      requestOptions.port = protocol === DEFAULT_HTTPS_PROTOCOL ? 443 : 80;
+    }
     unsupportedTransportOptions(requestOptions);
     validateRequestPath(requestOptions.path);
     const url = validateURL(

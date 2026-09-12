@@ -2432,12 +2432,17 @@ function rewriteCommonJsDynamicImports(source) {
 }
 
 function createGuestFunctionConstructor(NativeFunction, processOverride, sourceURL) {
+  // Nested CommonJS loads can construct a second guest Function wrapper while
+  // the parent wrapper is still installed globally. Always compile against
+  // the original native constructor so the injected import parameter is added
+  // exactly once.
+  const nativeFunction = NativeFunction.__bnhNativeFunction || NativeFunction;
   const GuestFunction = function guestFunctionConstructor(...args) {
     const body = args.length ? String(args.at(-1)) : '';
-    if (!body.includes('import')) return Reflect.construct(NativeFunction, args);
+    if (!body.includes('import')) return Reflect.construct(nativeFunction, args);
     const parameters = args.slice(0, -1);
     const rewritten = rewriteCommonJsDynamicImports(body);
-    const compiled = Reflect.construct(NativeFunction, ['__bnhImport', ...parameters, rewritten]);
+    const compiled = Reflect.construct(nativeFunction, ['__bnhImport', ...parameters, rewritten]);
     const importModule = (specifier, options) => processOverride.__bnhModuleImport(
       specifier,
       sourceURL,
@@ -2448,6 +2453,12 @@ function createGuestFunctionConstructor(NativeFunction, processOverride, sourceU
       return compiled.call(this, importModule, ...values);
     };
   };
+  Object.defineProperty(GuestFunction, '__bnhNativeFunction', {
+    value: nativeFunction,
+    configurable: false,
+    enumerable: false,
+    writable: false,
+  });
   Object.setPrototypeOf(GuestFunction, NativeFunction);
   GuestFunction.prototype = NativeFunction.prototype;
   return GuestFunction;
@@ -2568,6 +2579,181 @@ function createExecutionGlobal(scope) {
     deleteProperty: (current, property) => Reflect.deleteProperty(current, property),
     getPrototypeOf: () => Object.prototype,
   });
+}
+
+// Firefox can run Promise reactions inline when a resolver is called from a
+// callback while evaluating a browser ESM module. Node always observes the
+// Promise job boundary. Keep the guest constructor native-branded, but defer
+// settlement by one native microtask so a module callback cannot mutate its
+// caller's state before the callback returns.
+function createFirefoxGuestPromiseConstructor(NativePromise, enqueue, enqueueAbort, isAbortDispatching) {
+  // async-hooks installs a tracked constructor which deliberately returns a
+  // thenable proxy. Do not use that constructor for the guest's backing
+  // promise: native Promise.prototype methods reject the proxy as a receiver
+  // in Firefox. Its prototype still points at the original browser Promise,
+  // which is the constructor needed for a genuinely branded target.
+  const nativePromise = NativePromise?.prototype?.constructor
+    && NativePromise.prototype.constructor !== NativePromise
+    ? NativePromise.prototype.constructor
+    : NativePromise;
+  const schedule = typeof enqueue === 'function'
+    ? enqueue
+    : (callback) => nativePromise.resolve().then(callback);
+  let GuestPromise;
+  const create = (executor) => {
+    if (typeof executor !== 'function') throw new TypeError('Promise resolver is not a function');
+    let resolveGuest;
+    let rejectGuest;
+    let settled = false;
+    const target = new nativePromise((resolve, reject) => {
+      const settle = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        const enqueueSettlement = isAbortDispatching?.() && typeof enqueueAbort === 'function'
+          ? enqueueAbort
+          : schedule;
+        enqueueSettlement(() => callback(value));
+      };
+      resolveGuest = (value) => settle(resolve, value);
+      rejectGuest = (reason) => settle(reject, reason);
+    });
+    try {
+      executor(resolveGuest, rejectGuest);
+    } catch (error) {
+      rejectGuest(error);
+    }
+    return target;
+  };
+  GuestPromise = function Promise(executor) {
+    if (!new.target) throw new TypeError('Promises must be constructed via new');
+    return create(executor);
+  };
+  // Keep every returned object on the browser's native Promise prototype.
+  // Changing the prototype to make `constructor` point at GuestPromise is
+  // observable by Promise species/await machinery and breaks worker IPC
+  // contracts in Firefox, even though the underlying object is branded.
+  GuestPromise.prototype = nativePromise.prototype;
+  Object.setPrototypeOf(GuestPromise, NativePromise);
+  Object.defineProperties(GuestPromise, {
+    name: { configurable: true, value: 'Promise' },
+    length: { configurable: true, value: 1 },
+    resolve: {
+      configurable: true,
+      writable: true,
+      value(value) {
+        if (value && value.constructor === GuestPromise) return value;
+        // Static Promise.resolve already adopts its value through the native
+        // Promise job queue. Avoid adding a second deferred resolver here: in
+        // Firefox that extra hop can let setImmediate run before the Promise
+        // reaction, unlike Node's event-loop ordering.
+        return nativePromise.resolve(value);
+      },
+    },
+    reject: {
+      configurable: true,
+      writable: true,
+      value(reason) { return create((_resolve, reject) => reject(reason)); },
+    },
+    all: {
+      configurable: true,
+      writable: true,
+      value(values) {
+        return create((resolve, reject) => nativePromise.all(values).then(resolve, reject));
+      },
+    },
+    allSettled: {
+      configurable: true,
+      writable: true,
+      value(values) {
+        return create((resolve, reject) => nativePromise.allSettled(values).then(resolve, reject));
+      },
+    },
+    any: {
+      configurable: true,
+      writable: true,
+      value(values) {
+        return create((resolve, reject) => nativePromise.any(values).then(resolve, reject));
+      },
+    },
+    race: {
+      configurable: true,
+      writable: true,
+      value(values) {
+        return create((resolve, reject) => nativePromise.race(values).then(resolve, reject));
+      },
+    },
+  });
+  if (typeof nativePromise.withResolvers === 'function') {
+    Object.defineProperty(GuestPromise, 'withResolvers', {
+      configurable: true,
+      writable: true,
+      value() {
+        let resolve;
+        let reject;
+        const promise = create((resolveValue, rejectValue) => {
+          resolve = resolveValue;
+          reject = rejectValue;
+        });
+        return { promise, resolve, reject };
+      },
+    });
+  }
+  return GuestPromise;
+}
+
+function installFirefoxAbortCallbackBoundary(scope, setActive) {
+  const AbortSignalClass = scope.AbortSignal;
+  const prototype = AbortSignalClass?.prototype;
+  const nativeAdd = prototype?.addEventListener;
+  const nativeRemove = prototype?.removeEventListener;
+  if (typeof nativeAdd !== 'function' || typeof nativeRemove !== 'function') return null;
+  const previousAdd = Object.getOwnPropertyDescriptor(prototype, 'addEventListener');
+  const previousRemove = Object.getOwnPropertyDescriptor(prototype, 'removeEventListener');
+  const listeners = new WeakMap();
+  const add = function addEventListener(type, listener, options) {
+    if (type !== 'abort' || typeof listener !== 'function') {
+      return Reflect.apply(nativeAdd, this, [type, listener, options]);
+    }
+    const wrapped = (...args) => {
+      setActive(true);
+      try {
+        return Reflect.apply(listener, this, args);
+      } finally {
+        setActive(false);
+      }
+    };
+    let records = listeners.get(this);
+    if (!records) {
+      records = new Map();
+      listeners.set(this, records);
+    }
+    records.set(listener, wrapped);
+    return Reflect.apply(nativeAdd, this, [type, wrapped, options]);
+  };
+  const remove = function removeEventListener(type, listener, options) {
+    if (type !== 'abort' || typeof listener !== 'function') {
+      return Reflect.apply(nativeRemove, this, [type, listener, options]);
+    }
+    const wrapped = listeners.get(this)?.get(listener) || listener;
+    listeners.get(this)?.delete(listener);
+    return Reflect.apply(nativeRemove, this, [type, wrapped, options]);
+  };
+  try {
+    Object.defineProperty(prototype, 'addEventListener', { configurable: true, value: add });
+    Object.defineProperty(prototype, 'removeEventListener', { configurable: true, value: remove });
+  } catch {
+    return null;
+  }
+  return () => {
+    try {
+      if (previousAdd) Object.defineProperty(prototype, 'addEventListener', previousAdd);
+      else delete prototype.addEventListener;
+      if (previousRemove) Object.defineProperty(prototype, 'removeEventListener', previousRemove);
+      else delete prototype.removeEventListener;
+    } catch {
+      // A host prototype can become immutable while an execution is active.
+    }
+  };
 }
 
 function moduleSearchPaths(filename) {
@@ -2954,10 +3140,27 @@ function moduleSynchronousEsmSource(source, filename = '/node/index.mjs') {
       + replacement.value
       + transformed.slice(replacement.end);
   }
-  transformed = transformed.replace(
-    /(^|[;\n])\s*export\s+(const|let|var)\s+([$_A-Za-z][$_\w]*)\s*=\s*([^;\n]+);?/g,
-    (_, prefix, declaration, name, expression) => `${prefix}${declaration} ${name} = ${expression}; module.exports.${name} = ${name};`,
-  );
+  const exportedVariablePattern = /(^|[;\n])([ \t]*)export[ \t]+(const|let|var)[ \t]+([$_A-Za-z][$_\w]*)[ \t]*=[ \t]*/gm;
+  const exportedVariableReplacements = [];
+  for (const match of transformed.matchAll(exportedVariablePattern)) {
+    const expressionStart = match.index + match[0].length;
+    const expressionEnd = findDefaultExpressionEnd(transformed, expressionStart);
+    const expression = transformed.slice(expressionStart, expressionEnd).trim();
+    if (!expression) continue;
+    const exportStart = match.index + match[1].length;
+    const end = expressionEnd + (transformed[expressionEnd] === ';' ? 1 : 0);
+    exportedVariableReplacements.push({
+      start: exportStart,
+      end,
+      value: `${match[2]}${match[3]} ${match[4]} = ${expression}; module.exports.${match[4]} = ${match[4]};`,
+    });
+  }
+  for (let index = exportedVariableReplacements.length - 1; index >= 0; index -= 1) {
+    const replacement = exportedVariableReplacements[index];
+    transformed = transformed.slice(0, replacement.start)
+      + replacement.value
+      + transformed.slice(replacement.end);
+  }
   transformed = transformed.replace(
     /(^|[;\n])\s*export\s+\{([^}]+)\}(?!\s+from\b)\s*;?/g,
     (_, prefix, names) => `${prefix}${names.split(',').map((part) => part.trim()).filter(Boolean).map((part) => {
@@ -3252,11 +3455,22 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
   const env = Object.fromEntries(Object.entries(options.env || {}).map(([key, value]) => [key, String(value)]));
   const timers = new Set();
   const timerHandles = new Map();
+  const pendingEsmImports = new Set();
+  let referencedTimerCount = 0;
   const nativeTimers = scope.__BNH_NATIVE_TIMERS__;
   const nativeSetTimeout = nativeTimers?.setTimeout || scope.setTimeout.bind(scope);
   const nativeClearTimeout = nativeTimers?.clearTimeout || scope.clearTimeout.bind(scope);
   const nativeSetInterval = nativeTimers?.setInterval || scope.setInterval.bind(scope);
   const nativeClearInterval = nativeTimers?.clearInterval || scope.clearInterval.bind(scope);
+  const timerClock = typeof scope.performance?.now === 'function'
+    ? scope.performance.now.bind(scope.performance)
+    : Date.now;
+  // Browser timer implementations can deliver a long timeout slightly before
+  // its requested monotonic deadline. Node does not expose that early-fire
+  // behavior. Defer one-shot timers of at least one second until their due
+  // time; short timers remain unadjusted because they are also used to advance
+  // cache-resolution clocks and other event-loop bookkeeping.
+  const TIMER_DUE_MARGIN_MS = 50;
   const immediateQueue = new Map();
   let nextImmediateId = 0;
   let exitCode = 0;
@@ -3323,19 +3537,39 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
   const setTimer = (callback, delay, repeat = false, type = repeat ? 'Timeout' : 'Timeout') => {
     beforeExitEventEmitted = false;
     const useImmediateChannel = type === 'Immediate';
+    const requestedDelay = Number(delay);
+    // Node clamps positive sub-millisecond delays to one millisecond.
+    const timerDelay = requestedDelay > 0 && requestedDelay < 1 ? 1 : requestedDelay;
     const resource = new AsyncResource(type);
+    const timerStart = timerClock();
+    const timerMargin = timerDelay >= 1_000 ? TIMER_DUE_MARGIN_MS : 0;
     const handle = {
       id: null,
       repeat,
-      _idleTimeout: Number(delay),
-      _idleStart: Date.now(),
+      _idleTimeout: timerDelay,
+      _idleStart: timerStart,
+      _bnhDueTime: timerStart + timerDelay + timerMargin,
       _onTimeout: callback,
       _refed: true,
       _run: null,
       _immediateChannel: Boolean(useImmediateChannel),
+      _immediateTimer: null,
       resource,
-      ref() { this._refed = true; beforeExitEventEmitted = false; return this; },
-      unref() { this._refed = false; return this; },
+      ref() {
+        if (!this._refed) {
+          this._refed = true;
+          referencedTimerCount += 1;
+        }
+        beforeExitEventEmitted = false;
+        return this;
+      },
+      unref() {
+        if (this._refed) {
+          this._refed = false;
+          referencedTimerCount = Math.max(0, referencedTimerCount - 1);
+        }
+        return this;
+      },
       hasRef() { return this._refed; },
       refresh() {
         const previousId = this.id;
@@ -3347,7 +3581,9 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
           nativeClearTimeout(previousId);
           this.id = nativeSetTimeout(run, this._idleTimeout);
         }
-        this._idleStart = Date.now();
+        this._idleStart = timerClock();
+        this._bnhDueTime = this._idleStart + this._idleTimeout
+          + (this._idleTimeout >= 1_000 ? TIMER_DUE_MARGIN_MS : 0);
         timerHandles.delete(String(previousId));
         timerHandles.set(String(this.id), this);
         return this;
@@ -3357,8 +3593,31 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     };
     const run = () => {
       if (exited) return;
+      if (!repeat && !useImmediateChannel && Number.isFinite(handle._bnhDueTime)) {
+        const now = timerClock();
+        const remaining = handle._bnhDueTime - now;
+        if (remaining > 0) {
+          const previousId = handle.id;
+          handle.id = nativeSetTimeout(run, Math.max(1, Math.ceil(remaining)));
+          timerHandles.delete(String(previousId));
+          timerHandles.set(String(handle.id), handle);
+          return;
+        }
+      }
+      if (!repeat && !useImmediateChannel
+        && (!Number.isFinite(handle._idleTimeout) || handle._idleTimeout <= 0)
+        && !handle._bnhAwaitingEsm && pendingEsmImports.size > 0) {
+        handle._bnhAwaitingEsm = true;
+        const pending = [...pendingEsmImports];
+        Promise.allSettled(pending).then(() => {
+          handle._bnhAwaitingEsm = false;
+          if (timers.has(handle) && !exited) run();
+        });
+        return;
+      }
       if (repeat && (handle._idleTimeout < 0 || typeof handle._onTimeout !== 'function')) {
         nativeClearInterval(handle.id);
+        if (handle._refed) referencedTimerCount = Math.max(0, referencedTimerCount - 1);
         timers.delete(handle);
         timerHandles.delete(String(handle.id));
         resource.emitDestroy();
@@ -3379,6 +3638,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
         } finally {
           resource.emitDestroy();
         }
+        if (handle._refed) referencedTimerCount = Math.max(0, referencedTimerCount - 1);
         timers.delete(handle);
         timerHandles.delete(String(handle.id));
         return;
@@ -3407,9 +3667,12 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
         Object.assign(scope, previousTimers);
         scope.console = previousConsole;
         scope.process = previousProcess;
-        if (!repeat) resource.emitDestroy();
+        if (!repeat) {
+          resource.emitDestroy();
+        }
       }
       if (!repeat) {
+        if (handle._refed) referencedTimerCount = Math.max(0, referencedTimerCount - 1);
         timers.delete(handle);
         timerHandles.delete(String(handle.id));
         processObject._bnhTryExit?.();
@@ -3419,16 +3682,22 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     if (useImmediateChannel) {
       handle.id = ++nextImmediateId;
       immediateQueue.set(handle.id, handle);
-      queueMicrotask(() => {
+      // setImmediate is a next-turn task in Node. A browser microtask is too
+      // early: Firefox can run it before a Promise reaction that was queued by
+      // Promise.resolve(), reversing the observable Node order. Use the
+      // captured native timer channel so all current microtasks drain first.
+      handle._immediateTimer = nativeSetTimeout(() => {
         const queued = immediateQueue.get(handle.id);
         if (!queued) return;
         immediateQueue.delete(handle.id);
+        handle._immediateTimer = null;
         queued._run?.();
-      });
+      }, 0);
     } else {
-      handle.id = repeat ? nativeSetInterval(run, delay) : nativeSetTimeout(run, delay);
+      handle.id = repeat ? nativeSetInterval(run, timerDelay) : nativeSetTimeout(run, timerDelay);
     }
     timers.add(handle);
+    if (handle._refed) referencedTimerCount += 1;
     timerHandles.set(String(handle.id), handle);
     return handle;
   };
@@ -3439,6 +3708,9 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     if (!resolved) return;
     if (resolved._immediateChannel) {
       immediateQueue.delete(resolved.id);
+      if (resolved._immediateTimer !== null) nativeClearTimeout(resolved._immediateTimer);
+      resolved._immediateTimer = null;
+      if (timers.has(resolved) && resolved._refed) referencedTimerCount = Math.max(0, referencedTimerCount - 1);
       timers.delete(resolved);
       timerHandles.delete(String(resolved.id));
       resolved.resource?.emitDestroy?.();
@@ -3446,6 +3718,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     }
     if (resolved.repeat) nativeClearInterval(resolved.id);
     else nativeClearTimeout(resolved.id);
+    if (timers.has(resolved) && resolved._refed) referencedTimerCount = Math.max(0, referencedTimerCount - 1);
     timers.delete(resolved);
     timerHandles.delete(String(resolved.id));
     resolved.resource?.emitDestroy?.();
@@ -3837,6 +4110,18 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       processObject._bnhReleaseTasks?.();
     },
     _timers: timers,
+    _bnhHasReferencedTimers: () => referencedTimerCount > 0,
+    _bnhPendingEsmImports: pendingEsmImports,
+    _bnhTrackEsmImport: (promise, options = {}) => {
+      const tracked = Promise.resolve(promise);
+      if (options.waitForZeroTimer !== true) return tracked;
+      pendingEsmImports.add(tracked);
+      tracked.then(
+        () => pendingEsmImports.delete(tracked),
+        () => pendingEsmImports.delete(tracked),
+      );
+      return tracked;
+    },
     _bnhSetTimer: setTimer,
     _bnhClearTimer: clearTimer,
     _clearTimer: clearTimer,
@@ -3844,7 +4129,9 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     _bnhIsExited: () => exited,
     _exitRequested: () => exitRequested,
     _bnhReleaseTasks: null,
-    _bnhMarkActive: () => { beforeExitEventEmitted = false; },
+    _bnhMarkActive: () => {
+      beforeExitEventEmitted = false;
+    },
     _emitBeforeExit: () => {
       if (beforeExitEventEmitted || exitRequested || exited) return false;
       beforeExitEventEmitted = true;
@@ -4656,6 +4943,8 @@ export function createRuntime({
       }
     },
   });
+  let bindFsForProcess = null;
+  let bindPathForProcess = null;
   const Buffer = createBufferClass(scope);
   const File = createFileClass(scope);
   const Blob = installBlobCompatibility(scope.Blob);
@@ -4815,7 +5104,7 @@ export function createRuntime({
         const pkgJson = path.join(pkgDir, 'package.json');
         if (vfs.files.has(pkgJson)) {
           try {
-            const raw = vfs.read(pkgJson);
+            const raw = vfs.readSource(pkgJson);
             const config = JSON.parse(typeof raw === 'string' ? raw : new TextDecoder().decode(raw));
             if (subpath) {
               const subBase = path.join(pkgDir, subpath);
@@ -4845,7 +5134,7 @@ export function createRuntime({
     const packageJson = path.join(base, 'package.json');
     if (vfs.files.has(packageJson)) {
       try {
-        const raw = vfs.read(packageJson);
+        const raw = vfs.readSource(packageJson);
         const config = JSON.parse(typeof raw === 'string' ? raw : new TextDecoder().decode(raw));
         if (typeof config.main === 'string') {
           const mainBase = path.resolve(base, config.main);
@@ -4873,7 +5162,7 @@ export function createRuntime({
     for (;;) {
       if (directory.endsWith('/node_modules')) return 'commonjs';
       try {
-        const source = vfs.read(path.join(directory, 'package.json'));
+        const source = vfs.readSource(path.join(directory, 'package.json'));
         const text = typeof source === 'string' ? source : new TextDecoder().decode(source);
         const config = JSON.parse(text);
         return config.type === 'module' ? 'module' : 'commonjs';
@@ -4941,7 +5230,57 @@ export function createRuntime({
   }
 
   function makeBuiltins(processObject, runtimeRequire, diagnosticsChannels, runtimeOptions, performancePrimitives, trackTask, stdout, stderr, readSource, sourcePath, runtimeFetchRef, workerTransport) {
-    const fs = vfs.fs;
+    const rawFs = vfs.fs;
+    const boundFsPathIndices = new Map([
+      ['access', [0]], ['accessSync', [0]], ['appendFile', [0]], ['appendFileSync', [0]],
+      ['chmod', [0]], ['chmodSync', [0]], ['chown', [0]], ['chownSync', [0]],
+      ['copyFile', [0, 1]], ['copyFileSync', [0, 1]], ['cp', [0, 1]], ['cpSync', [0, 1]],
+      ['exists', [0]], ['existsSync', [0]], ['lchmod', [0]], ['lchmodSync', [0]],
+      ['lchown', [0]], ['lchownSync', [0]], ['link', [0, 1]], ['linkSync', [0, 1]],
+      ['lstat', [0]], ['lstatSync', [0]], ['lutimes', [0]], ['lutimesSync', [0]],
+      ['mkdir', [0]], ['mkdirSync', [0]], ['mkdtemp', [0]], ['mkdtempSync', [0]],
+      ['open', [0]], ['openSync', [0]], ['opendir', [0]], ['opendirSync', [0]],
+      ['readFile', [0]], ['readFileSync', [0]], ['readlink', [0]], ['readlinkSync', [0]],
+      ['realpath', [0]], ['realpathSync', [0]], ['rename', [0, 1]], ['renameSync', [0, 1]],
+      ['rm', [0]], ['rmSync', [0]], ['rmdir', [0]], ['rmdirSync', [0]],
+      ['stat', [0]], ['statSync', [0]], ['statfs', [0]], ['statfsSync', [0]],
+      ['symlink', [1]], ['symlinkSync', [1]], ['truncate', [0]], ['truncateSync', [0]],
+      ['unlink', [0]], ['unlinkSync', [0]], ['utimes', [0]], ['utimesSync', [0]],
+      ['writeFile', [0]], ['writeFileSync', [0]], ['createReadStream', [0]], ['createWriteStream', [0]],
+    ]);
+    const createBoundFs = (ownerProcess) => {
+      const bindFs = (api) => {
+        if (!api || (typeof api !== 'object' && typeof api !== 'function')) return api;
+        return new Proxy(api, {
+          get(target, name, receiver) {
+            if (name === 'promises' && target.promises) return bindFs(target.promises);
+            const value = Reflect.get(target, name, receiver);
+            const indices = boundFsPathIndices.get(name);
+            if (typeof value !== 'function' || !indices) return value;
+            const bound = (...args) => {
+              const boundArgs = [...args];
+              for (const index of indices) {
+                const valueAtIndex = boundArgs[index];
+                if (typeof valueAtIndex !== 'string' || valueAtIndex.startsWith('/')
+                  || /^[A-Za-z]:[\\/]/.test(valueAtIndex) || valueAtIndex.startsWith('\\\\')) continue;
+                boundArgs[index] = normalizePath(valueAtIndex, ownerProcess.cwd?.() || '/node');
+              }
+              return Reflect.apply(value, target, boundArgs);
+            };
+            // Preserve Node fs function metadata, especially the custom
+            // promisifier on fs.exists, when a process-bound wrapper is used.
+            for (const key of Reflect.ownKeys(value)) {
+              if (key === 'length' || key === 'name' || key === 'prototype') continue;
+              try { Object.defineProperty(bound, key, Object.getOwnPropertyDescriptor(value, key)); } catch {}
+            }
+            return bound;
+          },
+        });
+      };
+      return bindFs(rawFs);
+    };
+    bindFsForProcess = createBoundFs;
+    const fs = createBoundFs(processObject);
     let guestWasi;
     const wasi = {
       WASI: class BrowserWASI {
@@ -5282,52 +5621,83 @@ export function createRuntime({
         processObject.env[key] = value;
       }
     };
-    const currentPathProcess = () => scope.__bnhActiveProcess || scope.process || processObject;
-    const nodePath = {
-      ...path,
-      resolve(...parts) {
-        return path.resolve(currentPathProcess().cwd?.() || '/node', ...parts);
-      },
-      relative(from, to) {
-        const cwd = currentPathProcess().cwd?.() || '/node';
-        return path.relative(path.resolve(cwd, from), path.resolve(cwd, to));
-      },
+    // Path resolution is used by asynchronous toolchains after their
+    // CommonJS/ESM wrapper has returned. A path object that consults the
+    // mutable global active-process marker would then resolve against the
+    // parent process. Bind cwd-sensitive methods to the owning virtual
+    // process just like fs, while keeping the normal path helper surface.
+    const createBoundPath = (ownerProcess) => {
+      const ownerCwd = () => ownerProcess?.cwd?.() || '/node';
+      const boundPath = {
+        ...path,
+        resolve(...parts) {
+          return path.resolve(ownerCwd(), ...parts);
+        },
+        relative(from, to) {
+          const cwd = ownerCwd();
+          return path.relative(path.resolve(cwd, from), path.resolve(cwd, to));
+        },
+      };
+      const boundPosixPath = {
+        ...path.posix,
+        resolve(...parts) {
+          return path.posix.resolve(ownerCwd(), ...parts);
+        },
+        relative(from, to) {
+          const cwd = ownerCwd();
+          return path.posix.relative(path.posix.resolve(cwd, from), path.posix.resolve(cwd, to));
+        },
+      };
+      const boundWin32Path = {
+        ...path.win32,
+        resolve(...parts) {
+          return path.win32.resolve(ownerCwd(), ...parts);
+        },
+        relative(from, to) {
+          const cwd = ownerCwd();
+          return path.win32.relative(path.win32.resolve(cwd, from), path.win32.resolve(cwd, to));
+        },
+      };
+      boundPath.posix = boundPosixPath;
+      boundPath.win32 = boundWin32Path;
+      boundPosixPath.posix = boundPosixPath;
+      boundPosixPath.win32 = boundWin32Path;
+      boundWin32Path.posix = boundPosixPath;
+      boundWin32Path.win32 = boundWin32Path;
+      return boundPath;
     };
-    // `node:path/posix` and `node:path/win32` have the same cwd-sensitive
-    // resolve/relative contract as `node:path`. Keep their platform-specific
-    // helpers anchored to the active virtual process too; build tools such as
-    // tshy import `path/posix` directly before moving relative output trees.
-    const nodePosixPath = {
-      ...path.posix,
-      resolve(...parts) {
-        return path.posix.resolve(currentPathProcess().cwd?.() || '/node', ...parts);
-      },
-      relative(from, to) {
-        const cwd = currentPathProcess().cwd?.() || '/node';
-        return path.posix.relative(path.posix.resolve(cwd, from), path.posix.resolve(cwd, to));
-      },
+    const boundPathCache = new WeakMap();
+    let nodePath;
+    bindPathForProcess = (ownerProcess) => {
+      if (!ownerProcess || (typeof ownerProcess !== 'object' && typeof ownerProcess !== 'function')) return nodePath;
+      if (ownerProcess === processObject) return nodePath;
+      let boundPath = boundPathCache.get(ownerProcess);
+      if (!boundPath) {
+        boundPath = createBoundPath(ownerProcess);
+        boundPathCache.set(ownerProcess, boundPath);
+      }
+      return boundPath;
     };
-    const nodeWin32Path = {
-      ...path.win32,
-      resolve(...parts) {
-        return path.win32.resolve(currentPathProcess().cwd?.() || '/node', ...parts);
-      },
-      relative(from, to) {
-        const cwd = currentPathProcess().cwd?.() || '/node';
-        return path.win32.relative(path.win32.resolve(cwd, from), path.win32.resolve(cwd, to));
-      },
+    nodePath = createBoundPath(processObject);
+    const blobVirtualPath = (value) => {
+      const blobURL = String(value).split('#', 1)[0];
+      const paths = [blobURL];
+      // @tapjs/stack can normalize the authority separator in a generated
+      // blob location from `blob:http://host/...` to `blob:http:/host/...`.
+      // Treat both spellings as the same browser object URL when recovering
+      // the VFS source path.
+      const shorthand = blobURL.match(/^blob:(https?):\/([^/].*)$/);
+      if (shorthand) paths.push(`blob:${shorthand[1]}://${shorthand[2]}`);
+      for (const candidate of paths) {
+        const virtualPath = scope.__BNH_BLOB_VIRTUAL_PATHS__?.get?.(candidate);
+        if (typeof virtualPath === 'string') return virtualPath;
+      }
+      return undefined;
     };
-    nodePath.posix = nodePosixPath;
-    nodePath.win32 = nodeWin32Path;
-    nodePosixPath.posix = nodePosixPath;
-    nodePosixPath.win32 = nodeWin32Path;
-    nodeWin32Path.posix = nodePosixPath;
-    nodeWin32Path.win32 = nodeWin32Path;
     const nodePathToFileURL = (value) => {
       const rawValue = String(value);
       if (rawValue.startsWith('blob:')) {
-        const blobURL = rawValue.split('#', 1)[0];
-        const virtualPath = scope.__BNH_BLOB_VIRTUAL_PATHS__?.get(blobURL);
+        const virtualPath = blobVirtualPath(rawValue);
         if (typeof virtualPath === 'string') return pathToFileURL(virtualPath);
       }
       return pathToFileURL(value);
@@ -5516,7 +5886,7 @@ export function createRuntime({
           throw new TypeError('load hook must be a function');
         }
         const registry = processObj.__bnhModuleHooks || [];
-        const record = { resolve: hooks.resolve, load: hooks.load };
+        const record = { resolve: hooks.resolve, load: hooks.load, synchronous: true };
         registry.push(record);
         processObj.__bnhModuleHooks = registry;
         processObj.__bnhModuleHookRevision = (processObj.__bnhModuleHookRevision || 0) + 1;
@@ -5847,9 +6217,15 @@ export function createRuntime({
         },
         wrap: (script) => `${currentModuleWrapper[0]}${script}${currentModuleWrapper[1]}`,
         createRequire: (filename) => {
-          const importer = typeof filename === 'string' && filename.startsWith('file:')
-            ? fileURLToPath(filename)
-            : String(filename || sourcePath);
+          const filenameValue = String(filename || sourcePath);
+          const blobImporter = filenameValue.startsWith('blob:')
+            ? blobVirtualPath(filenameValue)
+            : undefined;
+          const importer = filenameValue.startsWith('file:')
+            ? fileURLToPath(filenameValue)
+            : typeof blobImporter === 'string'
+              ? blobImporter
+              : normalizePath(filenameValue, processObj.cwd?.() || '/node');
           const req = (name) => {
             if (String(name).startsWith('file:') && String(name).endsWith('.mjs')) {
               const error = new Error(`Cannot find module '${name}'`);
@@ -5933,6 +6309,18 @@ export function createRuntime({
             error.code = 'ERR_MISSING_ARGS';
             throw error;
           }
+          // module.register() accepts either a string or a URL object. The
+          // native loader passes the normalized URL string to the registered
+          // hook; preserving the guest URL object here makes compatible hooks
+          // such as ts-node call legacy url.parse(URL), which correctly rejects
+          // the object even though Node accepts it at the register boundary.
+          const normalizeRegistrationURL = (value) => (
+            value && typeof value === 'object' && typeof value.href === 'string'
+              ? value.href
+              : value
+          );
+          specifier = normalizeRegistrationURL(specifier);
+          parentURL = normalizeRegistrationURL(parentURL);
           if (parentURL !== undefined && parentURL !== null
             && typeof parentURL === 'object' && options === undefined) {
             options = parentURL;
@@ -6816,7 +7204,7 @@ export function createRuntime({
           };
         },
       },
-      path: nodePath, 'path/posix': nodePosixPath, 'path/win32': nodeWin32Path, process: processObject, querystring: createQuerystring(Buffer),
+      path: nodePath, 'path/posix': nodePath.posix, 'path/win32': nodePath.win32, process: processObject, querystring: createQuerystring(Buffer),
       stream: streamApi, 'stream/consumers': streamConsumers, 'stream/web': streamWebApi,
       'internal/webstreams/adapters': streamAdapters,
       'stream/promises': streamPromises,
@@ -7244,6 +7632,15 @@ export function createRuntime({
               continue;
             }
             if (!stopOptions && argument.startsWith('-')) continue;
+            // In eval/print mode, Node treats every trailing argument as a
+            // script argument. In particular, `node -e code pid` exposes
+            // `pid` as process.argv[1] rather than attempting to load it as
+            // the script path. foreground-child's watchdog uses this exact
+            // form when it passes the watched child's PID.
+            if (evalCode !== null) {
+              afterScript.push(argument);
+              continue;
+            }
             if (script === null) script = argument;
             else afterScript.push(argument);
           }
@@ -7480,7 +7877,10 @@ export function createRuntime({
           const trackOwnedTask = typeof ownerProcess?._bnhTaskTracker === 'function'
             ? ownerProcess._bnhTaskTracker
             : trackTask;
-          const childTaskLabel = `child:${String(file || '<unknown>').split('/').pop() || '<unknown>'} args:${Array.isArray(args) ? args.length : 0}`.slice(0, 128);
+          const childTaskArgs = Array.isArray(args)
+            ? args.map((value) => String(value).split('/').pop() || String(value)).join(' ')
+            : '';
+          const childTaskLabel = `child:${String(file || '<unknown>').split('/').pop() || '<unknown>'} args:${Array.isArray(args) ? args.length : 0} ${childTaskArgs}`.slice(0, 256);
           let releaseChildTask = trackOwnedTask?.(childTaskLabel) || null;
           const updateChildReference = (referenced) => {
             if (referenced) {
@@ -7519,6 +7919,7 @@ export function createRuntime({
             ipcError: null,
             error: null,
           };
+          (childActivity.active ||= []).push(activityRecord);
           // Keep the live process handle out of serialized activity records,
           // but retain it privately so bounded runtime heartbeats can inspect
           // a nested ESM/CJS child while its terminal frame is pending.
@@ -7554,7 +7955,13 @@ export function createRuntime({
           let childTerminal = null;
           const stdioEntry = (index) => Array.isArray(options?.stdio) ? options.stdio[index] : options?.stdio;
           const stdioIgnored = (index) => stdioEntry(index) === 'ignore';
-          const stdioInherited = (index) => stdioEntry(index) === 'inherit';
+          const stdioInherited = (index) => {
+            const entry = stdioEntry(index);
+            // Node accepts the corresponding fd number as shorthand for
+            // inheriting that stream, which foreground-child uses as
+            // [0, 1, 2, 'ipc'] for its watched process.
+            return entry === 'inherit' || entry === index;
+          };
           const stdoutDestination = Array.isArray(options?.stdio) && options.stdio[1]
             && typeof options.stdio[1].write === 'function'
             ? options.stdio[1]
@@ -7822,10 +8229,21 @@ export function createRuntime({
           child.kill = (signal = 'SIGTERM') => {
             if (closed) return true;
             killed = true;
-            if (ipc?.processHandle) {
-              try { ipc.processHandle.kill(signal); } catch { /* already terminal */ }
-            }
-            finish(null, normalizeChildKillSignal(signal));
+            // Native ChildProcess emits exit/close after kill() returns. Keep
+            // that ordering so a sibling cleanup child (for example
+            // foreground-child's watchdog) cannot observe the kill-triggering
+            // child's exit before its close listeners have run.
+            runtimeQueueMicrotask(() => {
+              if (closed) return;
+              if (ipc?.processHandle) {
+                try { ipc.processHandle.kill(signal); } catch { /* already terminal */ }
+              } else if (childProcess?.kill && childProcess?.wait) {
+                try { childProcess.kill(signal); } catch { /* already terminal */ }
+              } else if (childProcess?._bnhAbort) {
+                try { childProcess._bnhAbort(signal); } catch { /* already terminal */ }
+              }
+              finish(null, normalizeChildKillSignal(signal));
+            });
             return true;
           };
           const commandError = (code, signal) => {
@@ -7839,6 +8257,8 @@ export function createRuntime({
           const finish = (code, signal, error = null) => {
             if (closed) return;
             closed = true;
+            const activeIndex = childActivity.active?.indexOf(activityRecord);
+            if (activeIndex >= 0) childActivity.active.splice(activeIndex, 1);
             if (!activityRecorded) {
               activityRecorded = true;
               activityRecord.code = code;
@@ -8176,6 +8596,13 @@ export function createRuntime({
                   stderr += normalizeOutputChunk(value);
                   writeStderr(value);
                 });
+                // Keep the underlying virtual process available to kill(),
+                // just as the synchronous/native child paths do.  ESM
+                // children otherwise only lived on the activity record, so
+                // a caller such as foreground-child could close the wrapper
+                // while leaving the worker-backed process (and its watchdog
+                // interval) running.
+                childProcess = processHandle;
                 activityRecord.processHandle = processHandle;
                 if (ipc) {
                   ipc.processHandle = processHandle;
@@ -8607,7 +9034,7 @@ export function createRuntime({
               ? new Uint8Array(source)
               : ArrayBuffer.isView(source)
                 ? new Uint8Array(source.buffer, source.byteOffset, source.byteLength)
-                : new Uint8Array(source || []);
+              : new Uint8Array(source || []);
           const text = typeof source === 'string' ? source : new TextDecoder().decode(bytes);
           const esmEntry = entryPath.startsWith('data:') || isEsmModule(entryPath, processObj)
             || (isMain && hasStaticEsmSyntax(text));
@@ -8743,7 +9170,7 @@ export function createRuntime({
               if (builtin === 'dns/promises') return processObj?.__bnhDns?.promises || dnsPromises;
               if (builtin === 'v8') return createBrowserV8Module(processObj, scopeObj);
               if (builtin === 'dgram' && processObj?._bnhDgram) return processObj._bnhDgram;
-              const value = runtimeRequire(name);
+              const value = runtimeRequire(name, entryPath, processObj);
               return value;
             }
             const resolved = resolveFileSync(name, entryPath, processObj);
@@ -8853,6 +9280,79 @@ export function createRuntime({
             let entryPath = prepared.entryPath;
             const stdoutArr = [];
             const stderrArr = [];
+            const nestedEsmProcess = scope.process?.__bnhEsmNested === true ? scope.process : null;
+            // A browser cannot synchronously block its event loop while an
+            // ESM child with top-level await is running. Node's spawnSync can
+            // launch that child as a real OS process, though, and build tools
+            // such as @tapjs/test rely on exactly that shape with stdio
+            // inherited. Run that narrow case in an isolated async child,
+            // report the optimistic synchronous result, and retain one task
+            // on the caller until the child (and its VFS updates) settle. A
+            // later failure becomes the caller's exit code, so the parent
+            // still observes the child outcome at its process boundary.
+            if (nestedEsmProcess
+              && options.stdio === 'inherit'
+              && esmGraphHasTopLevelAwait(prepared.entryPath, nestedEsmProcess)) {
+              const release = nestedEsmProcess._bnhTaskTracker?.(
+                `sync-esm-child:${String(prepared.entryPath).split('/').pop() || '<unknown>'}`,
+              ) || null;
+              let processHandle;
+              try {
+                processHandle = runPreparedESM(prepared, {
+                  signal: options.signal,
+                  timeout: options.timeout,
+                  ownerProcess: nestedEsmProcess,
+                  asyncLifecycle: true,
+                  onNetwork: options.onNetwork,
+                }, (value) => nestedEsmProcess.stdout?.write?.(value),
+                (value) => nestedEsmProcess.stderr?.write?.(value));
+              } catch (error) {
+                release?.();
+                nestedEsmProcess.exitCode = 1;
+                nestedEsmProcess.stderr?.write?.(`${formatError(error)}\n`);
+                return {
+                  pid: 0,
+                  stdout: Buffer.from(''),
+                  stderr: Buffer.from(''),
+                  stdoutChunks: [],
+                  stderrChunks: [],
+                  status: 1,
+                  pending: false,
+                  signal: null,
+                  error,
+                  process: null,
+                };
+              }
+              processHandle.wait().then((terminal) => {
+                if (terminal.signal || terminal.code !== 0 || terminal.error) {
+                  nestedEsmProcess.exitCode = terminal.signal ? 1 : terminal.code ?? 1;
+                  const detail = terminal.error?.stack || terminal.error?.message || '';
+                  if (detail) nestedEsmProcess.stderr?.write?.(`${detail}\n`);
+                }
+                release?.();
+              }, (error) => {
+                nestedEsmProcess.exitCode = 1;
+                nestedEsmProcess.stderr?.write?.(`${formatError(error)}\n`);
+                release?.();
+              });
+              return {
+                pid: processHandle.pid || 0,
+                stdout: Buffer.from(''),
+                stderr: Buffer.from(''),
+                stdoutChunks: [],
+                stderrChunks: [],
+                status: 0,
+                pending: true,
+                signal: null,
+                error: null,
+                // The synchronous API cannot block the browser event loop,
+                // but its caller still needs the watched process lifecycle.
+                // Returning the async handle lets virtualAsync bridge its
+                // exit/close events instead of leaving foreground-child's
+                // watchdog alive forever.
+                process: processHandle,
+              };
+            }
             const previousDnsModule = dnsModule;
             if (prepared.snapshotBlobPath || prepared.buildSnapshot) {
               dnsModule = createBrowserDns({
@@ -8864,6 +9364,7 @@ export function createRuntime({
             let exitCode = 0;
             const previousState = {
               process: scope.process,
+              Promise: scope.Promise,
               require: scope.require,
               http: scope.http,
               hasHttp: Object.hasOwn(scope, 'http'),
@@ -9344,6 +9845,70 @@ export function createRuntime({
                 clearImmediate: scope.clearImmediate,
                 queueMicrotask: scope.queueMicrotask,
               };
+              // Some Node-targeted WASM loaders deliberately override
+              // WebAssembly.instantiate and then start the Go runtime from
+              // Promise.resolve(...). The promise is created by the guest's
+              // global Promise, outside the WebAssembly contract, so give
+              // same-realm child promises the same process context bridge as
+              // the runtime's own async surfaces.
+              const promiseClass = scope.Promise;
+              const bindPromise = (promise) => {
+                if (!promise || typeof promise.then !== 'function') return promise;
+                const runInChildPromiseContext = (callback) => {
+                  if (typeof callback !== 'function') return callback;
+                  return (...args) => {
+                    const runInContext = childProc.processObject._bnhRunInContext;
+                    if (typeof runInContext === 'function') {
+                      return runInContext(() => Reflect.apply(callback, undefined, args));
+                    }
+                    return Reflect.apply(callback, undefined, args);
+                  };
+                };
+                return new Proxy(promise, {
+                  get(target, property, receiver) {
+                    if (property === 'then') {
+                      return (onFulfilled, onRejected) => bindPromise(
+                        target.then(
+                          runInChildPromiseContext(onFulfilled),
+                          runInChildPromiseContext(onRejected),
+                        ),
+                      );
+                    }
+                    if (property === 'catch') {
+                      return (onRejected) => bindPromise(
+                        target.catch(runInChildPromiseContext(onRejected)),
+                      );
+                    }
+                    if (property === 'finally') {
+                      return (onFinally) => bindPromise(
+                        target.finally(runInChildPromiseContext(onFinally)),
+                      );
+                    }
+                    return Reflect.get(target, property, receiver);
+                  },
+                });
+              };
+              const firefoxPromiseFacade = typeof navigator === 'object'
+                && /Firefox\//.test(String(navigator.userAgent || ''));
+              // IPC children already bridge continuations through their
+              // channel and process context. Wrapping every static Promise
+              // result as well makes Chromium's same-realm fork exit path
+              // retain a proxy thenable after disconnect, so the child never
+              // reaches its terminal boundary. Keep the native Promise for
+              // IPC children; the explicit timer/queue/process bridges above
+              // still preserve their Node execution context.
+              if (!firefoxPromiseFacade && !options.ipc) {
+                scope.Promise = new Proxy(promiseClass, {
+                  get(target, property, receiver) {
+                    if (property === 'resolve' || property === 'reject'
+                      || property === 'all' || property === 'allSettled'
+                      || property === 'any' || property === 'race') {
+                      return (...args) => bindPromise(Reflect.apply(target[property], target, args));
+                    }
+                    return Reflect.get(target, property, receiver);
+                  },
+                });
+              }
               originalReadFileSync = fs.readFileSync;
               if (prepared.stdin !== undefined || prepared.stdinPath) {
                 let stdinValue = prepared.stdin;
@@ -9711,6 +10276,7 @@ export function createRuntime({
               // synchronous bootstrap; doing so contaminates the parent
               // runner while the child remains alive.
               scope.process = previousState.process;
+              scope.Promise = previousState.Promise;
               scope.console = previousState.console;
               scope.require = previousState.require;
               scope.global = previousState.global;
@@ -9791,14 +10357,17 @@ export function createRuntime({
               mainPath: prepared.mainPath === prepared.entryPath ? esmEntryPath : prepared.mainPath,
               scriptPath: prepared.scriptPath === prepared.entryPath ? esmEntryPath : prepared.scriptPath,
             };
+          const snapshot = vfs.snapshot({ copy: false, includeAllFiles: true });
           // An asynchronous ESM child is a separate Node process and must not
           // share its parent's module-loader cache or lifecycle event loop.
-          // Keep the VFS and network capabilities shared through the normal
-          // worker bridge, but give every async ESM child its own realm. This
-          // also prevents a parent waiting on a child from blocking that
-          // child's module evaluation and terminal frame.
+          // Every asynchronous ESM child is a real process boundary. Keep it
+          // in its own browser worker so its native module evaluator cannot
+          // collide with the still-running parent; prepareWorkerVfs retains a
+          // shared backing buffer for nested workers so this does not clone
+          // the complete application snapshot on every test file.
           const workerIsolation = Boolean(
-            options.ipc
+            options.workerIsolation === true
+            || options.ipc
             || options.asyncLifecycle
             || esmExecutionDepth > 0
           );
@@ -9807,7 +10376,6 @@ export function createRuntime({
           // filesystem before prepareWorkerVfs can share it with the child
           // realm. Keep the snapshot as a view of the current VFS, matching
           // runtime.spawn() and worker_threads.Worker().
-          const snapshot = vfs.snapshot({ copy: false });
           const files = Object.fromEntries(
             snapshot.artifacts.map(({ path, bytes }) => [path, bytes]),
           );
@@ -9881,9 +10449,11 @@ export function createRuntime({
             entry: esmPrepared.entryPath,
             execArgv: childExecArgv,
             proxy: childProxy,
-          virtualNetwork: workerIsolation ? { shared: true } : { shared: true, network: virtualNetwork },
-          esmNested: workerIsolation,
-        };
+            virtualNetwork: workerIsolation
+              ? { shared: true }
+              : { shared: true, network: virtualNetwork },
+            esmNested: workerIsolation,
+          };
           // The child receives a VFS snapshot even when the process uses the
           // in-memory fallback. Keep its writes connected to the owning VFS
           // in both modes; otherwise build tools can exit successfully while
@@ -9926,10 +10496,16 @@ export function createRuntime({
             cwd: esmPrepared.cwd,
             signal: options.signal,
             signalGrants: capabilities.manifest.signals.allowed,
+            exposeIpc: Boolean(options.ipc) || options.clusterGroupId !== undefined,
             workerSource: new URL('./runtime/process-entry.js', import.meta.url).href,
             workerType: 'module',
             execArgv: childExecArgv,
             vfs: esmDescriptor,
+            // The process-entry marker is the reliable signal that this
+            // runtime is already inside an isolated ESM worker. Some worker
+            // realms do not expose WorkerGlobalScope, so pass the boundary
+            // explicitly to avoid repacking the complete mixed VFS.
+            vfsNested: processObject.__bnhEsmNested === true,
             run,
             // Child processes may create a server after they start. Keep them
             // in this realm so later siblings can share the live registry.
@@ -9941,6 +10517,14 @@ export function createRuntime({
             proxyAdapter: workerIsolation ? proxyCapability.adapter : undefined,
             stdout: forwardStdout,
             stderr: forwardStderr,
+          });
+          // A nested browser worker can itself launch virtual children. Stream
+          // those bounded diagnostics to the owning process as each control
+          // frame arrives; waiting for the worker's terminal frame would lose
+          // all nested output when the parent is waiting on a child.
+          processHandle.on?.('child-output', (record) => {
+            const outputOwner = options.ownerProcess || processObject;
+            outputOwner.__bnhChildOutput?.(record);
           });
           const activeEsmChildrenOwner = options.ownerProcess || processObject;
           const activeEsmChildren = activeEsmChildrenOwner.__bnhEsmChildren ||= [];
@@ -10960,6 +11544,69 @@ export function createRuntime({
             });
           }
 
+          const removeCommands = new Set(['remove', 'rm', 'r', 'uninstall', 'un', 'unlink']);
+          if (removeCommands.has(command.name)) {
+            const prefixArgument = (() => {
+              for (let index = 0; index < commandArguments.length; index += 1) {
+                const argument = String(commandArguments[index]);
+                if (argument.startsWith('--prefix=')) return argument.slice('--prefix='.length);
+                if (argument === '--prefix') return commandArguments[index + 1];
+              }
+              return null;
+            })();
+            const configuredPrefix = prefixArgument
+              || env.npm_config_prefix
+              || env.NPM_CONFIG_PREFIX
+              || prepared.cwd;
+            const prefix = path.resolve(prepared.cwd, String(configuredPrefix));
+            const packageNames = positionalArguments();
+            if (packageNames.length === 0) {
+              return { code: 0, stdout: '', stderr: '' };
+            }
+            for (const spec of packageNames) {
+              const { name } = parsePackageSpec(spec);
+              if (!/^(?:@[^/]+\/)?[^/]+$/.test(name)) {
+                return { code: 1, stdout: '', stderr: `npm error invalid package name: ${name}\n` };
+              }
+              const packageRoot = path.join(prefix, 'node_modules', name);
+              let packageJson = null;
+              try {
+                const raw = await vfs.fs.promises.readFile(path.join(packageRoot, 'package.json'), 'utf8');
+                packageJson = JSON.parse(String(raw));
+              } catch {
+                // npm rm is idempotent for a package that is already absent.
+              }
+              if (packageJson?.bin) {
+                const bins = typeof packageJson.bin === 'string'
+                  ? [packageJson.name || name]
+                  : Object.keys(packageJson.bin);
+                for (const bin of bins) {
+                  await vfs.fs.promises.rm(path.join(prefix, 'node_modules', '.bin', bin), { force: true });
+                }
+              }
+              await vfs.fs.promises.rm(packageRoot, { recursive: true, force: true });
+            }
+            try {
+              const npm = createNpm();
+              const packageJson = await npm.readPackageJson(prefix);
+              if (packageJson) {
+                for (const section of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
+                  for (const spec of packageNames) {
+                    const { name } = parsePackageSpec(spec);
+                    if (packageJson[section]) delete packageJson[section][name];
+                  }
+                }
+                await vfs.fs.promises.writeFile(
+                  path.join(prefix, 'package.json'),
+                  `${JSON.stringify(packageJson, null, 2)}\n`,
+                );
+              }
+            } catch {
+              // A prefix without package.json is valid for npm's cleanup use.
+            }
+            return { code: 0, stdout: '', stderr: '' };
+          }
+
           if (!['install', 'i', 'add'].includes(command.name)) {
             return {
               code: 1,
@@ -11243,6 +11890,7 @@ export function createRuntime({
     let pending = 0;
     const pendingTaskRecords = new Map();
     let nextPendingTaskId = 0;
+    let wakeLifecycleWait = null;
     let markTaskActivity = () => {};
     const traceTaskStacks = options.traceTaskStacks === true;
     const publishLifecycleState = () => {
@@ -11257,14 +11905,11 @@ export function createRuntime({
       pending += 1;
       markTaskActivity();
       const taskId = ++nextPendingTaskId;
-      if (injectedProcess) {
-        if (pendingTaskRecords.size >= 4) pendingTaskRecords.delete(pendingTaskRecords.keys().next().value);
-        pendingTaskRecords.set(taskId, {
-          id: taskId,
-          label: label == null ? null : String(label).slice(0, 128),
-          stack: traceTaskStacks ? String(new Error().stack || '').split('\n')[2]?.trim().slice(0, 160) || null : null,
-        });
-      }
+      pendingTaskRecords.set(taskId, {
+        id: taskId,
+        label: label == null ? null : String(label).slice(0, 128),
+        stack: traceTaskStacks ? String(new Error().stack || '').split('\n')[2]?.trim().slice(0, 160) || null : null,
+      });
       publishLifecycleState();
       let released = false;
       return () => {
@@ -11273,6 +11918,11 @@ export function createRuntime({
         pending -= 1;
         pendingTaskRecords.delete(taskId);
         publishLifecycleState();
+        if (pendingTaskRecords.size === 0 && wakeLifecycleWait) {
+          // Let promise continuations queued by the task's consumer run before
+          // the lifecycle check observes the newly idle task set.
+          nativeSetTimeout(() => wakeLifecycleWait?.(), 0);
+        }
       };
     };
     const injectedProcess = options.processObject;
@@ -11314,6 +11964,39 @@ export function createRuntime({
         value: { setTimeout: nativeSetTimeout, clearTimeout: nativeClearTimeout, setInterval: nativeSetInterval, clearInterval: nativeClearInterval },
       });
     }
+    const previousGuestPromise = scope.Promise;
+    const previousFirefoxPromiseBoundary = scope.__BNH_FIREFOX_PROMISE_BOUNDARY__;
+    let abortDispatchDepth = 0;
+    // Build tools can cross another ESM worker boundary after npm resolves
+    // their .bin launcher to the package's real entry file. Keep their
+    // native Promise behavior throughout that boundary; the compatibility
+    // Promise is for the guest package/test process that needs Node's abort
+    // settlement ordering.
+    const firefoxPromiseBoundaryTool = /(?:^|\/)(?:node_modules\/)?(?:\.bin\/)?(?:tshy|esbuild)(?:\/|(?:\.cmd)?$)/.test(String(entry));
+    const nativeGuestPromise = previousGuestPromise?.prototype?.constructor
+      && previousGuestPromise.prototype.constructor !== previousGuestPromise
+      ? previousGuestPromise.prototype.constructor
+      : previousGuestPromise;
+    const restoreFirefoxAbortBoundary = typeof scope.navigator === 'object'
+      && /Firefox\//.test(String(scope.navigator?.userAgent || ''))
+      ? installFirefoxAbortCallbackBoundary(scope, (active) => {
+          abortDispatchDepth = Math.max(0, abortDispatchDepth + (active ? 1 : -1));
+        })
+      : null;
+    const firefoxGuestPromise = typeof scope.navigator === 'object'
+      && /Firefox\//.test(String(scope.navigator?.userAgent || ''))
+      && typeof previousGuestPromise === 'function'
+      && !firefoxPromiseBoundaryTool
+      ? createFirefoxGuestPromiseConstructor(
+          previousGuestPromise,
+          runtimeQueueMicrotask,
+          (callback) => nativeSetTimeout(callback, 0),
+          () => abortDispatchDepth > 0,
+        )
+      : null;
+    if (firefoxPromiseBoundaryTool && nativeGuestPromise) scope.Promise = nativeGuestPromise;
+    if (firefoxGuestPromise) scope.Promise = firefoxGuestPromise;
+    if (firefoxGuestPromise || firefoxPromiseBoundaryTool) scope.__BNH_FIREFOX_PROMISE_BOUNDARY__ = true;
     const injectedSetTimer = (callback, delay, repeat = false) => {
       const handle = repeat
         ? nativeSetInterval(callback, delay)
@@ -11334,12 +12017,10 @@ export function createRuntime({
     };
     // `execute()` owns the timers installed on the browser-global surface,
     // while the process contract owns timers created through its internal
-    // timer API. Injected and same-realm children can use both surfaces;
-    // treating only one set as authoritative lets a pending child callback
-    // disappear at the lifecycle idle check.
+    // timer API. Process timers expose a maintained referenced count so this
+    // lifecycle check does not rescan every live timer after every host turn.
     function* allRuntimeTimers() {
       yield* timerHandles;
-      yield* processObject?._timers || [];
     }
     const lifecycleWaitTimer = Symbol('bnh.lifecycleWaitTimer');
     const hasReferencedRuntimeTimers = (handles) => {
@@ -11347,7 +12028,7 @@ export function createRuntime({
         if (!handle?.[lifecycleWaitTimer]
           && (typeof handle?.hasRef === 'function' ? handle.hasRef() : handle?._refed !== false)) return true;
       }
-      return false;
+      return processObject?._bnhHasReferencedTimers?.() === true;
     };
     const hasLiveVirtualProcess = () => {
       const registry = scope.__BNH_VIRTUAL_PROCESS_REGISTRY__;
@@ -11449,18 +12130,26 @@ export function createRuntime({
             if (typeof injectedKill === 'function') return injectedKill(pid, signal);
             return true;
           };
-          processObject.send = (value, sendHandle, sendOptions, callback) => { if (typeof injectedProcess.send === 'function') return injectedProcess.send(value, sendHandle, sendOptions, callback); throw new Error('process.send is unavailable'); };
+          if (typeof injectedProcess.send === 'function') {
+            processObject.send = (value, sendHandle, sendOptions, callback) => injectedProcess.send(value, sendHandle, sendOptions, callback);
+          } else {
+            delete processObject.send;
+          }
           if (typeof injectedProcess.__bnhChildOutput === 'function') {
             processObject.__bnhChildOutput = injectedProcess.__bnhChildOutput;
           }
           processObject.connected = Boolean(injectedProcess.connected);
-          processObject.disconnect = () => {
-            if (typeof injectedProcess.disconnect !== 'function') return false;
-            const disconnected = injectedProcess.disconnect();
-            processObject.connected = Boolean(injectedProcess.connected);
-            return disconnected;
-          };
-          processObject.channel = injectedProcess.channel || processObject.channel;
+          if (typeof injectedProcess.disconnect === 'function') {
+            processObject.disconnect = () => {
+              const disconnected = injectedProcess.disconnect();
+              processObject.connected = Boolean(injectedProcess.connected);
+              return disconnected;
+            };
+          } else {
+            delete processObject.disconnect;
+          }
+          if (injectedProcess.channel) processObject.channel = injectedProcess.channel;
+          else delete processObject.channel;
           if (typeof injectedProcess.on === 'function') {
             // Queue browser IPC until the runtime's user-facing process listeners are installed.
             const pendingInjectedMessages = [];
@@ -11504,6 +12193,8 @@ export function createRuntime({
             injectedProcess.on('exit', (...args) => processObject.emit('exit', ...args));
           }
           processObject.exitCode = (injectedProcess.exitCode !== undefined) ? injectedProcess.exitCode : processObject.exitCode;
+          processObject.pid = injectedProcess.pid ?? processObject.pid;
+          processObject.ppid = injectedProcess.ppid ?? processObject.ppid;
           processObject.env = injectedProcess.env || processObject.env;
           processObject.argv = injectedProcess.argv || processObject.argv;
           processObject.cwd = (injectedProcess.cwd) ? (() => injectedProcess.cwd()) : processObject.cwd;
@@ -11518,6 +12209,12 @@ export function createRuntime({
       : fullProcessData;
     reportExecutePhase('process-bound');
     const processObject = processData.processObject;
+    // Browser-native ESM can settle the entry module job before the Promise
+    // continuation that consumes an unawaited dynamic import. Keep one
+    // startup task across a host turn so that continuation can create its
+    // real timers, children, or I/O before the virtual process is considered
+    // idle. Node's event loop naturally provides this turn.
+    let releaseEntrySettle = trackTask('entry-settle');
     materializeTempDirectories(processObject.env);
     // The process-entry boundary carries this marker on the injected worker
     // process. Mirror it onto the runtime-owned process object used by child
@@ -11526,6 +12223,11 @@ export function createRuntime({
     if (injectedProcess?.__bnhEsmNested) processObject.__bnhEsmNested = true;
     markTaskActivity = () => processObject._bnhMarkActive?.();
     processObject._bnhTaskTracker = trackTask;
+    Object.defineProperty(processObject, '_bnhPendingTaskCount', {
+      configurable: true,
+      enumerable: false,
+      value: () => pendingTaskRecords.size,
+    });
     const childActivity = processObject.__bnhChildActivity ||= {
       launched: 0,
       completed: 0,
@@ -11568,8 +12270,9 @@ export function createRuntime({
       value: Boolean(options.workerThread)
         || String(options.entry || '').startsWith('/node/.bnh-worker-eval-'),
     });
-    processObject._bnhShouldRunUnref = () => pending > 0
+    processObject._bnhShouldRunUnref = () => pendingTaskRecords.size > 0
       || hasReferencedTimers(allRuntimeTimers())
+      || processObject._bnhHasReferencedTimers?.() === true
       || hasLiveVirtualProcess()
       || hasReferencedIpc()
       || hasReferencedWorkerParentPort();
@@ -11755,7 +12458,7 @@ export function createRuntime({
         throw error;
       }
       const files = Object.fromEntries(
-        vfs.snapshot({ copy: false }).artifacts.map(({ path, bytes }) => [path, bytes]),
+        vfs.snapshot({ copy: false, includeAllFiles: true }).artifacts.map(({ path, bytes }) => [path, bytes]),
       );
       if (isEval) files[workerPath] = new scope.TextEncoder().encode(String(source));
       const vfsUpdateBridge = createVfsUpdateBridge();
@@ -12755,8 +13458,21 @@ export function createRuntime({
       parentURL: pathToFileURL(importer).href,
       importAttributes: {},
     });
-      const runModuleHook = (kind, value, context, fallback, processOverride) => {
+      const runModuleHook = (kind, value, context, fallback, processOverride, options = {}) => {
         let hooks = processObject.__bnhModuleHooks || [];
+      if (options.synchronousOnly) hooks = hooks.filter((hook) => hook?.synchronous === true);
+      // Node gives an asynchronous ESM loader a usable format before it calls
+      // the hook's defaultLoad.  A browser VFS has no native loader to infer
+      // that format for an extension such as .ts, so the resolver intentionally
+      // leaves it undefined and lets the registered async loader decide.  The
+      // published ts-node loader follows Node's contract by delegating
+      // defaultLoad with format:'module'; preserve that contract here instead
+      // of making the loader re-enter its unknown-extension fallback.
+      const hookContext = kind === 'load'
+        && context?.format === undefined
+        && hooks.some((hook) => hook?.synchronous !== true && typeof hook?.load === 'function')
+        ? { ...context, format: 'module' }
+        : context;
       const invoke = (index, currentValue, currentContext) => {
         if (index < 0) return fallback(currentValue, currentContext);
         const hook = hooks[index]?.[kind];
@@ -12768,13 +13484,21 @@ export function createRuntime({
         return result === undefined ? next() : result;
       };
       const pending = processObject.__bnhModuleRegistrationPromises;
-      if (!processOverride?.__bnhModuleRegistrationInternal && pending?.length) {
+      if (!processOverride?.__bnhModuleRegistrationInternal
+        && !processObject.__bnhModuleRegistrationLoading
+        && pending?.length) {
         return Promise.all([...pending]).then(() => {
           hooks = processObject.__bnhModuleHooks || [];
-          return invoke(hooks.length - 1, value, context);
+          if (options.synchronousOnly) hooks = hooks.filter((hook) => hook?.synchronous === true);
+          const pendingContext = kind === 'load'
+            && context?.format === undefined
+            && hooks.some((hook) => hook?.synchronous !== true && typeof hook?.load === 'function')
+            ? { ...context, format: 'module' }
+            : context;
+          return invoke(hooks.length - 1, value, pendingContext);
         });
       }
-      return invoke(hooks.length - 1, value, context);
+      return invoke(hooks.length - 1, value, hookContext);
     };
     let mainModule = null;
     let sysWarningEmitted = false;
@@ -12788,7 +13512,7 @@ export function createRuntime({
       seen.add(normalizedEntry);
       let source;
       try {
-        source = vfs.read(normalizedEntry);
+        source = vfs.readSource(normalizedEntry);
       } catch {
         return false;
       }
@@ -12891,6 +13615,22 @@ export function createRuntime({
         });
       }
       if (name === 'repl') return builtins.repl;
+      const builtinValue = (builtin) => {
+        const override = processObj._bnhBuiltinOverrides?.[builtin];
+        if (override !== undefined) return override;
+        if (builtin === 'process') return processObj;
+        if ((builtin === 'fs' || builtin === 'fs/promises') && bindFsForProcess) {
+          const processFs = bindFsForProcess(processObj);
+          return builtin === 'fs/promises' ? processFs.promises : processFs;
+        }
+        if ((builtin === 'path' || builtin === 'path/posix' || builtin === 'path/win32') && bindPathForProcess) {
+          const processPath = bindPathForProcess(processObj);
+          return builtin === 'path/posix' ? processPath.posix
+            : builtin === 'path/win32' ? processPath.win32
+              : processPath;
+        }
+        return builtins[builtin] ?? {};
+      };
       if (BUILTIN_NAMES.includes(name)) {
         if (name === 'internal/test/binding') processObj.__bnhEmitInternalTestBindingWarning?.(processObj);
         if (name === 'dns') scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ = Math.max(1, Number(scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ || 0));
@@ -12898,12 +13638,12 @@ export function createRuntime({
         const resolved = runModuleHook('resolve', specifier, context, (currentSpecifier) => ({
           url: `node:${builtinName(currentSpecifier)}`,
           format: 'builtin',
-        }));
+        }), processObj, { synchronousOnly: true });
         const url = resolved?.url || `node:${name}`;
-        const loaded = runModuleHook('load', url, context, () => ({ format: 'builtin', source: null }));
+        const loaded = runModuleHook('load', url, context, () => ({ format: 'builtin', source: null }), processObj, { synchronousOnly: true });
         if (loaded?.format === 'builtin') {
-          return processObj._bnhBuiltinOverrides?.[builtinName(url)]
-            ?? (builtinName(url) === 'process' ? processObj : builtins[builtinName(url)] ?? {});
+          const value = builtinValue(builtinName(url));
+          return value;
         }
         if (loaded?.source !== undefined && loaded?.source !== null) {
           const source = typeof loaded.source === 'string'
@@ -12937,8 +13677,7 @@ export function createRuntime({
           ));
           return overrideModule.exports;
         }
-        return processObj._bnhBuiltinOverrides?.[name]
-          ?? (name === 'process' ? processObj : builtins[name] ?? {});
+        return builtinValue(name);
       }
       const context = moduleHookContext(importer);
       const resolutionCache = processObj === processObject
@@ -12973,7 +13712,7 @@ export function createRuntime({
               url: pathToFileURL(candidate).href,
               format: candidate.endsWith('.json') ? 'json' : isRuntimeEsmModule(candidate, processObj.execArgv) ? 'module' : 'commonjs',
             };
-          });
+          }, processObj, { synchronousOnly: true });
       if (resolvedResult?.url?.startsWith('node:') && resolvedResult.shortCircuit !== true) {
         const error = new Error('"shortCircuit" must be true when a resolve hook does not call nextResolve');
         error.code = 'ERR_INVALID_RETURN_PROPERTY_VALUE';
@@ -13011,13 +13750,13 @@ export function createRuntime({
           if (candidate.endsWith('.node') && vfs.files.has(candidate)) {
             rejectNativeAddon(candidate, processObj);
           }
-          const source = vfs.read(candidate);
+          const source = vfs.readSource(candidate);
           return {
             url,
             format: candidate.endsWith('.json') ? 'json' : isRuntimeEsmModule(candidate, processObj.execArgv) ? 'module' : 'commonjs',
             source: typeof source === 'string' ? source : new TextDecoder().decode(source),
           };
-        });
+        }, processObj, { synchronousOnly: true });
       } catch (error) {
         if (error?.code === 'ENOENT') error.code = 'MODULE_NOT_FOUND';
         throw error;
@@ -13052,7 +13791,7 @@ export function createRuntime({
             }
             return cachedExports;
           }
-      const source = loaded?.source ?? vfs.read(resolved);
+      const source = loaded?.source ?? vfs.readSource(resolved);
       const text = typeof source === 'string' ? source : new TextDecoder().decode(source);
       const compileText = text;
           if (resolved.endsWith('.mjs')
@@ -13117,7 +13856,7 @@ export function createRuntime({
         for (const match of text.matchAll(/\bmodule\.exports\s*=\s*require\(\s*(['\"])(.*?)\1\s*\)/g)) {
           try {
             const child = esmLoader.resolve(match[2], resolved, ['node', 'require']);
-            const childSource = vfs.read(child);
+            const childSource = vfs.readSource(child);
             for (const name of cjsStaticExportNames(typeof childSource === 'string'
               ? childSource : new TextDecoder().decode(childSource))) exportNames.add(name);
             } catch { /* static metadata is best effort */ }
@@ -13126,7 +13865,7 @@ export function createRuntime({
           if (!text.includes(`Object.keys(${match[1]})`)) continue;
           try {
             const child = esmLoader.resolve(match[3], resolved, ['node', 'require']);
-            const childSource = vfs.read(child);
+            const childSource = vfs.readSource(child);
             for (const name of cjsStaticExportNames(typeof childSource === 'string'
               ? childSource : new TextDecoder().decode(childSource))) exportNames.add(name);
           } catch { /* static metadata is best effort */ }
@@ -13138,8 +13877,14 @@ export function createRuntime({
     };
     const esmLoader = createModuleLoader({
       files: {
-        has: (pathname) => vfs.files.has(pathname),
-        get: (pathname) => vfs.read(pathname),
+        // Module resolution must follow virtual symlinks. Package managers
+        // commonly build generated package trees through links (tap's
+        // test-built/node_modules link is one example), while the raw file
+        // index intentionally only contains regular files.
+        has: (pathname) => {
+          try { return vfs.fs.statSync(pathname).isFile(); } catch { return false; }
+        },
+        get: (pathname) => vfs.readSource(pathname),
       },
       // Loader hooks and remote ESM imports use the same live VFS/network
       // seams as CommonJS and fetch. Keeping these callbacks on the owning
@@ -13157,8 +13902,23 @@ export function createRuntime({
         true,
         processOverride || processObject,
       ),
-      resolveBuiltin: (name, processOverride) => processOverride?._bnhBuiltinOverrides?.[name]
-        ?? (name === 'process' ? processOverride : undefined),
+      resolveBuiltin: (name, processOverride) => {
+        const override = processOverride?._bnhBuiltinOverrides?.[name];
+        if (override !== undefined) return override;
+        if (name === 'process') return processOverride;
+        if ((name === 'fs' || name === 'fs/promises') && bindFsForProcess && processOverride) {
+          const processFs = bindFsForProcess(processOverride);
+          return name === 'fs/promises' ? processFs.promises : processFs;
+        }
+        if ((name === 'path' || name === 'path/posix' || name === 'path/win32')
+          && bindPathForProcess && processOverride) {
+          const processPath = bindPathForProcess(processOverride);
+          return name === 'path/posix' ? processPath.posix
+            : name === 'path/win32' ? processPath.win32
+              : processPath;
+        }
+        return undefined;
+      },
       runModuleHook,
       defaultModuleType: processObject.execArgv?.some(
         (argument) => String(argument) === '--experimental-default-type=module',
@@ -13199,7 +13959,7 @@ export function createRuntime({
           );
           await hook?.initialize?.(registration.options?.data);
           const hooks = processObject.__bnhModuleHooks || [];
-          hooks.push({ resolve: hook?.resolve, load: hook?.load });
+          hooks.push({ resolve: hook?.resolve, load: hook?.load, synchronous: false });
           processObject.__bnhModuleHooks = hooks;
           processObject.__bnhModuleHookRevision = (processObject.__bnhModuleHookRevision || 0) + 1;
         } finally {
@@ -13238,7 +13998,7 @@ export function createRuntime({
         if (loader === undefined) continue;
         const hook = await esmLoader.import(String(loader), preloadImporter, {}, undefined, processObject);
         const hooks = processObject.__bnhModuleHooks || [];
-        hooks.push({ resolve: hook?.resolve, load: hook?.load });
+        hooks.push({ resolve: hook?.resolve, load: hook?.load, synchronous: false });
         processObject.__bnhModuleHooks = hooks;
         processObject.__bnhModuleHookRevision = (processObject.__bnhModuleHookRevision || 0) + 1;
       }
@@ -13332,6 +14092,12 @@ export function createRuntime({
     }
     const earlyUnhandledRejections = new WeakSet();
     const dispatchUnhandledRejection = (promise, reason) => {
+      // Node stops observing user work once process.exit() has been requested.
+      // Browser promise callbacks can still surface one already-queued
+      // rejection on the following host turn; do not let that late delivery
+      // overwrite an explicit successful exit with an unhandled-rejection
+      // failure.
+      if (processObject._exitRequested?.() || processObject._bnhIsExited?.()) return;
       if (promise && (earlyUnhandledRejections.has(promise) || isPromiseHandled(promise))) return;
       if (promise) earlyUnhandledRejections.add(promise);
       const dispatch = () => {
@@ -13360,7 +14126,13 @@ export function createRuntime({
       return flag === '--expose-gc' || flag === '--expose_gc';
     });
     if (exposeGc) {
+      const hostGc = typeof scope.gc === 'function' ? scope.gc.bind(scope) : null;
       scope.gc = (options = undefined) => {
+        // Keep the browser's native collector when Chromium was launched
+        // with --js-flags=--expose-gc. The compatibility bookkeeping below
+        // supplements Node's observable GC hooks; it must not replace the
+        // actual collection that memory-sensitive packages request.
+        hostGc?.(options);
         const abortSignalState = scope[Symbol.for('bnh.abort-signal-compatibility')];
         if (abortSignalState?.gc) abortSignalState.gc();
         else if (abortSignalState) abortSignalState.gcGeneration += 1;
@@ -13370,7 +14142,11 @@ export function createRuntime({
         if (options?.execution === 'async') return Promise.resolve();
       };
     } else {
-      delete scope.gc;
+      // Chromium may expose a non-configurable native gc() when launched
+      // with --js-flags=--expose-gc. A Node child without --expose-gc should
+      // not require that ambient property to be removable; leave it in place
+      // when the host has made it non-configurable.
+      try { delete scope.gc; } catch { /* host-provided gc is not configurable */ }
     }
     const injectedSetTimeout = (callback, delay, ...args) => setTimer(function timerCallback() {
       return callback.apply(this, args);
@@ -13457,7 +14233,63 @@ export function createRuntime({
       configurable: true,
       enumerable: true,
       writable: true,
-      value: createWasmContract(scope),
+      value: createWasmContract(scope, {
+        mutable: true,
+        // Go's wasm_exec loader starts its work from a Promise continuation.
+        // That continuation runs after a same-realm child has restored the
+        // parent's globals, so preserve the child process and timer surfaces
+        // whenever a guest WebAssembly promise settles.
+        runInProcessContext: (owner, callback) => {
+          const previous = {
+            process: scope.process,
+            activeProcess: scope.__bnhActiveProcess,
+            console: scope.console,
+            setTimeout: scope.setTimeout,
+            clearTimeout: scope.clearTimeout,
+            setInterval: scope.setInterval,
+            clearInterval: scope.clearInterval,
+            setImmediate: scope.setImmediate,
+            clearImmediate: scope.clearImmediate,
+            queueMicrotask: scope.queueMicrotask,
+          };
+          scope.process = owner;
+          scope.__bnhActiveProcess = owner;
+          if (owner?._bnhConsole) scope.console = owner._bnhConsole;
+          if (owner?._bnhTimerContext) Object.assign(scope, owner._bnhTimerContext);
+          const restore = () => {
+            scope.process = previous.process;
+            if (previous.activeProcess === undefined) delete scope.__bnhActiveProcess;
+            else scope.__bnhActiveProcess = previous.activeProcess;
+            scope.console = previous.console;
+            scope.setTimeout = previous.setTimeout;
+            scope.clearTimeout = previous.clearTimeout;
+            scope.setInterval = previous.setInterval;
+            scope.clearInterval = previous.clearInterval;
+            scope.setImmediate = previous.setImmediate;
+            scope.clearImmediate = previous.clearImmediate;
+            scope.queueMicrotask = previous.queueMicrotask;
+          };
+          let result;
+          try {
+            result = callback();
+          } catch (error) {
+            restore();
+            throw error;
+          }
+          // Some Node-targeted WASM launchers start their real event loop in
+          // the callback's returned promise (Go's wasm_exec is one example).
+          // Keep the child globals installed until that lifecycle settles so
+          // later WASM callbacks observe the same process, cwd, and timers.
+          if (result && typeof result.then === 'function') {
+            return Promise.resolve(result).then(
+              (value) => { restore(); return value; },
+              (error) => { restore(); throw error; },
+            );
+          }
+          restore();
+          return result;
+        },
+      }),
     });
     reportExecutePhase('before-corepack');
     vfs.mkdir('/node/deps/corepack', { recursive: true });
@@ -13477,23 +14309,44 @@ export function createRuntime({
       reportExecutePhase('entry-source-notified');
       await Promise.resolve();
       reportExecutePhase('entry-microtask');
-      reportExecutePhase(`lifecycle:p${pending}:t${hasReferencedRuntimeTimers(allRuntimeTimers()) ? 1 : 0}:v${hasLiveVirtualProcess() ? 1 : 0}:i${hasReferencedIpc() ? 1 : 0}:w${hasReferencedWorkerParentPort() ? 1 : 0}`);
+      await new Promise((resolve) => nativeSetTimeout(resolve, 0));
+      releaseEntrySettle?.();
+      releaseEntrySettle = null;
+      reportExecutePhase(`lifecycle:p${pendingTaskRecords.size}:t${hasReferencedRuntimeTimers(allRuntimeTimers()) ? 1 : 0}:v${hasLiveVirtualProcess() ? 1 : 0}:i${hasReferencedIpc() ? 1 : 0}:w${hasReferencedWorkerParentPort() ? 1 : 0}`);
+      let idleLifecycleTurns = 0;
       while (!options.isCancelled?.() && !options.signal?.aborted && !processObject._exitRequested?.()) {
         await new Promise((resolve) => {
-          const handle = nativeSetTimeout(resolve, 0);
+          let handle;
+          const wake = () => {
+            if (wakeLifecycleWait !== wake) return;
+            wakeLifecycleWait = null;
+            if (handle && (typeof handle === 'object' || typeof handle === 'function')) nativeClearTimeout(handle);
+            resolve();
+          };
+          wakeLifecycleWait = wake;
+          handle = nativeSetTimeout(wake, 0);
           if (handle && (typeof handle === 'object' || typeof handle === 'function')) {
             handle[lifecycleWaitTimer] = true;
           }
         });
         if (options.isCancelled?.() || options.signal?.aborted || processObject._exitRequested?.()) break;
-        reportExecutePhase(`lifecycle:p${pending}:m${pendingMicrotasks}:t${hasReferencedRuntimeTimers(allRuntimeTimers()) ? 1 : 0}:v${hasLiveVirtualProcess() ? 1 : 0}:i${hasReferencedIpc() ? 1 : 0}:w${hasReferencedWorkerParentPort() ? 1 : 0}`);
-        if (pending === 0 && pendingMicrotasks === 0
+        reportExecutePhase(`lifecycle:p${pendingTaskRecords.size}:m${pendingMicrotasks}:t${hasReferencedRuntimeTimers(allRuntimeTimers()) ? 1 : 0}:v${hasLiveVirtualProcess() ? 1 : 0}:i${hasReferencedIpc() ? 1 : 0}:w${hasReferencedWorkerParentPort() ? 1 : 0}`);
+        const lifecycleIdle = pendingTaskRecords.size === 0 && pendingMicrotasks === 0
           && !hasReferencedRuntimeTimers(allRuntimeTimers()) && !hasLiveVirtualProcess()
-          && !hasReferencedIpc() && !hasReferencedWorkerParentPort()) {
-          // Check only after a host turn, including the turn following a
-          // beforeExit listener. Promise continuations can create new handles.
-          if (!processObject._emitBeforeExit?.()) break;
+          && !hasReferencedIpc() && !hasReferencedWorkerParentPort();
+        if (!lifecycleIdle) {
+          idleLifecycleTurns = 0;
+          continue;
         }
+        // Native Node drains promise/module-job continuations before it
+        // decides that the event loop is empty. Browser ESM evaluation can
+        // resume an unawaited import chain on the following host turn, so one
+        // empty observation is not yet a quiescent process. Requiring two
+        // consecutive empty turns preserves that ordering without inventing a
+        // package-specific keepalive.
+        idleLifecycleTurns += 1;
+        if (idleLifecycleTurns < 8) continue;
+        if (!processObject._emitBeforeExit?.()) break;
       }
       if (options.isCancelled?.() || options.signal?.aborted) return null;
       // A worker-backed child reports its logical runtime state through the
@@ -13508,6 +14361,11 @@ export function createRuntime({
       }
       return processObject.getCode();
     } catch (error) {
+      const requestedExit = injectedProcess?.__bnhExitRequest || processObject.__bnhExitRequest;
+      if (requestedExit) {
+        processObject.exitCode = Number(requestedExit.code) || 0;
+        return processObject.exitCode;
+      }
       stderr(`${error?.stack || error}\n`);
       processObject.exitCode = 1;
       // Preserve the uncaught boundary for process-entry. Browser Worker
@@ -13521,6 +14379,7 @@ export function createRuntime({
         || error?.code === 'ERR_TRACE_EVENTS_UNAVAILABLE') throw error;
       return 1;
     } finally {
+      releaseEntrySettle?.();
       for (const handle of timerHandles) clearTimer?.(handle);
       if (vfs.getTaskTracker?.() === runtimeVfsTaskTracker) vfs.setTaskTracker?.(previousVfsTaskTracker);
       if (typeof scope.removeEventListener === 'function') scope.removeEventListener('unhandledrejection', onUnhandledRejection);
@@ -13528,6 +14387,11 @@ export function createRuntime({
       esmLoader.dispose();
       processObject._markExited?.();
       builtins.async_hooks.cleanup();
+      if (firefoxGuestPromise && scope.Promise === firefoxGuestPromise) scope.Promise = previousGuestPromise;
+      if (firefoxPromiseBoundaryTool && scope.Promise === nativeGuestPromise) scope.Promise = previousGuestPromise;
+      if (previousFirefoxPromiseBoundary === undefined) delete scope.__BNH_FIREFOX_PROMISE_BOUNDARY__;
+      else scope.__BNH_FIREFOX_PROMISE_BOUNDARY__ = previousFirefoxPromiseBoundary;
+      restoreFirefoxAbortBoundary?.();
       Object.assign(scope, previous);
       delete scope.__bnhModuleLoader;
     }
@@ -13694,7 +14558,7 @@ export function createRuntime({
         }
       }
       const workerSource = new URL('./runtime/process-entry.js', import.meta.url).href;
-      const snapshot = vfs.snapshot({ copy: false });
+      const snapshot = vfs.snapshot({ copy: false, includeAllFiles: true });
       const files = Object.fromEntries(
         snapshot.artifacts.map(({ path, bytes }) => [path, {
           data: bytes,
@@ -13730,6 +14594,8 @@ export function createRuntime({
         runId: runSpec.runId,
         nodeVersion: resolvedProfile.id,
         childId: `entry-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        pid: options.pid ?? 1,
+        ppid: options.ppid ?? 0,
         entry,
         argv: Array.isArray(options.processArgv) ? options.processArgv : argv,
         execArgv: childExecArgv,

@@ -347,35 +347,67 @@ export function createDiagnosticsModule() {
         tracing.start.publish(context);
         try {
           const result = fn();
-          tracing.end.publish({ ...context, result });
+          // Node keeps one mutable context object for the complete trace. The
+          // start subscriber observes it before `result` exists, while the
+          // same object is updated before end subscribers run.
+          context.result = result;
+          tracing.end.publish(context);
           return result;
         } catch (error) {
-          tracing.error.publish({ ...context, error });
+          context.error = error;
+          tracing.error.publish(context);
+          tracing.end.publish(context);
           throw error;
         }
       };
       tracing.tracePromise = (fn, context = {}) => {
-        tracing.asyncStart.publish(context);
+        tracing.start.publish(context);
         let result;
         try {
           result = fn();
         } catch (error) {
-          tracing.error.publish({ ...context, error });
+          context.error = error;
+          tracing.error.publish(context);
+          tracing.end.publish(context);
           return Promise.reject(error);
         }
-        return Promise.resolve(result).then(
-          (value) => { tracing.asyncEnd.publish({ ...context, result: value }); return value; },
-          (error) => { tracing.error.publish({ ...context, error }); throw error; },
+        const then = result !== null && (typeof result === 'object' || typeof result === 'function')
+          && typeof result.then === 'function'
+          ? result.then.bind(result)
+          : null;
+        if (!then) {
+          context.result = result;
+          tracing.end.publish(context);
+          return result;
+        }
+        tracing.end.publish(context);
+        return then(
+          (value) => {
+            context.result = value;
+            tracing.asyncStart.publish(context);
+            tracing.asyncEnd.publish(context);
+            return value;
+          },
+          (error) => {
+            context.error = error;
+            tracing.error.publish(context);
+            tracing.asyncStart.publish(context);
+            tracing.asyncEnd.publish(context);
+            throw error;
+          },
         );
       };
       tracing.traceCallback = (fn, context = {}, thisArg, ...args) => {
         tracing.start.publish(context);
         try {
           const result = fn.apply(thisArg, args);
-          tracing.end.publish({ ...context, result });
+          context.result = result;
+          tracing.end.publish(context);
           return result;
         } catch (error) {
-          tracing.error.publish({ ...context, error });
+          context.error = error;
+          tracing.error.publish(context);
+          tracing.end.publish(context);
           throw error;
         }
       };

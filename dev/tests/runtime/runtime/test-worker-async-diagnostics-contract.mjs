@@ -86,6 +86,13 @@ test('diagnostics channels support subscriptions, tracing, and cleanup', async (
   const phases = [];
   tracing.subscribe({ start: () => phases.push('start'), end: () => phases.push('end'), asyncStart: () => phases.push('asyncStart'), asyncEnd: () => phases.push('asyncEnd') });
   assert.equal(tracing.traceSync(() => 3), 3);
+  assert.deepEqual(phases, ['start', 'end']);
+  phases.length = 0;
+  const syncTrace = diagnostics.tracingChannel('contract.sync');
+  const syncPhases = [];
+  syncTrace.subscribe({ start: () => syncPhases.push('start'), end: () => syncPhases.push('end'), asyncStart: () => syncPhases.push('asyncStart'), asyncEnd: () => syncPhases.push('asyncEnd') });
+  assert.equal(syncTrace.tracePromise(() => 3), 3);
+  assert.deepEqual(syncPhases, ['start', 'end']);
   assert.equal(await tracing.tracePromise(async () => 4), 4);
   assert.deepEqual(phases, ['start', 'end', 'asyncStart', 'asyncEnd']);
   diagnostics.clear();

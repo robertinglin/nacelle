@@ -1,5 +1,7 @@
+import { VFS_MUTATION_ORIGIN } from './vfs.js';
+
 export function connectVfsUpdates(vfs, port, enqueue = queueMicrotask) {
-  let applyingRemote = false;
+  const origin = {};
   let closed = false;
   let nextBarrier = 0;
   const barriers = new Map();
@@ -45,7 +47,7 @@ export function connectVfsUpdates(vfs, port, enqueue = queueMicrotask) {
     enqueue(flush);
   };
   const unsubscribe = vfs.subscribeMutations((update) => {
-    if (applyingRemote || closed) return;
+    if (closed || update?.[VFS_MUTATION_ORIGIN] === origin) return;
     if (update.action === 'sync') {
       fullSyncPending = true;
       pendingBatches.length = 0;
@@ -78,10 +80,11 @@ export function connectVfsUpdates(vfs, port, enqueue = queueMicrotask) {
       return;
     }
     if (update?.action !== 'delta' && update?.action !== 'sync') return;
-    // Suppress echoes on this connection while letting other connections
-    // relay the mutation to sibling workers.
-    applyingRemote = true;
-    try { vfs.applyUpdate(update); } finally { applyingRemote = false; }
+    // Tag mutations applied from this connection so its own listener skips
+    // them while other connections on the same VFS relay them to siblings.
+    // This preserves package trees installed two or more worker boundaries
+    // below the process that will later snapshot them.
+    vfs.applyUpdate(update, { origin });
   };
   port.addEventListener('message', onMessage);
   port.start();

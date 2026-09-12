@@ -124,6 +124,7 @@ const handledPromises = new WeakSet();
 // creates its next resolved promise.
 let promiseContextSwitchPending = false;
 const pendingDestroyIds = new Set();
+const pendingNonPromiseDestroyIds = new Set();
 let destroyDrainScheduled = false;
 let destroyDrainGeneration = 0;
 const resourceFinalizer = typeof FinalizationRegistry === 'function'
@@ -172,9 +173,16 @@ export function registerAsyncCompletion(promise, callback) {
     // native Promise receivers. Use their underlying native target for the
     // internal settlement observer so the hook does not expose a brand error
     // to user code.
-    originalThen.call(promiseTarget(promise),
-      () => completeAsyncCompletion(promise),
-      () => completeAsyncCompletion(promise));
+    const target = promiseTarget(promise);
+    const onSettled = () => completeAsyncCompletion(promise);
+    if (target === promise) {
+      // A promise may have crossed a separately evaluated runtime module and
+      // therefore not be present in this module's WeakMap. Its public then
+      // method is still the safe boundary for an observable proxy.
+      target.then(onSettled, onSettled);
+    } else {
+      originalThen.call(target, onSettled, onSettled);
+    }
   }
   return promise;
 }
@@ -237,8 +245,7 @@ export function runAsyncGenerator(generatorFunction, thisArg, args = []) {
         (error) => {
           advance('throw', error);
           completeAsyncCompletion(yielded);
-        },
-      );
+        });
     };
 
     advance('next', undefined);
@@ -249,8 +256,12 @@ export function runAsyncGenerator(generatorFunction, thisArg, args = []) {
 }
 
 // Node gives queued destroy hooks a chance to run between long promise chains
-// while still keeping them behind the current nextTick/microtask turn.
-const DESTROY_DRAIN_MICROTASKS = 8192;
+// while still keeping them behind the current nextTick/microtask turn. Promise
+// churn needs a larger window to avoid adding a microtask per continuation;
+// non-Promise resources need a bounded window so a large timer batch cannot
+// starve its next real timer indefinitely in a browser worker.
+const PROMISE_DESTROY_DRAIN_MICROTASKS = 8192;
+const RESOURCE_DESTROY_DRAIN_MICROTASKS = 64;
 
 resources.set(executionId, {
   type: 'ROOT',
@@ -353,19 +364,30 @@ function observablePromise(promise) {
     value: 'Promise',
   });
   const observable = new Proxy(target, {
-    get(currentTarget, property, receiver) {
-      if (property === 'then') {
-        const context = contexts.get(executionId);
-        const pending = promiseAwaitContexts.get(observable) || [];
-        pending.push({
+      get(currentTarget, property, receiver) {
+        if (property === 'then') {
+          const context = contexts.get(executionId);
+          const pending = promiseAwaitContexts.get(observable) || [];
+          pending.push({
           context: context ? new Map(context) : undefined,
           generation: asyncContextGeneration,
-        });
-        promiseAwaitContexts.set(observable, pending);
-        promiseAwaitContexts.set(currentTarget, pending);
-      }
-      return Reflect.get(currentTarget, property, receiver);
-    },
+          });
+          promiseAwaitContexts.set(observable, pending);
+          promiseAwaitContexts.set(currentTarget, pending);
+          // The proxy target is intentionally not a native Promise. Return a
+          // forwarding method rather than the native prototype method, whose
+          // brand check would reject the proxy before it reaches the tracked
+          // underlying promise.
+          return (onFulfilled, onRejected) => {
+            const patchedThen = globalThis.Promise?.prototype?.then;
+            if (typeof patchedThen === 'function' && patchedThen !== originalThen) {
+              return patchedThen.call(observable, onFulfilled, onRejected);
+            }
+            return originalThen.call(promise, onFulfilled, onRejected);
+          };
+        }
+        return Reflect.get(currentTarget, property, receiver);
+      },
   });
   promiseTargets.set(observable, promise);
   return observable;
@@ -375,16 +397,31 @@ function withResourceProcess(asyncId, callback) {
   const resourceProcess = resources.get(asyncId)?.process;
   if (resourceProcess === undefined) return callback();
   const previousActiveProcess = globalThis.__bnhActiveProcess;
+  const previousProcess = globalThis.process;
+  let installedProcess = false;
   // Async resources are created while this callback is active. Keep the
   // logical owner paired with the process context; otherwise a same-realm
   // child callback can create a Promise recorded for the parent and lose the
-  // child's AsyncLocalStorage context on its next continuation. The browser
-  // global `process` may be an immutable bundler alias, so the private marker
-  // is the only binding changed at an async boundary.
+  // child's AsyncLocalStorage context on its next continuation. Keep the
+  // public global process paired as well when the runtime owns a mutable
+  // browser global; Node-targeted WASM shims read `globalThis.process`
+  // directly instead of consulting the private marker.
   globalThis.__bnhActiveProcess = resourceProcess;
+  if (resourceProcess !== previousProcess) {
+    try {
+      globalThis.process = resourceProcess;
+      installedProcess = globalThis.process === resourceProcess;
+    } catch {
+      // Some browser hosts expose an immutable process alias. The private
+      // marker above remains sufficient for runtime-owned surfaces there.
+    }
+  }
   try {
     return callback();
   } finally {
+    if (installedProcess) {
+      try { globalThis.process = previousProcess; } catch { /* immutable host alias */ }
+    }
     if (previousActiveProcess === undefined) globalThis.__bnhActiveProcess = undefined;
     else globalThis.__bnhActiveProcess = previousActiveProcess;
   }
@@ -393,6 +430,7 @@ function withResourceProcess(asyncId, callback) {
 function drainDestroyedResources() {
   for (const asyncId of pendingDestroyIds) {
     pendingDestroyIds.delete(asyncId);
+    pendingNonPromiseDestroyIds.delete(asyncId);
     destroyResource(asyncId);
   }
 }
@@ -425,6 +463,7 @@ function resourceValue(record) {
 
 function queueDestroy(asyncId) {
   pendingDestroyIds.add(asyncId);
+  if (resources.get(asyncId)?.type !== 'PROMISE') pendingNonPromiseDestroyIds.add(asyncId);
   if (destroyDrainScheduled) return;
   destroyDrainScheduled = true;
   const generation = destroyDrainGeneration;
@@ -435,7 +474,10 @@ function queueDestroy(asyncId) {
       destroyDrainScheduled = false;
       return;
     }
-    if (microtasks++ < DESTROY_DRAIN_MICROTASKS) {
+    const drainAfter = enabledHooksExist() || pendingNonPromiseDestroyIds.size > 0
+      ? RESOURCE_DESTROY_DRAIN_MICROTASKS
+      : PROMISE_DESTROY_DRAIN_MICROTASKS;
+    if (microtasks++ < drainAfter) {
       hostQueueMicrotask?.(advance);
       return;
     }
@@ -709,11 +751,7 @@ function installPromiseHooks() {
         : (() => { throw args[0]; })();
     };
     let result;
-    try {
-      result = originalThen.call(sourcePromise, fulfill, reject);
-    } catch (error) {
-      throw error;
-    }
+    result = originalThen.call(sourcePromise, fulfill, reject);
     // The async resource belongs to the promise returned by then(), not the
     // source promise. A source promise may have multiple continuations.
     asyncId = newAsyncId('PROMISE', triggerAsyncId, result, true);
@@ -733,7 +771,14 @@ function installPromiseHooks() {
       promiseContexts.set(result, context);
     }
     emit('promiseResolve', asyncId);
-    return inheritedContext ? observablePromise(result) : result;
+    // Firefox's compatibility Promise is already a native-branded
+    // thenable. Returning the additional plain-object proxy here makes a
+    // later native Promise operation reject its receiver as an incompatible
+    // Proxy; the guest constructor's own `.then` boundary still restores the
+    // async context for this continuation.
+    return inheritedContext && globalThis.__BNH_FIREFOX_PROMISE_BOUNDARY__ !== true
+      ? observablePromise(result)
+      : result;
   };
   Promise.resolve = function patchedResolve(value) {
     if (promiseTargets.has(value) && this === globalThis.Promise) return value;
@@ -1002,6 +1047,14 @@ export class AsyncResource {
         destroyResource(this._asyncId);
         return this;
       }
+      // No destroy hook can observe an unobserved resource. Releasing it
+      // synchronously avoids paying the long promise-chain grace period for
+      // high-volume timers (for example a cache with thousands of expirations)
+      // while preserving deferred ordering for resources with hooks attached.
+      if (!resource.initObserved) {
+        destroyResource(this._asyncId);
+        return this;
+      }
       queueDestroy(this._asyncId);
       const relatedAsyncId = relatedAsyncIds.get(this._asyncId);
       const relatedResource = resources.get(relatedAsyncId);
@@ -1053,6 +1106,7 @@ export function createAsyncHooksModule(scope = globalThis) {
       destroyDrainScheduled = false;
       promiseContextSwitchPending = false;
       pendingDestroyIds.clear();
+      pendingNonPromiseDestroyIds.clear();
       internalAsyncScopes.length = 0;
       hookDispatchDepth = 0;
       activeHookSnapshot = null;

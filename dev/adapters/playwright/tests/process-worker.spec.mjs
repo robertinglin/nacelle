@@ -232,6 +232,63 @@ test.describe('browser-native worker process boundary', () => {
     expect(result).toEqual({ sharedFile: true, sharedArtifact: true, mode: 0o755, bytes: [1, 2, 3] });
   });
 
+  test('reuses an existing shared VFS backing store for nested workers', async ({ page }) => {
+    await openRuntime(page);
+    const result = await page.evaluate(async () => {
+      const { prepareWorkerVfs } = await import('/runtime/process.js');
+      const backing = new SharedArrayBuffer(8);
+      const source = new Uint8Array(backing, 2, 3);
+      source.set([1, 2, 3]);
+      const prepared = prepareWorkerVfs({
+        files: {
+          '/node/example.js': source,
+          '/node/descriptor.js': { data: source, mode: 0o755 },
+        },
+      }, {
+        crossOriginIsolated: true,
+        SharedArrayBuffer,
+      });
+      return {
+        rawUsesOriginalBacking: prepared.files['/node/example.js'].buffer === backing,
+        descriptorUsesOriginalBacking: prepared.files['/node/descriptor.js'].data.buffer === backing,
+        rawOffset: prepared.files['/node/example.js'].byteOffset,
+        descriptorOffset: prepared.files['/node/descriptor.js'].data.byteOffset,
+        bytes: [...prepared.files['/node/example.js']],
+      };
+    });
+    expect(result).toEqual({
+      rawUsesOriginalBacking: true,
+      descriptorUsesOriginalBacking: true,
+      rawOffset: 2,
+      descriptorOffset: 2,
+      bytes: [1, 2, 3],
+    });
+  });
+
+  test('does not repack large multi-backing shared VFS data for nested workers', async ({ page }) => {
+    await openRuntime(page);
+    const result = await page.evaluate(async () => {
+      const { prepareWorkerVfs } = await import('/runtime/process.js');
+      const files = {};
+      const backings = [];
+      for (let index = 0; index < 17; index += 1) {
+        const backing = new SharedArrayBuffer(1024 * 1024);
+        backings.push(backing);
+        files[`/node/file-${index}.js`] = new Uint8Array(backing);
+      }
+      const prepared = prepareWorkerVfs({ files }, {
+        crossOriginIsolated: true,
+        SharedArrayBuffer,
+      }, { nested: true });
+      const symbols = Object.getOwnPropertySymbols(prepared).map(String);
+      return {
+        retainedBackings: Object.values(prepared.files).every((bytes, index) => bytes.buffer === backings[index]),
+        hasChunkPayload: symbols.some((value) => value.includes('workerVfsChunks')),
+      };
+    });
+    expect(result).toEqual({ retainedBackings: true, hasChunkPayload: false });
+  });
+
   test('starts a worker with a large packed VFS payload', async ({ page }) => {
     await openRuntime(page);
     const result = await page.evaluate(async () => {
@@ -876,4 +933,100 @@ test.describe('browser-native worker process boundary', () => {
     expect(result.stdout).toContain('readable-abort-seen');
     expect(result.stderr).toBe('');
   });
+
+  test('drains a high-volume short-timer workload', async ({ page }) => {
+    await openRuntime(page);
+    const result = await page.evaluate(async () => {
+      const { createRuntime } = await import('/runtime.js');
+      const encode = (source) => new TextEncoder().encode(source);
+      const capabilities = {
+        vfs: { mounts: [{ path: '/node', mode: 'read-write' }] },
+        workers: { entryModules: ['*'], maxChildren: 2 },
+        ipc: { enabled: true },
+        signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
+        output: { maxBytes: 1024 * 1024, stdoutBytes: 1024 * 1024, stderrBytes: 1024 * 1024 },
+        envVars: { allowed: [] },
+      };
+      const runtime = createRuntime({ globalObject: globalThis });
+      const parentSource = `
+        const { spawn } = require('node:child_process');
+        const child = spawn(process.execPath, ['/node/timer-workload.mjs'], { stdio: ['ignore', 'pipe', 'pipe'] });
+        child.stdout.pipe(process.stdout);
+        child.stderr.pipe(process.stderr);
+        child.once('error', () => process.exit(1));
+        child.once('close', (code, signal) => process.exit(signal ? 1 : (code || 0)));
+      `;
+      const childSource = `
+        require('node:async_hooks').createHook({ init() {}, destroy() {} }).enable();
+        const cache = new Map();
+        const starts = new Map();
+        const ttl = 1_000;
+        let cachedNow = 0;
+        const getNow = () => {
+          const now = performance.now();
+          cachedNow = now;
+          const reset = setTimeout(() => { cachedNow = 0; }, 1);
+          reset.unref?.();
+          return now;
+        };
+        const remaining = (index) => ttl - ((cachedNow || getNow()) - starts.get(index));
+        const schedulePurge = (index, delay = ttl) => {
+          const timer = setTimeout(() => {
+            if ((cachedNow || getNow()) - starts.get(index) > ttl) {
+              cache.delete(index);
+              starts.delete(index);
+            } else {
+              schedulePurge(index, remaining(index));
+            }
+          }, delay + 1);
+          timer.unref?.();
+        };
+        const count = 10_000;
+        const deadline = setTimeout(() => {
+          console.error('timer workload timed out');
+          process.exit(1);
+        }, 8_000);
+        const startedAt = performance.now();
+        const tasks = [];
+        for (let index = 0; index < count; index += 1) {
+          tasks.push(new Promise((resolve) => setTimeout(() => {
+            starts.set(index, performance.now());
+            cache.set(index, {});
+            schedulePurge(index);
+            resolve();
+          }, Math.floor(Math.random() * 500))));
+        }
+        await Promise.all(tasks);
+        const allTasksElapsed = performance.now() - startedAt;
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+        if (cache.size !== 0) {
+          console.error('timer workload left ' + cache.size + ' entries after tasks in ' + allTasksElapsed.toFixed(1) + 'ms');
+          process.exit(1);
+        }
+        clearTimeout(deadline);
+        process.stdout.write('timer workload completed\\n');
+        process.exit(0);
+      `;
+      const stdout = [];
+      const stderr = [];
+      const decode = (value) => typeof value === 'string' ? value : new TextDecoder().decode(value);
+      await runtime.reset({ runId: 'high-volume-timer-regression', capabilities, isolation: 'worker' });
+      await runtime.mount({
+        '/node/timer-parent.js': encode(parentSource),
+        '/node/timer-workload.mjs': encode(childSource),
+      });
+      const started = performance.now();
+      const code = await runtime.executeEntry('/node/timer-parent.js', {
+        cwd: '/node',
+        env: {},
+        processArgv: ['node', '/node/timer-parent.js'],
+      }, (value) => stdout.push(decode(value)), (value) => stderr.push(decode(value)));
+      return { code, elapsed: performance.now() - started, stdout: stdout.join(''), stderr: stderr.join('') };
+    });
+
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toBe('timer workload completed\n');
+    expect(result.stderr).toBe('');
+  });
+
 });

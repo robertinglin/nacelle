@@ -1187,6 +1187,7 @@ export function createWorkerBrokerFactory(brokerPort, scope = globalThis) {
     const events = new BrowserEventEmitter();
     let closed = false;
     const endpoint = channel.port1;
+    const rawEndpoint = channel.raw.port1;
     endpoint.on('message', (message) => {
       if (message?.type === 'message') events.emit('message', message.value);
       else if (message?.type === 'messageerror') events.emit('messageerror', message.error || message);
@@ -1207,7 +1208,10 @@ export function createWorkerBrokerFactory(brokerPort, scope = globalThis) {
       postMessage(value, transferList) {
         if (closed) throw new Error('worker is not running');
         const transfers = normalizePortTransferList(transferList) || [];
-        endpoint.postMessage({ type: 'postMessage', value, transfers }, transfers);
+        rawEndpoint.postMessage(
+          { type: 'postMessage', value, transfers },
+          transfers.length ? transfers : undefined,
+        );
       },
       terminate() {
         if (closed) return Promise.resolve(1);

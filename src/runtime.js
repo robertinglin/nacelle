@@ -1,5 +1,11 @@
 import { installWebCryptoLifecycle } from './runtime/webcrypto-lifecycle.js';
-import { connectVfsUpdates } from './runtime/vfs-worker-bridge.js';
+import {
+  connectVfsUpdates,
+  createSharedVfsUpdateBuffer,
+  decodeSharedVfsRecord,
+  readSharedVfsRecords,
+  sharedVfsBufferOverflowed,
+} from './runtime/vfs-worker-bridge.js';
 import { rewriteDynamicImports } from './runtime/dynamic-imports.js';
 import { createAssert, inspect as nodeInspect } from './runtime/assert.js';
 import {
@@ -3428,6 +3434,8 @@ const DEFAULT_RUNTIME_CAPABILITIES = Object.freeze({
   envVars: { allowed: [] },
 });
 
+const RUNTIME_PROCESS_MARKER = Symbol.for('bnh.runtime-process');
+
 function browserProcessVersions(scope, profile) {
   // Next.js uses this WebContainer marker to select its own official SWC
   // WebAssembly fallback before attempting the platform-specific .node file.
@@ -3458,6 +3466,10 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
   const pendingEsmImports = new Set();
   let referencedTimerCount = 0;
   const nativeTimers = scope.__BNH_NATIVE_TIMERS__;
+  const setTimerProcess = (value) => {
+    try { return Reflect.set(scope, 'process', value, scope); }
+    catch { return false; }
+  };
   const nativeSetTimeout = nativeTimers?.setTimeout || scope.setTimeout.bind(scope);
   const nativeClearTimeout = nativeTimers?.clearTimeout || scope.clearTimeout.bind(scope);
   const nativeSetInterval = nativeTimers?.setInterval || scope.setInterval.bind(scope);
@@ -3656,7 +3668,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       };
       const previousConsole = scope.console;
       const timerContext = processObject._bnhTimerContext;
-      scope.process = processObject;
+      setTimerProcess(processObject);
       if (timerContext) Object.assign(scope, timerContext);
       if (processObject._bnhConsole) scope.console = processObject._bnhConsole;
       try {
@@ -3668,7 +3680,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       } finally {
         Object.assign(scope, previousTimers);
         scope.console = previousConsole;
-        scope.process = previousProcess;
+        setTimerProcess(previousProcess);
         if (!repeat) {
           resource.emitDestroy();
         }
@@ -3726,6 +3738,11 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     resolved.resource?.emitDestroy?.();
   };
   const processObject = new EventEmitter();
+  Object.defineProperty(processObject, RUNTIME_PROCESS_MARKER, {
+    configurable: false,
+    enumerable: false,
+    value: true,
+  });
   const processEvents = Object.create(null);
   const syncProcessEvents = () => {
     for (const key of Reflect.ownKeys(processEvents)) delete processEvents[key];
@@ -4912,6 +4929,10 @@ export function createRuntime({
   workerBrokerPort,
   } = {}) {
   const scope = globalObject;
+  const setScopeProcess = (value) => {
+    try { return Reflect.set(scope, 'process', value, scope); }
+    catch { return false; }
+  };
   // Internal process ownership is a runtime detail. Keep its temporary
   // marker off the enumerable global surface so compatibility checks such as
   // tap's global-leak assertion observe the same globals as Node.
@@ -5257,6 +5278,26 @@ export function createRuntime({
           get(target, name, receiver) {
             if (name === 'promises' && target.promises) return bindFs(target.promises);
             const value = Reflect.get(target, name, receiver);
+            if (name === 'writeSync' && typeof value === 'function') {
+              return (fd, data, offset = 0, length) => {
+                if (fd !== 1 && fd !== 2) return Reflect.apply(value, target, [fd, data, offset, length]);
+                let bytes;
+                if (typeof data === 'string') {
+                  const encoding = typeof offset === 'string' ? offset : 'utf8';
+                  bytes = (resolveEncodingOps(encoding) || { encode: (text) => new TextEncoder().encode(text) }).encode(data);
+                  offset = 0;
+                } else if (data instanceof Uint8Array) bytes = data;
+                else if (data instanceof ArrayBuffer) bytes = new Uint8Array(data);
+                else if (ArrayBuffer.isView(data)) bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+                else return Reflect.apply(value, target, [fd, data, offset, length]);
+                const start = Number.isInteger(offset) && offset >= 0 ? offset : 0;
+                const count = Math.min(length === undefined ? bytes.byteLength - start : length, bytes.byteLength - start);
+                if (count < 0) return 0;
+                const stream = fd === 1 ? ownerProcess?.stdout : ownerProcess?.stderr;
+                stream?.write?.(bytes.subarray(start, start + count));
+                return count;
+              };
+            }
             const indices = boundFsPathIndices.get(name);
             if (typeof value !== 'function' || !indices) return value;
             const bound = (...args) => {
@@ -6699,7 +6740,7 @@ export function createRuntime({
           setImmediate: scope.setImmediate,
           clearImmediate: scope.clearImmediate,
         };
-        scope.process = owner;
+        setScopeProcess(owner);
         if (owner?._bnhTimerContext) Object.assign(scope, owner._bnhTimerContext);
         try {
           return callback();
@@ -6707,7 +6748,7 @@ export function createRuntime({
           Object.assign(scope, previousTimers);
           if (previousActiveProcess === undefined) scope.__bnhActiveProcess = undefined;
           else scope.__bnhActiveProcess = previousActiveProcess;
-          scope.process = previousProcess;
+          setScopeProcess(previousProcess);
         }
       },
       onListening: notifyClusterListening,
@@ -6727,13 +6768,13 @@ export function createRuntime({
       runInProcessContext: (owner, callback) => {
         const previous = scope.process;
         const previousActiveProcess = scope.__bnhActiveProcess;
-        scope.process = owner;
+        setScopeProcess(owner);
         scope.__bnhActiveProcess = owner;
         try { return callback(); }
         finally {
           if (previousActiveProcess === undefined) scope.__bnhActiveProcess = undefined;
           else scope.__bnhActiveProcess = previousActiveProcess;
-          scope.process = previous;
+          setScopeProcess(previous);
         }
       },
     });
@@ -7997,7 +8038,7 @@ export function createRuntime({
               clearImmediate: scope.clearImmediate,
               queueMicrotask: scope.queueMicrotask,
             };
-            scope.process = ownerProcess;
+            setScopeProcess(ownerProcess);
             scope.__bnhActiveProcess = ownerProcess;
             if (ownerProcess._bnhTimerContext) Object.assign(scope, ownerProcess._bnhTimerContext);
             try {
@@ -8021,7 +8062,7 @@ export function createRuntime({
               queueMicrotask: scope.queueMicrotask,
             };
             const childOwner = childProcess?.processObject || childProcess;
-            scope.process = childOwner || scope.process;
+            setScopeProcess(childOwner || scope.process);
             if (childOwner) scope.__bnhActiveProcess = childOwner;
             if (childOwner?._bnhTimerContext) Object.assign(scope, childOwner._bnhTimerContext);
             try {
@@ -8909,8 +8950,15 @@ export function createRuntime({
           } catch {
             return false;
           }
-          if (hasTopLevelAwait(source)) return true;
           const text = typeof source === 'string' ? source : new TextDecoder().decode(source);
+          // An ESM launcher can await a dynamic import inside a top-level
+          // try/finally block. The block depth is not a function boundary,
+          // but the generic scanner intentionally avoids all brace-delimited
+          // regions. Recognize this common launcher shape before deciding
+          // whether a synchronous parent needs the isolated worker bridge.
+          if (hasTopLevelAwait(source)
+            || (isRuntimeEsmModule(entryPath, processObj.execArgv)
+              && /\bawait\s+import\s*\(/u.test(text))) return true;
           const imports = /(?:^|[;\n])\s*(?:import|export)\s+(?:[^'";]+?\s+from\s+)?['"]([^'"]+)['"]/gm;
           let match;
           while ((match = imports.exec(text))) {
@@ -8922,6 +8970,8 @@ export function createRuntime({
             } catch {
               continue;
             }
+            if (dependency && typeof dependency === 'object') dependency = dependency.url;
+            if (typeof dependency !== 'string') continue;
             if (dependency.startsWith('file:')) dependency = fileURLToPath(dependency);
             if (dependency.startsWith('node:')) continue;
             if (esmGraphHasTopLevelAwait(dependency, processObj, seen)) return true;
@@ -9284,27 +9334,25 @@ export function createRuntime({
             const stderrArr = [];
             const nestedEsmProcess = scope.process?.__bnhEsmNested === true ? scope.process : null;
             // A browser cannot synchronously block its event loop while an
-            // ESM child with top-level await is running. Node's spawnSync can
-            // launch that child as a real OS process, though, and build tools
-            // such as @tapjs/test rely on exactly that shape with stdio
-            // inherited. Run that narrow case in an isolated async child,
-            // report the optimistic synchronous result, and retain one task
-            // on the caller until the child (and its VFS updates) settle. A
-            // later failure becomes the caller's exit code, so the parent
-            // still observes the child outcome at its process boundary.
+            // ESM child with top-level await is running. A nested browser
+            // worker can block on a shared coordination cell, however, while
+            // a host-brokered child worker continues independently. Use that
+            // narrow bridge for spawnSync callers so compiler output and VFS
+            // mutations are available before the caller resumes.
             if (nestedEsmProcess
               && options.stdio === 'inherit'
               && esmGraphHasTopLevelAwait(prepared.entryPath, nestedEsmProcess)) {
               const release = nestedEsmProcess._bnhTaskTracker?.(
                 `sync-esm-child:${String(prepared.entryPath).split('/').pop() || '<unknown>'}`,
               ) || null;
+              const syncBuffer = createSharedVfsUpdateBuffer();
               let processHandle;
               try {
                 processHandle = runPreparedESM(prepared, {
                   signal: options.signal,
                   timeout: options.timeout,
                   ownerProcess: nestedEsmProcess,
-                  asyncLifecycle: true,
+                  syncBuffer,
                   onNetwork: options.onNetwork,
                 }, (value) => nestedEsmProcess.stdout?.write?.(value),
                 (value) => nestedEsmProcess.stderr?.write?.(value));
@@ -9325,6 +9373,104 @@ export function createRuntime({
                   process: null,
                 };
               }
+              if (syncBuffer && typeof Atomics?.wait === 'function') {
+                try {
+                  const header = new Int32Array(syncBuffer, 0, 6);
+                  const timeout = Number(options.timeout);
+                  const waitResult = Number.isFinite(timeout) && timeout > 0
+                    ? Atomics.wait(header, 0, 0, timeout)
+                    : Atomics.wait(header, 0, 0);
+                  if (waitResult === 'timed-out') {
+                    const timeoutStdout = [];
+                    const timeoutStderr = [];
+                    for (const record of readSharedVfsRecords(syncBuffer)) {
+                      if (record?.type !== 'output') continue;
+                      (record.stream === 'stderr' ? timeoutStderr : timeoutStdout).push(String(record.value || ''));
+                    }
+                    try { processHandle.terminate?.(); } catch { /* child may have exited while the wait returned */ }
+                    const error = new Error('spawnSync timed out');
+                    error.code = 'ETIMEDOUT';
+                    release?.();
+                    return {
+                      pid: processHandle.pid || 0,
+                      stdout: Buffer.from(timeoutStdout.join('')),
+                      stderr: Buffer.from(timeoutStderr.join('')),
+                      stdoutChunks: timeoutStdout,
+                      stderrChunks: timeoutStderr,
+                      status: null,
+                      pending: false,
+                      signal: 'SIGKILL',
+                      error,
+                      process: processHandle,
+                    };
+                  }
+                  const stdoutChunks = [];
+                  const stderrChunks = [];
+                  let childError = null;
+                  for (const record of readSharedVfsRecords(syncBuffer)) {
+                    if (record?.type === 'output') {
+                      const value = String(record.value || '');
+                      const chunks = record.stream === 'stderr' ? stderrChunks : stdoutChunks;
+                      chunks.push(value);
+                      (record.stream === 'stderr'
+                        ? nestedEsmProcess.stderr
+                        : nestedEsmProcess.stdout)?.write?.(value);
+                      continue;
+                    }
+                    if (record?.type === 'error' && record.error) {
+                      childError = Object.assign(new Error(String(record.error.message || 'synchronous child failed')), record.error);
+                      continue;
+                    }
+                    const update = decodeSharedVfsRecord(record);
+                    if (update) vfs.applyUpdate(update);
+                  }
+                  const status = Atomics.load(header, 2);
+                  const signalCode = Atomics.load(header, 3);
+                  const signal = signalCode === 2 ? 'SIGINT' : signalCode === 9 ? 'SIGKILL' : signalCode === 15 ? 'SIGTERM' : null;
+                  let error = childError;
+                  if (sharedVfsBufferOverflowed(syncBuffer)) {
+                    error = new Error('synchronous child VFS buffer overflowed');
+                    error.code = 'ERR_SYNC_VFS_OVERFLOW';
+                  }
+                  if (error) nestedEsmProcess.stderr?.write?.(`${formatError(error)}\n`);
+                  release?.();
+                  return {
+                    pid: processHandle.pid || 0,
+                    stdout: Buffer.from(stdoutChunks.join('')),
+                    stderr: Buffer.from(stderrChunks.join('')),
+                    stdoutChunks,
+                    stderrChunks,
+                    status: signal ? null : status,
+                    pending: false,
+                    signal,
+                    error,
+                    process: processHandle,
+                  };
+                } catch (error) {
+                  // Atomics.wait is forbidden in a page realm. Preserve the
+                  // existing asynchronous lifecycle behavior there rather
+                  // than turning an otherwise valid ESM child into a crash.
+                  try { processHandle.terminate?.(); } catch { /* child may have exited while records were decoded */ }
+                  release?.();
+                  nestedEsmProcess.exitCode = 1;
+                  nestedEsmProcess.stderr?.write?.(`${formatError(error)}\n`);
+                  return {
+                    pid: processHandle.pid || 0,
+                    stdout: Buffer.from(''),
+                    stderr: Buffer.from(''),
+                    stdoutChunks: [],
+                    stderrChunks: [],
+                    status: 1,
+                    pending: false,
+                    signal: null,
+                    error,
+                    process: processHandle,
+                  };
+                }
+              }
+              // SharedArrayBuffer is unavailable only in constrained browser
+              // realms. Keep the old pending result as a last-resort
+              // compatibility path for those realms.
               processHandle.wait().then((terminal) => {
                 if (terminal.signal || terminal.code !== 0 || terminal.error) {
                   nestedEsmProcess.exitCode = terminal.signal ? 1 : terminal.code ?? 1;
@@ -9651,13 +9797,13 @@ export function createRuntime({
               runInProcessContext: (owner, callback) => {
                 const previousProcess = scope.process;
                 const previousActiveProcess = scope.__bnhActiveProcess;
-                scope.process = owner;
+                setScopeProcess(owner);
                 scope.__bnhActiveProcess = owner;
                 try { return callback(); }
                 finally {
                   if (previousActiveProcess === undefined) scope.__bnhActiveProcess = undefined;
                   else scope.__bnhActiveProcess = previousActiveProcess;
-                  scope.process = previousProcess;
+                  setScopeProcess(previousProcess);
                 }
               },
             });
@@ -9668,7 +9814,7 @@ export function createRuntime({
               if (!childContextResource) {
                 const previousProcess = scope.process;
                 const previousActiveProcess = scope.__bnhActiveProcess;
-                scope.process = childProc.processObject;
+                setScopeProcess(childProc.processObject);
                 scope.__bnhActiveProcess = childProc.processObject;
                 try {
                   // A same-realm child is still a separate Node process for
@@ -9679,7 +9825,7 @@ export function createRuntime({
                 } finally {
                   if (previousActiveProcess === undefined) scope.__bnhActiveProcess = undefined;
                   else scope.__bnhActiveProcess = previousActiveProcess;
-                  scope.process = previousProcess;
+                  setScopeProcess(previousProcess);
                 }
               }
               return childContextResource.runInAsyncScope(callback, childProc.processObject);
@@ -9697,7 +9843,7 @@ export function createRuntime({
                 clearImmediate: scope.clearImmediate,
                 queueMicrotask: scope.queueMicrotask,
               };
-              scope.process = childProc.processObject;
+              setScopeProcess(childProc.processObject);
               scope.__bnhActiveProcess = childProc.processObject;
               if (childProc.processObject._bnhConsole) scope.console = childProc.processObject._bnhConsole;
               if (childProc.processObject._bnhTimerContext) Object.assign(scope, childProc.processObject._bnhTimerContext);
@@ -9708,7 +9854,7 @@ export function createRuntime({
                 scope.console = previousConsole;
                 if (previousActiveProcess === undefined) scope.__bnhActiveProcess = undefined;
                 else scope.__bnhActiveProcess = previousActiveProcess;
-                scope.process = previousProcess;
+                setScopeProcess(previousProcess);
               }
             };
             childProc.processObject._bnhReleaseTasks = () => {
@@ -9778,7 +9924,7 @@ export function createRuntime({
               };
             }
             const releaseGlobalProcess = () => {
-              if (scope.process === childProc.processObject) scope.process = previousState.process;
+              if (scope.process === childProc.processObject) setScopeProcess(previousState.process);
             };
             const releaseGlobalConsole = () => {
               if (scope.console === childProc.processObject._bnhConsole) scope.console = previousState.console;
@@ -9802,7 +9948,7 @@ export function createRuntime({
               }
             };
             childProc.processObject._bnhReleaseGlobalProcess = releaseGlobalProcess;
-              scope.process = childProc.processObject;
+              setScopeProcess(childProc.processObject);
               scope.console = createConsole((value) => {
                 stdoutArr.push(value);
                 options.onStdout?.(value);
@@ -10277,7 +10423,7 @@ export function createRuntime({
               // logical process or console installed globally after this
               // synchronous bootstrap; doing so contaminates the parent
               // runner while the child remains alive.
-              scope.process = previousState.process;
+              setScopeProcess(previousState.process);
               scope.Promise = previousState.Promise;
               scope.console = previousState.console;
               scope.require = previousState.require;
@@ -10371,6 +10517,7 @@ export function createRuntime({
             options.workerIsolation === true
             || options.ipc
             || options.asyncLifecycle
+            || options.syncBuffer
             || esmExecutionDepth > 0
           );
           // The child process boundary owns the transferred/shared bytes. A
@@ -10449,6 +10596,7 @@ export function createRuntime({
             files,
             directories: snapshot.directories,
             symlinks: snapshot.symlinks,
+            syncBuffer: options.syncBuffer,
             entry: esmPrepared.entryPath,
             execArgv: childExecArgv,
             proxy: childProxy,
@@ -10461,7 +10609,7 @@ export function createRuntime({
           // in-memory fallback. Keep its writes connected to the owning VFS
           // in both modes; otherwise build tools can exit successfully while
           // leaving generated files stranded in the child snapshot.
-          const vfsUpdateBridge = createVfsUpdateBridge();
+          const vfsUpdateBridge = options.syncBuffer ? null : createVfsUpdateBridge();
           const run = async (context) => {
             const previous = esmExecutionTail;
             let release;
@@ -10473,7 +10621,7 @@ export function createRuntime({
               const result = await runProcessEntry({
                 ...context,
                 vfs: esmDescriptor,
-                vfsUpdatePort: vfsUpdateBridge.port,
+                vfsUpdatePort: vfsUpdateBridge?.port,
                 runtimeInstance: workerIsolation
                   ? undefined
                   : createRuntime({
@@ -10510,13 +10658,22 @@ export function createRuntime({
             // explicitly to avoid repacking the complete mixed VFS.
             vfsNested: processObject.__bnhEsmNested === true,
             run,
+            // The synchronous parent cannot service the child's ready
+            // handshake while blocked in Atomics.wait. Deliver the complete
+            // VFS in the initial worker message for this narrow bridge.
+            vfsEager: Boolean(options.syncBuffer),
             // Child processes may create a server after they start. Keep them
             // in this realm so later siblings can share the live registry.
-            forceFallback: !workerIsolation,
+            forceFallback: !workerIsolation && !options.syncBuffer,
             preserveReferences: true,
             networkPort: networkChannel?.raw.port2,
-            vfsUpdatePort: vfsUpdateBridge.port,
-            workerBrokerPort,
+            vfsUpdatePort: vfsUpdateBridge?.port,
+            syncBuffer: options.syncBuffer,
+            workerBrokerPort: workerBrokerPort
+              || scope.__BNH_WORKER_BROKER_PORT__
+              || (typeof scope.__BNH_CREATE_WORKER_BROKER_PORT__ === 'function'
+                ? scope.__BNH_CREATE_WORKER_BROKER_PORT__()
+                : undefined),
             proxyAdapter: workerIsolation ? proxyCapability.adapter : undefined,
             stdout: forwardStdout,
             stderr: forwardStderr,
@@ -13588,12 +13745,12 @@ export function createRuntime({
       const runInProcessContext = (callback) => {
         const previousProcess = scope.process;
         const previousActiveProcess = scope.__bnhActiveProcess;
-        scope.process = processObj;
+        setScopeProcess(processObj);
         scope.__bnhActiveProcess = processObj;
         try { return callback(); }
         finally {
           scope.__bnhActiveProcess = previousActiveProcess;
-          scope.process = previousProcess;
+          setScopeProcess(previousProcess);
         }
       };
       if (String(specifier).startsWith('file:') && String(specifier).endsWith('.mjs')) {
@@ -14277,12 +14434,12 @@ export function createRuntime({
             clearImmediate: scope.clearImmediate,
             queueMicrotask: scope.queueMicrotask,
           };
-          scope.process = owner;
+          setScopeProcess(owner);
           scope.__bnhActiveProcess = owner;
           if (owner?._bnhConsole) scope.console = owner._bnhConsole;
           if (owner?._bnhTimerContext) Object.assign(scope, owner._bnhTimerContext);
           const restore = () => {
-            scope.process = previous.process;
+            setScopeProcess(previous.process);
             if (previous.activeProcess === undefined) delete scope.__bnhActiveProcess;
             else scope.__bnhActiveProcess = previous.activeProcess;
             scope.console = previous.console;

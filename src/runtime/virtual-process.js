@@ -463,7 +463,9 @@ export function createVirtualProcess(options = {}) {
   const scope = options.scope || globalThis;
   const workerBrokerPort = options.workerBrokerPort || scope.__BNH_WORKER_BROKER_PORT__;
   const canUseBrowserWorker = !options.forceFallback
-    && typeof (options.Worker || scope.Worker) === 'function'
+    && (Boolean(options.workerFactory)
+      || Boolean(workerBrokerPort)
+      || typeof (options.Worker || scope.Worker) === 'function')
     && typeof (options.MessageChannel || scope.MessageChannel) === 'function';
   let processHandle;
   if (canUseBrowserWorker) {

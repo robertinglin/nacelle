@@ -178,7 +178,7 @@ export function prepareWorkerVfs(vfs, scope, { eager = false, nested = false } =
   // more than one SharedArrayBuffer backing store. Do not allocate a chunk
   // array merely to repack those immutable shared files; that path is what
   // exhausts Chromium's ArrayBuffer budget during large test suites.
-  const directNested = nestedWorker && (allShared || totalBytes > 16 * 1024 * 1024);
+  const directNested = nestedWorker && allShared;
   const mixedShared = nestedWorker
     && !allShared
     && !directNested
@@ -872,6 +872,11 @@ export function createProcess({
   let exitRequested = false;
   const grants = new Set(signalGrants || SIGNALS);
   const process = new EventEmitter();
+  Object.defineProperty(process, Symbol.for('bnh.runtime-process'), {
+    configurable: false,
+    enumerable: false,
+    value: true,
+  });
   process.version = profile.runtimeVersion;
   process.versions = processVersions(scope, profile);
   process.release = profile.release;
@@ -1337,6 +1342,7 @@ export function createBrowserProcess(options = {}) {
     };
     if (options.networkPort) initialData.networkPort = options.networkPort;
     if (options.vfsUpdatePort) initialData.vfsUpdatePort = options.vfsUpdatePort;
+    if (options.syncBuffer) initialData.syncBuffer = options.syncBuffer;
     const brokeredWorker = Boolean(options.workerBrokerPort
       && typeof WorkerGlobalScope === 'function'
       && scope instanceof WorkerGlobalScope);

@@ -901,7 +901,12 @@ export function createVfs(options = {}) {
     else metadata.delete(path);
   }
 
-  function sharedStorageBytes(bytes) {
+  // Internal worker mounts may receive a transferred ArrayBuffer. Reusing it
+  // is intentional when copyBuffers is false: the child owns that snapshot,
+  // and converting every file back into a separate SharedArrayBuffer would
+  // duplicate a large dependency tree before the compiler starts.
+  function sharedStorageBytes(bytes, { preserve = false } = {}) {
+    if (preserve) return bytes;
     if (!(bytes instanceof Uint8Array)
       || globalThis.crossOriginIsolated !== true
       || typeof SharedArrayBuffer !== 'function'
@@ -3538,7 +3543,7 @@ export function createVfs(options = {}) {
       entryValue.data ?? entryValue.bytes ?? entryValue.content ?? entryValue,
       undefined,
       copyBuffers,
-    )));
+    ), { preserve: copyBuffers === false }));
     if (entryValue.mode !== undefined) metadataFor(path).mode = modeValue(entryValue.mode);
   }
 

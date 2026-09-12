@@ -27,6 +27,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
   let outputFlushQueued = false;
   let pendingStdout = '';
   let pendingStderr = '';
+  let syncBuffer;
   // The control terminal frame is the reliable end-of-process boundary. Keep
   // the injected process here so state produced immediately before natural
   // completion cannot be stranded behind a separately ordered IPC message.
@@ -72,6 +73,22 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     control.postMessage({ channel: CONTROL, key, runId: identity.runId, childId: identity.childId, type, ...fields });
   }
 
+  function appendSyncRecord(record) {
+    if (!syncBuffer || typeof syncBuffer.byteLength !== 'number') return;
+    const header = new Int32Array(syncBuffer, 0, 6);
+    const payload = new TextEncoder().encode(JSON.stringify(record));
+    const offset = Atomics.load(header, 1);
+    const next = offset + 4 + payload.byteLength;
+    if (24 + next > syncBuffer.byteLength) {
+      Atomics.store(header, 4, 1);
+      return;
+    }
+    const bytes = new Uint8Array(syncBuffer, 24);
+    new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).setUint32(offset, payload.byteLength, true);
+    bytes.set(payload, offset + 4);
+    Atomics.store(header, 1, next);
+  }
+
   // A TAP reporter can emit thousands of short lines synchronously. Sending
   // one MessagePort frame per write makes a large, otherwise CPU-bound test
   // spend most of its time crossing the browser worker boundary. Node's stdio
@@ -82,12 +99,14 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     if (pendingStdout) {
       const value = pendingStdout;
       pendingStdout = '';
-      sendControl('output', { stream: 'stdout', value });
+      if (syncBuffer) appendSyncRecord({ type: 'output', stream: 'stdout', value });
+      else sendControl('output', { stream: 'stdout', value });
     }
     if (pendingStderr) {
       const value = pendingStderr;
       pendingStderr = '';
-      sendControl('output', { stream: 'stderr', value });
+      if (syncBuffer) appendSyncRecord({ type: 'output', stream: 'stderr', value });
+      else sendControl('output', { stream: 'stderr', value });
     }
   }
 
@@ -527,12 +546,22 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     // Preserve all writes that occurred immediately before process.exit or a
     // natural completion ahead of the terminal control frame.
     flushOutput();
+    if (error && syncBuffer && typeof syncBuffer.byteLength === 'number') {
+      appendSyncRecord({ type: 'error', error: errorRecord(error) });
+    }
     if (runtimeStateTimer) {
       clearInterval(runtimeStateTimer);
       runtimeStateTimer = undefined;
     }
     exitCode = code;
     signalCode = signal;
+    if (syncBuffer && typeof syncBuffer.byteLength === 'number') {
+      const header = new Int32Array(syncBuffer, 0, 6);
+      Atomics.store(header, 2, Number(code) || 0);
+      Atomics.store(header, 3, signal === 'SIGINT' ? 2 : signal === 'SIGKILL' ? 9 : signal === 'SIGTERM' ? 15 : 0);
+      Atomics.store(header, 0, 1);
+      Atomics.notify(header, 0);
+    }
     sendControl('terminal', {
       status: kind === 'natural' || kind === 'exit' ? 'exited' : 'failed',
       kind,
@@ -557,9 +586,15 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     user = message.userPort;
     key = message.key;
     identity = message.identity;
+    syncBuffer = message.syncBuffer;
     const exposeIpc = message.exposeIpc === true;
     const deferExitUntilCleanup = Boolean(message.vfsUpdatePort);
     const process = makeEmitter();
+    Object.defineProperty(process, Symbol.for('bnh.runtime-process'), {
+      configurable: false,
+      enumerable: false,
+      value: true,
+    });
     processStateSource = process;
     const pendingMessages = [];
     let pendingMessageFlushQueued = false;

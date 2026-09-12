@@ -2157,6 +2157,146 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('publishes synchronous-grandchild writes from a top-level-await ESM child', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert');
+        const fs = require('node:fs');
+        const { spawn } = require('node:child_process');
+        const child = spawn(process.execPath, ['/node/project/build.mjs'], { cwd: '/node/project' });
+        let errorOutput = '';
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(fs.readFileSync('/node/project/dist/tla-sync-grandchild.txt', 'utf8'), 'tla-sync');
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/project/build.mjs': [
+          "await Promise.resolve();",
+          "import { spawnSync } from 'node:child_process';",
+          "const result = spawnSync(process.execPath, ['/node/project/write-child.mjs'], { stdio: 'inherit' });",
+          "if (result.status !== 0) throw new Error(result.stderr.toString());",
+        ].join('\n'),
+        '/node/project/write-child.mjs': [
+          "import { mkdirSync, writeFileSync } from 'node:fs';",
+          "mkdirSync('dist', { recursive: true });",
+          "writeFileSync('dist/tla-sync-grandchild.txt', 'tla-sync');",
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('routes process-bound fs.writeSync stdio descriptors to the owning streams', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const fs = require('node:fs');
+      fs.writeSync(1, Buffer.from('stdout-sync\\n'));
+      fs.writeSync(2, Buffer.from('stderr-sync\\n'));
+    `);
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('stdout-sync');
+    expect(result.stderr).toContain('stderr-sync');
+  });
+
+  test('runs an extensionless tsgo-wasm launcher from a synchronous TLA child', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert');
+        const fs = require('node:fs');
+        const { spawn } = require('node:child_process');
+        const child = spawn(process.execPath, ['/node/project/build.mjs'], { cwd: '/node/project' });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0);
+        assert.strictEqual(fs.readFileSync('/node/project/tsgo-loaded.txt', 'utf8'), 'wasm-loaded');
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/project/build.mjs': [
+          "await Promise.resolve();",
+          "import { spawnSync } from 'node:child_process';",
+          "import { readFileSync } from 'node:fs';",
+          "const result = spawnSync(process.execPath, ['/node/project/node_modules/@typescript/native-preview/bin/tsgo.js'], { stdio: 'inherit', timeout: 5000 });",
+          "if (result.status !== 0) throw new Error('tsgo launcher failed');",
+          "if (readFileSync('/node/project/tsgo-loaded.txt', 'utf8') !== 'wasm-loaded') throw new Error('tsgo output was not visible to the launcher parent');",
+        ].join('\n'),
+        '/node/project/node_modules/@typescript/native-preview/package.json': '{"name":"@typescript/native-preview","version":"7.0.0","type":"module"}',
+        '/node/project/node_modules/@typescript/native-preview/bin/tsgo.js': [
+          '#!/usr/bin/env node',
+          'const originalExit = process.exit;',
+          'let wasmExitCode = 0;',
+          "process.exit = (code = 0) => { wasmExitCode = Number(code) || 0; process.exitCode = wasmExitCode; };",
+          "try { await import('../tsgo-wasm'); } finally { process.exit = originalExit; }",
+        ].join('\n'),
+        '/node/project/node_modules/@typescript/native-preview/tsgo-wasm': [
+          "import { writeFileSync } from 'node:fs';",
+          "writeFileSync('/node/project/tsgo-loaded.txt', 'wasm-loaded');",
+          'process.exit(0);',
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+
+  test('honors an intercepted global process in dynamic ESM modules', async ({ harnessPage }) => {
+    const minipass = [
+      'const proc = typeof process === "object" && process ? process : { stdout: null, stderr: null };',
+      'export class Minipass {',
+      '  constructor() { this.listeners = new Map(); this.destinations = []; this.ended = false; }',
+      '  on(name, listener) { const listeners = this.listeners.get(name) || []; listeners.push(listener); this.listeners.set(name, listeners); return this; }',
+      '  write(value) { this.value = String(value); return true; }',
+      '  pipe(destination) { this.destinations.push({ destination, end: destination !== proc.stdout && destination !== proc.stderr }); return destination; }',
+      '  end(value) { for (const { destination, end } of this.destinations) { if (value !== undefined) destination.write?.(value); if (end) destination.end?.(); } this.ended = true; for (const listener of this.listeners.get("end") || []) listener(); return this; }',
+      '}',
+    ].join('\n');
+    const result = await harnessPage.run(`
+      (async () => {
+        const originalProcess = globalThis.process;
+        try {
+          globalThis.process = { stdout: null, stderr: null };
+          const { Minipass } = await import('/node/project/index.js');
+          globalThis.process.stdout = new Minipass({ encoding: 'utf8' });
+          globalThis.process.stdout.on('end', () => { throw new Error('stdout should not end'); });
+          globalThis.process.stderr = new Minipass({ encoding: 'utf8' });
+          globalThis.process.stderr.on('end', () => { throw new Error('stderr should not end'); });
+          const src = new Minipass({ encoding: 'utf8' });
+          src.pipe(globalThis.process.stdout);
+          src.pipe(globalThis.process.stderr);
+          src.end('hello, stdio');
+          await new Promise(resolve => setTimeout(resolve));
+          originalProcess.stdout.write('import-ok\\n');
+        } catch (error) {
+          originalProcess.stderr.write(String(error?.stack || error) + '\\n');
+          originalProcess.exitCode = 1;
+        } finally {
+          globalThis.process = originalProcess;
+        }
+      })();
+    `, {
+      files: {
+        '/node/project/package.json': JSON.stringify({ type: 'module' }),
+        '/node/project/index.js': minipass,
+      },
+    });
+    await expectPass(expect, result);
+  });
+
   test('publishes synchronous-grandchild writes before explicit process exit', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       (async () => {

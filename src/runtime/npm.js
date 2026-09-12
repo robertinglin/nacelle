@@ -28,14 +28,33 @@ function isBrowserNativePackage(name, platform) {
     || /(?:^|-)\b(?:aix|android|darwin|freebsd|linux|openbsd|sunos|win32)\b(?:-|$)/i.test(packageName);
 }
 
-// Some packages publish a first-party WebAssembly distribution under a
-// separate package name instead of declaring it as an npm platform variant.
-// Keep these substitutions explicit and version-matched: this is an official
-// package alternative, not a fabricated native package or a general resolver
-// alias.
+function tsgoWasmVersionForNativeVersion(version) {
+  const match = String(version || '').match(/dev\.(\d{4})(\d{2})(\d{2})(?:\.|$)/);
+  return match ? `${match[1]}.${Number(match[2])}.${Number(match[3])}` : null;
+}
+
+// Some packages publish a WebAssembly distribution under a separate package
+// name instead of declaring it as an npm platform variant. Keep these
+// substitutions explicit and version-matched: they are package alternatives,
+// not fabricated native packages or general resolver aliases. tsgo-wasm is an
+// unofficial distribution of the TypeScript native compiler.
 const BROWSER_PACKAGE_ALTERNATIVES = Object.freeze({
   esbuild: Object.freeze({ name: 'esbuild-wasm', reason: 'official-wasm-distribution' }),
+  '@typescript/native-preview': Object.freeze({
+    name: 'tsgo-wasm',
+    reason: 'unofficial-wasm-distribution',
+    versionFor: tsgoWasmVersionForNativeVersion,
+    fileAliases: Object.freeze([['tsgo-wasm', 'bin/tsgo.js', '../tsgo-wasm', 'go-wasm-exit']]),
+  }),
 });
+
+function browserPackageAliasSource(importSpecifier, aliasKind) {
+  const specifier = JSON.stringify(importSpecifier);
+  if (aliasKind === 'go-wasm-exit') {
+    return `#!/usr/bin/env node\nconst originalExit = process.exit;\nlet wasmExitCode = 0;\nprocess.exit = (code = 0) => { wasmExitCode = Number(code) || 0; process.exitCode = wasmExitCode; };\ntry { await import(${specifier}); } finally { process.exit = originalExit; }\n`;
+  }
+  return `#!/usr/bin/env node\nawait import(${specifier});\n`;
+}
 
 function browserPackageAlternative(name, platform) {
   return platform === 'browser' ? BROWSER_PACKAGE_ALTERNATIVES[String(name)] || null : null;
@@ -848,7 +867,12 @@ export class BrowserNpm {
         // so browser installs remain semantically aligned with the lockfile.
         const alternativeMetadata = await this.fetchPackageMetadata(packageName, { onProgress });
         const lockVersion = lockPackageEntry(itemNodeModulesDir, name, resolutionRange)?.version;
-        if (lockVersion && alternativeMetadata.versions?.[lockVersion]) {
+        const matchedAlternativeVersion = browserAlternative.versionFor?.(lockVersion)
+          || browserAlternative.versionFor?.(resolutionRange);
+        if (matchedAlternativeVersion && alternativeMetadata.versions?.[matchedAlternativeVersion]) {
+          version = matchedAlternativeVersion;
+          versionDoc = alternativeMetadata.versions[matchedAlternativeVersion];
+        } else if (lockVersion && alternativeMetadata.versions?.[lockVersion]) {
           version = lockVersion;
           versionDoc = alternativeMetadata.versions[lockVersion];
         } else {
@@ -932,6 +956,27 @@ export class BrowserNpm {
             } catch { /* ignore */ }
           }
         }
+      }
+
+      // Preserve the requested package's executable contract when a browser
+      // alternative publishes the same launcher under a different filename.
+      for (const [source, target, importSpecifier, aliasKind] of browserAlternative?.fileAliases || []) {
+        const sourcePath = `${pkgDir}/${source}`;
+        const targetPath = `${pkgDir}/${target}`;
+        const sourceFile = packageFiles[sourcePath];
+        if (!sourceFile) {
+          throw new Error(`browser package alternative is missing ${source}`);
+        }
+        packageFiles[targetPath] = importSpecifier
+          ? {
+            data: new TextEncoder().encode(
+              browserPackageAliasSource(importSpecifier, aliasKind),
+            ),
+            mode: sourceFile.mode,
+          }
+          : { ...sourceFile };
+        pkgFilesCount += 1;
+        pkgTotalBytes += packageFiles[targetPath].data.byteLength;
       }
 
       if (optional && !optionalPackageSupportsTarget(resolutionName, parsedPkgJson, this.platform, this.arch, this.libc)) {

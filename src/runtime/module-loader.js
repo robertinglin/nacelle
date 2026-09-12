@@ -13,6 +13,7 @@ const RESERVED_EXPORT_NAMES = new Set([
 const NATIVE_ADDON_EXTENSION = '.node';
 const SYNC_HOOKS_WRAPPED = Symbol('bnhSyncHooksWrapped');
 const REGISTERED_HOOKS = Symbol('bnhRegisteredHooks');
+const RUNTIME_PROCESS_MARKER = Symbol.for('bnh.runtime-process');
 let nextLoaderId = 0;
 const GENERATED_OBJECT_IMPORTERS = new WeakMap();
 
@@ -1581,8 +1582,21 @@ export function createModuleLoader({
 
   const bindProcess = (source, processOverride) => {
     if (!processOverride || hasTopLevelProcessBinding(source)) return source;
+    // A package can intentionally replace the global process object while it
+    // loads a fresh module (tap's t.intercept(global, 'process', ...) does
+    // this for Minipass's stdio tests). The owner override is normally needed
+    // to retain virtual-process context after an async boundary, but it must
+    // not hide an explicit guest replacement. Runtime-owned process objects
+    // carry a private marker; any other current global process is the guest's
+    // observable binding.
+    const currentProcess = globalObject.process;
+    const boundProcess = currentProcess
+      && currentProcess !== processOverride
+      && !currentProcess[RUNTIME_PROCESS_MARKER]
+      ? currentProcess
+      : processOverride;
     const token = register(() => {
-      return processOverride;
+      return boundProcess;
     });
     return `const process = globalThis[${quote(registryName)}][${quote(token)}]();\n${source}`;
   };

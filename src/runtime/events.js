@@ -238,7 +238,11 @@ export class BrowserEventEmitter {
   on(name, listener) {
     validateFunction(listener, 'listener');
     this._ensureState();
-    if (name !== 'newListener') this.emit('newListener', name, listener.listener || listener);
+    // Node's internal listener bookkeeping does not dispatch `newListener`
+    // through an EventEmitter subclass' public emit override. Minipass uses
+    // that override to defer `end` while paused; routing this internal event
+    // through the override makes adding an ordinary listener emit `end`.
+    if (name !== 'newListener') BrowserEventEmitter.prototype.emit.call(this, 'newListener', name, listener.listener || listener);
     const listeners = this._listeners.get(name) || new ListenerList();
     listeners.add(listener);
     this._listeners.set(name, listeners);
@@ -254,7 +258,7 @@ export class BrowserEventEmitter {
   prependListener(name, listener) {
     validateFunction(listener, 'listener');
     this._ensureState();
-    if (name !== 'newListener') this.emit('newListener', name, listener.listener || listener);
+    if (name !== 'newListener') BrowserEventEmitter.prototype.emit.call(this, 'newListener', name, listener.listener || listener);
     const listeners = this._listeners.get(name) || new ListenerList();
     this._listeners.set(name, new ListenerList(listener, ...listeners));
     syncEvents(this);

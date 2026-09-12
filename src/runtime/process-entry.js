@@ -1,4 +1,4 @@
-import { connectVfsUpdates } from './vfs-worker-bridge.js';
+import { connectVfsUpdates, createSharedVfsUpdatePort } from './vfs-worker-bridge.js';
 import { createRuntime } from '../runtime.js';
 import { PROCESS_WORKER_SOURCE } from './process-worker.js';
 import { installProcessContract } from './process.js';
@@ -253,7 +253,10 @@ export async function runProcessEntry(context) {
     copyBuffers: false,
   });
   const vfsUpdatePort = context.vfsUpdatePort || descriptor.vfsUpdatePort;
-  const vfsBridge = vfsUpdatePort ? connectVfsUpdates(runtime.vfs, vfsUpdatePort) : null;
+  const sharedVfsPort = descriptor.syncBuffer ? createSharedVfsUpdatePort(descriptor.syncBuffer) : null;
+  const vfsBridge = vfsUpdatePort
+    ? connectVfsUpdates(runtime.vfs, vfsUpdatePort)
+    : sharedVfsPort ? connectVfsUpdates(runtime.vfs, sharedVfsPort) : null;
   let code;
   try {
     setRuntimePhase('execute');

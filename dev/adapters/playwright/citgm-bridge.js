@@ -13,6 +13,64 @@ const NPM_BIN = new TextEncoder().encode('#!/usr/bin/env node\n');
 const browserFetch = typeof globalThis.fetch === 'function' ? globalThis.fetch.bind(globalThis) : null;
 const encoder = new TextEncoder();
 
+// A synchronous ESM child may block its owning dedicated worker in
+// Atomics.wait. Chromium does not schedule a worker created from that blocked
+// worker, so route nested workers through a page-owned broker just as the
+// regular harness bridge does.
+const NativeMessageChannel = globalThis.MessageChannel;
+const NativeWorker = globalThis.Worker;
+
+function createWorkerBrokerPort() {
+  if (typeof NativeMessageChannel !== 'function' || typeof NativeWorker !== 'function') return undefined;
+  const channel = new NativeMessageChannel();
+  const brokerPort = channel.port1;
+  brokerPort.onmessage = (event) => {
+    const request = event.data;
+    if (request?.type !== 'create' || !request.port) return;
+    const worker = new NativeWorker(request.source, request.options || {});
+    const clientPort = request.port;
+    let initialized = false;
+    clientPort.onmessage = (clientEvent) => {
+      const message = clientEvent.data;
+      if (message?.type === 'postMessage') {
+        const transfers = [...(message.transfers || [])];
+        let value = message.value;
+        if (!initialized) {
+          initialized = true;
+          const childBrokerPort = createWorkerBrokerPort();
+          value = { ...value, workerBrokerPort: childBrokerPort };
+          transfers.push(childBrokerPort);
+        }
+        worker.postMessage(value, transfers);
+      } else if (message?.type === 'terminate') {
+        worker.terminate();
+        clientPort.close();
+      }
+    };
+    clientPort.start?.();
+    worker.addEventListener('message', (workerEvent) => {
+      clientPort.postMessage({ type: 'message', value: workerEvent.data });
+    });
+    worker.addEventListener('messageerror', (workerEvent) => {
+      clientPort.postMessage({ type: 'messageerror', error: { message: String(workerEvent?.message || 'worker message error') } });
+    });
+    worker.addEventListener('error', (workerEvent) => {
+      clientPort.postMessage({
+        type: 'error',
+        error: {
+          name: workerEvent?.error?.name || workerEvent?.name || 'Error',
+          message: String(workerEvent?.error?.message || workerEvent?.message || 'worker failed'),
+          stack: workerEvent?.error?.stack || workerEvent?.error?.stack || null,
+        },
+      });
+    });
+  };
+  brokerPort.start?.();
+  return channel.port2;
+}
+
+globalThis.__BNH_CREATE_WORKER_BROKER_PORT__ = createWorkerBrokerPort;
+
 function concatBytes(chunks) {
   const total = chunks.reduce((size, chunk) => size + chunk.byteLength, 0);
   const result = new Uint8Array(total);

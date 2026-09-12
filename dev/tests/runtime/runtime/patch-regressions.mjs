@@ -82,6 +82,23 @@ test('nested guest Function constructors do not duplicate the import parameter',
   assert.equal(stdout, 'ok\n');
 });
 
+test('EventEmitter listener bookkeeping bypasses subclass emit overrides', async () => {
+  const { stdout } = await run(`
+    const { EventEmitter } = require('node:events');
+    class Subclass extends EventEmitter {
+      emit(name, ...args) {
+        if (name === 'newListener') throw new Error('newListener used the public emit override');
+        return super.emit(name, ...args);
+      }
+    }
+    const emitter = new Subclass();
+    emitter.on('value', () => {});
+    emitter.prependListener('other', () => {});
+    console.log('ok');
+  `);
+  assert.equal(stdout, 'ok\n');
+});
+
 test('async filesystem callbacks retain the owning child working directory', async () => {
   const { stdout } = await run(`
     const fs = require('fs');
@@ -390,15 +407,17 @@ test('IPC ESM children can finish after a synchronous nested spawn', async () =>
     '/node/build.mjs': `
       await Promise.resolve();
       import { spawnSync } from 'node:child_process';
+      import { value } from './dependency.mjs';
       const nested = spawnSync(process.execPath, ['-e', 'process.stdout.write("nested" + String.fromCharCode(10))'], { stdio: 'inherit' });
       if (nested.status !== 0) throw new Error(nested.stderr?.toString() || 'nested spawn failed');
-      console.log('built');
+      console.log('built', value);
     `,
+    '/node/dependency.mjs': 'export const value = "dependency";',
   });
   // The nested same-realm child's inherited stdout is intentionally not
   // replayed through the outer worker stream; the contract under test is that
   // the synchronous spawn does not strand the ESM child before close.
-  assert.match(stdout, /stdout:built\n0 null\n/);
+  assert.match(stdout, /stdout:built dependency\n0 null\n/);
 });
 
 test('ESM children with foreground-child stdio inherit and close', async () => {
@@ -940,6 +959,64 @@ test('browser npm uses an official WASM alternative for esbuild', async () => {
   assert.deepEqual(selectedUrls, [
     'https://registry.example/esbuild-wasm',
     'https://registry.example/esbuild-wasm-0.28.0.tgz',
+  ]);
+});
+
+test('browser npm exposes the unofficial tsgo-wasm launcher at the native compiler path', async () => {
+  const vfs = createVfs();
+  const launcher = '#!/usr/bin/env node\nconsole.log("tsgo wasm");';
+  const wasmBytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
+  const wasmTarball = await packTarGz([{
+    path: 'package/package.json',
+    data: new TextEncoder().encode(JSON.stringify({
+      name: 'tsgo-wasm',
+      version: '2026.2.18',
+      type: 'module',
+      main: 'tsgo.wasm',
+      bin: { 'tsgo-wasm': 'tsgo-wasm' },
+    })),
+  }, {
+    path: 'package/tsgo-wasm',
+    data: new TextEncoder().encode(launcher),
+  }, {
+    path: 'package/tsgo.wasm',
+    data: wasmBytes,
+  }]);
+  const selectedUrls = [];
+  const npm = new BrowserNpm({
+    vfs,
+    registry: 'https://registry.example',
+    fetchFn: async (url) => {
+      selectedUrls.push(String(url));
+      if (String(url) === 'https://registry.example/tsgo-wasm') {
+        return new Response(JSON.stringify({
+          name: 'tsgo-wasm',
+          versions: {
+            '2026.2.18': {
+              version: '2026.2.18',
+              bin: { 'tsgo-wasm': 'tsgo-wasm' },
+              dist: { tarball: 'https://registry.example/tsgo-wasm-2026.2.18.tgz' },
+            },
+          },
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      if (String(url) === 'https://registry.example/tsgo-wasm-2026.2.18.tgz') return new Response(wasmTarball);
+      throw new Error(`unexpected URL: ${url}`);
+    },
+  });
+
+  await npm.install('@typescript/native-preview@^7.0.0-dev.20260218.1');
+
+  assert.equal(npm.installed.get('@typescript/native-preview'), '2026.2.18');
+  assert.equal(vfs.fs.readFileSync('/node/node_modules/@typescript/native-preview/tsgo-wasm', 'utf8'), launcher);
+  assert.equal(
+    vfs.fs.readFileSync('/node/node_modules/@typescript/native-preview/bin/tsgo.js', 'utf8'),
+    '#!/usr/bin/env node\nconst originalExit = process.exit;\nlet wasmExitCode = 0;\nprocess.exit = (code = 0) => { wasmExitCode = Number(code) || 0; process.exitCode = wasmExitCode; };\ntry { await import("../tsgo-wasm"); } finally { process.exit = originalExit; }\n',
+  );
+  assert.deepEqual([...vfs.fs.readFileSync('/node/node_modules/@typescript/native-preview/tsgo.wasm')], [...wasmBytes]);
+  assert.deepEqual(selectedUrls, [
+    'https://registry.example/tsgo-wasm',
+    'https://registry.example/tsgo-wasm-2026.2.18.tgz',
   ]);
 });
 

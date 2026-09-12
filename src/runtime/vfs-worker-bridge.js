@@ -1,5 +1,162 @@
 import { VFS_MUTATION_ORIGIN } from './vfs.js';
 
+const SHARED_VFS_HEADER_BYTES = 24;
+const SHARED_VFS_OFFSET_INDEX = 1;
+const SHARED_VFS_OVERFLOW_INDEX = 4;
+
+function isSharedArrayBuffer(value) {
+  return value != null && Object.prototype.toString.call(value) === '[object SharedArrayBuffer]';
+}
+
+function encodeBytes(bytes) {
+  const value = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+  let text = '';
+  for (let index = 0; index < value.byteLength; index += 0x8000) {
+    text += String.fromCharCode(...value.subarray(index, index + 0x8000));
+  }
+  if (typeof btoa === 'function') return btoa(text);
+  return globalThis.Buffer.from(text, 'binary').toString('base64');
+}
+
+function decodeBytes(value) {
+  const text = String(value || '');
+  if (typeof atob === 'function') {
+    const binary = atob(text);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+  }
+  return new Uint8Array(globalThis.Buffer.from(text, 'base64'));
+}
+
+function wireChange(change) {
+  const result = { ...change };
+  if (change?.bytes !== undefined) result.bytes = encodeBytes(change.bytes);
+  return result;
+}
+
+function wireUpdate(update) {
+  if (update?.action === 'delta') {
+    return {
+      action: 'delta',
+      removed: Array.isArray(update.removed) ? update.removed : [],
+      changes: Array.isArray(update.changes) ? update.changes.map(wireChange) : [],
+    };
+  }
+  if (update?.action === 'sync') {
+    const state = update.state || {};
+    return {
+      action: 'sync',
+      state: {
+        directories: Array.isArray(state.directories) ? state.directories : [],
+        symlinks: Array.isArray(state.symlinks) ? state.symlinks : [],
+        files: Object.fromEntries(Object.entries(state.files || {}).map(([path, bytes]) => [path, encodeBytes(bytes)])),
+      },
+    };
+  }
+  return null;
+}
+
+function unwireChange(change) {
+  const result = { ...change };
+  if (change?.bytes !== undefined) result.bytes = decodeBytes(change.bytes);
+  return result;
+}
+
+function unwireUpdate(update) {
+  if (update?.action === 'delta') {
+    return {
+      action: 'delta',
+      removed: Array.isArray(update.removed) ? update.removed : [],
+      changes: Array.isArray(update.changes) ? update.changes.map(unwireChange) : [],
+    };
+  }
+  if (update?.action === 'sync') {
+    const state = update.state || {};
+    return {
+      action: 'sync',
+      state: {
+        directories: Array.isArray(state.directories) ? state.directories : [],
+        symlinks: Array.isArray(state.symlinks) ? state.symlinks : [],
+        files: Object.fromEntries(Object.entries(state.files || {}).map(([path, bytes]) => [path, decodeBytes(bytes)])),
+      },
+    };
+  }
+  return null;
+}
+
+export function createSharedVfsUpdateBuffer(byteLength = 64 * 1024 * 1024) {
+  if (typeof SharedArrayBuffer !== 'function') return null;
+  const size = Math.max(SHARED_VFS_HEADER_BYTES + 4, Math.trunc(byteLength));
+  return new SharedArrayBuffer(size);
+}
+
+export function appendSharedVfsRecord(buffer, record) {
+  if (typeof SharedArrayBuffer !== 'function' || !isSharedArrayBuffer(buffer)) return false;
+  const header = new Int32Array(buffer, 0, SHARED_VFS_HEADER_BYTES / 4);
+  const payload = new TextEncoder().encode(JSON.stringify(record));
+  const offset = Atomics.load(header, SHARED_VFS_OFFSET_INDEX);
+  const next = offset + 4 + payload.byteLength;
+  if (SHARED_VFS_HEADER_BYTES + next > buffer.byteLength) {
+    Atomics.store(header, SHARED_VFS_OVERFLOW_INDEX, 1);
+    return false;
+  }
+  const bytes = new Uint8Array(buffer, SHARED_VFS_HEADER_BYTES);
+  new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).setUint32(offset, payload.byteLength, true);
+  bytes.set(payload, offset + 4);
+  Atomics.store(header, SHARED_VFS_OFFSET_INDEX, next);
+  return true;
+}
+
+export function readSharedVfsRecords(buffer) {
+  if (typeof SharedArrayBuffer !== 'function' || !isSharedArrayBuffer(buffer)) return [];
+  const header = new Int32Array(buffer, 0, SHARED_VFS_HEADER_BYTES / 4);
+  const offset = Atomics.load(header, SHARED_VFS_OFFSET_INDEX);
+  const bytes = new Uint8Array(buffer, SHARED_VFS_HEADER_BYTES, Math.max(0, offset));
+  const decoder = new TextDecoder();
+  const records = [];
+  let position = 0;
+  while (position + 4 <= bytes.byteLength) {
+    const length = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(position, true);
+    position += 4;
+    if (length > bytes.byteLength - position) break;
+    try {
+      const payload = new Uint8Array(length);
+      payload.set(bytes.subarray(position, position + length));
+      records.push(JSON.parse(decoder.decode(payload)));
+    } catch { break; }
+    position += length;
+  }
+  return records;
+}
+
+export function sharedVfsBufferOverflowed(buffer) {
+  if (typeof SharedArrayBuffer !== 'function' || !isSharedArrayBuffer(buffer)) return false;
+  return Atomics.load(new Int32Array(buffer, 0, SHARED_VFS_HEADER_BYTES / 4), SHARED_VFS_OVERFLOW_INDEX) !== 0;
+}
+
+export function createSharedVfsUpdatePort(buffer) {
+  const listeners = new Set();
+  return {
+    postMessage(message) {
+      if (message?.action === 'barrier') {
+        for (const listener of listeners) listener({ data: { action: 'ack', id: message.id } });
+        return;
+      }
+      const update = wireUpdate(message);
+      if (update) appendSharedVfsRecord(buffer, { type: 'vfs', update });
+    },
+    addEventListener(name, listener) { if (name === 'message') listeners.add(listener); },
+    removeEventListener(name, listener) { if (name === 'message') listeners.delete(listener); },
+    start() {},
+    close() { listeners.clear(); },
+  };
+}
+
+export function decodeSharedVfsRecord(record) {
+  return record?.type === 'vfs' ? unwireUpdate(record.update) : null;
+}
+
 export function connectVfsUpdates(vfs, port, enqueue = queueMicrotask) {
   const origin = {};
   let closed = false;

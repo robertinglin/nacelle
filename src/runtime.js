@@ -10447,6 +10447,7 @@ export function createRuntime({
             capabilities: childCapabilities,
             nodeVersion: resolvedProfile.id,
             files,
+            directories: snapshot.directories,
             symlinks: snapshot.symlinks,
             entry: esmPrepared.entryPath,
             execArgv: childExecArgv,
@@ -12462,6 +12463,7 @@ export function createRuntime({
       const files = Object.fromEntries(
         vfs.snapshot({ copy: false, includeAllFiles: true }).artifacts.map(({ path, bytes }) => [path, bytes]),
       );
+      const directories = vfs.snapshot({ copy: false, includeAllFiles: true }).directories;
       if (isEval) files[workerPath] = new scope.TextEncoder().encode(String(source));
       const vfsUpdateBridge = createVfsUpdateBridge();
       const child = createBrowserProcess({
@@ -12489,6 +12491,7 @@ export function createRuntime({
         capabilities: capabilities.manifest,
         nodeVersion: resolvedProfile.id,
         files,
+        directories,
           entry: workerPath,
           execArgv: workerOptions.execArgv || ownerProcess.execArgv,
           proxy: capabilities.manifest.proxy,
@@ -13476,13 +13479,28 @@ export function createRuntime({
         ? { ...context, format: 'module' }
         : context;
       const invoke = (index, currentValue, currentContext) => {
-        if (index < 0) return fallback(currentValue, currentContext);
+        if (index < 0) {
+          const result = fallback(currentValue, currentContext);
+          if (result && typeof result.then === 'function') {
+            return Promise.resolve(result).then((resolved) => {
+              return resolved;
+            });
+          }
+          return result;
+        }
         const hook = hooks[index]?.[kind];
         if (typeof hook !== 'function') return invoke(index - 1, currentValue, currentContext);
         const next = (nextValue = currentValue, nextContext = currentContext) => (
           invoke(index - 1, nextValue, nextContext)
         );
         const result = hook(currentValue, currentContext, next);
+        if (result && typeof result.then === 'function') {
+          return Promise.resolve(result).then((resolved) => {
+            return resolved;
+          }, (error) => {
+            throw error;
+          });
+        }
         return result === undefined ? next() : result;
       };
       const pending = processObject.__bnhModuleRegistrationPromises;
@@ -14488,6 +14506,7 @@ export function createRuntime({
         files: {},
         mount,
         symlinks: [],
+        directories: [],
       }]));
       const owningMount = (entry) => {
         const path = normalizePath(entry, '/node');
@@ -14503,12 +14522,26 @@ export function createRuntime({
 
       const entries = files instanceof Map ? files.entries() : Object.entries(files || {});
       for (const [entry, value] of entries) owningMount(entry).files[entry] = value;
+      const rootMountGranted = declaredMounts.some((mount) => mount.path === '/');
+      for (const directory of context.directories || []) {
+        // Every in-memory VFS snapshot contains `/` as its internal root,
+        // even when the capability manifest grants only a sub-mount such as
+        // `/node`. Do not turn that implementation sentinel into a mount
+        // request; an explicitly granted root still receives it normally.
+        if (normalizePath(directory, '/node') === '/' && !rootMountGranted) continue;
+        owningMount(directory).directories.push(directory);
+      }
       for (const [link, target] of context.symlinks || []) {
         owningMount(link).symlinks.push([link, target]);
       }
       for (const group of groups.values()) {
-        if (Object.keys(group.files).length || group.symlinks.length) {
-          vfs.mount(group.files, { ...group.mount, symlinks: group.symlinks, copyBuffers: context.copyBuffers !== false });
+        if (Object.keys(group.files).length || group.symlinks.length || group.directories.length) {
+          vfs.mount(group.files, {
+            ...group.mount,
+            directories: group.directories,
+            symlinks: group.symlinks,
+            copyBuffers: context.copyBuffers !== false,
+          });
         }
       }
       mounted = true;
@@ -14618,6 +14651,7 @@ export function createRuntime({
           capabilities: capabilities.manifest,
           nodeVersion: resolvedProfile.id,
           files,
+          directories: snapshot.directories,
           symlinks: snapshot.symlinks,
           npmCache: options.npmCache,
           entry,

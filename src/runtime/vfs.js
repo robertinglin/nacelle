@@ -855,7 +855,6 @@ export function createVfs(options = {}) {
 
   function resolvePath(path, followFinal = true, operation = 'access') {
     let current = path;
-    const visited = new Set();
     for (let depth = 0; depth <= 40; depth += 1) {
       const parts = current.split('/').filter(Boolean);
       let prefix = '/';
@@ -864,8 +863,6 @@ export function createVfs(options = {}) {
         prefix = prefix === '/' ? `/${parts[index]}` : `${prefix}/${parts[index]}`;
         const final = index === parts.length - 1;
         if (!symlinks.has(prefix) || (!followFinal && final)) continue;
-        if (visited.has(prefix)) throw loop(prefix);
-        visited.add(prefix);
         const target = symlinkTarget(prefix, symlinks.get(prefix));
         const remainder = parts.slice(index + 1).join('/');
         current = remainder ? normalizePath(`${target}/${remainder}`, '/') : target;
@@ -1067,7 +1064,9 @@ export function createVfs(options = {}) {
     invalidateDirectoryChildrenIndex();
     const removed = Array.isArray(update.removed) ? update.removed : [];
     for (const pathValue of removed) {
-      const path = resolvePath(pathValue);
+      // Removal updates describe the node itself. Following a final symlink
+      // here would recursively delete its target instead of unlinking it.
+      const path = resolvePath(pathValue, false);
       if (path === '/') continue;
       try { removeTree(path, true, true); } catch { /* a concurrent local removal is already in sync */ }
     }
@@ -1107,7 +1106,13 @@ export function createVfs(options = {}) {
 
     const changes = Array.isArray(update.changes) ? update.changes : [];
     for (const change of changes) {
-        const path = resolvePath(change.path, change.type !== 'symlink');
+      // A remove mutation must preserve a final symlink just like a symlink
+      // mutation. Otherwise a worker removing a package self-link can remove
+      // the linked package tree from the parent VFS.
+      const path = resolvePath(
+        change.path,
+        change.type !== 'symlink' && change.type !== 'remove',
+      );
       if (change.type === 'remove') {
         if (path !== '/') {
           try { removeTree(path, true, true); } catch { /* already absent */ }
@@ -3555,6 +3560,17 @@ export function createVfs(options = {}) {
     }
     const mountRecord = declareMount(mountConfig);
     seedTree(mountRecord.path, fixtureTree, mountConfig.copyBuffers !== false);
+    for (const directory of mountConfig.directories || []) {
+      const directoryPath = normalizePath(directory, mountRecord.path);
+      if (!isWithin(directoryPath, mountRecord.path)) throw denied(directoryPath, 'mount');
+      let parent = mountRecord.path;
+      const parts = directoryPath.slice(mountRecord.path.length).split('/').filter(Boolean);
+      for (const part of parts) {
+        parent = parent === '/' ? `/${part}` : `${parent}/${part}`;
+        if (files.has(parent)) throw notDirectory(parent, 'mount');
+        directories.add(parent);
+      }
+    }
     for (const [link, target] of mountConfig.symlinks || []) {
       const linkPath = normalizePath(link, mountRecord.path);
       if (!isWithin(linkPath, mountRecord.path)) throw denied(linkPath, 'mount');
@@ -3690,7 +3706,7 @@ export function createVfs(options = {}) {
     }
   }
 
-  function asyncFsOperation(callback, operation) {
+  function asyncFsOperation(callback, operation, crossRealm = false) {
     validateCallback(callback);
     const releaseRequest = activeRequestTracker?.('FSReqCallback');
     scheduleFsCallback(() => {
@@ -3720,7 +3736,7 @@ export function createVfs(options = {}) {
         try { callback(error); }
         finally { release(); }
       }
-    });
+    }, crossRealm);
   }
 
   function close(handle, callback) {
@@ -3784,7 +3800,10 @@ export function createVfs(options = {}) {
   function readdir(pathValue, optionsValue, callback) {
     const done = typeof optionsValue === 'function' ? optionsValue : callback;
     resolve(pathValue);
-    asyncFsOperation(done, () => fs.readdirSync(pathValue, optionsValue));
+    // Directory reads are real I/O in Node. Use the host timer queue here so
+    // an async lstat issued before a recursive walk can settle first, matching
+    // the ordering observable by path-scurry's includeChildMatches logic.
+    asyncFsOperation(done, () => fs.readdirSync(pathValue, optionsValue), true);
   }
 
   function unlink(pathValue, callback) {

@@ -510,7 +510,15 @@ function capabilitiesFor(env) {
     ? location.origin
     : null;
   return {
-    vfs: { mounts: [{ path: '/node', mode: 'read-write' }] },
+    // CITGM packages expect the ordinary POSIX root to be available for
+    // temporary fixtures such as /tmp. This is still an isolated in-memory
+    // mount; it does not expose the adapter's host filesystem.
+    vfs: {
+      mounts: [
+        { path: '/node', mode: 'read-write' },
+        { path: '/', mode: 'read-write' },
+      ],
+    },
     // CITGM's npm test can materialize a very large package VFS in each
     // child. Keep the browser-side fan-out bounded so buffered test output
     // cannot exhaust the page before the package reports its result.

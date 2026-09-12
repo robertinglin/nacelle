@@ -54,6 +54,61 @@ test('worker symlink updates preserve the link node across the worker boundary',
   }
 });
 
+test('worker symlink removals unlink the link without removing its target', async () => {
+  const parent = createVfs();
+  const worker = createVfs();
+  const tree = {
+    '/node/project/package.json': '{"name":"project"}',
+    '/node/project/src/index.ts': 'export default 1;',
+  };
+  parent.mount(tree);
+  worker.mount(tree);
+  const channel = new MessageChannel();
+  const parentBridge = connectVfsUpdates(parent, channel.port1);
+  const workerBridge = connectVfsUpdates(worker, channel.port2);
+  try {
+    worker.fs.mkdirSync('/node/project/src/node_modules', { recursive: true });
+    worker.fs.symlinkSync('../..', '/node/project/src/node_modules/project');
+    await workerBridge.drain();
+    assert.equal(parent.fs.readFileSync('/node/project/src/node_modules/project/package.json', 'utf8'), '{"name":"project"}');
+
+    worker.fs.rmSync('/node/project/src/node_modules/project', { recursive: true, force: true });
+    await workerBridge.drain();
+    assert.equal(parent.fs.existsSync('/node/project/src/node_modules/project'), false);
+    assert.equal(parent.fs.readFileSync('/node/project/package.json', 'utf8'), '{"name":"project"}');
+    assert.equal(parent.fs.readFileSync('/node/project/src/index.ts', 'utf8'), 'export default 1;');
+  } finally {
+    parentBridge.close();
+    workerBridge.close();
+  }
+});
+
+test('worker snapshots preserve empty directories', async () => {
+  const parent = createVfs();
+  const worker = createVfs();
+  parent.mount({}, { path: '/', directories: ['/tmp/glob-test/foo'] });
+  worker.mount({}, { path: '/', directories: ['/tmp/glob-test/foo'] });
+  const channel = new MessageChannel();
+  const parentBridge = connectVfsUpdates(parent, channel.port1);
+  const workerBridge = connectVfsUpdates(worker, channel.port2);
+  try {
+    worker.fs.mkdirSync('/tmp/glob-test/bar', { recursive: true });
+    await workerBridge.drain();
+    const snapshot = parent.snapshot({ includeAllFiles: true });
+    const restored = createVfs();
+    restored.mount(snapshot.files, {
+      path: '/',
+      directories: snapshot.directories,
+      symlinks: snapshot.symlinks,
+    });
+    assert.equal(restored.fs.statSync('/tmp/glob-test/foo').isDirectory(), true);
+    assert.equal(restored.fs.statSync('/tmp/glob-test/bar').isDirectory(), true);
+  } finally {
+    parentBridge.close();
+    workerBridge.close();
+  }
+});
+
 test('a parent relays worker changes to siblings without echoing them back', async () => {
   const parent = createVfs();
   const first = createVfs();

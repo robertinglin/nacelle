@@ -247,7 +247,11 @@ export async function runProcessEntry(context) {
     if (Object.keys(missingFiles).length || missingSymlinks.length) {
       await runtime.mount(missingFiles, { symlinks: missingSymlinks, copyBuffers: false });
     }
-  } else await runtime.mount(descriptor.files, { symlinks: descriptor.symlinks, copyBuffers: false });
+  } else await runtime.mount(descriptor.files, {
+    directories: descriptor.directories,
+    symlinks: descriptor.symlinks,
+    copyBuffers: false,
+  });
   const vfsUpdatePort = context.vfsUpdatePort || descriptor.vfsUpdatePort;
   const vfsBridge = vfsUpdatePort ? connectVfsUpdates(runtime.vfs, vfsUpdatePort) : null;
   let code;

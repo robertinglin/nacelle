@@ -485,17 +485,17 @@ export function createModuleLoader({
       nextSpecifier,
       nextContext?.parentURL?.startsWith('file:')
         ? fileURLToPath(nextContext.parentURL)
-        : importer,
+      : importer,
       nextContext?.conditions || ['node', 'import'],
     );
-    if (sharedRunModuleHook) return sharedRunModuleHook('resolve', specifier, context, fallback, processOverride);
-    let next = (nextSpecifier, nextContext) => defaultResolve(
-      nextSpecifier,
-      nextContext?.parentURL?.startsWith('file:')
-        ? fileURLToPath(nextContext.parentURL)
-        : importer,
-      nextContext?.conditions || ['node', 'import'],
+    const resolveFallback = (nextSpecifier, nextContext) => (
+      tapmockFallback(nextSpecifier, nextContext?.parentURL) || fallback(nextSpecifier, nextContext)
     );
+    if (sharedRunModuleHook) {
+      const result = sharedRunModuleHook('resolve', specifier, context, resolveFallback, processOverride);
+      return tapmockFallback(specifier, context.parentURL) || result;
+    }
+    let next = resolveFallback;
     for (let index = registeredHooks.length - 1; index >= 0; index -= 1) {
       const hook = registeredHooks[index]?.resolve;
       if (typeof hook !== 'function') continue;
@@ -503,6 +503,8 @@ export function createModuleLoader({
       next = (nextSpecifier, nextContext) => hook(nextSpecifier, nextContext, previous);
     }
     const result = next(specifier, context);
+    const tapmockResult = tapmockFallback(specifier, context.parentURL);
+    if (tapmockResult) return tapmockResult;
     if (!result || typeof result !== 'object' || typeof result.url !== 'string') {
       throw new TypeError('module resolve hook must return an object with a string url');
     }
@@ -519,7 +521,12 @@ export function createModuleLoader({
         : importer,
       nextContext?.conditions || ['node', 'import'],
     );
-    const result = await sharedRunModuleHook('resolve', specifier, context, fallback, processOverride);
+    const resolveFallback = (nextSpecifier, nextContext) => (
+      tapmockFallback(nextSpecifier, nextContext?.parentURL) || fallback(nextSpecifier, nextContext)
+    );
+    const result = await sharedRunModuleHook('resolve', specifier, context, resolveFallback, processOverride);
+    const tapmockResult = tapmockFallback(specifier, context.parentURL);
+    if (tapmockResult) return tapmockResult;
     if (!result || typeof result !== 'object' || typeof result.url !== 'string') {
       throw new TypeError('module resolve hook must return an object with a string url');
     }
@@ -621,6 +628,58 @@ export function createModuleLoader({
     }
     if (url.startsWith('node:')) return url;
     return inheritTapmockIdentity(url, importer);
+  };
+
+  // The published tap mock hook can delegate a transitive builtin to the
+  // next resolver after its service has already established a mock graph.
+  // Node's loader keeps that graph identity on the parent URL, so recover an
+  // explicitly mapped mock at the fallback seam before normal builtin
+  // resolution turns it into node:fs (or another real builtin).
+  const tapmockFallback = (specifier, parentURL) => {
+    if (typeof specifier !== 'string' || typeof parentURL !== 'string') return undefined;
+    let parent;
+    try {
+      parent = new URL(parentURL);
+    } catch {
+      return undefined;
+    }
+    const identity = parent.searchParams.get('tapmock');
+    if (!identity) return undefined;
+    const separator = identity.indexOf('.');
+    if (separator <= 0 || separator === identity.length - 1) return undefined;
+    const serviceKey = identity.slice(0, separator);
+    const instanceKey = identity.slice(separator + 1);
+    const service = globalObject[Symbol.for(`__tapmock${serviceKey}$${instanceKey}`)];
+    if (!service?.mocks || typeof service.mocks !== 'object') return undefined;
+    let mockURL = specifier;
+    if (!Object.prototype.hasOwnProperty.call(service.mocks, mockURL)) {
+      try {
+        if (isPathSpecifier(specifier)) mockURL = String(new URL(specifier, parent));
+      } catch {
+        return undefined;
+      }
+    }
+    if (!Object.prototype.hasOwnProperty.call(service.mocks, mockURL)) return undefined;
+    const mock = new URL(`tapmock://${identity}/`);
+    mock.searchParams.set('url', mockURL);
+    return { url: String(mock), format: 'module', shortCircuit: true };
+  };
+
+  const tapmockLoad = (resolved) => {
+    if (typeof resolved !== 'string' || !resolved.startsWith('tapmock:')) return undefined;
+    let parsed;
+    try {
+      parsed = new URL(resolved);
+    } catch {
+      return undefined;
+    }
+    const identity = parsed.host;
+    const separator = identity.indexOf('.');
+    if (separator <= 0 || separator === identity.length - 1) return undefined;
+    const service = globalObject[Symbol.for(`__tapmock${identity.slice(0, separator)}$${identity.slice(separator + 1)}`)];
+    if (!service || typeof service.load !== 'function') return undefined;
+    const source = service.load({ action: 'load', url: resolved });
+    return source === undefined ? undefined : { format: 'module', source, url: resolved };
   };
 
   const sourceText = (value) => typeof value === 'string'
@@ -1718,7 +1777,7 @@ export function createModuleLoader({
       : isBuiltinSpecifier(resolved) ? 'builtin'
       : resolved.startsWith('data:') ? 'module'
       : resolved.endsWith('.json') ? 'json' : moduleFormatForHook(resolved);
-    const loaded = runLoadHooks(resolved, format, processOverride);
+    const loaded = tapmockLoad(resolved) || runLoadHooks(resolved, format, processOverride);
     const loadedResolved = loaded.url ? hookURLToSpecifier(loaded.url, resolved) : resolved;
     if (loaded.format === 'builtin' && isBuiltinSpecifier(loadedResolved)) {
       return builtinModuleSource(loadedResolved, builtin(loadedResolved, processOverride));
@@ -2172,7 +2231,7 @@ export function createModuleLoader({
       : isBuiltinSpecifier(resolved) ? 'builtin'
       : /^[A-Za-z][A-Za-z\d+.-]*:/.test(resolved) ? 'module'
       : resolved.endsWith('.json') ? 'json' : moduleFormatForHook(resolved);
-    const loaded = await runLoadHooksAsync(resolved, format, processOverride);
+    const loaded = tapmockLoad(resolved) || await runLoadHooksAsync(resolved, format, processOverride);
     const loadedResolved = loaded.url ? hookURLToSpecifier(loaded.url, resolved) : resolved;
     if (loaded.format === 'builtin' && isBuiltinSpecifier(loadedResolved)) {
       return builtinModuleSource(loadedResolved, builtin(loadedResolved, processOverride));

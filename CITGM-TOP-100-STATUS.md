@@ -25,97 +25,97 @@ not being reclassified as newly rerun here.
 | 9 | chalk | PASS | ours | Published `chalk@6.0.0` initially failed in the shared ESM lowering path; six Chromium CITGM runs were preserved. Final run `citgm-1789065205654` passed after general ESM binding, export, `import.meta`, and `module.exports` interop fixes. Required gates: build passed; `npm test` 296/296; Chromium Playwright 243/243; Firefox Playwright 243/243. |
 | 10 | emoji-regex | PASS | none observed | Published `emoji-regex@10.6.0` passed on the first Chromium CITGM run `citgm-1789065974177`; install and all four child phases exited 0. No runtime, nested-dependency, or upstream package/repository failure was observed. Required gates: build passed; `npm test` 296/296; Chromium Playwright 243/243; Firefox Playwright 243/243. |
 | 11 | wrap-ansi | PASS | ours | Published `wrap-ansi@10.0.1` passed final Chromium CITGM `citgm-1789070077131`; the package-level failures were fixed in the shared ESM literal scanner and bare `node --test` discovery. Required gates passed after rebuilding the generated bundle: `npm test` 296/296; Chromium Playwright 246/246; Firefox Playwright 246/246. |
-| 12 | lru-cache | PASS | ours | Published `lru-cache@11.5.2` now passes exact CITGM in both browsers: Firefox `citgm-1789211689248` and Chromium `citgm-1789211984176`; all 29 upstream TAP subtests and 19,628 assertions pass, including all six `esbuild-wasm` build invocations. Required final gates passed after the fix: build; `npm test` 333/333; Chromium Playwright 266/266; Firefox Playwright 266/266. The native esbuild, timer-drain, process-output, async ordering, and late post-exit rejection behaviors were fixed in the shared browser runtime; rank 13 is recorded as an upstream blocker, rank 14 is current, and ranks 15–100 remain pending. |
-| 13 | tslib | BLOCKED | upstream package/repository (CITGM test contract) | Published `tslib@2.8.1` installs successfully in Chromium (`citgm-1789213425873`) and Firefox (`citgm-1789213473799`), but both CITGM runs stop before package execution with `Module does not support npm-test!`. The package metadata has no `scripts.test`; there is no browser-runtime behavior to fix and no safe test shim to add. The blocker is recorded; rank 14 is current and ranks 15–100 remain pending. |
-| 14 | picomatch | PASS | ours | Published `picomatch@4.0.7` passes exact CITGM in Chromium (`citgm-1789215545080`) and Firefox (`citgm-1789215632195`); npm install, ESLint, and Mocha (1,983 passing tests) all exit 0. The runtime fix suppresses the private virtual-process exit sentinel at the parent unhandled-rejection boundary and preserves useful object-error formatting. Required final gates passed after rebuilding: npm test 333/333; Chromium Playwright 266/266; Firefox Playwright 266/266. Ranks 15–100 remain pending until this rank-14 commit is clean. |
-| 15 | glob | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 16 | minipass | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 17 | type-fest | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 18 | color-name | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 19 | strip-ansi | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 20 | balanced-match | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 21 | p-limit | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 22 | glob-parent | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 23 | p-locate | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 24 | has-flag | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 25 | iconv-lite | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 26 | entities | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 27 | uuid | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 28 | json-schema-traverse | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 29 | string-width | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 30 | escape-string-regexp | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 31 | globals | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 32 | is-fullwidth-code-point | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 33 | argparse | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 34 | ignore | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 35 | which | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 36 | esbuild | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 37 | isexe | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 38 | js-yaml | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 39 | resolve | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 40 | mime-types | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 41 | nanoid | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 42 | yargs-parser | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 43 | source-map | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 44 | string_decoder | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 45 | color-convert | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 46 | estraverse | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 47 | https-proxy-agent | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 48 | @babel/helper-validator-identifier | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 49 | json5 | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 50 | react-is | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 51 | readdirp | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 52 | commander | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 53 | js-tokens | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 54 | shebang-regex | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 55 | fs-extra | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 56 | readable-stream | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 57 | punycode | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 58 | tr46 | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 59 | find-up | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 60 | webidl-conversions | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 61 | path-exists | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 62 | graceful-fs | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 63 | eslint-scope | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 64 | yargs | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 65 | cross-spawn | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 66 | statuses | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 67 | whatwg-url | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 68 | fast-deep-equal | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 69 | locate-path | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 70 | is-number | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 71 | get-stream | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 72 | yaml | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 73 | path-scurry | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 74 | @babel/parser | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 75 | browserslist | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 76 | @babel/helper-string-parser | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 77 | camelcase | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 78 | yallist | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 79 | @babel/template | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 80 | cookie | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 81 | agent-base | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 82 | safe-buffer | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 83 | qs | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 84 | fill-range | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 85 | path-to-regexp | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 86 | lodash | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 87 | universalify | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 88 | form-data | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 89 | jiti | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 90 | @radix-ui/react-primitive | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 91 | onetime | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 92 | node-releases | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 93 | ajv | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 94 | is-glob | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 95 | escalade | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 96 | update-browserslist-db | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 97 | yocto-queue | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 98 | to-regex-range | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 99 | fast-json-stable-stringify | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
-| 100 | get-intrinsic | PENDING | — | Not attempted; rank 14 requires a successful commit first. |
+| 12 | lru-cache | PASS | ours | Published `lru-cache@11.5.2` now passes exact CITGM in both browsers: Firefox `citgm-1789211689248` and Chromium `citgm-1789211984176`; all 29 upstream TAP subtests and 19,628 assertions pass, including all six `esbuild-wasm` build invocations. Required final gates passed after the fix: build; `npm test` 333/333; Chromium Playwright 266/266; Firefox Playwright 266/266. The native esbuild, timer-drain, process-output, async ordering, and late post-exit rejection behaviors were fixed in the shared browser runtime; rank 13 is recorded as an upstream blocker, ranks 14–15 are complete, and rank 16 is current. |
+| 13 | tslib | BLOCKED | upstream package/repository (CITGM test contract) | Published `tslib@2.8.1` installs successfully in Chromium (`citgm-1789213425873`) and Firefox (`citgm-1789213473799`), but both CITGM runs stop before package execution with `Module does not support npm-test!`. The package metadata has no `scripts.test`; there is no browser-runtime behavior to fix and no safe test shim to add. The blocker is recorded; ranks 14–15 are complete and rank 16 is current. |
+| 14 | picomatch | PASS | ours | Published `picomatch@4.0.7` passes exact CITGM in Chromium (`citgm-1789215545080`) and Firefox (`citgm-1789215632195`); npm install, ESLint, and Mocha (1,983 passing tests) all exit 0. The runtime fix suppresses the private virtual-process exit sentinel at the parent unhandled-rejection boundary and preserves useful object-error formatting. Required final gates passed after rebuilding: npm test 333/333; Chromium Playwright 266/266; Firefox Playwright 266/266. Rank 15 is complete and rank 16 is current. |
+| 15 | glob | PASS | ours, with upstream test behavior preserved | Published `glob@13.0.6` passes exact CITGM in Chromium (`citgm-1789230527444`, 1106 pass + 1 skip) and Firefox (`citgm-1789230819617`, 1106 pass + 1 skip). The shared fixes cover empty-directory snapshots, POSIX root temporary fixtures, recursive symlink traversal/removal semantics, async directory-read ordering, and transitive `@tapjs/mock` builtin resolution. Required final gates passed: build with 5 WASM artifacts; `npm test` 336/336; Chromium Playwright 266/266; Firefox Playwright 266/266. |
+| 16 | minipass | PENDING | — | Not attempted; rank 15 is complete and this is the next package. |
+| 17 | type-fest | PENDING | — | Not attempted; rank 16 is current. |
+| 18 | color-name | PENDING | — | Not attempted; rank 16 is current. |
+| 19 | strip-ansi | PENDING | — | Not attempted; rank 16 is current. |
+| 20 | balanced-match | PENDING | — | Not attempted; rank 16 is current. |
+| 21 | p-limit | PENDING | — | Not attempted; rank 16 is current. |
+| 22 | glob-parent | PENDING | — | Not attempted; rank 16 is current. |
+| 23 | p-locate | PENDING | — | Not attempted; rank 16 is current. |
+| 24 | has-flag | PENDING | — | Not attempted; rank 16 is current. |
+| 25 | iconv-lite | PENDING | — | Not attempted; rank 16 is current. |
+| 26 | entities | PENDING | — | Not attempted; rank 16 is current. |
+| 27 | uuid | PENDING | — | Not attempted; rank 16 is current. |
+| 28 | json-schema-traverse | PENDING | — | Not attempted; rank 16 is current. |
+| 29 | string-width | PENDING | — | Not attempted; rank 16 is current. |
+| 30 | escape-string-regexp | PENDING | — | Not attempted; rank 16 is current. |
+| 31 | globals | PENDING | — | Not attempted; rank 16 is current. |
+| 32 | is-fullwidth-code-point | PENDING | — | Not attempted; rank 16 is current. |
+| 33 | argparse | PENDING | — | Not attempted; rank 16 is current. |
+| 34 | ignore | PENDING | — | Not attempted; rank 16 is current. |
+| 35 | which | PENDING | — | Not attempted; rank 16 is current. |
+| 36 | esbuild | PENDING | — | Not attempted; rank 16 is current. |
+| 37 | isexe | PENDING | — | Not attempted; rank 16 is current. |
+| 38 | js-yaml | PENDING | — | Not attempted; rank 16 is current. |
+| 39 | resolve | PENDING | — | Not attempted; rank 16 is current. |
+| 40 | mime-types | PENDING | — | Not attempted; rank 16 is current. |
+| 41 | nanoid | PENDING | — | Not attempted; rank 16 is current. |
+| 42 | yargs-parser | PENDING | — | Not attempted; rank 16 is current. |
+| 43 | source-map | PENDING | — | Not attempted; rank 16 is current. |
+| 44 | string_decoder | PENDING | — | Not attempted; rank 16 is current. |
+| 45 | color-convert | PENDING | — | Not attempted; rank 16 is current. |
+| 46 | estraverse | PENDING | — | Not attempted; rank 16 is current. |
+| 47 | https-proxy-agent | PENDING | — | Not attempted; rank 16 is current. |
+| 48 | @babel/helper-validator-identifier | PENDING | — | Not attempted; rank 16 is current. |
+| 49 | json5 | PENDING | — | Not attempted; rank 16 is current. |
+| 50 | react-is | PENDING | — | Not attempted; rank 16 is current. |
+| 51 | readdirp | PENDING | — | Not attempted; rank 16 is current. |
+| 52 | commander | PENDING | — | Not attempted; rank 16 is current. |
+| 53 | js-tokens | PENDING | — | Not attempted; rank 16 is current. |
+| 54 | shebang-regex | PENDING | — | Not attempted; rank 16 is current. |
+| 55 | fs-extra | PENDING | — | Not attempted; rank 16 is current. |
+| 56 | readable-stream | PENDING | — | Not attempted; rank 16 is current. |
+| 57 | punycode | PENDING | — | Not attempted; rank 16 is current. |
+| 58 | tr46 | PENDING | — | Not attempted; rank 16 is current. |
+| 59 | find-up | PENDING | — | Not attempted; rank 16 is current. |
+| 60 | webidl-conversions | PENDING | — | Not attempted; rank 16 is current. |
+| 61 | path-exists | PENDING | — | Not attempted; rank 16 is current. |
+| 62 | graceful-fs | PENDING | — | Not attempted; rank 16 is current. |
+| 63 | eslint-scope | PENDING | — | Not attempted; rank 16 is current. |
+| 64 | yargs | PENDING | — | Not attempted; rank 16 is current. |
+| 65 | cross-spawn | PENDING | — | Not attempted; rank 16 is current. |
+| 66 | statuses | PENDING | — | Not attempted; rank 16 is current. |
+| 67 | whatwg-url | PENDING | — | Not attempted; rank 16 is current. |
+| 68 | fast-deep-equal | PENDING | — | Not attempted; rank 16 is current. |
+| 69 | locate-path | PENDING | — | Not attempted; rank 16 is current. |
+| 70 | is-number | PENDING | — | Not attempted; rank 16 is current. |
+| 71 | get-stream | PENDING | — | Not attempted; rank 16 is current. |
+| 72 | yaml | PENDING | — | Not attempted; rank 16 is current. |
+| 73 | path-scurry | PENDING | — | Not attempted; rank 16 is current. |
+| 74 | @babel/parser | PENDING | — | Not attempted; rank 16 is current. |
+| 75 | browserslist | PENDING | — | Not attempted; rank 16 is current. |
+| 76 | @babel/helper-string-parser | PENDING | — | Not attempted; rank 16 is current. |
+| 77 | camelcase | PENDING | — | Not attempted; rank 16 is current. |
+| 78 | yallist | PENDING | — | Not attempted; rank 16 is current. |
+| 79 | @babel/template | PENDING | — | Not attempted; rank 16 is current. |
+| 80 | cookie | PENDING | — | Not attempted; rank 16 is current. |
+| 81 | agent-base | PENDING | — | Not attempted; rank 16 is current. |
+| 82 | safe-buffer | PENDING | — | Not attempted; rank 16 is current. |
+| 83 | qs | PENDING | — | Not attempted; rank 16 is current. |
+| 84 | fill-range | PENDING | — | Not attempted; rank 16 is current. |
+| 85 | path-to-regexp | PENDING | — | Not attempted; rank 16 is current. |
+| 86 | lodash | PENDING | — | Not attempted; rank 16 is current. |
+| 87 | universalify | PENDING | — | Not attempted; rank 16 is current. |
+| 88 | form-data | PENDING | — | Not attempted; rank 16 is current. |
+| 89 | jiti | PENDING | — | Not attempted; rank 16 is current. |
+| 90 | @radix-ui/react-primitive | PENDING | — | Not attempted; rank 16 is current. |
+| 91 | onetime | PENDING | — | Not attempted; rank 16 is current. |
+| 92 | node-releases | PENDING | — | Not attempted; rank 16 is current. |
+| 93 | ajv | PENDING | — | Not attempted; rank 16 is current. |
+| 94 | is-glob | PENDING | — | Not attempted; rank 16 is current. |
+| 95 | escalade | PENDING | — | Not attempted; rank 16 is current. |
+| 96 | update-browserslist-db | PENDING | — | Not attempted; rank 16 is current. |
+| 97 | yocto-queue | PENDING | — | Not attempted; rank 16 is current. |
+| 98 | to-regex-range | PENDING | — | Not attempted; rank 16 is current. |
+| 99 | fast-json-stable-stringify | PENDING | — | Not attempted; rank 16 is current. |
+| 100 | get-intrinsic | PENDING | — | Not attempted; rank 16 is current. |
 
-The pending-row cursor now points to rank 14; no later package has been
+The pending-row cursor now points to rank 16; no later package has been
 started.
 
 ## Rank 6 failure record
@@ -150,6 +150,32 @@ npm run build -- --node-version=v22                         PASS
 npm test                                                     PASS — 296/296
 npm run test:browser:chromium                               PASS — 243/243
 npm run test:browser:firefox                                 PASS — 243/243
+```
+
+## Rank 15 failure record
+
+The published `glob@13.0.6` candidate was tested with CITGM 10.0.2. Complete
+artifacts for every attempt are preserved under
+`artifacts/citgm-top-100/rank-015-glob/`.
+
+| Run / log | Observed failure | Classification and resolution |
+| --- | --- | --- |
+| `citgm-1789219852599`, `citgm-1789219909357` | Initial Chromium and Firefox runs failed during the upstream TAP suite. | Ours. The initial failures exposed missing empty-directory state in worker snapshots, root-mounted `/tmp` compatibility, and incorrect recursive symlink handling. |
+| `citgm-1789220312833` through `citgm-1789221774708` | Several diagnostic reruns reported `scripts/build.sh: No such file or directory` while the candidate build was being exercised. | Ours, exposed by the package's generated build layout. The VFS mount was corrected to preserve directory entries and root-relative paths; all diagnostic logs remain preserved. |
+| `citgm-1789222983286`, `citgm-1789223833121`, `citgm-1789226482018`, `citgm-1789227767490`, `citgm-1789228232177` | The failure count reduced from 15 to 4 as directory/symlink and async callback behavior were fixed; remaining cases were memfs, mocked async `realpath`, and synchronous abort handling. | Ours. These were general VFS ordering, snapshot, and loader compatibility defects, not glob-specific conditionals. |
+| `citgm-1789228529931`, `citgm-1789229101503`, `citgm-1789229929305` | Loader diagnostics isolated the final issue to transitive `@tapjs/mock` builtin resolution; one experimental fallback run also recorded a `tapmock:` load-chain failure. | Ours, exposed by the nested `path-scurry`/`@tapjs/mock` graph. The final loader fix makes explicit active tapmock mappings win over builtin fallback resolution and loads generated tapmock modules directly at the VFS seam. The failed experimental run is retained as evidence and is not a package result. |
+| `citgm-1789230527444` / `citgm-1789230819617` | Published `glob@13.0.6` completed CITGM with 1106 passing assertions and 1 skip in both Chromium and Firefox. | PASS. No nested dependency or upstream package/repository blocker remained. |
+
+## Rank 15 gate evidence
+
+The repository-wide gates passed after both final CITGM browser passes and
+before the rank-15 commit was created:
+
+```text
+npm run build -- --node-version=v22                        PASS — 5 WASM artifacts; Node 22.23.2
+npm test                                                   PASS — 336/336
+npm run test:browser:chromium                             PASS — 266/266
+npm run test:browser:firefox                              PASS — 266/266
 ```
 
 ## Rank 11 failure record

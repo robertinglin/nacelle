@@ -46,9 +46,21 @@ function inspectModule(module, name, depth) {
 
 function createContextEvaluator(scope) {
   const FunctionConstructor = scope.Function || Function;
-  return FunctionConstructor('context', 'source', `
-    with (context) {
-      const globalThis = context;
+  return FunctionConstructor('context', 'source', 'scope', `
+    const sandbox = new Proxy(context, {
+      has(target, property) {
+        return property !== Symbol.unscopables && property !== 'eval' && property !== 'source';
+      },
+      get(target, property, receiver) {
+        if (property === 'globalThis') return receiver;
+        if (Reflect.has(target, property)) return Reflect.get(target, property, receiver);
+        return scope[property];
+      },
+      set(target, property, value) {
+        return Reflect.set(target, property, value, target);
+      },
+    });
+    with (sandbox) {
       return eval(source);
     }
   `);
@@ -194,6 +206,43 @@ function copyRealmToContext(context, realm, nativeKeys, managedKeys) {
     } catch {
       try { context[key] = realm[key]; } catch { /* preserve the realm result */ }
     }
+  }
+}
+
+function descriptorsEqual(first, second) {
+  if (!first || !second || first.configurable !== second.configurable
+    || first.enumerable !== second.enumerable) return false;
+  if ('value' in first || 'value' in second) {
+    return 'value' in first && 'value' in second
+      && first.value === second.value
+      && first.writable === second.writable;
+  }
+  return first.get === second.get && first.set === second.set;
+}
+
+function captureOwnPropertyDescriptors(value) {
+  const descriptors = new Map();
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Reflect.getOwnPropertyDescriptor(value, key);
+    if (descriptor) descriptors.set(key, descriptor);
+  }
+  return descriptors;
+}
+
+// Keep this as a defensive cleanup for host properties created by code that
+// bypasses the synthetic evaluator's proxy. Normal bare assignments are
+// forwarded to the context while evaluation is still running.
+function copySyntheticGlobalAssignments(context, scope, before) {
+  for (const key of Reflect.ownKeys(scope)) {
+    if (key === 'globalThis' || key === CONTEXT_MARKER) continue;
+    const after = Reflect.getOwnPropertyDescriptor(scope, key);
+    const previous = before.get(key);
+    if (!after || descriptorsEqual(previous, after)) continue;
+    try { Object.defineProperty(context, key, after); } catch { try { context[key] = scope[key]; } catch { /* preserve the result */ } }
+    try {
+      if (previous) Object.defineProperty(scope, key, previous);
+      else delete scope[key];
+    } catch { /* preserve the host global when it cannot be restored */ }
   }
 }
 
@@ -872,7 +921,14 @@ export function createVmModule(scope = globalThis) {
       const previousFilename = scope.__bnhVmFilename;
       scope.__bnhVmFilename = this.options.filename;
       try {
-        if (!realm) return normalizeContextError(evaluate(context, source));
+        if (!realm) {
+          const globalProperties = captureOwnPropertyDescriptors(scope);
+          try {
+            return normalizeContextError(evaluate(context, source, scope));
+          } finally {
+            copySyntheticGlobalAssignments(context, scope, globalProperties);
+          }
+        }
         copyContextToRealm(context, realm.global, realm.managedKeys);
         return normalizeContextError(realm.evaluate(source));
       } finally {

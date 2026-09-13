@@ -67,6 +67,31 @@ test.describe('browser runtime bridge and core primitives', () => {
     expect(result.stdout).toContain('stdio listener contract completed');
   });
 
+  test('matches util inspect defaults and vm sandbox assignment ownership', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const vm = require('node:vm');
+      const { inspect } = require('node:util');
+      assert.strictEqual(inspect.defaultOptions.depth, 2);
+      assert.strictEqual(inspect.defaultOptions.colors, false);
+      const context = vm.createContext();
+      context.functionToRun = () => 42;
+      const script = new vm.Script(
+        'returnValue = functionToRun(); customResult = functionToRun(); '
+        + '({returnOwn: Object.hasOwn(globalThis, "returnValue"), '
+        + 'customOwn: Object.hasOwn(globalThis, "customResult")})',
+      );
+      const returned = script.runInNewContext(context, { timeout: 1000 });
+      assert.deepStrictEqual(returned, { returnOwn: true, customOwn: true });
+      assert.strictEqual(context.returnValue, 42);
+      assert.strictEqual(context.customResult, 42);
+      process.stdout.write('inspect and vm compatibility completed');
+    `);
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('inspect and vm compatibility completed');
+  });
+
   test('does not keep the parent alive for detached unref children', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const { spawn } = require('node:child_process');

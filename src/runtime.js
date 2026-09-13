@@ -7329,8 +7329,26 @@ export function createRuntime({
       'stream/promises': streamPromises,
       timers, 'timers/promises': timerPromises, string_decoder: { StringDecoder: createStringDecoder() },
       url: nodeUrl, util: (() => {
-        const inspectFn = (value, options) => nodeInspect(value, options ?? {});
+        const inspectDefaultOptions = {
+          showHidden: false,
+          depth: 2,
+          colors: false,
+          customInspect: true,
+          showProxy: false,
+          maxArrayLength: 100,
+          maxStringLength: 10_000,
+          breakLength: 80,
+          compact: 3,
+          sorted: false,
+          getters: false,
+          numericSeparator: false,
+        };
+        const inspectFn = (value, options) => nodeInspect(
+          value,
+          options == null ? inspectDefaultOptions : { ...inspectDefaultOptions, ...options },
+        );
         inspectFn.custom = Symbol.for('nodejs.util.inspect.custom');
+        inspectFn.defaultOptions = inspectDefaultOptions;
         const utilScope = Object.create(scope);
         // Object.assign would route these writes through an inherited global
         // process accessor when the runtime is hosted by Node.

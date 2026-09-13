@@ -54,8 +54,8 @@ not being reclassified as newly rerun here.
 | 32 | is-fullwidth-code-point | PASS | none observed | Published `is-fullwidth-code-point@5.1.0` at gitHead `2696d873463fde9f6b09b49c98380bd49c67b00a` passes exact CITGM unchanged in Chromium (`citgm-1789307869379`) and Firefox (`citgm-1789307953202`); install, XO, AVA, and tsd phases all exited 0. No runtime, nested-dependency, or upstream package/repository failure was observed. Repository-wide gates were skipped under the unchanged double-CITGM rule. |
 | 33 | argparse | PASS | ours | Published `argparse@3.0.2` at gitHead `b24ea1892b4b7e7a268cd4554cdd654ec47c148f` passes exact CITGM in Chromium (`citgm-1789315178421`) and Firefox (`citgm-1789315226994`). The VFS now rejects writes to chmod 0400 files, and the loader accepts Firefox's Node-equivalent class-call TypeError wording; native Node passes the targeted `TestTypeClassicClass` suite. Required final gates passed after rebuilding: `npm test` and full Chromium/Firefox Playwright; complete artifacts and native comparison logs are preserved under `artifacts/citgm-top-100/rank-033-argparse/`. |
 | 34 | ignore | PASS | ours | Published `ignore@7.0.9` at gitHead `821765efdf7752b186a03ed0450d9ee013cee099` passes exact CITGM in Chromium (`citgm-1789317691280`) and Firefox (`citgm-1789317740056`); both the `7.0.6` and `7.0.9` compatibility worktrees pass, including `--win32`. Native Node v26 also passes the exact package (1368 assertions plus both compatibility modes), proving the initial browser failure was ours: the browser materialized a GitHub source archive without Git history, and the runtime lacked the Git/worktree surface and synchronous shebang launcher behavior required by the package. Required final gates passed: build; `npm test` 340/340; Chromium Playwright 289/289; Firefox Playwright 289/289. Complete attempts and native proof are preserved under `artifacts/citgm-top-100/rank-034-ignore/`. |
-| 35 | which | PENDING | — | Not attempted; rank 34 is complete and rank 35 is current. |
-| 36 | esbuild | PENDING | — | Not attempted; rank 34 is complete and rank 35 is current. |
+| 35 | which | PASS | none observed | Published `which@7.0.0` at gitHead `297db11d58eebe01551ae0875a127a89ee63d2cb` passes exact CITGM in Chromium (`citgm-1789318901100`) and Firefox (`citgm-1789318952953`); installation, ESLint, and TAP all exited 0. Firefox records template-oss repository-drift diagnostics, but the package test contract is green. No runtime, nested-dependency, or upstream package/repository failure was observed. Repository-wide gates were skipped under the unchanged double-CITGM rule. Complete artifacts are preserved under `artifacts/citgm-top-100/rank-035-which/`. |
+| 36 | esbuild | PENDING | — | Not attempted; rank 35 is complete and rank 36 is current. |
 | 37 | isexe | PENDING | — | Not attempted; rank 33 is complete and rank 34 is current. |
 | 38 | js-yaml | PENDING | — | Not attempted; rank 33 is complete and rank 34 is current. |
 | 39 | resolve | PENDING | — | Not attempted; rank 33 is complete and rank 34 is current. |
@@ -121,7 +121,7 @@ not being reclassified as newly rerun here.
 | 99 | fast-json-stable-stringify | PENDING | — | Not attempted; rank 33 is complete and rank 34 is current. |
 | 100 | get-intrinsic | PENDING | — | Not attempted; rank 33 is complete and rank 34 is current. |
 
-The pending-row cursor now points to rank 35; no package after rank 35 has
+The pending-row cursor now points to rank 36; no package after rank 36 has
 been started.
 
 ## Rank 6 failure record
@@ -977,3 +977,28 @@ npm run test:browser:firefox                            PASS — 289/289
 ```
 
 Rank 34 is recorded as `PASS` and the ordered cursor advances to rank 35.
+
+## Rank 35 CITGM evidence
+
+The published `which@7.0.0` candidate at gitHead
+`297db11d58eebe01551ae0875a127a89ee63d2cb` passed exact CITGM 10.0.2 in
+both browsers. Complete artifacts are preserved under
+`artifacts/citgm-top-100/rank-035-which/`.
+
+| Run / log | Observed result | Classification |
+| --- | --- | --- |
+| `citgm-1789318901100` / `citgm-1789318952953` | Chromium and Firefox completed package installation, ESLint, and the upstream TAP suite with exit code 0. Firefox also emitted template-oss repository-drift diagnostics that did not affect the CITGM result. | PASS; no runtime, nested-dependency, or upstream package/repository failure observed. |
+
+## Rank 35 gate evidence
+
+The exact CITGM pair passed without repository changes, so the repository-wide
+build, unit, and Playwright gates were intentionally skipped under the
+unchanged double-CITGM continuation rule:
+
+```text
+NACELLE_CITGM_ARTIFACT_DIR=artifacts/citgm-top-100/rank-035-which npm run citgm:browser:chromium -- which  PASS — citgm-1789318901100
+NACELLE_CITGM_ARTIFACT_DIR=artifacts/citgm-top-100/rank-035-which npm run citgm:browser:firefox -- which   PASS — citgm-1789318952953
+npm run build / npm test / full Playwright suites                  SKIPPED — unchanged double-CITGM pass
+```
+
+Rank 35 is recorded as `PASS` and the ordered cursor advances to rank 36.

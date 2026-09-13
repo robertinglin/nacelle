@@ -243,7 +243,12 @@ export function createStringDecoder() {
 
   function StringDecoder(encoding) {
     this.encoding = normalize(encoding);
-    this._decoder = this.encoding === 'utf8' ? new TextDecoder('utf-8') : null;
+    // Node's StringDecoder preserves a leading BOM. Consumers such as
+    // iconv-lite need to observe it so they can apply their own stripBOM
+    // option and callback.
+    this._decoder = this.encoding === 'utf8'
+      ? new TextDecoder('utf-8', { ignoreBOM: true })
+      : null;
     this._pending = new Uint8Array(0);
     this._lastChar = new Uint8Array(4);
     this._lastNeed = 0;

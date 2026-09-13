@@ -935,12 +935,21 @@ export class Readable extends EventEmitter {
       return this._bufferedBytes < this.readableHighWaterMark;
     }
     if (this._decoder) {
-      const bytes = typeof chunk === 'string'
-        ? (globalThis.Buffer?.from
-          ? globalThis.Buffer.from(chunk, encoding || 'utf8')
-          : new TextEncoder().encode(chunk))
-        : toBytes(chunk);
-      chunk = this._decoder.decode(bytes, { stream: true });
+      // Node preserves string chunks pushed through a matching decoder. In
+      // particular, UTF-8 surrogate halves must remain intact across chunks
+      // so encoders such as iconv-lite can combine them before conversion.
+      // Re-encoding a lone half with Buffer.from would replace it with U+FFFD.
+      const pushedEncoding = encoding === undefined
+        ? this._encoding
+        : readableEncodingName(encoding);
+      if (typeof chunk !== 'string' || pushedEncoding !== this._encoding) {
+        const bytes = typeof chunk === 'string'
+          ? (globalThis.Buffer?.from
+            ? globalThis.Buffer.from(chunk, encoding || 'utf8')
+            : new TextEncoder().encode(chunk))
+          : toBytes(chunk);
+        chunk = this._decoder.decode(bytes, { stream: true });
+      }
     }
     if (typeof chunk === 'string' && this._preserveStrings) {
       if (chunk.length === 0) return this._bufferedBytes < this.readableHighWaterMark;
@@ -2580,43 +2589,48 @@ export function ensureOutputStream(stream) {
   });
 }
 
+function initializeDuplex(stream, options = {}, readableInitialized = false) {
+  if (!readableInitialized) initializeCallableReadable(stream, options);
+  stream._writable = new Writable(options);
+  stream._writableState = stream._writable._writableState;
+  stream._writable._owner = stream;
+  // Duplex owns one destroy lifecycle. The inner writable only drains its
+  // pending writes; invoking the user hook on both layers would double-call
+  // the Node _destroy contract.
+  stream._writable._destroyHook = null;
+  const inheritedDestroy = stream._destroyHook;
+  if (options.write) stream._write = options.write;
+  if (options.writev) stream._writev = options.writev;
+  if (options.final) stream._final = options.final;
+  stream._destroyHook = options.destroy || inheritedDestroy;
+  // The writable side owns queueing and finish emission, but the public
+  // Duplex subclass owns the _final hook. Keep the hook on the inner side
+  // so end() waits for an async subclass finalizer before finishing.
+  stream._writable._final = stream._final;
+  stream.allowHalfOpen = options.allowHalfOpen !== false;
+  stream.writable = stream._writable.writable;
+  stream._writable.on('drain', () => stream.emit('drain'));
+  stream._writable.on('finish', () => {
+    stream.writable = false;
+    stream.emit('finish');
+    queueMicrotask(() => {
+      if (stream._destroyed) stream._emitClose();
+      else if (stream._readableState.endEmitted && stream._readableState.autoDestroy) stream.destroy();
+      else if (!stream.readable) stream._emitClose();
+    });
+  });
+  stream._writable.on('error', (error) => stream.destroy(error));
+  stream._writable.on('close', () => queueMicrotask(() => {
+    // Ending the writable side of a duplex stream is not the same as
+    // closing the socket; the readable peer may still have responses.
+    if (stream._destroyed || !stream.readable) stream._emitClose();
+  }));
+}
+
 class DuplexImpl extends Readable {
   constructor(options = {}) {
     super(options);
-    this._writable = new Writable(options);
-    this._writableState = this._writable._writableState;
-    this._writable._owner = this;
-    // Duplex owns one destroy lifecycle. The inner writable only drains its
-    // pending writes; invoking the user hook on both layers would double-call
-    // the Node _destroy contract.
-    this._writable._destroyHook = null;
-    const inheritedDestroy = this._destroyHook;
-    if (options.write) this._write = options.write;
-    if (options.writev) this._writev = options.writev;
-    if (options.final) this._final = options.final;
-    this._destroyHook = options.destroy || inheritedDestroy;
-    // The writable side owns queueing and finish emission, but the public
-    // Duplex subclass owns the _final hook. Keep the hook on the inner side
-    // so end() waits for an async subclass finalizer before finishing.
-    this._writable._final = this._final;
-    this.allowHalfOpen = options.allowHalfOpen !== false;
-    this.writable = this._writable.writable;
-    this._writable.on('drain', () => this.emit('drain'));
-    this._writable.on('finish', () => {
-      this.writable = false;
-      this.emit('finish');
-      queueMicrotask(() => {
-        if (this._destroyed) this._emitClose();
-        else if (this._readableState.endEmitted && this._readableState.autoDestroy) this.destroy();
-        else if (!this.readable) this._emitClose();
-      });
-    });
-    this._writable.on('error', (error) => this.destroy(error));
-    this._writable.on('close', () => queueMicrotask(() => {
-      // Ending the writable side of a duplex stream is not the same as
-      // closing the socket; the readable peer may still have responses.
-      if (this._destroyed || !this.readable) this._emitClose();
-    }));
+    initializeDuplex(this, options, true);
   }
 
   get writableFinished() { return this._writable?.writableFinished ?? false; }
@@ -2688,7 +2702,9 @@ for (const property of ['writableBuffer']) {
 
 export function Duplex(options = {}) {
   if (new.target) return Reflect.construct(DuplexImpl, [options], new.target);
-  return new DuplexImpl(options);
+  if (this === undefined || this === null) return new DuplexImpl(options);
+  initializeDuplex(this, options);
+  return this;
 }
 
 Duplex.prototype = DuplexImpl.prototype;
@@ -3091,14 +3107,18 @@ export function duplexPair(options = {}) {
   return [first, second];
 }
 
-export class Transform extends Duplex {
+function initializeTransform(stream, options = {}) {
+  if (typeof options.transform === 'function') stream._transform = options.transform;
+  if (typeof options.flush === 'function') stream._flush = options.flush;
+  stream.on('prefinish', () => {
+    if (stream._final !== Transform.prototype._final) Transform.prototype._final.call(stream);
+  });
+}
+
+class TransformImpl extends Duplex {
   constructor(options = {}) {
     super(options);
-    if (typeof options.transform === 'function') this._transform = options.transform;
-    if (typeof options.flush === 'function') this._flush = options.flush;
-    this.on('prefinish', () => {
-      if (this._final !== Transform.prototype._final) Transform.prototype._final.call(this);
-    });
+    initializeTransform(this, options);
   }
 
   _transform(value, _encoding, done) {
@@ -3154,6 +3174,17 @@ export class Transform extends Duplex {
     }
   }
 }
+
+export function Transform(options = {}) {
+  if (new.target) return Reflect.construct(TransformImpl, [options], new.target);
+  if (this === undefined || this === null) return new TransformImpl(options);
+  initializeDuplex(this, options);
+  initializeTransform(this, options);
+  return this;
+}
+
+Transform.prototype = TransformImpl.prototype;
+Object.setPrototypeOf(Transform, TransformImpl);
 
 for (const property of ['_final', '_write', '_read']) {
   Object.defineProperty(Transform.prototype, property, { enumerable: true });

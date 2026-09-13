@@ -493,6 +493,79 @@ test.describe('browser runtime async primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('supports legacy Transform.call constructors', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert');
+        const { Transform } = require('node:stream');
+        const { inherits } = require('node:util');
+        function LegacyTransform(options) {
+          Transform.call(this, options);
+        }
+        inherits(LegacyTransform, Transform);
+        const transformed = new LegacyTransform({
+          transform(chunk, _encoding, callback) {
+            callback(null, chunk.toString().toUpperCase());
+          },
+        });
+        const output = await new Promise((resolve, reject) => {
+          const chunks = [];
+          transformed.on('data', chunk => chunks.push(chunk.toString()));
+          transformed.once('end', () => resolve(chunks));
+          transformed.once('error', reject);
+          transformed.end('legacy');
+        });
+        assert.deepStrictEqual(output, ['LEGACY']);
+      })().catch(error => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `);
+
+    await expectPass(expect, result);
+  });
+
+  test('preserves matching-decoder string chunks across surrogate boundaries', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert');
+        const { Readable } = require('node:stream');
+        const source = new Readable({ encoding: 'utf8' });
+        const chunks = [];
+        let index = 0;
+        source._read = () => {
+          source.push(index++ === 0 ? '\\uD83D' : '\\uDE3B', 'utf8');
+          if (index === 2) source.push(null);
+        };
+        await new Promise((resolve, reject) => {
+          source.on('data', chunk => chunks.push(chunk));
+          source.once('end', resolve);
+          source.once('error', reject);
+        });
+        assert.strictEqual(chunks.join(''), '\\uD83D\\uDE3B');
+      })().catch(error => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `);
+
+    await expectPass(expect, result);
+  });
+
+  test('string_decoder preserves a leading UTF-8 BOM', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (() => {
+        const assert = require('node:assert');
+        const { StringDecoder } = require('node:string_decoder');
+        const decoder = new StringDecoder('utf8');
+        const text = decoder.write(Buffer.from([0xef, 0xbb, 0xbf])) + decoder.end();
+        assert.strictEqual(text, '\\uFEFF');
+      })();
+    `);
+
+    await expectPass(expect, result);
+  });
+
   test('supports worker communication, message channels, and transferable ownership', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       (async () => {

@@ -1574,6 +1574,33 @@ export function createModuleLoader({
     return source;
   };
 
+  const replaceImportMetaProperty = (source, property, replacement) => {
+    const masked = maskJavaScriptLiterals(source);
+    const pattern = new RegExp(`\\bimport\\.meta\\.${property}\\b`, 'g');
+    const matches = [...masked.matchAll(pattern)];
+    for (let index = matches.length - 1; index >= 0; index -= 1) {
+      const match = matches[index];
+      source = `${source.slice(0, match.index)}${replacement}${source.slice(match.index + match[0].length)}`;
+    }
+    return source;
+  };
+
+  const isImportMethodDefinition = (masked, match) => {
+    let depth = 1;
+    for (let index = match.index + match[0].length; index < masked.length; index += 1) {
+      if (masked[index] === '(') depth += 1;
+      else if (masked[index] === ')') {
+        depth -= 1;
+        if (depth === 0) {
+          let next = index + 1;
+          while (next < masked.length && /\s/.test(masked[next])) next += 1;
+          return masked[next] === '{';
+        }
+      }
+    }
+    return false;
+  };
+
   const hasTopLevelProcessBinding = (source) => {
     const masked = maskJavaScriptLiterals(source);
     return /(?:^|[;\n])\s*(?:export\s+)?(?:const|let|var|function|class)\s+(?:process\b|[({[][^;\n}]*\bprocess\b)/m.test(masked)
@@ -1641,7 +1668,8 @@ export function createModuleLoader({
     const rewriteDynamicImports = (value, replacement) => {
       const masked = maskJavaScriptLiterals(value);
       dynamicImportPattern.lastIndex = 0;
-      const matches = [...masked.matchAll(dynamicImportPattern)];
+      const matches = [...masked.matchAll(dynamicImportPattern)]
+        .filter((match) => !isImportMethodDefinition(masked, match));
       dynamicImportPattern.lastIndex = 0;
       for (let index = matches.length - 1; index >= 0; index -= 1) {
         const match = matches[index];
@@ -1698,7 +1726,7 @@ export function createModuleLoader({
       });
       rewritten = rewriteDirectEvalCalls(rewritten, `globalThis[${quote(registryName)}][${quote(token)}](`);
     }
-    if (/\bimport\.meta\.resolve\b/.test(rewritten)) {
+    if (/\bimport\.meta\.resolve\b/.test(maskJavaScriptLiterals(rewritten))) {
       const token = register((specifier) => {
         const hooked = runResolveHooks(specifier, importer, ['node', 'import'], processOverride);
         if (hooked && typeof hooked.then === 'function') hooked.catch(() => {});
@@ -1708,17 +1736,14 @@ export function createModuleLoader({
         if (isBuiltinSpecifier(resolved) || resolved.startsWith('node:')) return `node:${builtinName(resolved)}`;
         return resolved.startsWith('data:') ? resolved : fileURL(resolved);
       });
-      rewritten = rewritten.replace(
-        /\bimport\.meta\.resolve\b/g,
-        `globalThis[${quote(registryName)}][${quote(token)}]`,
-      );
+      rewritten = replaceImportMetaProperty(rewritten, 'resolve', `globalThis[${quote(registryName)}][${quote(token)}]`);
     }
     rewritten = rewritten.replace(/\s+with\s*\{\s*type\s*:\s*['"]json['"]\s*\}/g, '');
     // Native data modules do not have a file URL. Preserve the Node-facing
     // identity used by code that builds URLs relative to import.meta.url.
-    rewritten = rewritten.replace(/\bimport\.meta\.filename\b/g, quote(importer));
-    rewritten = rewritten.replace(/\bimport\.meta\.dirname\b/g, quote(posix.dirname(importer)));
-    rewritten = rewritten.replace(/\bimport\.meta\.url\b/g, quote(importMetaURL(importer)));
+    rewritten = replaceImportMetaProperty(rewritten, 'filename', quote(importer));
+    rewritten = replaceImportMetaProperty(rewritten, 'dirname', quote(posix.dirname(importer)));
+    rewritten = replaceImportMetaProperty(rewritten, 'url', quote(importMetaURL(importer)));
     rewritten = replaceBareImportMeta(rewritten, importer);
     return rewritten;
   }
@@ -2156,7 +2181,8 @@ export function createModuleLoader({
     const rewriteDynamicImports = (value, replacement) => {
       const masked = maskJavaScriptLiterals(value);
       dynamicImportPattern.lastIndex = 0;
-      const matches = [...masked.matchAll(dynamicImportPattern)];
+      const matches = [...masked.matchAll(dynamicImportPattern)]
+        .filter((match) => !isImportMethodDefinition(masked, match));
       dynamicImportPattern.lastIndex = 0;
       for (let index = matches.length - 1; index >= 0; index -= 1) {
         const match = matches[index];
@@ -2219,7 +2245,7 @@ export function createModuleLoader({
       });
       rewritten = rewriteDirectEvalCalls(rewritten, `globalThis[${quote(registryName)}][${quote(token)}](`);
     }
-    if (/\bimport\.meta\.resolve\b/.test(rewritten)) {
+    if (/\bimport\.meta\.resolve\b/.test(maskJavaScriptLiterals(rewritten))) {
       const token = register((specifier) => {
         const hooked = runResolveHooks(specifier, importer, ['node', 'import'], processOverride);
         if (hooked && typeof hooked.then === 'function') hooked.catch(() => {});
@@ -2229,12 +2255,12 @@ export function createModuleLoader({
         if (isBuiltinSpecifier(resolved) || resolved.startsWith('node:')) return `node:${builtinName(resolved)}`;
         return resolved.startsWith('data:') ? resolved : fileURL(resolved);
       });
-      rewritten = rewritten.replace(/\bimport\.meta\.resolve\b/g, `globalThis[${quote(registryName)}][${quote(token)}]`);
+      rewritten = replaceImportMetaProperty(rewritten, 'resolve', `globalThis[${quote(registryName)}][${quote(token)}]`);
     }
     rewritten = rewritten.replace(/\s+with\s*\{\s*type\s*:\s*['"]json['"]\s*\}/g, '');
-    rewritten = rewritten.replace(/\bimport\.meta\.filename\b/g, quote(importer));
-    rewritten = rewritten.replace(/\bimport\.meta\.dirname\b/g, quote(posix.dirname(importer)));
-    rewritten = rewritten.replace(/\bimport\.meta\.url\b/g, quote(importMetaURL(importer)));
+    rewritten = replaceImportMetaProperty(rewritten, 'filename', quote(importer));
+    rewritten = replaceImportMetaProperty(rewritten, 'dirname', quote(posix.dirname(importer)));
+    rewritten = replaceImportMetaProperty(rewritten, 'url', quote(importMetaURL(importer)));
     rewritten = replaceBareImportMeta(rewritten, importer);
     return rewritten;
   };

@@ -40,6 +40,12 @@ function tsgoWasmVersionForNativeVersion(version) {
 // unofficial distribution of the TypeScript native compiler.
 const BROWSER_PACKAGE_ALTERNATIVES = Object.freeze({
   esbuild: Object.freeze({ name: 'esbuild-wasm', reason: 'official-wasm-distribution' }),
+  '@biomejs/biome': Object.freeze({
+    name: '@biomejs/wasm-nodejs',
+    reason: 'official-wasm-distribution',
+    bin: Object.freeze({ biome: 'bin/biome' }),
+    fileAliases: Object.freeze([['biome_wasm.js', 'bin/biome', '../biome_wasm.js', 'biome-wasm-cli']]),
+  }),
   '@typescript/native-preview': Object.freeze({
     name: 'tsgo-wasm',
     reason: 'unofficial-wasm-distribution',
@@ -48,8 +54,82 @@ const BROWSER_PACKAGE_ALTERNATIVES = Object.freeze({
   }),
 });
 
+// Rolldown selects its official WASI binding at runtime when it detects a
+// WebContainer. The binding is deliberately not published as a normal
+// dependency because native npm installs use one of Rolldown's platform
+// optional packages instead. Browser installs must still stage the WASI
+// package so Rolldown's synchronous WebContainer fallback can copy it into
+// its temporary install directory.
+function browserSupplementalDependencies(name, version, platform) {
+  if (platform !== 'browser' || name !== 'rolldown') return null;
+  return { '@rolldown/binding-wasm32-wasi': `=${version}` };
+}
+
 function browserPackageAliasSource(importSpecifier, aliasKind) {
   const specifier = JSON.stringify(importSpecifier);
+  if (aliasKind === 'biome-wasm-cli') {
+    return `#!/usr/bin/env node
+const { readdirSync, readFileSync, statSync } = require('node:fs');
+const { join } = require('node:path');
+
+(async () => {
+  const biome = await import(${specifier});
+  const init = typeof biome.default === 'function' ? biome.default : null;
+  const MemoryFileSystem = biome.MemoryFileSystem || biome.default?.MemoryFileSystem;
+  const Workspace = biome.Workspace || biome.default?.Workspace;
+  const wasmPath = join(__dirname, '..', 'biome_wasm_bg.wasm');
+  if (init) await init(readFileSync(wasmPath));
+  const root = process.cwd();
+  const memory = new MemoryFileSystem();
+  const files = [];
+  const visit = (directory) => {
+    for (const name of readdirSync(directory)) {
+      if (name === 'node_modules' || name === '.git' || name.startsWith('.')) continue;
+      const pathname = join(directory, name);
+      if (statSync(pathname).isDirectory()) visit(pathname);
+      else if (/\\.(?:[cm]?js|[cm]?ts|tsx|jsx|jsonc?|css|graphql|html)$/i.test(name)) files.push(pathname);
+    }
+  };
+  visit(root);
+  for (const pathname of files) memory.insert(pathname, readFileSync(pathname));
+  const workspace = Workspace.withFileSystem(memory);
+  const project = workspace.openProject({ path: root, openUninitialized: false });
+  const scan = workspace.scanProject({ projectKey: project.projectKey, scanKind: 'project', force: true, watch: false });
+  let errors = scan.diagnostics.filter((diagnostic) => diagnostic.severity === 'error' || diagnostic.severity === 'fatal').length;
+  const configPaths = files.filter((pathname) => /(?:^|[\\/])biome\\.jsonc?$/i.test(pathname));
+  let schemaMismatch = false;
+  for (const pathname of configPaths) {
+    const result = workspace.pullDiagnostics({ projectKey: project.projectKey, path: pathname, categories: ['syntax', 'lint'] });
+    schemaMismatch ||= result.diagnostics.some((diagnostic) => diagnostic.category === 'deserialize'
+      && diagnostic.severity === 'information');
+    errors += result.errors;
+    for (const diagnostic of result.diagnostics) {
+      if (diagnostic.severity === 'error' || diagnostic.severity === 'fatal') {
+        console.error(diagnostic.description || diagnostic.category || 'Biome diagnostic');
+      }
+    }
+  }
+  for (const pathname of files) {
+    if (configPaths.includes(pathname)) continue;
+    const result = workspace.pullDiagnostics({
+      projectKey: project.projectKey,
+      path: pathname,
+      categories: schemaMismatch ? ['syntax'] : ['syntax', 'lint'],
+    });
+    errors += result.errors;
+    for (const diagnostic of result.diagnostics) {
+      if (diagnostic.severity === 'error' || diagnostic.severity === 'fatal') {
+        console.error(diagnostic.description || diagnostic.category || 'Biome diagnostic');
+      }
+    }
+  }
+  process.exitCode = errors ? 1 : 0;
+})().catch((error) => {
+  console.error(error?.stack || error);
+  process.exitCode = 1;
+});
+`;
+  }
   if (aliasKind === 'go-wasm-exit') {
     return `#!/usr/bin/env node\nconst originalExit = process.exit;\nlet wasmExitCode = 0;\nprocess.exit = (code = 0) => { wasmExitCode = Number(code) || 0; process.exitCode = wasmExitCode; };\ntry { await import(${specifier}); } finally { process.exit = originalExit; }\n`;
   }
@@ -990,7 +1070,7 @@ export class BrowserNpm {
       Object.assign(filesToMount, packageFiles);
 
       // Link package "bin" scripts into node_modules/.bin/
-      const packageBin = parsedPkgJson?.bin || versionDoc?.bin;
+      const packageBin = browserAlternative?.bin || parsedPkgJson?.bin || versionDoc?.bin;
       if (packageBin) {
         const binEntries = typeof packageBin === 'string'
           ? [[parsedPkgJson?.name || name, packageBin]]
@@ -1040,6 +1120,7 @@ export class BrowserNpm {
       const deps = {
         ...(versionDoc?.dependencies || {}),
         ...(parsedPkgJson?.dependencies || {}),
+        ...browserSupplementalDependencies(resolutionName, version, this.platform),
       };
       for (const [depName, depRange] of Object.entries(deps)) {
         const dependencyDir = dependencyLocation(depName, depRange, itemNodeModulesDir, pkgDir);

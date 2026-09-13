@@ -135,6 +135,9 @@ test('supports synchronous require of an ESM graph when the Node profile enables
       '/node/package-type-module/synchronous.js': `
         import first from './first.js';
         import second from './second.js';
+        const imports = {};
+        void imports;
+        // export function ignoredByTheLowerer() {}
         export const named = first.value + second;
         export default 'default';
       `,

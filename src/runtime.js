@@ -3106,11 +3106,11 @@ function moduleSynchronousEsmSource(source, filename = '/node/index.mjs') {
       : `module.exports[${JSON.stringify(name)}] = ${local};`;
   };
   transformed = transformed.replace(
-    /(^|[;\n])[ \t]*import[ \t]*([\s\S]*?)[ \t]*from[ \t]*(['\"])([^'\"]+)\3[ \t]*;?/g,
+    /(^|[;\n])[ \t]*\bimport\b[ \t]*([\s\S]*?)[ \t]*from[ \t]*(['\"])([^'\"]+)\3[ \t]*;?/g,
     (_, prefix, clause, quote, specifier) => `${prefix}${importBindings(clause, `require(${JSON.stringify(specifier)})`, clause.trim().startsWith('*'))}`,
   );
   transformed = transformed.replace(
-    /(^|[;\n])[ \t]*import[ \t]+(['\"])([^'\"]+)\2[ \t]*;?/g,
+    /(^|[;\n])[ \t]*\bimport\b[ \t]+(['\"])([^'\"]+)\2[ \t]*;?/g,
     (_, prefix, quote, specifier) => `${prefix}require(${JSON.stringify(specifier)});`,
   );
   transformed = transformed.replace(/\bconst\s+(require|exports|module)\s*=/g, 'var $1 =');
@@ -3243,9 +3243,18 @@ function moduleSynchronousEsmSource(source, filename = '/node/index.mjs') {
     /(^|[;\n])\s*export\s+(async\s+)?(function|class)\s+([$_A-Za-z][$_\w]*)/g,
     (_, prefix, asyncKeyword = '', declaration, name) => `${prefix}${asyncKeyword}${declaration} ${name}`,
   );
-  const exportedDeclarations = [...String(source).matchAll(/\bexport\s+(?:async\s+)?(?:function|class)\s+([$_A-Za-z][$_\w]*)/g)];
+  // Bundled ESM can contain line-oriented examples inside block comments.
+  // Mask comments before collecting declaration names so those examples do
+  // not become assignments to identifiers that were never declared.
+  const exportScanSource = String(source).replace(
+    /\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g,
+    (comment) => comment.replace(/[^\r\n]/g, ' '),
+  );
+  const exportedDeclarations = [...exportScanSource.matchAll(
+    /(^|[;\n])[ \t]*export[ \t]+(?:async[ \t]+)?(?:function|class)[ \t]+([$_A-Za-z][$_\w]*)/gm,
+  )];
   if (exportedDeclarations.length) {
-    transformed += `\n${exportedDeclarations.map(([, name]) => `module.exports.${name} = ${name};`).join('\n')}`;
+    transformed += `\n${exportedDeclarations.map(([, , name]) => `module.exports.${name} = ${name};`).join('\n')}`;
   }
   transformed = transformed.replace(
     /(^|[;\n])\s*export\s*\{\s*\}\s*;?/g,
@@ -10422,11 +10431,16 @@ export function createRuntime({
                       ...sourceManifest.manifest.dependencies,
                       ...sourceManifest.manifest.optionalDependencies,
                     };
+                    const nodeModulesMarker = '/node_modules/';
+                    const markerIndex = targetRoot.lastIndexOf(nodeModulesMarker);
+                    const dependencyNodeModules = markerIndex >= 0
+                      ? targetRoot.slice(0, markerIndex + '/node_modules'.length)
+                      : path.join(prepared.cwd, 'node_modules');
                     for (const [dependencyName, dependencyRange] of Object.entries(dependencies)) {
                       copyInstalledPackage(
                         dependencyName,
                         dependencyRange,
-                        path.join(prepared.cwd, 'node_modules', dependencyName),
+                        path.join(dependencyNodeModules, dependencyName),
                       );
                     }
                   };
@@ -14050,7 +14064,7 @@ export function createRuntime({
       }
       if (Object.hasOwn(moduleCache, resolved)) {
         return moduleCache[resolved].exports;
-      }
+          }
       let loaded;
       try {
         loaded = runModuleHook('load', resolvedURL, context, (url) => {
@@ -14102,7 +14116,7 @@ export function createRuntime({
               Object.defineProperty(cachedExports, '__esModule', { value: true, enumerable: true });
             }
             return cachedExports;
-          }
+      }
       const source = loaded?.source ?? vfs.readSource(resolved);
       const text = typeof source === 'string' ? source : new TextDecoder().decode(source);
       const compileText = text;

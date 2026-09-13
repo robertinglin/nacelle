@@ -109,6 +109,56 @@ test.describe('browser-native VFS and module loading', () => {
     expect(result.stdout).toContain('CommonJS filename resolution completed');
   });
 
+  test('uses the owning VFS module API for createRequire from ESM', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { createRequire } from 'node:module';
+      const requireFromEsm = createRequire(import.meta.url);
+      const value = requireFromEsm('/node/create-require/entry.cjs');
+      assert.deepStrictEqual(value, { nested: 'loaded', fs: 'function' });
+      process.stdout.write('ESM createRequire VFS completion');
+    `, {
+      entryPath: '/node/create-require/main.mjs',
+      files: {
+        '/node/create-require/entry.cjs': [
+          "module.exports = { nested: require('./nested.cjs'), fs: typeof require('node:fs').readFileSync };",
+        ].join('\n'),
+        '/node/create-require/nested.cjs': "module.exports = 'loaded';\n",
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('ESM createRequire VFS completion');
+  });
+
+  test('resolves createRequire targets staged below the virtual temp directory', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      import { createRequire } from 'node:module';
+      const requireFromTemp = createRequire('file:///tmp/create-require/loader.mjs');
+      assert.strictEqual(requireFromTemp('/tmp/create-require/entry.cjs'), 'temp-loaded');
+      process.stdout.write('temp createRequire VFS completion');
+    `, {
+      capabilities: {
+        vfs: { mounts: [
+          { path: '/node', mode: 'read-write' },
+          { path: '/tmp', mode: 'read-write' },
+        ] },
+        workers: { entryModules: ['*'], maxChildren: 8 },
+        ipc: { enabled: true },
+        signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
+        output: { maxBytes: 4 * 1024 * 1024, stdoutBytes: 2 * 1024 * 1024, stderrBytes: 2 * 1024 * 1024 },
+        envVars: { allowed: [] },
+      },
+      files: {
+        '/tmp/create-require/entry.cjs': "module.exports = 'temp-loaded';\n",
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('temp createRequire VFS completion');
+  });
+
   test('uses CommonJS package main when resolving a directory request', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       (() => {

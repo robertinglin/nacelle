@@ -55,8 +55,8 @@ not being reclassified as newly rerun here.
 | 33 | argparse | PASS | ours | Published `argparse@3.0.2` at gitHead `b24ea1892b4b7e7a268cd4554cdd654ec47c148f` passes exact CITGM in Chromium (`citgm-1789315178421`) and Firefox (`citgm-1789315226994`). The VFS now rejects writes to chmod 0400 files, and the loader accepts Firefox's Node-equivalent class-call TypeError wording; native Node passes the targeted `TestTypeClassicClass` suite. Required final gates passed after rebuilding: `npm test` and full Chromium/Firefox Playwright; complete artifacts and native comparison logs are preserved under `artifacts/citgm-top-100/rank-033-argparse/`. |
 | 34 | ignore | PASS | ours | Published `ignore@7.0.9` at gitHead `821765efdf7752b186a03ed0450d9ee013cee099` passes exact CITGM in Chromium (`citgm-1789317691280`) and Firefox (`citgm-1789317740056`); both the `7.0.6` and `7.0.9` compatibility worktrees pass, including `--win32`. Native Node v26 also passes the exact package (1368 assertions plus both compatibility modes), proving the initial browser failure was ours: the browser materialized a GitHub source archive without Git history, and the runtime lacked the Git/worktree surface and synchronous shebang launcher behavior required by the package. Required final gates passed: build; `npm test` 340/340; Chromium Playwright 289/289; Firefox Playwright 289/289. Complete attempts and native proof are preserved under `artifacts/citgm-top-100/rank-034-ignore/`. |
 | 35 | which | PASS | none observed | Published `which@7.0.0` at gitHead `297db11d58eebe01551ae0875a127a89ee63d2cb` passes exact CITGM in Chromium (`citgm-1789318901100`) and Firefox (`citgm-1789318952953`); installation, ESLint, and TAP all exited 0. Firefox records template-oss repository-drift diagnostics, but the package test contract is green. No runtime, nested-dependency, or upstream package/repository failure was observed. Repository-wide gates were skipped under the unchanged double-CITGM rule. Complete artifacts are preserved under `artifacts/citgm-top-100/rank-035-which/`. |
-| 36 | esbuild | PENDING | — | Not attempted; rank 35 is complete and rank 36 is current. |
-| 37 | isexe | PENDING | — | Not attempted; rank 33 is complete and rank 34 is current. |
+| 36 | esbuild | BLOCKED | upstream package/repository (monorepo package layout) | Published `esbuild@0.28.2` at gitHead `609683d892977362a0f99026cb74b96263d728a9` fails exact Chromium CITGM (`citgm-1789319117820`) and Firefox CITGM (`citgm-1789319307780`) because the downloaded monorepo root has no `package.json`; native Node CITGM 10.0.2 reproduces the same `/tmp/.../esbuild/package.json` ENOENT. The published npm package is under `npm/esbuild`, so this is proven upstream/CITGM project-layout failure, not a browser-runtime failure. No fake package root or shim was added. |
+| 37 | isexe | PENDING | — | Not attempted; rank 36 is complete and rank 37 is current. |
 | 38 | js-yaml | PENDING | — | Not attempted; rank 33 is complete and rank 34 is current. |
 | 39 | resolve | PENDING | — | Not attempted; rank 33 is complete and rank 34 is current. |
 | 40 | mime-types | PENDING | — | Not attempted; rank 33 is complete and rank 34 is current. |
@@ -121,7 +121,7 @@ not being reclassified as newly rerun here.
 | 99 | fast-json-stable-stringify | PENDING | — | Not attempted; rank 33 is complete and rank 34 is current. |
 | 100 | get-intrinsic | PENDING | — | Not attempted; rank 33 is complete and rank 34 is current. |
 
-The pending-row cursor now points to rank 36; no package after rank 36 has
+The pending-row cursor now points to rank 37; no package after rank 37 has
 been started.
 
 ## Rank 6 failure record
@@ -1002,3 +1002,32 @@ npm run build / npm test / full Playwright suites                  SKIPPED — u
 ```
 
 Rank 35 is recorded as `PASS` and the ordered cursor advances to rank 36.
+
+## Rank 36 failure record
+
+The published `esbuild@0.28.2` candidate at gitHead
+`609683d892977362a0f99026cb74b96263d728a9` was tested with CITGM 10.0.2.
+The complete Chromium and Firefox artifacts and native comparison are preserved under
+`artifacts/citgm-top-100/rank-036-esbuild/`.
+
+| Run / log | Observed failure | Classification and resolution |
+| --- | --- | --- |
+| `citgm-1789319117820` / `citgm-1789319307780` | Chromium and Firefox CITGM download `https://github.com/evanw/esbuild/archive/609683d892977362a0f99026cb74b96263d728a9.tar.gz`, then report `Package.json Could not be found` before package execution. | Not classified as upstream until native proof. |
+| `native-citgm-node-v26.log` | Native Node CITGM 10.0.2 reproduces the same failure during `npm install`: `/tmp/.../esbuild/package.json` is missing. | Upstream package/repository layout blocker, proven by native Node. The published npm package is located under the monorepo `npm/esbuild` subtree while CITGM resolves and installs the repository root. No fake package root, shim, or browser-only workaround was added. |
+
+## Rank 36 gate evidence
+
+The exact Chromium CITGM failure was reproduced by native Node before applying
+the upstream classification. No repository-wide gates were run because no
+repository change was made and the package is blocked before meaningful test
+execution:
+
+```text
+NACELLE_CITGM_ARTIFACT_DIR=artifacts/citgm-top-100/rank-036-esbuild npm run citgm:browser:chromium -- esbuild  FAIL — citgm-1789319117820 (missing monorepo-root package.json)
+NACELLE_CITGM_ARTIFACT_DIR=artifacts/citgm-top-100/rank-036-esbuild npm run citgm:browser:firefox -- esbuild   FAIL — citgm-1789319307780 (same missing monorepo-root package.json)
+npm exec --yes --package=citgm@10.0.2 -- citgm esbuild                                      FAIL — native Node v26, same ENOENT
+npm run build / npm test / full Playwright suites                                               NOT RUN — upstream/package-layout blocker; no repository changes
+```
+
+Rank 36 is recorded as `BLOCKED` only after the same failure was reproduced
+under native Node, and the ordered cursor advances to rank 37.

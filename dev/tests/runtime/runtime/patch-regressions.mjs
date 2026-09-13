@@ -1043,6 +1043,8 @@ test('wildcard caret and tilde ranges keep their respective upper bounds', () =>
   assert.equal(satisfiesSemver('1.9.0', '^1.2.x'), true);
   assert.equal(satisfiesSemver('2.0.0', '^1.2.x'), false);
   assert.equal(satisfiesSemver('1.3.0', '~1.2.x'), false);
+  assert.equal(satisfiesSemver('1.0.9', '1.x.x'), true);
+  assert.equal(satisfiesSemver('2.0.0', '1.x.x'), false);
   assert.equal(satisfiesSemver('12.1.0', '>=*'), true);
 });
 

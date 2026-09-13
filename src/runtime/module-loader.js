@@ -694,9 +694,25 @@ export function createModuleLoader({
     return source === undefined ? undefined : { format: 'module', source, url: resolved };
   };
 
-  const sourceText = (value) => typeof value === 'string'
-    ? value
-    : new TextDecoder().decode(value);
+  const sourceText = (value) => {
+    if (typeof value === 'string') return value;
+    // Async loader hooks can receive raw Buffer-like values from another
+    // realm. Copy the byte view into this realm before decoding so browser
+    // TextDecoder implementations accept SharedArrayBuffer-backed and
+    // cross-realm sources consistently.
+    let bytes;
+    try {
+      if (value && typeof value === 'object' && value.buffer !== undefined
+          && typeof value.byteLength === 'number') {
+        bytes = new Uint8Array(value.buffer, value.byteOffset || 0, value.byteLength);
+      } else {
+        bytes = new Uint8Array(value);
+      }
+    } catch {
+      bytes = Uint8Array.from(value);
+    }
+    return new TextDecoder().decode(Uint8Array.from(bytes));
+  };
 
   const packageConfigCache = new Map();
   // npm's .bin directory contains executable shims rather than package
@@ -2282,7 +2298,10 @@ export function createModuleLoader({
       : isBuiltinSpecifier(resolved) ? 'builtin'
       : /^[A-Za-z][A-Za-z\d+.-]*:/.test(resolved) ? 'module'
       : resolved.endsWith('.json') ? 'json' : moduleFormatForHook(resolved);
-    const loaded = tapmockLoad(resolved) || await runLoadHooksAsync(resolved, format, processOverride);
+    let loaded = tapmockLoad(resolved) || await runLoadHooksAsync(resolved, format, processOverride);
+    if (loaded?.source && typeof loaded.source.then === 'function') {
+      loaded = { ...loaded, source: await loaded.source };
+    }
     const loadedResolved = loaded.url ? hookURLToSpecifier(loaded.url, resolved) : resolved;
     if (loaded.format === 'builtin' && isBuiltinSpecifier(loadedResolved)) {
       return builtinModuleSource(loadedResolved, builtin(loadedResolved, processOverride));

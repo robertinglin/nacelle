@@ -220,10 +220,12 @@ function wildcardComparator(v, value) {
   const patchPart = match[4];
   const wildcardAt = /[xX*]/.test(minorPart || '') ? 'minor' : /[xX*]/.test(patchPart || '') ? 'patch' : null;
   if (!wildcardAt) return undefined;
+  const minorIsWildcard = /[xX*]/.test(minorPart || '');
+  const patchIsWildcard = /[xX*]/.test(patchPart || '');
   const lower = {
     major,
-    minor: minorPart && wildcardAt !== 'minor' ? Number(minorPart) : 0,
-    patch: patchPart && wildcardAt !== 'patch' ? Number(patchPart) : 0,
+    minor: minorPart && !minorIsWildcard ? Number(minorPart) : 0,
+    patch: patchPart && !patchIsWildcard ? Number(patchPart) : 0,
     prerelease: null,
   };
   const upper = wildcardAt === 'minor' || operator === '^' && major > 0

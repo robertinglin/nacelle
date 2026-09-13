@@ -87,6 +87,7 @@ function vfsError(code, path, operation, message = code) {
   if (operation) error.syscall = operation;
   const errno = {
     EEXIST: -17,
+    EACCES: -13,
     EBADF: -9,
     EISDIR: -21,
     ELOOP: -40,
@@ -760,6 +761,26 @@ export function createVfs(options = {}) {
   const directories = backend.directories instanceof Set ? backend.directories : new Set(['/']);
   const symlinks = backend.symlinks instanceof Map ? backend.symlinks : new Map();
   const metadata = new Map();
+  const configuredUid = options.uid;
+  const configuredGid = options.gid;
+  const currentCredential = (configured, method, fallback) => {
+    if (typeof configured === 'function') {
+      try {
+        const value = configured();
+        if (Number.isInteger(value) && value >= 0) return value;
+      } catch {}
+    } else if (Number.isInteger(configured) && configured >= 0) {
+      return configured;
+    }
+    try {
+      const activeProcess = globalThis.__bnhActiveProcess;
+      const value = activeProcess?.[method]?.();
+      if (Number.isInteger(value) && value >= 0) return value;
+    } catch {}
+    return fallback;
+  };
+  const currentUid = () => currentCredential(configuredUid, 'getuid', 1000);
+  const currentGid = () => currentCredential(configuredGid, 'getgid', 1000);
   const sourceVersions = new WeakMap();
   let nextSourceVersion = 0;
   let taskTracker = typeof options.trackTask === 'function' ? options.trackTask : null;
@@ -888,10 +909,34 @@ export function createVfs(options = {}) {
     let attributes = metadata.get(path);
     if (!attributes) {
       const now = Date.now();
-      attributes = { atimeMs: now, mtimeMs: now, ctimeMs: now, birthtimeMs: now, nlink: 1 };
+      attributes = {
+        atimeMs: now,
+        mtimeMs: now,
+        ctimeMs: now,
+        birthtimeMs: now,
+        nlink: 1,
+        uid: currentUid(),
+        gid: currentGid(),
+      };
       metadata.set(path, attributes);
     }
     return attributes;
+  }
+
+  function permissionBits(path) {
+    const attributes = metadataFor(path);
+    const mode = attributes.mode ?? (directories.has(path) ? 0o777 : 0o666);
+    const uid = currentUid();
+    if (uid === 0) return 0o7;
+    if (uid === attributes.uid) return (mode >> 6) & 0o7;
+    if (currentGid() === attributes.gid) return (mode >> 3) & 0o7;
+    return mode & 0o7;
+  }
+
+  function assertPermission(path, operation, requested) {
+    if ((permissionBits(path) & requested) !== requested) {
+      throw vfsError('EACCES', path, operation, 'permission denied');
+    }
   }
 
   function removeMetadata(path) {
@@ -1236,6 +1281,9 @@ export function createVfs(options = {}) {
     ensureParent(path, operation);
     if (directories.has(path) || symlinks.has(path)) throw isDirectory(path, operation);
     const previous = files.get(path);
+    if (previous && !['descriptor-write', 'mount', 'sync'].includes(operation)) {
+      assertPermission(path, operation, FS_CONSTANTS.W_OK);
+    }
     const bytes = decode(value, encoding);
     if (append && previous) {
       const combined = new Uint8Array(previous.byteLength + bytes.byteLength);
@@ -1251,12 +1299,13 @@ export function createVfs(options = {}) {
     return mount;
   }
 
-  function readBytes(path, operation = 'open') {
+  function readBytes(path, operation = 'open', permission = FS_CONSTANTS.R_OK) {
     path = resolvePath(path);
     access(path, operation);
     if (directories.has(path)) throw isDirectory(path, operation);
     const value = files.get(path);
     if (value === undefined) throw missing(path, operation);
+    if (permission) assertPermission(path, operation, permission);
     return new Uint8Array(value);
   }
 
@@ -1948,11 +1997,20 @@ export function createVfs(options = {}) {
       optionsObject = undefined;
     }
     validateEncoding(optionsObject);
-    resolve(pathValue);
+    const descriptorRecord = typeof pathValue === 'number' ? descriptor(pathValue) : null;
+    if (descriptorRecord?.directory) throw isDirectory(descriptorRecord.path, 'read');
+    if (!descriptorRecord) resolve(pathValue);
+    const readValue = () => {
+      if (!descriptorRecord) return readBytes(resolve(pathValue));
+      const source = readBytes(descriptorRecord.path, 'read');
+      const value = source.subarray(descriptorRecord.position);
+      descriptorRecord.position = source.length;
+      return value;
+    };
     if (typeof done === 'function') {
       scheduleReadFile(() => {
         try {
-          done(null, decodeText(readBytes(resolve(pathValue)), encodingOption(optionsObject)));
+          done(null, decodeText(readValue(), encodingOption(optionsObject)));
         } catch (error) {
           done(error);
         }
@@ -1960,7 +2018,7 @@ export function createVfs(options = {}) {
       return;
     }
     try {
-      const value = decodeText(readBytes(resolve(pathValue)), encodingOption(optionsObject));
+      const value = decodeText(readValue(), encodingOption(optionsObject));
       return value;
     } catch (error) {
       throw error;
@@ -1970,7 +2028,7 @@ export function createVfs(options = {}) {
   function truncate(pathValue, length = 0) {
     const path = resolvePath(resolve(pathValue));
     length = truncateLength(length);
-    const current = readBytes(path, 'open');
+    const current = readBytes(path, 'open', 0);
     const next = new Uint8Array(length);
     next.set(current.subarray(0, length));
     access(path, 'truncate', true);
@@ -2293,8 +2351,15 @@ export function createVfs(options = {}) {
     return 'r';
   }
 
+  const validOpenFlags = new Set(['r', 'r+', 'rs', 'rs+', 'w', 'wx', 'w+', 'wx+', 'a', 'ax', 'a+', 'ax+']);
+
   function openDescriptor(pathValue, flags = 'r') {
     flags = normalizeOpenFlags(flags);
+    if (!validOpenFlags.has(flags)) {
+      const error = new TypeError(`The argument 'flags' is invalid. Received '${flags}'`);
+      error.code = 'ERR_INVALID_ARG_VALUE';
+      throw error;
+    }
     const path = resolvePath(resolve(pathValue));
     const writable = flags.includes('w') || flags.includes('a') || flags.includes('+');
     access(path, 'open', writable);
@@ -2310,6 +2375,7 @@ export function createVfs(options = {}) {
       });
       return fd;
     }
+    if (files.has(path)) assertPermission(path, 'open', writable ? FS_CONSTANTS.W_OK : FS_CONSTANTS.R_OK);
     if (!files.has(path) && !flags.includes('w') && !flags.includes('a')) throw missing(path, 'open');
     if (flags.includes('x') && files.has(path)) throw existsError(path, 'open');
     if (!files.has(path)) setFile(path, new Uint8Array(), false, 'open');
@@ -2319,7 +2385,7 @@ export function createVfs(options = {}) {
       fd,
       path,
       flags,
-      position: flags.includes('a') ? readBytes(path).length : 0,
+      position: flags.includes('a') ? readBytes(path, 'open', 0).length : 0,
     });
     return fd;
   }
@@ -2493,11 +2559,11 @@ export function createVfs(options = {}) {
     }
     const at = bytePosition === null || bytePosition === undefined ? record.position : bytePosition;
     const count = Math.min(byteLength ?? valueBytes.length, valueBytes.length - byteOffset);
-    const target = readBytes(record.path, 'write');
+    const target = readBytes(record.path, 'write', 0);
     const result = new Uint8Array(Math.max(target.length, at + count));
     result.set(target);
     result.set(valueBytes.subarray(byteOffset, byteOffset + count), at);
-    setFile(record.path, result, false, 'write');
+    setFile(record.path, result, false, 'descriptor-write');
     if (bytePosition === null || bytePosition === undefined) record.position = at + count;
     return { bytesWritten: count, buffer: data };
   }

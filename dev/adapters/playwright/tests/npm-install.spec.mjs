@@ -69,6 +69,15 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     expect([...vfs.fs.readFileSync('/node/numeric.txt')]).toEqual([7, 8, 9]);
   });
 
+  test('VFS enforces chmod write permissions on existing files', () => {
+    const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
+    vfs.fs.writeFileSync('/node/readonly.txt', 'original');
+    vfs.fs.chmodSync('/node/readonly.txt', 0o400);
+    expect(() => vfs.fs.openSync('/node/readonly.txt', 'w')).toThrow(/EACCES/);
+    expect(() => vfs.fs.writeFileSync('/node/readonly.txt', 'blocked')).toThrow(/EACCES/);
+    expect(vfs.fs.readFileSync('/node/readonly.txt', 'utf8')).toBe('original');
+  });
+
   test('VFS opens read-only directories for fd metadata consumers', () => {
     const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
     const fd = vfs.fs.openSync('/node', 'r');

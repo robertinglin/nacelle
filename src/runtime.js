@@ -2434,7 +2434,7 @@ function createBrowserV8Module(processObject, scope) {
 }
 
 const COMMONJS_WRAPPER_PARAMETERS = Object.freeze([
-  'require', 'module', 'exports', '__filename', '__dirname', '__bnhImport',
+  'require', 'module', 'exports', '__filename', '__dirname', '__bnhImport', '__bnhRequireImport',
 ]);
 
 function rewriteCommonJsDynamicImports(source) {
@@ -2449,7 +2449,9 @@ function createGuestFunctionConstructor(NativeFunction, processOverride, sourceU
   const nativeFunction = NativeFunction.__bnhNativeFunction || NativeFunction;
   const GuestFunction = function guestFunctionConstructor(...args) {
     const body = args.length ? String(args.at(-1)) : '';
-    if (!body.includes('import')) return Reflect.construct(nativeFunction, args);
+    if (!body.includes('import')) {
+      return Reflect.construct(nativeFunction, args, new.target || nativeFunction);
+    }
     const parameters = args.slice(0, -1);
     const rewritten = rewriteCommonJsDynamicImports(body);
     const compiled = Reflect.construct(nativeFunction, ['__bnhImport', ...parameters, rewritten]);
@@ -2496,8 +2498,14 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
     )
     : null;
   if (moduleWrapper) {
-    let prefix = String(moduleWrapper[0]).replace('__dirname) {', '__dirname, __bnhImport) {');
-    if (bindProcess) prefix = prefix.replace('__bnhImport) {', '__bnhImport, process) {');
+    let prefix = String(moduleWrapper[0]).replace(
+      '__dirname) {',
+      '__dirname, __bnhImport, __bnhRequireImport) {',
+    );
+    if (bindProcess) prefix = prefix.replace(
+      '__bnhImport, __bnhRequireImport) {',
+      '__bnhImport, __bnhRequireImport, process) {',
+    );
     if (bindAsync) prefix = prefix.replace(/\)\s*\{\s*$/u, `, ${prepared.bindingName}) {`);
     const wrappedSource = `${prefix}${sourceText}${moduleWrapper[1]}`;
     const wrapped = new CommonJsFunction(`return ${wrappedSource}`)();
@@ -2508,6 +2516,7 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
       commonJsValues[3],
       commonJsValues[4],
       commonJsValues[5],
+      commonJsValues[6] || commonJsValues[0],
     ];
     if (bindProcess) values.push(effectiveProcessOverride);
     if (bindAsync) values.push(asyncRunner);
@@ -2555,7 +2564,15 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
     if (globalThis.__BNH_DISABLE_GUEST_FUNCTION !== true) globalThis.Function = createGuestFunctionConstructor(previousFunction, effectiveProcessOverride, sourceURL);
   }
   try {
-    const values = [...commonJsValues, commonJsValues[5] || ((specifier) => import(specifier))];
+    const values = [
+      commonJsValues[0],
+      commonJsValues[1],
+      commonJsValues[2],
+      commonJsValues[3],
+      commonJsValues[4],
+      commonJsValues[5] || ((specifier) => import(specifier)),
+      commonJsValues[6] || commonJsValues[0],
+    ];
     if (bindProcess) values.push(effectiveProcessOverride);
     if (bindAsync) values.push(asyncRunner);
     return wrapped(...values);
@@ -3036,6 +3053,17 @@ function moduleHasStaticEsmSyntax(source) {
   return /(?:^|[;\n])\s*(?:export\s+(?:default\b|(?:const|let|var|function|class)\b|[*{])|import\s*(?:(?:[^'";]*?from\s*)?['"]))/m.test(stripped);
 }
 
+// Node packages occasionally detect an ES class called without `new` by
+// matching V8's TypeError wording. Browser engines use different wording for
+// the same semantic error, so keep the Node-compatible spelling plus the
+// portable browser spelling in package source loaded by the runtime.
+function normalizeNodeClassCallErrorPatterns(source) {
+  return String(source).replace(
+    /\/Class constructor \.\* cannot be invoked without 'new'\/([dgimsuvy]*)/g,
+    (_, flags) => `/Class constructor .* cannot be invoked without 'new'|class constructors must be invoked with 'new'/${flags}`,
+  );
+}
+
 function cjsStaticExportNames(source) {
   const names = new Set();
   const add = (name) => {
@@ -3107,11 +3135,11 @@ function moduleSynchronousEsmSource(source, filename = '/node/index.mjs') {
   };
   transformed = transformed.replace(
     /(^|[;\n])[ \t]*\bimport\b[ \t]*([\s\S]*?)[ \t]*from[ \t]*(['\"])([^'\"]+)\3[ \t]*;?/g,
-    (_, prefix, clause, quote, specifier) => `${prefix}${importBindings(clause, `require(${JSON.stringify(specifier)})`, clause.trim().startsWith('*'))}`,
+    (_, prefix, clause, quote, specifier) => `${prefix}${importBindings(clause, `__bnhRequireImport(${JSON.stringify(specifier)})`, clause.trim().startsWith('*'))}`,
   );
   transformed = transformed.replace(
     /(^|[;\n])[ \t]*\bimport\b[ \t]+(['\"])([^'\"]+)\2[ \t]*;?/g,
-    (_, prefix, quote, specifier) => `${prefix}require(${JSON.stringify(specifier)});`,
+    (_, prefix, quote, specifier) => `${prefix}__bnhRequireImport(${JSON.stringify(specifier)});`,
   );
   transformed = transformed.replace(/\bconst\s+(require|exports|module)\s*=/g, 'var $1 =');
   transformed = transformed.replace(
@@ -3231,7 +3259,7 @@ function moduleSynchronousEsmSource(source, filename = '/node/index.mjs') {
   transformed = transformed.replace(
     /(^|[;\n])\s*export\s+\{([^}]+)\}\s+from\s+(['\"])([^'\"]+)\3\s*;?/g,
     (_, prefix, names, quote, specifier) => {
-      const request = `require(${JSON.stringify(specifier)})`;
+      const request = `__bnhRequireImport(${JSON.stringify(specifier)})`;
       const binding = `__bnhReexport${reexportIndex++}`;
       return `${prefix}const ${binding} = ${request};\n${names.split(',').map((part) => {
         const [local, exported = local] = part.trim().split(/\s+as\s+/);
@@ -3262,7 +3290,7 @@ function moduleSynchronousEsmSource(source, filename = '/node/index.mjs') {
   );
   transformed = transformed.replace(
     /(^|[;\n])\s*export\s+\*\s+from\s+(['\"])([^'\"]+)\2\s*;?/g,
-    (_, prefix, quote, specifier) => `${prefix}Object.assign(module.exports, require(${JSON.stringify(specifier)}));`,
+    (_, prefix, quote, specifier) => `${prefix}Object.assign(module.exports, __bnhRequireImport(${JSON.stringify(specifier)}));`,
   );
   if (uninitializedExportNames.length) {
     transformed += `\n${uninitializedExportNames.map((name) => `module.exports.${name} = ${name};`).join('\n')}`;
@@ -4236,6 +4264,23 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       closeOwnedServers();
       processObject._bnhReleaseTasks?.();
       for (const handle of timers) clearTimer(handle);
+    },
+  });
+  // Node exposes stdout/stderr as configurable enumerable accessors. Some
+  // packages temporarily replace the streams and inspect the original
+  // descriptor to restore them, so preserve that observable contract.
+  const processStdout = processObject.stdout;
+  const processStderr = processObject.stderr;
+  Object.defineProperties(processObject, {
+    stdout: {
+      configurable: true,
+      enumerable: true,
+      get: () => processStdout,
+    },
+    stderr: {
+      configurable: true,
+      enumerable: true,
+      get: () => processStderr,
     },
   });
   // Next.js tracing calls the Node process contract from forked virtual
@@ -5894,9 +5939,11 @@ export function createRuntime({
       Module.prototype._compile = function compile(content, filename, format) {
         const source = typeof content === 'string' ? content : String(content);
         const resolved = String(filename || this.filename || sourcePath);
-        const compileSource = format === 'module' || moduleHasStaticEsmSyntax(source)
-          ? moduleSynchronousEsmSource(source, resolved)
-          : source;
+        const compileSource = normalizeNodeClassCallErrorPatterns(
+          format === 'module' || moduleHasStaticEsmSyntax(source)
+            ? moduleSynchronousEsmSource(source, resolved)
+            : source,
+        );
         // require.extensions handlers (notably proxyquire) may install a
         // module-specific require before delegating to _compile. Preserve
         // that hook while still giving ordinary modules the local loader.
@@ -5921,6 +5968,16 @@ export function createRuntime({
         require.main = moduleApi._main || null;
         require.cache = moduleApi._cache || new Map();
         require.extensions = moduleApi._extensions;
+        const requireImport = (name) => {
+          if (BUILTIN_NAMES.includes(builtinName(name))) return require(name);
+          const resolveImport = processObj.__bnhModuleResolve;
+          const resolvedImport = typeof resolveImport === 'function'
+            ? resolveImport(name, resolved, ['node', 'import'])
+            : moduleApi._resolveFilename(name, this, false);
+          const url = typeof resolvedImport === 'object' ? resolvedImport.url : resolvedImport;
+          const importedPath = url.startsWith('file:') ? fileURLToPath(url) : url;
+          return moduleApi._load(importedPath, this, false, processObj);
+        };
         this.require = require;
         const previousActiveModulePath = processObj.__bnhActiveModulePath;
         processObj.__bnhActiveModulePath = resolved;
@@ -5928,13 +5985,13 @@ export function createRuntime({
           return runCommonJSWrapper(
             compileSource,
             resolved,
-            [require, this, this.exports, resolved, path.dirname(resolved),
-              (specifier, options) => {
-                if (typeof processObj.__bnhModuleImport === 'function') {
-                  return processObj.__bnhModuleImport(specifier, resolved, options);
-                }
-                throw new Error('The owning process module loader is unavailable');
-              }],
+              [require, this, this.exports, resolved, path.dirname(resolved),
+                (specifier, options) => {
+                  if (typeof processObj.__bnhModuleImport === 'function') {
+                    return processObj.__bnhModuleImport(specifier, resolved, options);
+                  }
+                  throw new Error('The owning process module loader is unavailable');
+                }, requireImport],
             currentModuleWrapper,
             processObj,
           );
@@ -8955,7 +9012,7 @@ export function createRuntime({
           return child;
         }
 
-        function resolveFileSync(specifier, importer, processObj = null) {
+        function resolveFileSync(specifier, importer, processObj = null, conditions = ['node', 'require']) {
           const source = String(specifier).replaceAll('\\', '/');
           if (source.startsWith('data:')) return source;
           const internalName = source.startsWith('node:') ? source.slice(5) : source;
@@ -8966,10 +9023,16 @@ export function createRuntime({
           }
           const resolveRequire = processObj?.__bnhModuleResolveRequire
             || processObject.__bnhModuleResolveRequire;
-          if (typeof resolveRequire === 'function') {
+          const resolveImport = processObj?.__bnhModuleResolve
+            || processObject.__bnhModuleResolve;
+          const resolver = conditions.includes('import') && typeof resolveImport === 'function'
+            ? resolveImport
+            : resolveRequire;
+          if (typeof resolver === 'function') {
             try {
-              const resolved = resolveRequire(source, importer);
-              return resolved.startsWith('file:') ? fileURLToPath(resolved) : resolved;
+              const resolved = resolver(source, importer, conditions);
+              const url = typeof resolved === 'object' ? resolved.url : resolved;
+              return url.startsWith('file:') ? fileURLToPath(url) : url;
             } catch (error) {
               // Preserve the runtime's explicit unsupported native-addon seam,
               // but never turn a missing bare package into an importer-relative
@@ -9362,6 +9425,18 @@ export function createRuntime({
             if (mock?.active) return mock.getCjsValue();
             return loadModuleSync(resolved, entryPath, processObj, scopeObj, bufferClass, stderrArr, undefined, moduleState, false, compileCacheState, text.includes('eval('), syncStreamWebApi);
           };
+          // Synchronous ESM is lowered into this CommonJS wrapper, but its
+          // static imports still need ESM package-export conditions. In
+          // particular, packages such as unicorn-magic expose an import
+          // target nested below the `node` condition and intentionally have
+          // no direct CommonJS `require` entry.
+          const requireImportFn = (name) => {
+            if (BUILTIN_NAMES.includes(builtinName(name))) return requireFn(name);
+            const resolved = resolveFileSync(name, entryPath, processObj, ['node', 'import']);
+            const mock = moduleMockFor(resolved);
+            if (mock?.active) return mock.getCjsValue();
+            return loadModuleSync(resolved, entryPath, processObj, scopeObj, bufferClass, stderrArr, undefined, moduleState, false, compileCacheState, text.includes('eval('), syncStreamWebApi);
+          };
           requireFn.resolve = (name) => BUILTIN_NAMES.includes(builtinName(name)) ? name : resolveFileSync(name, entryPath, processObj);
           requireFn.main = moduleState.main;
           // Next.js invalidates generated manifests through delete
@@ -9422,7 +9497,7 @@ export function createRuntime({
               moduleSource,
               entryPath,
               [requireFn, moduleRecord, moduleExports, entryPath, path.dirname(entryPath),
-                importFromCommonJs],
+                importFromCommonJs, requireImportFn],
               activeModuleApi.wrapper,
               processObj,
             );
@@ -11226,6 +11301,56 @@ export function createRuntime({
                 streamed: Boolean((onStdout && stdout) || (onStderr && stderr)),
               });
             }
+            // A package lifecycle script can invoke Node with flags but no
+            // script path, most notably `node --test`. This is still a real
+            // Node child; sending it to virtualAsync would treat `--test` as
+            // an ordinary executable argument and bypass the prepared Node
+            // test runner.
+            if ((entry === processObject.execPath || isNodeExecutable(entry))
+              && Array.isArray(argv) && argv.length > 0
+              && typeof argv[0] === 'string' && argv[0].startsWith('-')) {
+              const prepared = prepareChild(entry, argv, {
+                cwd,
+                env: commandEnv,
+                input: stdin,
+                signal,
+                timeout,
+              }, ownerProcess);
+              const stdout = [];
+              const stderr = [];
+              const complete = (code, signalValue) => ({
+                code: signalValue ? null : code ?? 1,
+                stdout: stdout.join(''),
+                stderr: stderr.join(''),
+                streamed: Boolean(stdout.length || stderr.length),
+              });
+              const result = runPreparedSync(prepared, {
+                asyncLifecycle: true,
+                encoding: 'utf8',
+                onStdout: (value) => {
+                  const chunk = normalizeOutputChunk(value);
+                  stdout.push(chunk);
+                  onStdout?.(chunk);
+                },
+                onStderr: (value) => {
+                  const chunk = normalizeOutputChunk(value);
+                  stderr.push(chunk);
+                  onStderr?.(chunk);
+                },
+              });
+              if (!result.pending || !result.process) return Promise.resolve(complete(result.status, result.signal));
+              return new Promise((resolve) => {
+                result.process.once('exit', (code, signalValue) => {
+                  scope.queueMicrotask(() => {
+                    const finalSignal = result.process.getSignal?.() || signalValue || null;
+                    const finalCode = finalSignal
+                      ? null
+                      : (result.process.getCode?.() ?? code);
+                    resolve(complete(finalCode, finalSignal));
+                  });
+                });
+              });
+            }
             // `node script` is a real child launch.  If the script is ESM (or
             // has an ESM loader registered), preserve that format at this
             // boundary instead of sending it through the synchronous
@@ -12388,11 +12513,23 @@ export function createRuntime({
     }, stdout, stderr, trackTask);
     reportExecutePhase('process-created');
     const processData = injectedProcess
-      ? (() => {
+        ? (() => {
           const processObject = fullProcessData.processObject;
           // Preserve injected process identity and capabilities (stdout, stderr, exit control, IPC)
-          processObject.stdout = injectedProcess.stdout || processObject.stdout;
-          processObject.stderr = injectedProcess.stderr || processObject.stderr;
+          const injectedStdout = injectedProcess.stdout || processObject.stdout;
+          const injectedStderr = injectedProcess.stderr || processObject.stderr;
+          Object.defineProperties(processObject, {
+            stdout: {
+              configurable: true,
+              enumerable: true,
+              get: () => injectedStdout,
+            },
+            stderr: {
+              configurable: true,
+              enumerable: true,
+              get: () => injectedStderr,
+            },
+          });
           installProcessStdoutIterableSurface(processObject.stdout, processObject);
           installProcessStderrSocketSurface(processObject.stderr, processObject);
           const injectedStdin = injectedProcess.stdin;
@@ -13913,10 +14050,17 @@ export function createRuntime({
         const source = decodeURIComponent(dataPath.slice(comma + 1).split('#')[0]);
         const dataModule = { exports: {} };
         const dataRequire = (child) => loadModule(child, dataPath, false, processObj);
+        const dataRequireImport = (child) => {
+          const resolvedImport = processObj.__bnhModuleResolve?.(child, dataPath, ['node', 'import']);
+          if (!resolvedImport) return dataRequire(child);
+          const url = typeof resolvedImport === 'object' ? resolvedImport.url : resolvedImport;
+          const importedPath = url.startsWith('file:') ? fileURLToPath(url) : url;
+          return loadModule(importedPath, dataPath, true, processObj);
+        };
         runInProcessContext(() => runCommonJSWrapper(
           moduleSynchronousEsmSource(source, dataPath),
           dataPath,
-          [dataRequire, dataModule, dataModule.exports, dataPath, '/', undefined],
+          [dataRequire, dataModule, dataModule.exports, dataPath, '/', undefined, dataRequireImport],
           null,
           processObj,
         ));

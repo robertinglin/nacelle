@@ -854,6 +854,49 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('runs bare node test discovery from an npm lifecycle child', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/node', [
+          '/node/node_modules/.bin/npm', 'test',
+        ], { cwd: '/node/.citgm/tmp/package-under-test' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput + output);
+        assert.match(output, /# tests 1/);
+        assert.match(output, /# pass 1/);
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/.citgm/tmp/package-under-test/package.json': JSON.stringify({
+          name: 'nested-node-test-fixture',
+          version: '1.0.0',
+          scripts: { test: 'node --test' },
+        }),
+        '/node/.citgm/tmp/package-under-test/test/basic.test.js': [
+          "import test from 'node:test';",
+          "test('nested npm test', () => {});",
+        ].join('\n'),
+        '/node/node_modules/.bin/node': '#!/usr/bin/env node\\n',
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\\n',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
   test('runs nested package-manager lifecycle scripts through a Node child', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert');

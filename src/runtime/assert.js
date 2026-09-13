@@ -142,7 +142,12 @@ function inspectEnumerableProperties(value, options, state) {
     .filter((key) => Object.prototype.propertyIsEnumerable.call(value, key))
     .sort((a, b) => String(a).localeCompare(String(b)));
   if (keys.length === 0) return '';
-  const entries = keys.map((key) => `  ${propertyLabel(key)}: ${indentMultiline(inspect(value[key], options, state), 2)}`);
+  const compactEntries = keys.map((key) => `${propertyLabel(key)}: ${inspect(value[key], options, state)}`);
+  const compact = `{ ${compactEntries.join(', ')} }`;
+  if (options.compact !== false && !compact.includes('\n') && compact.length <= (options.breakLength ?? 80)) {
+    return compact;
+  }
+  const entries = compactEntries.map((entry) => `  ${indentMultiline(entry, 2)}`);
   return `{\n${entries.join(',\n')}\n}`;
 }
 
@@ -170,17 +175,17 @@ function inspect(value, options = {}, state = { seen: new Map(), nextReference: 
   if (typeof value === 'bigint') return `${value}n`;
   if (typeof value === 'boolean') return String(value);
   if (typeof value === 'symbol') return String(value);
-  if (typeof value === 'function') return `[Function${value.name ? `: ${value.name}` : ' (anonymous)'}]`;
-  if (options.depth === -1) {
-    if (Array.isArray(value)) return '[Array]';
-    return `[${value.constructor?.name || 'Object'}]`;
-  }
   if (options.customInspect !== false) {
     const customInspect = value?.[inspectCustomSymbol];
     if (typeof customInspect === 'function' && customInspect !== inspect) {
       const result = customInspect.call(value, options.depth ?? 2, options, inspect);
       if (result !== value) return typeof result === 'string' ? result : inspect(result, options, state);
     }
+  }
+  if (typeof value === 'function') return `[Function${value.name ? `: ${value.name}` : ' (anonymous)'}]`;
+  if (options.depth === -1) {
+    if (Array.isArray(value)) return '[Array]';
+    return `[${value.constructor?.name || 'Object'}]`;
   }
   if (value instanceof RegExp) {
     try {
@@ -280,10 +285,17 @@ function inspect(value, options = {}, state = { seen: new Map(), nextReference: 
 
   if (Array.isArray(value)) {
     if (value.length === 0) return '[]';
-    const items = [];
+    const values = [];
     for (let index = 0; index < value.length; index += 1) {
-      items.push(`  ${Object.prototype.hasOwnProperty.call(value, index) ? indentMultiline(inspect(value[index], options, state), 2) : '<empty>'}`);
+      values.push(Object.prototype.hasOwnProperty.call(value, index) ? inspect(value[index], options, state) : '<empty>');
     }
+    const compact = `[ ${values.join(', ')} ]`;
+    if (options.compact !== false && !compact.includes('\n') && compact.length <= (options.breakLength ?? 80)) {
+      return compact.includes(`[Circular *${reference}]`)
+        ? `<ref *${reference}> ${compact}`
+        : compact;
+    }
+    const items = values.map((entry) => `  ${indentMultiline(entry, 2)}`);
     const rendered = `[\n${items.join(',\n')}\n]`;
     return rendered.includes(`[Circular *${reference}]`)
       ? `<ref *${reference}> ${rendered}`
@@ -316,12 +328,12 @@ function inspect(value, options = {}, state = { seen: new Map(), nextReference: 
   const keys = Reflect.ownKeys(value)
     .sort((a, b) => typeof a === 'symbol' ? -1 : typeof b === 'symbol' ? 1 : String(a).localeCompare(String(b)));
   if (keys.length === 0) return '{}';
-  const entries = keys.map((key) => {
+  const compactEntries = keys.map((key) => {
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     if (descriptor && (descriptor.get || descriptor.set)) {
       const accessor = descriptor.get && descriptor.set ? 'Getter/Setter' : descriptor.get ? 'Getter' : 'Setter';
-      if (options.getters !== true || !descriptor.get) return `  ${propertyLabel(key)}: [${accessor}]`;
-      return `  ${propertyLabel(key)}: [Getter: ${indentMultiline(inspect(value[key], options, state), 2)}]`;
+      if (options.getters !== true || !descriptor.get) return `${propertyLabel(key)}: [${accessor}]`;
+      return `${propertyLabel(key)}: [Getter: ${inspect(value[key], options, state)}]`;
     }
     let entry;
     try {
@@ -329,10 +341,18 @@ function inspect(value, options = {}, state = { seen: new Map(), nextReference: 
     } catch {
       entry = '<unavailable>';
     }
-    return `  ${propertyLabel(key)}: ${indentMultiline(inspect(entry, options, state), 2)}`;
+    return `${propertyLabel(key)}: ${inspect(entry, options, state)}`;
   });
- const prefix = '';
- const label = value instanceof Comparison ? 'Comparison ' : '';
+  const compact = `{ ${compactEntries.join(', ')} }`;
+  const prefix = '';
+  const label = value instanceof Comparison ? 'Comparison ' : '';
+  if (options.compact !== false && !compact.includes('\n') && compact.length + label.length <= (options.breakLength ?? 80)) {
+    const rendered = `${label}${compact}`;
+    return rendered.includes(`[Circular *${reference}]`)
+      ? `<ref *${reference}> ${rendered}`
+      : rendered;
+  }
+  const entries = compactEntries.map((entry) => `  ${indentMultiline(entry, 2)}`);
   const rendered = `${prefix}${label}{\n${entries.join(',\n')}\n}`;
   return rendered.includes(`[Circular *${reference}]`)
     ? `<ref *${reference}> ${rendered}`
@@ -1240,9 +1260,6 @@ function matcherResult(error, expected) {
       && error?.name === expected.name
       && Object.getPrototypeOf(error) !== expected.prototype) return { matched: false };
     if (expected.prototype !== undefined && error instanceof expected) {
-      if (expected.name.endsWith('Error')
-        && error.constructor?.name === expected.name
-        && error.constructor !== expected) return { matched: false };
       return { matched: true };
     }
     const isErrorConstructor = expected.prototype

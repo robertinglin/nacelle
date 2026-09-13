@@ -520,7 +520,7 @@ function createMockTracker(scope, timerModules, moduleOptions = {}) {
 export function createNodeTest({ scope, processObject, stdout, stderr, trackTask, assert, timers = {}, timerPromises = {}, sourcePath, execArgv = [] }) {
   normalizeProcessEnv(processObject);
   const schedule = typeof scope.queueMicrotask === 'function' ? scope.queueMicrotask.bind(scope) : (callback) => scope.setTimeout(callback, 0);
-  const createRoot = () => ({ name: '<root>', fullName: '<root>', parent: null, before: [], after: [], beforeEach: [], afterEach: [], children: [], started: false, beforeReady: null, completion: null, runTail: Promise.resolve() });
+  const createRoot = () => ({ name: '<root>', fullName: '<root>', parent: null, before: [], after: [], beforeEach: [], afterEach: [], children: [], started: false, beforeReady: null, completion: null, runTail: Promise.resolve(), suiteTail: Promise.resolve() });
   // A node:test runner gives each discovered file its own top-level suite.
   // Keep the initial root for ordinary `test()` calls, then replace it before
   // each file loaded by run() so root hooks and child registration cannot leak
@@ -701,7 +701,7 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
   }
   function startSuite(suite) {
     if (suite.started) return suite; suite.started = true; const release = trackTask();
-    suite.beforeReady = (async () => { try { await Promise.resolve(); await runHooks(suite.before, { name: suite.name, fullName: suite.fullName, signal: suite.signal, diagnostic, assert }); return null; } catch (error) { return error; } })();
+    suite.beforeReady = (async () => { try { await suite.startGate; await Promise.resolve(); await runHooks(suite.before, { name: suite.name, fullName: suite.fullName, signal: suite.signal, diagnostic, assert }); return null; } catch (error) { return error; } })();
     suite.completion = (async () => { const beforeError = await suite.beforeReady; await Promise.all(suite.children); try { await runHooks([...suite.after].reverse(), { name: suite.name, signal: suite.signal }); } catch (error) { reportFailure(error); } if (beforeError) reportFailure(beforeError); })().finally(() => release?.()); return suite;
   }
   function hook(name, callback) { if (typeof callback !== 'function') throw invalidType(`${name} callback`, 'function', callback); suiteStack.at(-1)[name].push(callback); }
@@ -712,7 +712,7 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
   }
   function hookChain(suite, name) { const chain = []; for (let current = suite; current; current = current.parent) chain.push(...current[name]); return name === 'afterEach' ? chain : chain.reverse(); }
   function createSuite(name, options, callback, parent) {
-    const suite = { name: String(name ?? '(anonymous suite)'), fullName: parent === root ? String(name ?? '(anonymous suite)') : `${parent.fullName} > ${String(name ?? '(anonymous suite)')}`, parent, signal: options.signal, before: [], after: [], beforeEach: [], afterEach: [], children: [], started: false, beforeReady: null, completion: null, runTail: Promise.resolve() };
+    const suite = { name: String(name ?? '(anonymous suite)'), fullName: parent === root ? String(name ?? '(anonymous suite)') : `${parent.fullName} > ${String(name ?? '(anonymous suite)')}`, parent, signal: options.signal, before: [], after: [], beforeEach: [], afterEach: [], children: [], started: false, beforeReady: null, completion: null, runTail: Promise.resolve(), startGate: parent === root ? root.suiteTail : Promise.resolve() };
     let definitionError = null;
     if (!options.skip && !options.todo && typeof callback === 'function') {
       suiteStack.push(suite);
@@ -722,7 +722,9 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
     // Hooks are registered while the suite definition callback runs. Start
     // the suite only after that callback has returned so async before hooks
     // cannot race test execution with an empty hook list.
-    parent.children.push(startSuite(suite).completion);
+    const completion = startSuite(suite).completion;
+    parent.children.push(completion);
+    if (parent === root) root.suiteTail = suite.startGate.then(() => completion);
     if (definitionError) throw definitionError;
     return suite.completion;
   }
@@ -733,14 +735,26 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
     // Capture the owning file while the file is being discovered. The active
     // run advances to the next file before the serialized result is emitted,
     // so consulting activeRun.file at completion misattributes failures and
-    // leaves reporters without the real per-test error context.
-    const file = activeRun?.file || sourcePath || processObject.argv?.[1];
+    // leaves reporters without the real per-test error context. CommonJS
+    // evaluation exposes the path directly; ESM-only callers fall back to
+    // their registration stack before using the synthetic runner argv.
+    const stackFile = [...String(new Error().stack || '').matchAll(/(?:^|[\s(@])(\/node\/[^():\s]+\.m?js):\d+:\d+/g)]
+      .map((match) => match[1])
+      .find((candidate) => !candidate.includes('/runtime/'));
+    const file = activeRun?.file || processObject.__bnhActiveModulePath || stackFile
+      || processObject.argv?.[1] || sourcePath;
     const result = new Promise((resolve) => {
       const node = { children: [], fullName, file, before: [], after: [], beforeEach: [], afterEach: [], beforeReady: null, context: null, mock: null, runTail: Promise.resolve() };
       const run = async () => {
         const release = trackTask();
         runtimeState.activeTest = { name: label, fullName, file, state: 'running' };
         try {
+          // Node runs top-level suites from one file serially by default.
+          // Keep process-global fixtures such as stdout/stderr replacements
+          // from overlapping across the package's independently declared
+          // suites; callers can still opt into concurrency explicitly later.
+          if (ownerNode?.parent?.parent === null) await ownerNode.startGate;
+          else if (parent?.parent === root) await parent.startGate;
           const suiteState = startSuite(parent);
           const beforeError = await suiteState.beforeReady;
           if (beforeError) {
@@ -858,6 +872,11 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
             }
           };
           const timeout = testOptions.timeout ?? activeRun?.timeout;
+          const previousArgv = processObject.argv;
+          const testArgv = Array.isArray(previousArgv) ? [...previousArgv] : [];
+          if (testArgv.length < 2) testArgv.push(file);
+          else testArgv[1] = file;
+          processObject.argv = testArgv;
           try {
             try { await runWithTimeout(execute, timeout, label, (error) => testAbortController?.abort(error)); }
             catch (error) { failure ||= error; }
@@ -869,10 +888,11 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
               return { name: label, status: 'fail', error: failure, file };
             }
             if (!runOwnsOutput) stdout(`ok - ${label}\n`);
-            return { name: label, status: 'pass', file };
-          } finally {
-            removeExternalAbort?.();
-          }
+              return { name: label, status: 'pass', file };
+            } finally {
+              processObject.argv = previousArgv;
+              removeExternalAbort?.();
+            }
         } finally {
           if (runtimeState.activeTest?.file === file && runtimeState.activeTest?.name === label) {
             runtimeState.activeTest = null;
@@ -972,7 +992,16 @@ export function createNodeTest({ scope, processObject, stdout, stderr, trackTask
           if (typeof processObject.__bnhModuleImport !== 'function') {
             throw codedError(Error, 'ERR_UNSUPPORTED_NODE_TEST_RUN', 'node:test run cannot load test files in this process');
           }
-          await processObject.__bnhModuleImport(String(file), importer, undefined, processObject);
+          const previousArgv = processObject.argv;
+          const fileArgv = Array.isArray(previousArgv) ? [...previousArgv] : [];
+          if (fileArgv.length < 2) fileArgv.push(String(file));
+          else fileArgv[1] = String(file);
+          processObject.argv = fileArgv;
+          try {
+            await processObject.__bnhModuleImport(String(file), importer, undefined, processObject);
+          } finally {
+            processObject.argv = previousArgv;
+          }
         }
         // Release test chains only after the final file has finished
         // registering its tests and root hooks.

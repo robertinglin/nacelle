@@ -46,6 +46,17 @@ function stripHashbang(source) {
   ));
 }
 
+// Node packages occasionally detect an ES class called without `new` by
+// matching V8's TypeError wording. Browser engines use different wording for
+// the same semantic error, so keep the Node-compatible spelling plus the
+// portable browser spelling in package source loaded by the runtime.
+function normalizeNodeClassCallErrorPatterns(source) {
+  return String(source).replace(
+    /\/Class constructor \.\* cannot be invoked without 'new'\/([dgimsuvy]*)/g,
+    (_, flags) => `/Class constructor .* cannot be invoked without 'new'|class constructors must be invoked with 'new'/${flags}`,
+  );
+}
+
 function stripPathIdentity(path) {
   const value = String(path);
   const query = value.indexOf('?');
@@ -1936,7 +1947,7 @@ export function createModuleLoader({
       require.cache = cache;
       require.main = mainModule;
       module.require = require;
-      const transformed = source.replace(/\bimport\s*\(/g, '__bnhImport(');
+      const transformed = normalizeNodeClassCallErrorPatterns(source.replace(/\bimport\s*\(/g, '__bnhImport('));
       const names = Object.keys(globals || {});
       const fn = new Function('exports', 'require', 'module', '__filename', '__dirname', '__bnhImport', ...names, transformed);
       const result = fn(module.exports, require, module, resolved, dirname,

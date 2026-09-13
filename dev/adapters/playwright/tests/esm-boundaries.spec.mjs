@@ -157,6 +157,154 @@ test('supports synchronous require of an ESM graph when the Node profile enables
   expect(JSON.parse(child.stdout)).toEqual({ __esModule: true, default: 'default', named: 'named', packageValue: 'main' });
 });
 
+test('uses ESM conditions for static imports lowered inside synchronously required ESM', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const assert = require('node:assert/strict');
+    const value = require('conditional-esm-parent');
+    assert.strictEqual(value.selected, 'node import target');
+    assert.throws(() => require('conditional-esm-child'), (error) => {
+      assert.strictEqual(error.code, 'ERR_PACKAGE_PATH_NOT_EXPORTED');
+      return true;
+    });
+    process.stdout.write('conditional ESM export conditions completed');
+  `, {
+    files: {
+      '/node/node_modules/conditional-esm-parent/package.json': JSON.stringify({
+        name: 'conditional-esm-parent',
+        type: 'module',
+        exports: { types: './index.d.ts', default: './index.js' },
+      }),
+      '/node/node_modules/conditional-esm-parent/index.js': `
+        import { selected } from 'conditional-esm-child';
+        export { selected };
+      `,
+      '/node/node_modules/conditional-esm-child/package.json': JSON.stringify({
+        name: 'conditional-esm-child',
+        type: 'module',
+        exports: {
+          node: { types: './node.d.ts', import: './node.js' },
+          default: { types: './default.d.ts', import: './default.js' },
+        },
+      }),
+      '/node/node_modules/conditional-esm-child/node.js': `export const selected = 'node import target';`,
+      '/node/node_modules/conditional-esm-child/default.js': `export const selected = 'default import target';`,
+    },
+  });
+
+  await expectPass(expect, result);
+  expect(result.stdout).toContain('conditional ESM export conditions completed');
+});
+
+test('preserves subclass prototypes when a virtual process constructs Function subclasses', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const assert = require('node:assert/strict');
+    class FunctionBase extends Function {
+      constructor() {
+        super('return 42');
+      }
+    }
+    class DerivedFunction extends FunctionBase {
+      marker() { return 'prototype survived'; }
+    }
+    const value = new DerivedFunction();
+    assert.strictEqual(value(), 42);
+    assert.strictEqual(value.marker(), 'prototype survived');
+    assert.strictEqual(value instanceof DerivedFunction, true);
+    process.stdout.write('Function subclass prototype completed');
+  `);
+
+  await expectPass(expect, result);
+  expect(result.stdout).toContain('Function subclass prototype completed');
+});
+
+test('preserves callable class error prototypes and process stream descriptors', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const assert = require('node:assert/strict');
+    function callable(cls) {
+      const result = { [cls.name]: function (...args) {
+        const thisClass = new.target === result || !new.target;
+        return Reflect.construct(cls, args, thisClass ? cls : new.target);
+      } };
+      result[cls.name].prototype = cls.prototype;
+      cls.prototype[Symbol.toStringTag] = cls.name;
+      return result[cls.name];
+    }
+    const ArgumentError = callable(class ArgumentError extends Error {});
+    const error = new ArgumentError('expected');
+    const stdoutDescriptor = Object.getOwnPropertyDescriptor(process, 'stdout');
+    assert.strictEqual(error instanceof ArgumentError, true);
+    assert.strictEqual(Object.getPrototypeOf(error), ArgumentError.prototype);
+    assert.throws(() => { throw error; }, ArgumentError);
+    assert.strictEqual(stdoutDescriptor.enumerable, true);
+    assert.strictEqual(stdoutDescriptor.configurable, true);
+    assert.strictEqual(typeof stdoutDescriptor.get, 'function');
+    class StdIOBuffer {
+      write() {}
+    }
+    class SystemExit extends Error {}
+    class ParserError extends Error {}
+    const captureParserExit = (fn) => {
+      if (process.stdout instanceof StdIOBuffer || process.stderr instanceof StdIOBuffer) return fn();
+      const oldStdout = Object.getOwnPropertyDescriptor(process, 'stdout');
+      const oldStderr = Object.getOwnPropertyDescriptor(process, 'stderr');
+      Object.defineProperty(process, 'stdout', { value: new StdIOBuffer() });
+      Object.defineProperty(process, 'stderr', { value: new StdIOBuffer() });
+      try {
+        try { return fn(); }
+        catch (caught) {
+          if (!(caught instanceof SystemExit)) throw caught;
+          throw new ParserError('captured');
+        }
+      } finally {
+        Object.defineProperty(process, 'stdout', oldStdout);
+        Object.defineProperty(process, 'stderr', oldStderr);
+      }
+    };
+    const BaseParser = callable(class BaseParser {
+      parse_args() { return this.error('bad'); }
+      error(message) { return this.exit(2, message); }
+      exit() { throw new SystemExit(); }
+    });
+    class ErrorRaisingParser extends BaseParser {
+      parse_args(...args) { return captureParserExit(() => super.parse_args(...args)); }
+      error(...args) { return captureParserExit(() => super.error(...args)); }
+      exit(...args) { return captureParserExit(() => super.exit(...args)); }
+    }
+    assert.throws(() => new ErrorRaisingParser().parse_args(), ParserError);
+    process.stdout.write('callable error and stream descriptor completed');
+  `);
+
+  await expectPass(expect, result);
+  expect(result.stdout).toContain('callable error and stream descriptor completed');
+});
+
+test('accepts browser class-call TypeError wording in CommonJS package code', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const assert = require('node:assert/strict');
+    const compatible = require('/node/node_modules/class-call-wording-fixture');
+    assert.strictEqual(compatible, true);
+    process.stdout.write('class-call wording completed');
+  `, {
+    files: {
+      '/node/node_modules/class-call-wording-fixture/package.json': JSON.stringify({
+        name: 'class-call-wording-fixture',
+        main: 'index.js',
+      }),
+      '/node/node_modules/class-call-wording-fixture/index.js': `
+        module.exports = (() => {
+          class C {}
+          const nodeClassError = /Class constructor .* cannot be invoked without 'new'/;
+          try { C('value'); } catch (error) { return nodeClassError.test(error.message); }
+          return false;
+        })();
+      `,
+    },
+  });
+
+  await expectPass(expect, result);
+  expect(result.stdout).toContain('class-call wording completed');
+});
+
 test('allows ESM bindings that overlap synthetic CommonJS wrapper names', async ({ harnessPage }) => {
   const result = await harnessPage.run(`
     const assert = require('node:assert/strict');

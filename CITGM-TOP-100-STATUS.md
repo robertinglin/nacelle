@@ -1135,4 +1135,21 @@ npm run build                              PASS — build-final2.log
 npm test                                   PASS — 345/345, npm-test-final2.log
 npm run test:browser:chromium              PASS — 296/296, playwright-chromium-final2.log
 npm run test:browser:firefox                PASS — 296/296, playwright-firefox-final2.log
+
+## Rank 40 status
+
+The published `mime-types@3.0.2` candidate at gitHead
+`29a0302d799933a45384892df0722f3c5bb1b033` passed exact CITGM 10.0.2 under
+native Node v26, Chromium, and Firefox. Artifacts are preserved under
+`artifacts/citgm-top-100/rank-040-mime-types/`. No package, nested dependency,
+or runtime failure was observed, so no failure classification applies.
+
+```text
+npm exec --yes --package=citgm@10.0.2 -- citgm mime-types       PASS — native-citgm-node-v26.log
+npm run citgm:browser:chromium -- mime-types                    PASS — citgm-1789334125439
+npm run citgm:browser:firefox -- mime-types                     PASS — citgm-1789334143512
+npm test / full Chromium / full Firefox Playwright suites        NOT RUN — double CITGM pass with no source change
+```
+
+Rank 40 is recorded as `PASS` and the ordered cursor advances to rank 41.
 ```

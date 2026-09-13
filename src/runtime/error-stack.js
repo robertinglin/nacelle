@@ -35,6 +35,7 @@ function createCallSite(line) {
   const parsed = parseLocation(location);
   const site = {
     getFileName: () => parsed.fileName,
+    getScriptNameOrSourceURL: () => parsed.fileName,
     getLineNumber: () => parsed.lineNumber,
     getColumnNumber: () => parsed.columnNumber,
     getFunctionName: () => functionName || null,
@@ -69,6 +70,88 @@ function parseCallSites(stack) {
     .split(/\r?\n/)
     .map(createCallSite)
     .filter(Boolean);
+}
+
+function normalizePrepareStackSites(callSites) {
+  if (!Array.isArray(callSites)) return callSites;
+  return callSites.filter((site) => site !== undefined && site !== null);
+}
+
+function supportsNativePreparedErrorStack(ErrorConstructor) {
+  const previousPrepare = ErrorConstructor.prepareStackTrace;
+  let invoked = false;
+  try {
+    ErrorConstructor.prepareStackTrace = (_error, callSites) => {
+      invoked = true;
+      return callSites;
+    };
+    const stack = new ErrorConstructor().stack;
+    return invoked && Array.isArray(stack);
+  } catch {
+    return false;
+  } finally {
+    ErrorConstructor.prepareStackTrace = previousPrepare;
+  }
+}
+
+function installPrepareStackTraceCompatibility(ErrorConstructor) {
+  const descriptor = Object.getOwnPropertyDescriptor(ErrorConstructor, 'prepareStackTrace');
+  if (descriptor && !descriptor.configurable && !descriptor.get && !descriptor.set) return false;
+  let prepareStackTrace = descriptor?.get
+    ? descriptor.get.call(ErrorConstructor)
+    : descriptor?.value;
+  const wrappedByOriginal = new WeakMap();
+  const originalByWrapped = new WeakMap();
+  const wrappedPrepareStackTrace = (original) => {
+    if (typeof original !== 'function') return original;
+    const existing = wrappedByOriginal.get(original);
+    if (existing) return existing;
+    const wrapped = (error, callSites) => original(error, normalizePrepareStackSites(callSites));
+    wrappedByOriginal.set(original, wrapped);
+    originalByWrapped.set(wrapped, original);
+    return wrapped;
+  };
+  try {
+    Object.defineProperty(ErrorConstructor, 'prepareStackTrace', {
+      configurable: true,
+      enumerable: descriptor?.enumerable ?? false,
+      get: () => wrappedPrepareStackTrace(prepareStackTrace),
+      set: (value) => {
+        prepareStackTrace = originalByWrapped.get(value) || value;
+      },
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function installPreparedErrorStackGetter(ErrorConstructor) {
+  if (supportsNativePreparedErrorStack(ErrorConstructor)) return false;
+  const prototype = ErrorConstructor.prototype;
+  const descriptor = Object.getOwnPropertyDescriptor(prototype, 'stack');
+  if (!descriptor?.get || !descriptor.configurable) return false;
+  const nativeGet = descriptor.get;
+  const nativeSet = descriptor.set;
+  try {
+    Object.defineProperty(prototype, 'stack', {
+      configurable: true,
+      enumerable: descriptor.enumerable,
+      get() {
+        const rawStack = nativeGet.call(this);
+        const prepareStackTrace = ErrorConstructor.prepareStackTrace;
+        if (typeof prepareStackTrace !== 'function') return rawStack;
+        const callSites = Array.isArray(rawStack) ? normalizePrepareStackSites(rawStack) : parseCallSites(rawStack);
+        return prepareStackTrace(this, callSites);
+      },
+      set(value) {
+        if (nativeSet) nativeSet.call(this, value);
+      },
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function formatCallSites(error, callSites) {
@@ -222,7 +305,10 @@ export function installErrorStackCompatibility(globalObject = globalThis) {
   if (typeof ErrorConstructor?.captureStackTrace !== 'function') return false;
   if (installedConstructors.has(ErrorConstructor)) return false;
   installedConstructors.add(ErrorConstructor);
-  if (supportsStructuredCapture(ErrorConstructor)) {
+  const structuredCapture = supportsStructuredCapture(ErrorConstructor);
+  installPrepareStackTraceCompatibility(ErrorConstructor);
+  installPreparedErrorStackGetter(ErrorConstructor);
+  if (structuredCapture) {
     installStructuredCaptureFallback(ErrorConstructor);
     return false;
   }

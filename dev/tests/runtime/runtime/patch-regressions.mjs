@@ -369,6 +369,25 @@ test('child process wrappers can observe virtual spawn contracts', async () => {
   assert.equal(stdout, 'spawn wrappers completed');
 });
 
+test('nested CommonJS modules inherit the active virtual process binding', async () => {
+  const { stdout } = await run(`
+    const child = require('child_process').spawnSync(
+      process.execPath,
+      ['-e', 'process.stdout.write(require("./nested.cjs"))'],
+      { encoding: 'utf8' },
+    );
+    if (child.status !== 0) throw new Error(child.stderr || child.stdout);
+    process.stdout.write(child.stdout);
+  `, {
+    '/node/nested.cjs': `
+      const { ChildProcess } = require('child_process');
+      const spawnSyncBinding = process.binding('spawn_sync');
+      module.exports = typeof process.binding + ':' + typeof spawnSyncBinding.spawn + ':' + typeof ChildProcess.prototype.spawn;
+    `,
+  });
+  assert.equal(stdout, 'function:function:function');
+});
+
 test('same-realm children that call process.exit close promptly', async () => {
   const { stdout } = await run(`
     const child = require('child_process').spawn(process.execPath, ['-e', 'process.exit(0)']);

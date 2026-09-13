@@ -644,6 +644,13 @@ test.describe('browser ESM loader', () => {
         return captured.filter(Boolean).slice(0, limit);
       }
       assert.ok(tapStyleCapture(1, captureFromHere).length > 0);
+      const previousPrepareForError = Error.prepareStackTrace;
+      Error.prepareStackTrace = (_error, callSites) => callSites;
+      const directStack = new Error().stack;
+      Error.prepareStackTrace = previousPrepareForError;
+      assert.ok(Array.isArray(directStack));
+      assert.ok(directStack.length > 0);
+      assert.ok(directStack.every((callSite) => callSite && typeof callSite.getFileName === 'function'));
       const previousPrepare = Error.prepareStackTrace;
       Error.prepareStackTrace = (_error, callSites) => callSites;
       const crossModuleTarget = { stack: [] };

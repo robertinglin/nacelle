@@ -2479,16 +2479,19 @@ const prepareCommonJsSource = createCommonJsSourcePreparer();
 const CommonJsFunction = Function;
 
 function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = null, processOverride = null) {
+  const activeProcess = globalThis.__bnhActiveProcess;
+  const effectiveProcessOverride = processOverride
+    || (activeProcess?.[RUNTIME_PROCESS_MARKER] ? activeProcess : null);
   const prepared = prepareCommonJsSource(source);
   const sourceText = `${prepared.source}\n//# sourceURL=${sourceURL}`;
-  const bindProcess = processOverride && !prepared.hasProcessBinding;
+  const bindProcess = effectiveProcessOverride && !prepared.hasProcessBinding;
   const bindAsync = prepared.bindAsync;
   const asyncRunner = bindAsync
     ? (generatorFunction, thisArg, args) => runAsyncGenerator(
       generatorFunction,
       thisArg,
       args,
-      processOverride?._bnhTaskTracker,
+      effectiveProcessOverride?._bnhTaskTracker,
     )
     : null;
   if (moduleWrapper) {
@@ -2496,12 +2499,7 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
     if (bindProcess) prefix = prefix.replace('__bnhImport) {', '__bnhImport, process) {');
     if (bindAsync) prefix = prefix.replace(/\)\s*\{\s*$/u, `, ${prepared.bindingName}) {`);
     const wrappedSource = `${prefix}${sourceText}${moduleWrapper[1]}`;
-    let wrapped;
-    try {
-      wrapped = new CommonJsFunction(`return ${wrappedSource}`)();
-    } catch (error) {
-      throw error;
-    }
+    const wrapped = new CommonJsFunction(`return ${wrappedSource}`)();
     const values = [
       commonJsValues[2],
       commonJsValues[0],
@@ -2510,12 +2508,12 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
       commonJsValues[4],
       commonJsValues[5],
     ];
-    if (bindProcess) values.push(processOverride);
+    if (bindProcess) values.push(effectiveProcessOverride);
     if (bindAsync) values.push(asyncRunner);
     const previousUserCode = globalThis.__bnhUserCode;
     const previousActiveProcess = globalThis.__bnhActiveProcess;
     globalThis.__bnhUserCode = true;
-    if (processOverride) globalThis.__bnhActiveProcess = processOverride;
+    if (effectiveProcessOverride) globalThis.__bnhActiveProcess = effectiveProcessOverride;
     const previousFunction = globalThis.Function;
     // Install the guest Function constructor for every CommonJS evaluation
     // owned by a virtual process.  A module can construct a function from a
@@ -2524,8 +2522,8 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
     // The constructor delegates unchanged to the native Function for all
     // other bodies, so this preserves ordinary Function semantics while
     // keeping deferred imports inside the owning module loader.
-    if (processOverride?.__bnhModuleImport) {
-      if (globalThis.__BNH_DISABLE_GUEST_FUNCTION !== true) globalThis.Function = createGuestFunctionConstructor(previousFunction, processOverride, sourceURL);
+    if (effectiveProcessOverride?.__bnhModuleImport) {
+      if (globalThis.__BNH_DISABLE_GUEST_FUNCTION !== true) globalThis.Function = createGuestFunctionConstructor(previousFunction, effectiveProcessOverride, sourceURL);
     }
     try {
       return wrapped(...values);
@@ -2548,16 +2546,16 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
   const previousUserCode = globalThis.__bnhUserCode;
   const previousActiveProcess = globalThis.__bnhActiveProcess;
   globalThis.__bnhUserCode = true;
-  if (processOverride) globalThis.__bnhActiveProcess = processOverride;
+  if (effectiveProcessOverride) globalThis.__bnhActiveProcess = effectiveProcessOverride;
   const previousFunction = globalThis.Function;
   // See the module-wrapper path above: dynamic import syntax may only exist
   // in a string compiled after this CommonJS evaluation has returned.
-  if (processOverride?.__bnhModuleImport) {
-    if (globalThis.__BNH_DISABLE_GUEST_FUNCTION !== true) globalThis.Function = createGuestFunctionConstructor(previousFunction, processOverride, sourceURL);
+  if (effectiveProcessOverride?.__bnhModuleImport) {
+    if (globalThis.__BNH_DISABLE_GUEST_FUNCTION !== true) globalThis.Function = createGuestFunctionConstructor(previousFunction, effectiveProcessOverride, sourceURL);
   }
   try {
     const values = [...commonJsValues, commonJsValues[5] || ((specifier) => import(specifier))];
-    if (bindProcess) values.push(processOverride);
+    if (bindProcess) values.push(effectiveProcessOverride);
     if (bindAsync) values.push(asyncRunner);
     return wrapped(...values);
   } finally {
@@ -9663,6 +9661,13 @@ export function createRuntime({
                   stderrArr.push(value);
                   options.onStderr?.(value);
                 }, () => () => {});
+            // `process.binding()` is an ordinary public process surface used
+            // by legacy child-process instrumentation such as
+            // process-on-spawn. Every virtual child must see the same
+            // browser-backed binding contract as its owning process.
+            if (typeof processObject.binding === 'function') {
+              childProc.processObject.binding = processObject.binding;
+            }
             childProc.processObject._bnhVirtualChild = true;
             // A same-realm child has no worker control port to carry network
             // telemetry. When the caller requested it, forward the child's
@@ -13899,6 +13904,10 @@ export function createRuntime({
             for (const key of Reflect.ownKeys(childProcess)) {
               const descriptor = Object.getOwnPropertyDescriptor(childProcess, key);
               if (!descriptor || typeof descriptor.value !== 'function') continue;
+              if (key === 'ChildProcess') {
+                Object.defineProperty(boundChildProcess, key, descriptor);
+                continue;
+              }
               Object.defineProperty(boundChildProcess, key, {
                 ...descriptor,
                 value: (...args) => runInProcessContext(

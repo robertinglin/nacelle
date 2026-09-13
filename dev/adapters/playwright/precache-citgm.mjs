@@ -165,6 +165,37 @@ function projectPackageManifest(bytes) {
   return null;
 }
 
+function projectFileText(bytes, suffix) {
+  const tar = gunzipSync(bytes);
+  for (let offset = 0; offset + 512 <= tar.byteLength;) {
+    const header = tar.subarray(offset, offset + 512);
+    if (header.every((value) => value === 0)) break;
+    const name = new TextDecoder().decode(header.subarray(0, 100)).replace(/\0.*$/, '');
+    const sizeText = new TextDecoder().decode(header.subarray(124, 136)).replace(/\0.*$/, '').trim();
+    const size = parseInt(sizeText || '0', 8);
+    const contentStart = offset + 512;
+    if (name.endsWith(suffix)) return new TextDecoder().decode(tar.subarray(contentStart, contentStart + size));
+    offset = contentStart + Math.ceil(size / 512) * 512;
+  }
+  return null;
+}
+
+// Some package compatibility suites use the repository's own Git worktree
+// machinery to run older tagged tests. GitHub archive downloads contain the
+// source tree but no .git directory, so precache those explicitly referenced
+// compatibility tags for the browser's virtual-Git implementation.
+function projectCompatibilityRefs(bytes) {
+  const source = projectFileText(bytes, '/compat/config.js');
+  if (!source) return [];
+  const configured = source.match(/module\.exports\s*=\s*\[([\s\S]*?)\]/)?.[1] || '';
+  const refs = [];
+  const literals = /(['"])([^'"\\]+)\1/g;
+  for (let match; (match = literals.exec(configured));) {
+    if (!refs.includes(match[2])) refs.push(match[2]);
+  }
+  return refs;
+}
+
 function resolveVersion(document, range) {
   if (range === 'latest' && document['dist-tags']?.latest) {
     const version = document['dist-tags'].latest;
@@ -280,9 +311,11 @@ async function main() {
       lookup: citgmLookup?.[targetName],
     });
     let projectArchive = null;
+    const projectArchives = new Map();
     if (projectUrl) {
       process.stdout.write(`Fetching CITGM project archive ${projectUrl}...\n`);
       projectArchive = await fetchBytes(projectUrl);
+      projectArchives.set(projectUrl, projectArchive);
       const projectManifest = projectPackageManifest(projectArchive);
       if (targetPackage && projectManifest?.devDependencies) {
         targetPackage.devDependencies = {
@@ -291,6 +324,14 @@ async function main() {
         };
         packageList = await resolvePackageGraph(installedPackages, metadata, registry, new Set([targetName]));
         process.stdout.write(`Resolved project test dependencies; metadata now covers ${metadata.size} packages.\n`);
+      }
+
+      const repositoryUrl = projectUrl.replace(/\/archive\/[^/]+\.tar\.gz$/, '');
+      for (const ref of projectCompatibilityRefs(projectArchive)) {
+        const refUrl = `${repositoryUrl}/archive/${encodeURIComponent(ref)}.tar.gz`;
+        if (projectArchives.has(refUrl)) continue;
+        process.stdout.write(`Fetching CITGM compatibility archive ${refUrl}...\n`);
+        projectArchives.set(refUrl, await fetchBytes(refUrl));
       }
     }
 
@@ -317,11 +358,11 @@ async function main() {
       tarballPaths[`tarball:${tarballUrl}`] = relative;
     });
 
-    if (projectUrl && projectArchive) {
-      const relative = `projects/${createHash('sha256').update(projectUrl).digest('hex')}.tar.gz`;
+    for (const [archiveUrl, archiveBytes] of projectArchives) {
+      const relative = `projects/${createHash('sha256').update(archiveUrl).digest('hex')}.tar.gz`;
       await mkdir(path.join(cacheDir, 'projects'), { recursive: true });
-      await writeFile(path.join(cacheDir, relative), projectArchive);
-      projectPaths[projectUrl] = relative;
+      await writeFile(path.join(cacheDir, relative), archiveBytes);
+      projectPaths[archiveUrl] = relative;
     }
 
     const manifest = {

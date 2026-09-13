@@ -157,6 +157,9 @@ export async function runProcessEntry(context) {
     error.code = 'ERR_INVALID_CAPABILITY';
     throw error;
   }
+  globalThis.__BNH_GIT_PROJECT_ARCHIVES__ = Array.isArray(descriptor.gitProjects)
+    ? descriptor.gitProjects
+    : [];
   const profile = resolveNodeVersionProfile(descriptor.nodeVersion || 'lts');
   if (context.workerBrokerPort) globalThis.__BNH_WORKER_BROKER_PORT__ = context.workerBrokerPort;
   const runtime = context.runtimeInstance || runtimeFor(profile.id, context.workerBrokerPort).runtime;

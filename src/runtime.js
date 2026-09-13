@@ -8650,6 +8650,22 @@ export function createRuntime({
             releaseChildTask = null;
             return child;
           }
+          if (commandName === 'git') {
+            setActivityPhase('git');
+            child.spawn(spawnOptions());
+            scope.queueMicrotask(() => {
+              if (closed) return;
+              const result = runVirtualGitCommand(prepared.commandArgs, prepared.cwd);
+              stdout += String(result.stdout || '');
+              stderr += String(result.stderr || '');
+              if (result.stdout) writeStdout(result.stdout);
+              if (result.stderr) writeStderr(result.stderr);
+              finish(result.code, null);
+            });
+            releaseChildTask?.();
+            releaseChildTask = null;
+            return child;
+          }
           if (commandName === 'node') {
           }
           const launchesNpmEntrypoint = commandName === 'node'
@@ -9536,6 +9552,57 @@ export function createRuntime({
         }
         function runPreparedSync(prepared, options = {}) {
             const { cwd, env, executionArgv, argv } = prepared;
+            if (String(prepared.command).split('/').pop() === 'git') {
+              const result = runVirtualGitCommand(prepared.commandArgs, cwd);
+              const stdout = String(result.stdout || '');
+              const stderr = String(result.stderr || '');
+              const encoding = options?.encoding;
+              return {
+                pid: prepared.pid,
+                stdout: encoding && encoding !== 'buffer' ? stdout : Buffer.from(stdout),
+                stderr: encoding && encoding !== 'buffer' ? stderr : Buffer.from(stderr),
+                stdoutChunks: stdout ? [stdout] : [],
+                stderrChunks: stderr ? [stderr] : [],
+                status: result.code,
+                pending: false,
+                signal: null,
+                error: null,
+                process: null,
+              };
+            }
+            // A synchronous child launched through an npm-generated .bin
+            // entrypoint still goes through its shebang interpreter. Without
+            // this translation, the Node-option parser below mistakes the
+            // command's first option value (for example `classic` in
+            // `tap --reporter classic`) for a script path.
+            const commandName = String(prepared.command).split('/').pop();
+            if (prepared.command !== processObject.execPath
+              && commandName !== 'node'
+              && commandName !== 'nodejs') {
+              try {
+                const launcherSource = vfs.readSource(prepared.command);
+                const launcherText = typeof launcherSource === 'string'
+                  ? launcherSource
+                  : new TextDecoder().decode(launcherSource);
+                if (launcherText.startsWith('#!')) {
+                  const launcherPrepared = prepareChild(
+                    processObject.execPath,
+                    [prepared.command, ...prepared.commandArgs],
+                    {
+                      cwd,
+                      env,
+                      input: prepared.stdin,
+                      timeout: options.timeout,
+                      killSignal: options.killSignal,
+                    },
+                  );
+                  return runPreparedSync(launcherPrepared, options);
+                }
+              } catch {
+                // Fall through to the normal virtual command/module path so
+                // missing or non-script executables retain their diagnostics.
+              }
+            }
             let entryPath = prepared.entryPath;
             const stdoutArr = [];
             const stderrArr = [];
@@ -10815,6 +10882,7 @@ export function createRuntime({
             files,
             directories: snapshot.directories,
             symlinks: snapshot.symlinks,
+            gitProjects: scope.__BNH_GIT_PROJECT_ARCHIVES__ || [],
             syncBuffer: options.syncBuffer,
             entry: esmPrepared.entryPath,
             execArgv: childExecArgv,
@@ -12299,6 +12367,98 @@ export function createRuntime({
         vfs.fs.mkdirSync(configuredPath, { recursive: true });
       }
     }
+  }
+
+  function virtualGitRepository(manifest) {
+    const repository = typeof manifest?.repository === 'string'
+      ? manifest.repository
+      : manifest?.repository?.url;
+    if (typeof repository !== 'string') return null;
+    return repository
+      .replace(/^git\+/, '')
+      .replace(/^git:/, 'https:')
+      .replace(/^ssh:\/\/git@/, 'https://')
+      .replace(/^git@([^:]+):/, 'https://$1/')
+      .replace(/\.git$/, '')
+      .replace(/\/+$/, '');
+  }
+
+  function virtualGitProject(cwd) {
+    const fs = vfs.fs;
+    let directory = normalizePath(cwd, '/node');
+    while (directory && directory !== '/') {
+      try {
+        const manifest = JSON.parse(String(fs.readFileSync(path.join(directory, 'package.json'), 'utf8')));
+        const repository = virtualGitRepository(manifest);
+        if (repository) return { directory, manifest, repository };
+      } catch { /* search the parent */ }
+      directory = path.dirname(directory);
+    }
+    return null;
+  }
+
+  // CITGM project downloads are GitHub source archives rather than full Git
+  // clones. Provide the small synchronous Git surface used by package test
+  // suites while keeping the checkout content sourced from exact archives
+  // precached for the requested repository refs.
+  function runVirtualGitCommand(args, cwd) {
+    const project = virtualGitProject(cwd);
+    const values = (args || []).map(String);
+    const command = values[0] || '';
+    const projectArchives = Array.isArray(scope.__BNH_GIT_PROJECT_ARCHIVES__)
+      ? scope.__BNH_GIT_PROJECT_ARCHIVES__
+      : [];
+    const fail = (message) => ({ code: 1, stdout: '', stderr: `git: ${message}\n` });
+    if (!project) return fail('not a Git work tree');
+
+    if (command === 'describe') {
+      if (!values.includes('--tags') || !values.includes('--abbrev=0')) return fail('describe mode is not available');
+      const latest = projectArchives.find((candidate) => candidate.repository === project.repository)?.latestTag
+        || project.manifest.version;
+      return latest ? { code: 0, stdout: `${latest}\n`, stderr: '' } : fail('no tags can describe this repository');
+    }
+
+    if (command === 'rev-parse') {
+      if (values.includes('--show-toplevel')) return { code: 0, stdout: `${project.directory}\n`, stderr: '' };
+      if (values.includes('--is-inside-work-tree')) return { code: 0, stdout: 'true\n', stderr: '' };
+      return fail('rev-parse mode is not available');
+    }
+
+    if (command !== 'worktree') return fail(`command '${command}' is not available`);
+    const action = values[1];
+    const positional = values.slice(2).filter((value) => !value.startsWith('-'));
+    const fs = vfs.fs;
+    if (action === 'remove') {
+      const destination = positional[0];
+      if (!destination) return fail('worktree remove requires a path');
+      fs.rmSync(normalizePath(destination, cwd), { recursive: true, force: true });
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    if (action !== 'add' || positional.length < 2) return fail('worktree add requires a path and ref');
+
+    const destination = normalizePath(positional[0], cwd);
+    const requestedRef = positional[1];
+    const candidates = projectArchives.filter((candidate) => candidate.repository === project.repository);
+    const latest = candidates.find((candidate) => candidate.latestTag === project.manifest.version)
+      || candidates.find((candidate) => candidate.latestTag);
+    const archive = candidates.find((candidate) => candidate.ref === requestedRef)
+      || candidates.find((candidate) => candidate.ref === `refs/tags/${requestedRef}`)
+      || (requestedRef === 'HEAD' ? latest : null)
+      || (requestedRef === project.manifest.version ? latest : null);
+    if (!archive?.files?.length) return fail(`ref '${requestedRef}' is not available in the precached repository`);
+
+    fs.rmSync(destination, { recursive: true, force: true });
+    fs.mkdirSync(destination, { recursive: true });
+    for (const entry of archive.files) {
+      const target = normalizePath(path.join(destination, entry.path), '/');
+      if (target !== destination && !target.startsWith(`${destination}/`)) return fail('worktree path escapes checkout');
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, entry.data);
+      if (Number.isInteger(entry.mode) && entry.mode > 0) {
+        try { fs.chmodSync(target, entry.mode & 0o777); } catch { /* preserve the file when chmod is unavailable */ }
+      }
+    }
+    return { code: 0, stdout: '', stderr: '' };
   }
 
   async function execute(entry, options, stdout, stderr) {
@@ -15151,6 +15311,7 @@ export function createRuntime({
           files,
           directories: snapshot.directories,
           symlinks: snapshot.symlinks,
+          gitProjects: scope.__BNH_GIT_PROJECT_ARCHIVES__ || [],
           npmCache: options.npmCache,
           entry,
           execArgv: childExecArgv,

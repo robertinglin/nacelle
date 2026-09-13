@@ -53,9 +53,9 @@ not being reclassified as newly rerun here.
 | 31 | globals | BLOCKED | nested dependency interaction (native Node also fails) | Exact browser CITGM passes in Firefox after the independent util.inspect fix, but Chromium installs ESLint 9.39.5 at the root and ESLint 8.57.1 under XO; ESLint 9 meta.defaultOptions is then invoked through ESLint 8 Linter and fails. The same root-9/nested-8 layout fails native Node with the same XO error; proof is preserved in native-node/duplicate-eslint-layout.log. Initial browser runtime failures were ours and are fixed in the working runtime; this remaining cross-major dependency interaction is not browser-only. |
 | 32 | is-fullwidth-code-point | PASS | none observed | Published `is-fullwidth-code-point@5.1.0` at gitHead `2696d873463fde9f6b09b49c98380bd49c67b00a` passes exact CITGM unchanged in Chromium (`citgm-1789307869379`) and Firefox (`citgm-1789307953202`); install, XO, AVA, and tsd phases all exited 0. No runtime, nested-dependency, or upstream package/repository failure was observed. Repository-wide gates were skipped under the unchanged double-CITGM rule. |
 | 33 | argparse | PASS | ours | Published `argparse@3.0.2` at gitHead `b24ea1892b4b7e7a268cd4554cdd654ec47c148f` passes exact CITGM in Chromium (`citgm-1789315178421`) and Firefox (`citgm-1789315226994`). The VFS now rejects writes to chmod 0400 files, and the loader accepts Firefox's Node-equivalent class-call TypeError wording; native Node passes the targeted `TestTypeClassicClass` suite. Required final gates passed after rebuilding: `npm test` and full Chromium/Firefox Playwright; complete artifacts and native comparison logs are preserved under `artifacts/citgm-top-100/rank-033-argparse/`. |
-| 34 | ignore | PENDING | — | Not attempted; rank 33 is complete and rank 34 is current. |
-| 35 | which | PENDING | — | Not attempted; rank 33 is complete and rank 34 is current. |
-| 36 | esbuild | PENDING | — | Not attempted; rank 33 is complete and rank 34 is current. |
+| 34 | ignore | PASS | ours | Published `ignore@7.0.9` at gitHead `821765efdf7752b186a03ed0450d9ee013cee099` passes exact CITGM in Chromium (`citgm-1789317691280`) and Firefox (`citgm-1789317740056`); both the `7.0.6` and `7.0.9` compatibility worktrees pass, including `--win32`. Native Node v26 also passes the exact package (1368 assertions plus both compatibility modes), proving the initial browser failure was ours: the browser materialized a GitHub source archive without Git history, and the runtime lacked the Git/worktree surface and synchronous shebang launcher behavior required by the package. Required final gates passed: build; `npm test` 340/340; Chromium Playwright 289/289; Firefox Playwright 289/289. Complete attempts and native proof are preserved under `artifacts/citgm-top-100/rank-034-ignore/`. |
+| 35 | which | PENDING | — | Not attempted; rank 34 is complete and rank 35 is current. |
+| 36 | esbuild | PENDING | — | Not attempted; rank 34 is complete and rank 35 is current. |
 | 37 | isexe | PENDING | — | Not attempted; rank 33 is complete and rank 34 is current. |
 | 38 | js-yaml | PENDING | — | Not attempted; rank 33 is complete and rank 34 is current. |
 | 39 | resolve | PENDING | — | Not attempted; rank 33 is complete and rank 34 is current. |
@@ -121,7 +121,7 @@ not being reclassified as newly rerun here.
 | 99 | fast-json-stable-stringify | PENDING | — | Not attempted; rank 33 is complete and rank 34 is current. |
 | 100 | get-intrinsic | PENDING | — | Not attempted; rank 33 is complete and rank 34 is current. |
 
-The pending-row cursor now points to rank 34; no package after rank 34 has
+The pending-row cursor now points to rank 35; no package after rank 35 has
 been started.
 
 ## Rank 6 failure record
@@ -949,3 +949,31 @@ npm test                                                PASS
 npm run test:browser:chromium                           PASS
 npm run test:browser:firefox                            PASS
 ```
+
+## Rank 34 failure record
+
+The published `ignore@7.0.9` candidate at gitHead
+`821765efdf7752b186a03ed0450d9ee013cee099` was tested with CITGM 10.0.2.
+Complete artifacts for every attempt, including the initial failures, are
+preserved under `artifacts/citgm-top-100/rank-034-ignore/`.
+
+| Run / log | Observed failure or result | Classification and resolution |
+| --- | --- | --- |
+| `citgm-1789316370783` | The package's `compat` gate could not resolve `git describe --tags --abbrev=0` because the browser project download is a source archive without `.git` history. | Ours. Native Node v26 on a full exact-githead clone passes the package, so this was not an upstream or nested dependency failure. The pre-cache now fetches the current commit and every literal compatibility ref, and the browser runtime supplies the required virtual Git/worktree operations from those exact archives. |
+| `citgm-1789317208886`, `citgm-1789317338841`, `citgm-1789317453032` | Follow-up runs reached the virtual worktree but exposed SCP-style (`git@github.com:...`) repository metadata and then the synchronous `tap` launcher parsing `classic` as a script path. | Ours. Repository URL normalization now covers SCP-style Git URLs, and synchronous shebang entrypoints now translate to Node before parsing their command arguments. These intermediate failures remain preserved as implementation evidence. |
+| `citgm-1789317691280` / `citgm-1789317740056` | Chromium and Firefox both completed install and the full `ignore` contract with the `7.0.6` and `7.0.9` compatibility worktrees passing in normal and `--win32` modes. | PASS. No nested dependency or upstream package/repository blocker remained. |
+| `native-ignore-node-v26.log` | Native Node v26 exact checkout passes lint, TypeScript checks, build, 1368/1368 test assertions, and both compatibility modes. | Required native comparison proof; this explicitly rules out an upstream/package classification for the browser failure. |
+
+## Rank 34 gate evidence
+
+The required repository-wide gates passed after both final CITGM browser passes
+and before committing the status record:
+
+```text
+npm run build                                           PASS — 5 WASM artifacts; Node 22.23.2
+npm test                                                PASS — 340/340
+npm run test:browser:chromium                           PASS — 289/289
+npm run test:browser:firefox                            PASS — 289/289
+```
+
+Rank 34 is recorded as `PASS` and the ordered cursor advances to rank 35.

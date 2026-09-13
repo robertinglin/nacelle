@@ -1,5 +1,6 @@
 import { BrowserNpm, BrowserNpmCache } from './runtime/npm.js';
 import { createRuntime } from './runtime.js';
+import { unpackTarGz } from './runtime/tar.js';
 import { createProgressReporter } from './progress-protocol.mjs';
 import { createCitgmProcessArgv } from './citgm-argv.mjs';
 import { createSerializedCaptureQueue } from './citgm-capture.mjs';
@@ -535,6 +536,75 @@ class ArtifactNpmCache extends BrowserNpmCache {
     const response = await fetch(new URL(relative, this.artifactBaseUrl));
     return response.ok ? new Uint8Array(await response.arrayBuffer()) : null;
   }
+
+  projectUrls() {
+    return Object.keys(this.artifactManifest?.projects || {});
+  }
+}
+
+function gitRepositoryFromManifest(manifest) {
+  const repository = typeof manifest?.repository === 'string'
+    ? manifest.repository
+    : manifest?.repository?.url;
+  if (typeof repository !== 'string') return null;
+  return repository
+    .replace(/^git\+/, '')
+    .replace(/^git:/, 'https:')
+    .replace(/^ssh:\/\/git@/, 'https://')
+    .replace(/^git@([^:]+):/, 'https://$1/')
+    .replace(/\.git$/, '')
+    .replace(/\/+$/, '');
+}
+
+function projectArchiveRef(url) {
+  try {
+    const pathname = new URL(url).pathname;
+    const match = pathname.match(/\/archive\/([^/]+)\.tar\.gz$/);
+    return match ? decodeURIComponent(match[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function materializeGitProjectArchives(cache) {
+  const projects = [];
+  for (const url of cache.projectUrls()) {
+    const archive = await cache.getProject(url);
+    if (!archive) continue;
+    let entries;
+    try {
+      entries = await unpackTarGz(archive, { stripPrefix: '' }, globalThis);
+    } catch {
+      continue;
+    }
+    const firstPath = entries.find((entry) => entry.type === 'file')?.path || '';
+    const root = firstPath.includes('/') ? `${firstPath.slice(0, firstPath.indexOf('/'))}/` : '';
+    const files = entries
+      .filter((entry) => entry.type === 'file' && entry.data)
+      .map((entry) => ({
+        path: root && entry.path.startsWith(root) ? entry.path.slice(root.length) : entry.path,
+        data: entry.data,
+        mode: entry.mode,
+      }))
+      .filter((entry) => entry.path && !entry.path.startsWith('/') && !entry.path.split('/').includes('..'));
+    const packageJson = files.find((entry) => entry.path === 'package.json');
+    let manifest = null;
+    try {
+      manifest = JSON.parse(new TextDecoder().decode(packageJson.data));
+    } catch {
+      continue;
+    }
+    const repository = gitRepositoryFromManifest(manifest);
+    if (!repository) continue;
+    projects.push({
+      url,
+      repository,
+      ref: projectArchiveRef(url),
+      latestTag: manifest.version || null,
+      files,
+    });
+  }
+  return projects;
 }
 
 const runtime = createRuntime({ globalObject: globalThis, nodeVersion: 'v22' });
@@ -978,6 +1048,9 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       libc: 'browser',
     });
     const precacheUsed = await npmCache.loadArtifact(citgmVersion, module, registry);
+    globalThis.__BNH_GIT_PROJECT_ARCHIVES__ = precacheUsed
+      ? await materializeGitProjectArchives(npmCache)
+      : [];
     currentStage = 'citgm-install';
     report('setup', 'citgm-install-started');
     timer = setTimeout(() => {

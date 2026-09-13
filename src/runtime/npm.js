@@ -40,6 +40,11 @@ function tsgoWasmVersionForNativeVersion(version) {
 // unofficial distribution of the TypeScript native compiler.
 const BROWSER_PACKAGE_ALTERNATIVES = Object.freeze({
   esbuild: Object.freeze({ name: 'esbuild-wasm', reason: 'official-wasm-distribution' }),
+  rollup: Object.freeze({
+    name: '@rollup/wasm-node',
+    reason: 'official-wasm-distribution',
+    useIf: (range) => !parseSemver(range) || parseSemver(range).major >= 4,
+  }),
   '@biomejs/biome': Object.freeze({
     name: '@biomejs/wasm-nodejs',
     reason: 'official-wasm-distribution',
@@ -936,7 +941,11 @@ export class BrowserNpm {
         return;
       }
 
-      const browserAlternative = browserPackageAlternative(resolutionName, this.platform);
+      const browserAlternativeCandidate = browserPackageAlternative(resolutionName, this.platform);
+      const browserAlternative = browserAlternativeCandidate
+        && browserAlternativeCandidate.useIf?.(resolutionRange) === false
+        ? null
+        : browserAlternativeCandidate;
       const packageName = browserAlternative?.name || resolutionName;
       let versionDoc = null;
       let version = null;

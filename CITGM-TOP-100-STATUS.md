@@ -57,8 +57,8 @@ not being reclassified as newly rerun here.
 | 35 | which | PASS | none observed | Published `which@7.0.0` at gitHead `297db11d58eebe01551ae0875a127a89ee63d2cb` passes exact CITGM in Chromium (`citgm-1789318901100`) and Firefox (`citgm-1789318952953`); installation, ESLint, and TAP all exited 0. Firefox records template-oss repository-drift diagnostics, but the package test contract is green. No runtime, nested-dependency, or upstream package/repository failure was observed. Repository-wide gates were skipped under the unchanged double-CITGM rule. Complete artifacts are preserved under `artifacts/citgm-top-100/rank-035-which/`. |
 | 36 | esbuild | BLOCKED | upstream package/repository (monorepo package layout) | Published `esbuild@0.28.2` at gitHead `609683d892977362a0f99026cb74b96263d728a9` fails exact Chromium CITGM (`citgm-1789319117820`) and Firefox CITGM (`citgm-1789319307780`) because the downloaded monorepo root has no `package.json`; native Node CITGM 10.0.2 reproduces the same `/tmp/.../esbuild/package.json` ENOENT. The published npm package is under `npm/esbuild`, so this is proven upstream/CITGM project-layout failure, not a browser-runtime failure. No fake package root or shim was added. |
 | 37 | isexe | PASS | ours | Published `isexe@4.0.0` passes exact CITGM in Chromium (`citgm-1789321276490`) and Firefox (`citgm-1789321334839`). The runtime fixed wildcard `1.x.x` semver resolution, portable decoding of cross-realm/SharedArrayBuffer-backed loader source, and awaiting asynchronous `@tapjs/mock` module source. Matching native Node 22 CITGM passes the exact package, so the browser failures were ours; no upstream or nested-dependency classification applies. Required final gates passed: build; `npm test` 343/343; Chromium Playwright 289/289; Firefox Playwright 289/289. |
-| 38 | js-yaml | PENDING | — | Not attempted; rank 37 is complete and rank 38 is current. |
-| 39 | resolve | PENDING | — | Not attempted; rank 37 is complete and rank 38 is current. |
+| 38 | js-yaml | PASS | ours | Published `js-yaml@5.4.2` at gitHead `494400bd45cad078123cfc057e674a9a0a8d9983` passes exact CITGM in Chromium (`citgm-1789326034170`) and Firefox (`citgm-1789326085784`). Every failure was reproduced against the exact package under native Node and was a browser-runtime defect: official `@rollup/wasm-node` selection, Node-style WASI worker `self` assignment, virtual Git fixture support, quoted `node --test` glob expansion, synchronous and asynchronous TypeScript stripping, and package self-reference export resolution. Required final gates passed after the fixes: `npm test` 345/345; Chromium Playwright 290/290; Firefox Playwright 290/290. Complete failure and success artifacts are preserved under `artifacts/citgm-top-100/rank-038-js-yaml/`. |
+| 39 | resolve | PENDING | — | Not attempted; rank 38 is complete and rank 39 is current. |
 | 40 | mime-types | PENDING | — | Not attempted; rank 37 is complete and rank 38 is current. |
 | 41 | nanoid | PENDING | — | Not attempted; rank 37 is complete and rank 38 is current. |
 | 42 | yargs-parser | PENDING | — | Not attempted; rank 37 is complete and rank 38 is current. |
@@ -121,8 +121,8 @@ not being reclassified as newly rerun here.
 | 99 | fast-json-stable-stringify | PENDING | — | Not attempted; rank 37 is complete and rank 38 is current. |
 | 100 | get-intrinsic | PENDING | — | Not attempted; rank 37 is complete and rank 38 is current. |
 
-The pending-row cursor now points to rank 37; no package after rank 37 has
-been started.
+The pending-row cursor now points to rank 39. Every row marked `PENDING` from
+rank 39 onward has not been started; rank 39 is the next package in order.
 
 ## Rank 6 failure record
 
@@ -1062,3 +1062,43 @@ npm run test:browser:firefox                            PASS — 289/289
 ```
 
 Rank 37 is recorded as `PASS` and the ordered cursor advances to rank 38.
+
+## Rank 38 failure record
+
+The published `js-yaml@5.4.2` candidate at gitHead
+`494400bd45cad078123cfc057e674a9a0a8d9983` was tested with CITGM 10.0.2.
+Complete browser, native comparison, and repository-gate artifacts are
+preserved under `artifacts/citgm-top-100/rank-038-js-yaml/`.
+
+Every package-level failure below was checked with the exact package under
+native Node v26; native CITGM passed each time. Therefore none of these
+failures is classified as nested-dependency or upstream/package/repository
+behavior.
+
+| Run / log | Observed failure | Classification and resolution |
+| --- | --- | --- |
+| `citgm-1789322684130` | `rollup/dist/native.js` required the omitted optional `@rollup/rollup-linux-x64-musl` package before js-yaml's tests ran. | Ours. The browser installer now selects the official `@rollup/wasm-node` distribution for Rollup 4+ while preserving native resolution for older Rollup fixtures. |
+| `citgm-1789322872244` | Vite's WASI worker failed on `Cannot set property self of #<WorkerGlobalScope> which has only a getter`. | Ours. The runtime now rewrites Node-style worker `self` snapshots only where the browser's WorkerGlobalScope makes `self` read-only; the behavior is covered by a browser regression oracle. |
+| `citgm-1789323493647`, `citgm-1789323592829`, `citgm-1789323877307` | The package's test fixture invoked `git -C`; the virtual Git implementation treated `-C` as a subcommand and lacked the external Git fixture/archive flow. | Ours. Virtual Git now supports the required `-C`, repository initialization, remote/fetch/checkout, and HEAD operations; the exact GitHub fixture commit is fetched and recorded by the precache adapter. |
+| `citgm-1789324339088` | Quoted `test/core/**/*.test.mjs` was passed to the browser child as a literal path, producing `ERR_MODULE_NOT_FOUND`. | Ours. The Node test argument parser now expands explicit quoted globs against the virtual filesystem, with a bridge regression oracle. |
+| `citgm-1789324465450`, `citgm-1789324632719`, `citgm-1789324724418`, `citgm-1789324963383` | TypeScript source first failed with `ERR_UNKNOWN_FILE_EXTENSION`, then with syntax errors from interfaces/generics/annotations, and finally through the asynchronous ESM loader path. | Ours. The shared browser loader now strips the supported TypeScript syntax in both synchronous and asynchronous module materialization paths; the stripper is verified against the public Node API and js-yaml's source. |
+| `citgm-1789325245461`, `citgm-1789325541815`, `citgm-1789325607912`, `citgm-1789325680968`, `citgm-1789325780566`, `citgm-1789325832935`, `citgm-1789325887845` | The browser resolved js-yaml's self-import to a nested old `js-yaml` package, so the generated module lacked the `EVENT_ID` export. Instrumented runs proved the wrong target before the diagnostic code was removed. | Ours. Package resolution now honors the owning package's conditional self-reference exports before searching nested `node_modules`, matching native Node behavior. |
+| `npm-test-initial-failure.md` | The first repository `npm test` run failed in the old Rollup demo fixture with `No matching version found for @rollup/wasm-node@2.79.2`. | Ours. The official Rollup WASM alternative is now selected only for Rollup 4+; the successful rerun is preserved in `npm-test.log`. |
+| `native-citgm-node-v26.log` | Exact native CITGM for `js-yaml@5.4.2` passed (`The smoke test has passed`). | Required native proof: the package and its test contract are green under Node, so the browser failures above were ours. |
+| `citgm-1789326034170` / `citgm-1789326085784` | Final Chromium and Firefox CITGM runs both installed js-yaml, ran its test suite, and exited 0. | PASS. No nested-dependency or upstream package/repository blocker remained. |
+
+## Rank 38 gate evidence
+
+The package required runtime and regression-test changes, so all repository-wide
+gates ran after both final CITGM browser passes and before committing:
+
+```text
+NACELLE_CITGM_ARTIFACT_DIR=artifacts/citgm-top-100/rank-038-js-yaml npm run citgm:browser:chromium -- js-yaml  PASS — citgm-1789326034170
+NACELLE_CITGM_ARTIFACT_DIR=artifacts/citgm-top-100/rank-038-js-yaml npm run citgm:browser:firefox -- js-yaml   PASS — citgm-1789326085784
+npm run build                                           PASS — 5 WASM artifacts; Node 22.23.2
+npm test                                                PASS — 345/345
+npm run test:browser:chromium                           PASS — 290/290
+npm run test:browser:firefox                            PASS — 290/290
+```
+
+Rank 38 is recorded as `PASS` and the ordered cursor advances to rank 39.

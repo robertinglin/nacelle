@@ -602,6 +602,34 @@ test('conditional ESM plugin packages retain their named plugin export', async (
   assert.equal(stdout, 'function function\n');
 });
 
+test('package self-references prefer the owning package exports over nested dependencies', async () => {
+  const { stdout } = await run(`
+    const child = require('child_process').spawn(process.execPath, ['/node/app/entry.mjs'], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+    child.stdout.on('data', (chunk) => process.stdout.write(chunk));
+    child.stderr.on('data', (chunk) => process.stdout.write('stderr:' + chunk));
+    child.on('close', (code) => { if (code !== 0) throw new Error('self-reference child failed: ' + code); });
+  `, {
+    '/node/app/package.json': JSON.stringify({
+      name: 'self-reference-package',
+      exports: { '.': { import: './esm.mjs', require: './cjs.cjs' } },
+    }),
+    '/node/app/entry.mjs': `
+      import assert from 'node:assert/strict';
+      import { createRequire } from 'node:module';
+      import { marker } from 'self-reference-package';
+      const require = createRequire(import.meta.url);
+      assert.equal(marker, 'own-import');
+      assert.equal(require('self-reference-package').marker, 'own-require');
+      console.log('self-reference exports completed');
+    `,
+    '/node/app/esm.mjs': `export const marker = 'own-import';`,
+    '/node/app/cjs.cjs': `exports.marker = 'own-require';`,
+    '/node/app/node_modules/self-reference-package/package.json': JSON.stringify({ main: './nested.cjs' }),
+    '/node/app/node_modules/self-reference-package/nested.cjs': `exports.marker = 'nested-dependency';`,
+  });
+  assert.equal(stdout, 'self-reference exports completed\n');
+});
+
 test('killing a referenced async child does not race its close event', async () => {
   const { stdout } = await run(`
     const child = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 60000)']);
@@ -978,6 +1006,58 @@ test('browser npm uses an official WASM alternative for esbuild', async () => {
   assert.deepEqual(selectedUrls, [
     'https://registry.example/esbuild-wasm',
     'https://registry.example/esbuild-wasm-0.28.0.tgz',
+  ]);
+});
+
+test('browser npm uses the official Rollup WASM alternative at the native package path', async () => {
+  const vfs = createVfs();
+  const wasmTarball = await packTarGz([{
+    path: 'package/package.json',
+    data: new TextEncoder().encode(JSON.stringify({
+      name: '@rollup/wasm-node',
+      version: '4.63.2',
+      main: 'dist/rollup.js',
+      bin: { rollup: 'dist/bin/rollup' },
+    })),
+  }, {
+    path: 'package/dist/bin/rollup',
+    data: new TextEncoder().encode('#!/usr/bin/env node\nprocess.stdout.write("wasm");'),
+  }, {
+    path: 'package/dist/rollup.js',
+    data: new TextEncoder().encode('module.exports = { version: "4.63.2" };'),
+  }]);
+  const selectedUrls = [];
+  const npm = new BrowserNpm({
+    vfs,
+    registry: 'https://registry.example',
+    fetchFn: async (url) => {
+      selectedUrls.push(String(url));
+      if (String(url) === 'https://registry.example/@rollup/wasm-node') {
+        return new Response(JSON.stringify({
+          name: '@rollup/wasm-node',
+          versions: {
+            '4.63.2': {
+              name: '@rollup/wasm-node',
+              version: '4.63.2',
+              bin: { rollup: 'dist/bin/rollup' },
+              dist: { tarball: 'https://registry.example/rollup-wasm-node-4.63.2.tgz' },
+            },
+          },
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      if (String(url) === 'https://registry.example/rollup-wasm-node-4.63.2.tgz') return new Response(wasmTarball);
+      throw new Error(`unexpected URL: ${url}`);
+    },
+  });
+
+  await npm.install('rollup@4.63.2');
+
+  assert.equal(npm.installed.get('rollup'), '4.63.2');
+  assert.match(vfs.fs.readFileSync('/node/node_modules/rollup/package.json', 'utf8'), /@rollup\/wasm-node/);
+  assert.match(vfs.fs.readFileSync('/node/node_modules/.bin/rollup', 'utf8'), /node_modules\/rollup\/dist\/bin\/rollup/);
+  assert.deepEqual(selectedUrls, [
+    'https://registry.example/@rollup/wasm-node',
+    'https://registry.example/rollup-wasm-node-4.63.2.tgz',
   ]);
 });
 

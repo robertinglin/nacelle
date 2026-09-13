@@ -74,6 +74,64 @@ test.describe('browser-native worker process boundary', () => {
     expect(result.calls).toEqual([{ hasSignal: true, target: 'https://example.test/' }]);
   });
 
+  test('keeps Node-style WASI worker self aliases compatible with browser WorkerGlobalScope', async ({ page }) => {
+    await openRuntime(page);
+    const result = await page.evaluate(async () => {
+      const { createRuntime } = await import('/runtime.js');
+      const encode = (source) => new TextEncoder().encode(source);
+      const capabilities = {
+        vfs: { mounts: [{ path: '/node', mode: 'read-write' }] },
+        workers: { entryModules: ['*'], maxChildren: 4 },
+        ipc: { enabled: true },
+        signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
+        output: { maxBytes: 1024 * 1024, stdoutBytes: 1024 * 1024, stderrBytes: 1024 * 1024 },
+        envVars: { allowed: [] },
+      };
+      const runtime = createRuntime({ globalObject: globalThis });
+      await runtime.reset({ runId: 'wasi-worker-self-alias', capabilities, isolation: 'worker' });
+      await runtime.mount({
+        '/node/main.js': encode(`
+          const { Worker } = require('node:worker_threads');
+          const worker = new Worker('/node/wasi-style-worker.mjs');
+          worker.once('message', async (value) => {
+            process.stdout.write(JSON.stringify(value) + '\\n');
+            await worker.terminate();
+            process.exit(0);
+          });
+          worker.once('error', (error) => {
+            process.stderr.write(error.stack || String(error));
+            process.exit(1);
+          });
+        `),
+        '/node/wasi-style-worker.mjs': encode(`
+          import { parentPort } from 'node:worker_threads';
+          Object.assign(globalThis, {
+            self: globalThis,
+            require() {},
+            Worker: globalThis.Worker,
+            postMessage() {},
+          });
+          parentPort.postMessage({ alias: self === globalThis, workerThread: true });
+        `),
+      });
+      const stdout = [];
+      const stderr = [];
+      const decode = (value) => typeof value === 'string' ? value : new TextDecoder().decode(value);
+      const code = await runtime.executeEntry('/node/main.js', {
+        cwd: '/node',
+        env: {},
+        processArgv: ['node', '/node/main.js'],
+      }, (value) => stdout.push(decode(value)), (value) => stderr.push(decode(value)));
+      return { code, stdout: stdout.join(''), stderr: stderr.join('') };
+    });
+
+    expect(result).toEqual({
+      code: 0,
+      stdout: '{"alias":true,"workerThread":true}\n',
+      stderr: '',
+    });
+  });
+
   test('shares bytes in both raw and descriptor-shaped worker VFS entries', async ({ page }) => {
     await openRuntime(page);
     const result = await page.evaluate(async () => {

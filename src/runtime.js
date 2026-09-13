@@ -3360,7 +3360,7 @@ function stripTypeScriptSource(source) {
   // Declarations which have no JavaScript representation are blanked rather
   // than removed so that generated stack locations remain stable.
   result = result.replace(
-    /(^|[;\n])([ \t]*(?:(?:declare|export)\s+)*(?:interface|type)\s+[A-Za-z_$][\w$]*(?:\s+extends[^\{=]+)?\s*(?:\{[\s\S]*?\}\s*;?|=[\s\S]*?;))/g,
+    /(^|[;\n])([ \t]*(?:(?:declare|export)\s+)*(?:interface|type)\s+[A-Za-z_$][\w$]*(?:\s+extends[^\{=]+)?\s*(?:\{[\s\S]*?\}[ \t]*;?|=[\s\S]*?;))/g,
     (_, prefix, declaration) => `${prefix}${blankTypeScriptText(declaration)}`,
   );
   result = result.replace(
@@ -3368,10 +3368,20 @@ function stripTypeScriptSource(source) {
     (declaration) => blankTypeScriptText(declaration),
   );
 
+  // Generic function declarations/calls have no runtime representation for
+  // the type-parameter list. Keep the same identifier and call syntax after
+  // stripping it. The lookahead avoids treating ordinary comparisons as
+  // generic parameters.
+  result = result.replace(
+    /(\b(?:function\s+)?[$A-Za-z_][$\w]*)\s*<[^<>\n]+>(?=\s*\()/g,
+    '$1',
+  );
+
   // Type annotations are recognized at JavaScript delimiters so ordinary
   // object-literal properties and strings are left untouched.
+  const typeName = '[A-Za-z_$][\\w$]*(?:\\s*<[^<>\\n]*(?:<[^<>\\n]*>[^<>\\n]*)?>)?(?:\\s*\\[\\s*\\])?';
   result = result.replace(
-    /[!?]?\s*:\s*[A-Za-z_$][\w$]*(?:\s*<[^>\n]*>)?(?:\s*\[\s*\])?(?:\s*\|\s*[A-Za-z_$][\w$]*(?:\s*<[^>\n]*>)?(?:\s*\[\s*\])?)*(?=\s*(?:[,)=;{=]|$))/g,
+    new RegExp(`[!?]?\\s*:\\s*(?:readonly\\s+)?${typeName}(?:\\s*\\|\\s*(?:readonly\\s+)?${typeName})*(?=\\s*(?:[,)=;{=]|\\r?\\n|$))`, 'g'),
     (annotation) => blankTypeScriptText(annotation),
   );
   result = result.replace(
@@ -7661,20 +7671,20 @@ export function createRuntime({
           return { args: normalizedArgs, options: normalizedOptions };
         }
 
-        function discoverNodeTestFiles(cwd) {
+        function discoverNodeTestFiles(cwd, requestedPatterns = []) {
           // These are Node's default test-runner discovery names. Keep the
           // search rooted at the child cwd and out of dependency trees so a
           // bare `node --test` behaves like the host runner without importing
           // every JavaScript file in the package.
-          const patterns = [
-            'test.js', 'test.mjs', 'test.cjs',
-            'test/**/*.js', 'test/**/*.mjs', 'test/**/*.cjs',
-            'test-*.js', 'test-*.mjs', 'test-*.cjs',
-            '**/test.js', '**/test.mjs', '**/test.cjs',
-            '**/test-*.js', '**/test-*.mjs', '**/test-*.cjs',
-            '**/*-test.js', '**/*-test.mjs', '**/*-test.cjs',
-            '**/*.test.js', '**/*.test.mjs', '**/*.test.cjs',
-          ];
+          const patterns = requestedPatterns.length ? requestedPatterns : [
+              'test.js', 'test.mjs', 'test.cjs',
+              'test/**/*.js', 'test/**/*.mjs', 'test/**/*.cjs',
+              'test-*.js', 'test-*.mjs', 'test-*.cjs',
+              '**/test.js', '**/test.mjs', '**/test.cjs',
+              '**/test-*.js', '**/test-*.mjs', '**/test-*.cjs',
+              '**/*-test.js', '**/*-test.mjs', '**/*-test.cjs',
+              '**/*.test.js', '**/*.test.mjs', '**/*.test.cjs',
+            ];
           try {
             return [...new Set(vfs.fs.globSync(patterns, { cwd, exclude: ['node_modules'] }))]
               .map((pathname) => normalizePath(pathname, cwd))
@@ -7721,6 +7731,7 @@ export function createRuntime({
           const importPreloads = [];
           let evalCode = null;
           let moduleInput = false;
+          let testMode = false;
           let interactive = false;
           let printResult = false;
           let script = null;
@@ -7806,6 +7817,10 @@ export function createRuntime({
               moduleInput = argument.slice('--input-type='.length) === 'module';
               continue;
             }
+            if (!stopOptions && argument === '--test') {
+              testMode = true;
+              continue;
+            }
             if (!stopOptions && (argument === '-e' || argument === '--eval')) {
               const code = rawArgs[++index];
               if (code !== undefined) evalCode = code;
@@ -7835,13 +7850,17 @@ export function createRuntime({
               afterScript.push(argument);
               continue;
             }
+            if (testMode) {
+              afterScript.push(argument);
+              continue;
+            }
             if (script === null) script = argument;
             else afterScript.push(argument);
           }
           const executionArgv = [executable, ...rawArgs];
           const id = ++childSequence;
-          const nodeTestMode = script === null && rawArgs.includes('--test');
-          const nodeTestFiles = nodeTestMode ? discoverNodeTestFiles(cwd) : [];
+          const nodeTestMode = script === null && testMode;
+          const nodeTestFiles = nodeTestMode ? discoverNodeTestFiles(cwd, afterScript) : [];
           const mainPath = script
             ? normalizePath(script, cwd)
             : nodeTestMode
@@ -12402,14 +12421,92 @@ export function createRuntime({
   // suites while keeping the checkout content sourced from exact archives
   // precached for the requested repository refs.
   function runVirtualGitCommand(args, cwd) {
-    const project = virtualGitProject(cwd);
-    const values = (args || []).map(String);
+    const rawValues = (args || []).map(String);
+    let effectiveCwd = cwd;
+    let optionIndex = 0;
+    while (rawValues[optionIndex] === '-C' && rawValues[optionIndex + 1]) {
+      effectiveCwd = normalizePath(rawValues[optionIndex + 1], effectiveCwd);
+      optionIndex += 2;
+    }
+    const values = rawValues.slice(optionIndex);
     const command = values[0] || '';
     const projectArchives = Array.isArray(scope.__BNH_GIT_PROJECT_ARCHIVES__)
       ? scope.__BNH_GIT_PROJECT_ARCHIVES__
       : [];
     const fail = (message) => ({ code: 1, stdout: '', stderr: `git: ${message}\n` });
-    if (!project) return fail('not a Git work tree');
+    const fs = vfs.fs;
+    const gitDir = normalizePath('.git', effectiveCwd);
+    const configPath = normalizePath('config', gitDir);
+    const headPath = normalizePath('HEAD', gitDir);
+    const fetchHeadPath = normalizePath('FETCH_HEAD', gitDir);
+    const readText = (file) => {
+      try { return String(fs.readFileSync(file, 'utf8')); } catch { return ''; }
+    };
+    const repositoryFromUrl = (value) => String(value || '')
+      .replace(/^git\+/, '')
+      .replace(/^git:/, 'https:')
+      .replace(/^ssh:\/\/git@/, 'https://')
+      .replace(/^git@([^:]+):/, 'https://$1/')
+      .replace(/\.git$/, '')
+      .replace(/\/+$/, '');
+    const archiveFor = (repository, ref = null) => projectArchives.find((candidate) => {
+      if (candidate.repository !== repository) return false;
+      return !ref || candidate.ref === ref || candidate.head === ref;
+    });
+    const repositoryFromConfig = () => readText(configPath).match(/\n?\s*url\s*=\s*(\S+)/)?.[1] || '';
+    const project = virtualGitProject(effectiveCwd) || virtualGitProject(cwd);
+
+    // The browser has no host Git executable. This is the subset used by
+    // source-tree test fixtures: discover HEAD, initialize a local checkout,
+    // fetch an exact archive, and detach at FETCH_HEAD.
+    if (command === 'ls-remote') {
+      const remote = repositoryFromUrl(values.find((value) => /^https?:\/\//i.test(value)));
+      const archive = archiveFor(remote);
+      if (!archive?.ref) return fail(`remote '${remote}' is not precached`);
+      return { code: 0, stdout: `${archive.ref}\tHEAD\n`, stderr: '' };
+    }
+
+    if (command === 'init') {
+      fs.mkdirSync(gitDir, { recursive: true });
+      fs.writeFileSync(headPath, 'ref: refs/heads/master\n');
+      return { code: 0, stdout: '', stderr: '' };
+    }
+
+    if (command === 'remote') {
+      if (values[1] !== 'add' || !values[2] || !values[3]) return fail('remote add requires a name and URL');
+      fs.mkdirSync(gitDir, { recursive: true });
+      fs.writeFileSync(configPath, `[remote \"${values[2]}\"]\n\turl = ${values[3]}\n`);
+      return { code: 0, stdout: '', stderr: '' };
+    }
+
+    if (command === 'fetch') {
+      const remoteName = values.find((value) => value === 'origin') || 'origin';
+      const requestedRef = values.at(-1);
+      const remote = repositoryFromUrl(repositoryFromConfig()) || remoteName;
+      const archive = archiveFor(remote, requestedRef);
+      if (!archive?.ref) return fail(`ref '${requestedRef}' is not available for '${remote}'`);
+      fs.writeFileSync(fetchHeadPath, `${archive.ref}\t${remote}\tFETCH_HEAD\n`);
+      return { code: 0, stdout: '', stderr: '' };
+    }
+
+    if (command === 'checkout') {
+      const requestedRef = values.at(-1);
+      const remote = repositoryFromUrl(repositoryFromConfig());
+      const archive = archiveFor(remote, readText(fetchHeadPath).split(/\s+/)[0] || requestedRef);
+      if (!archive?.files?.length) return fail(`ref '${requestedRef}' is not available for '${remote}'`);
+      fs.mkdirSync(effectiveCwd, { recursive: true });
+      for (const entry of archive.files) {
+        const target = normalizePath(entry.path, effectiveCwd);
+        if (target !== effectiveCwd && !target.startsWith(`${effectiveCwd}/`)) return fail('checkout path escapes worktree');
+        fs.mkdirSync(normalizePath('.', target.slice(0, target.lastIndexOf('/')) || effectiveCwd), { recursive: true });
+        fs.writeFileSync(target, entry.data);
+        if (Number.isInteger(entry.mode) && entry.mode > 0) {
+          try { fs.chmodSync(target, entry.mode & 0o777); } catch { /* preserve the file when chmod is unavailable */ }
+        }
+      }
+      fs.writeFileSync(headPath, `${archive.ref}\n`);
+      return { code: 0, stdout: '', stderr: '' };
+    }
 
     if (command === 'describe') {
       if (!values.includes('--tags') || !values.includes('--abbrev=0')) return fail('describe mode is not available');
@@ -12419,6 +12516,10 @@ export function createRuntime({
     }
 
     if (command === 'rev-parse') {
+      if (values.includes('HEAD') && fs.existsSync(headPath)) {
+        const head = readText(headPath).trim();
+        if (/^[0-9a-f]{40}$/i.test(head)) return { code: 0, stdout: `${head}\n`, stderr: '' };
+      }
       if (values.includes('--show-toplevel')) return { code: 0, stdout: `${project.directory}\n`, stderr: '' };
       if (values.includes('--is-inside-work-tree')) return { code: 0, stdout: 'true\n', stderr: '' };
       return fail('rev-parse mode is not available');
@@ -12427,7 +12528,6 @@ export function createRuntime({
     if (command !== 'worktree') return fail(`command '${command}' is not available`);
     const action = values[1];
     const positional = values.slice(2).filter((value) => !value.startsWith('-'));
-    const fs = vfs.fs;
     if (action === 'remove') {
       const destination = positional[0];
       if (!destination) return fail('worktree remove requires a path');
@@ -12436,7 +12536,8 @@ export function createRuntime({
     }
     if (action !== 'add' || positional.length < 2) return fail('worktree add requires a path and ref');
 
-    const destination = normalizePath(positional[0], cwd);
+    if (!project) return fail('not a Git work tree');
+    const destination = normalizePath(positional[0], effectiveCwd);
     const requestedRef = positional[1];
     const candidates = projectArchives.filter((candidate) => candidate.repository === project.repository);
     const latest = candidates.find((candidate) => candidate.latestTag === project.manifest.version)
@@ -13064,6 +13165,26 @@ export function createRuntime({
       );
       const directories = vfs.snapshot({ copy: false, includeAllFiles: true }).directories;
       if (isEval) files[workerPath] = new scope.TextEncoder().encode(String(source));
+      // Node-oriented WASI workers commonly install `self` as an alias for
+      // globalThis before wiring parentPort. Browser WorkerGlobalScope already
+      // exposes that exact alias as a read-only property, so the assignment is
+      // redundant and otherwise aborts the worker before it can handle a
+      // message. Keep the Node worker protocol intact and remove only this
+      // browser-incompatible alias from the child snapshot.
+      if (!isEval && scope.self === scope) {
+        try {
+          const workerSource = vfs.readSource(workerPath);
+          if (/Object\.assign\s*\(\s*globalThis\s*,\s*\{\s*self\s*:\s*globalThis\s*,/u.test(workerSource)) {
+            files[workerPath] = new scope.TextEncoder().encode(workerSource.replace(
+              /(Object\.assign\s*\(\s*globalThis\s*,\s*\{\s*)self\s*:\s*globalThis\s*,\s*/u,
+              '$1',
+            ));
+          }
+        } catch {
+          // The child loader reports the normal missing-entry error if the
+          // requested worker source is not mounted.
+        }
+      }
       const vfsUpdateBridge = createVfsUpdateBridge();
       const child = createBrowserProcess({
         scope,
@@ -14571,6 +14692,9 @@ export function createRuntime({
       defaultModuleType: processObject.execArgv?.some(
         (argument) => String(argument) === '--experimental-default-type=module',
       ) ? 'module' : 'commonjs',
+      stripTypeScript: resolvedProfile.features?.typescript === 'strip'
+        ? stripTypeScriptSource
+        : undefined,
     });
     processObject.__bnhModuleResolve = (specifier, importer, conditions) => (
       esmLoader.resolveWithHooks(specifier, importer, conditions)

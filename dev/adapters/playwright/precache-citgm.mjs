@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { gunzipSync } from 'node:zlib';
 import { compareSemver, parseNpmAlias, parseSemver, satisfiesSemver } from '../../../src/runtime/npm.js';
@@ -196,6 +196,50 @@ function projectCompatibilityRefs(bytes) {
   return refs;
 }
 
+// A few source-tree test suites use Git to fetch a pinned external fixture
+// repository. Capture GitHub remotes mentioned by the project so the browser
+// runtime can replay the same commands from exact archive bytes.
+function projectGitRemotes(bytes) {
+  const tar = gunzipSync(bytes);
+  const remotes = [];
+  const seen = new Set();
+  for (let offset = 0; offset + 512 <= tar.byteLength;) {
+    const header = tar.subarray(offset, offset + 512);
+    if (header.every((value) => value === 0)) break;
+    const name = new TextDecoder().decode(header.subarray(0, 100)).replace(/\0.*$/, '');
+    const sizeText = new TextDecoder().decode(header.subarray(124, 136)).replace(/\0.*$/, '').trim();
+    const size = parseInt(sizeText || '0', 8);
+    const contentStart = offset + 512;
+    if (size > 0) {
+      const source = new TextDecoder().decode(tar.subarray(contentStart, contentStart + size));
+      for (const match of source.matchAll(/https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git/g)) {
+        const repository = match[0].replace(/\.git$/, '');
+        if (!seen.has(repository)) {
+          seen.add(repository);
+          remotes.push(repository);
+        }
+      }
+    }
+    offset = contentStart + Math.ceil(size / 512) * 512;
+  }
+  return remotes;
+}
+
+function gitRemoteHead(repository) {
+  const result = spawnSync('git', ['ls-remote', `${repository}.git`, 'HEAD'], {
+    encoding: 'utf8',
+    maxBuffer: 1024 * 1024,
+  });
+  if (result.status !== 0) {
+    throw new Error(`git ls-remote failed for ${repository}: ${result.stderr || result.error || 'unknown error'}`);
+  }
+  const commit = String(result.stdout || '').trim().split(/\s+/)[0];
+  if (!/^[0-9a-f]{40}$/i.test(commit)) {
+    throw new Error(`git ls-remote returned no commit for ${repository}`);
+  }
+  return commit;
+}
+
 function resolveVersion(document, range) {
   if (range === 'latest' && document['dist-tags']?.latest) {
     const version = document['dist-tags'].latest;
@@ -312,6 +356,7 @@ async function main() {
     });
     let projectArchive = null;
     const projectArchives = new Map();
+    const gitRepositories = {};
     if (projectUrl) {
       process.stdout.write(`Fetching CITGM project archive ${projectUrl}...\n`);
       projectArchive = await fetchBytes(projectUrl);
@@ -332,6 +377,16 @@ async function main() {
         if (projectArchives.has(refUrl)) continue;
         process.stdout.write(`Fetching CITGM compatibility archive ${refUrl}...\n`);
         projectArchives.set(refUrl, await fetchBytes(refUrl));
+      }
+      for (const remote of projectGitRemotes(projectArchive)) {
+        if (remote === repositoryUrl) continue;
+        const head = gitRemoteHead(remote);
+        const archiveUrl = `${remote}/archive/${head}.tar.gz`;
+        if (!projectArchives.has(archiveUrl)) {
+          process.stdout.write(`Fetching Git fixture archive ${archiveUrl}...\n`);
+          projectArchives.set(archiveUrl, await fetchBytes(archiveUrl));
+        }
+        gitRepositories[remote] = { head, archiveUrl };
       }
     }
 
@@ -374,6 +429,7 @@ async function main() {
       metadata: metadataPaths,
       tarballs: tarballPaths,
       projects: projectPaths,
+      gitRepositories,
       packageCount: packageList.length,
     };
     await writeFile(path.join(cacheDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);

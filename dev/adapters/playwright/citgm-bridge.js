@@ -540,6 +540,14 @@ class ArtifactNpmCache extends BrowserNpmCache {
   projectUrls() {
     return Object.keys(this.artifactManifest?.projects || {});
   }
+
+  gitRepositoryForArchive(url) {
+    const repositories = this.artifactManifest?.gitRepositories || {};
+    for (const [repository, descriptor] of Object.entries(repositories)) {
+      if (descriptor?.archiveUrl === url) return { repository, ...descriptor };
+    }
+    return null;
+  }
 }
 
 function gitRepositoryFromManifest(manifest) {
@@ -592,15 +600,19 @@ async function materializeGitProjectArchives(cache) {
     try {
       manifest = JSON.parse(new TextDecoder().decode(packageJson.data));
     } catch {
-      continue;
+      // External Git fixture repositories are not npm packages and therefore
+      // do not have package.json. Their repository identity comes from the
+      // precache manifest instead.
     }
-    const repository = gitRepositoryFromManifest(manifest);
+    const repository = gitRepositoryFromManifest(manifest) || cache.gitRepositoryForArchive?.(url)?.repository;
     if (!repository) continue;
+    const gitDescriptor = cache.gitRepositoryForArchive?.(url);
     projects.push({
       url,
       repository,
       ref: projectArchiveRef(url),
-      latestTag: manifest.version || null,
+      latestTag: manifest?.version || null,
+      head: gitDescriptor?.head || null,
       files,
     });
   }

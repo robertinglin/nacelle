@@ -277,6 +277,7 @@ export function createModuleLoader({
   fileVersion,
   fetchModule,
   defaultModuleType = 'commonjs',
+  stripTypeScript,
 } = {}) {
   const registeredHooks = sharedRunModuleHook ? [] : wrapSynchronousLoadHook(builtins?.module);
   const cache = Object.create(null);
@@ -760,6 +761,31 @@ export function createModuleLoader({
     if (filesystemPath.endsWith('.mjs')) return 'module';
     if (filesystemPath.endsWith('.cjs')) return 'commonjs';
     const extension = posix.extname(filesystemPath);
+    if (extension === '.mts') {
+      if (typeof stripTypeScript !== 'function') throw packageError(
+        'ERR_UNKNOWN_FILE_EXTENSION',
+        `Unknown file extension \"${extension}\" for ${resolved}`,
+      );
+      return 'module';
+    }
+    if (extension === '.cts') {
+      if (typeof stripTypeScript !== 'function') throw packageError(
+        'ERR_UNKNOWN_FILE_EXTENSION',
+        `Unknown file extension \"${extension}\" for ${resolved}`,
+      );
+      return 'commonjs';
+    }
+    if (extension === '.ts') {
+      if (typeof stripTypeScript !== 'function') throw packageError(
+        'ERR_UNKNOWN_FILE_EXTENSION',
+        `Unknown file extension \"${extension}\" for ${resolved}`,
+      );
+      // Node's native type stripping follows the surrounding module graph for
+      // .ts. Source-tree tests commonly import ESM-flavoured .ts from .mjs;
+      // classify this extension as ESM so the stripped source keeps its
+      // imports/exports intact.
+      return 'module';
+    }
     if (extension && !['.js', '.json', '.node'].includes(extension)) {
       throw packageError(
         'ERR_UNKNOWN_FILE_EXTENSION',
@@ -904,6 +930,34 @@ export function createModuleLoader({
     throw packageError('ERR_INVALID_PACKAGE_TARGET', invalidPackageTargetMessage(kind, target));
   };
 
+  const resolvePackageSelfReference = (specifier, importer, conditions) => {
+    const parts = String(specifier).split('/');
+    const packageName = specifier.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
+    const subpath = parts.slice(packageName.split('/').length).join('/');
+    let directory = posix.dirname(importer);
+    while (true) {
+      const config = packageConfig(directory);
+      if (config?.name === packageName && config.exports !== undefined) {
+        const exportsMap = config.exports === null || typeof config.exports === 'string' || Array.isArray(config.exports)
+          ? { '.': config.exports }
+          : Object.keys(config.exports).some((key) => key === '.' || key.startsWith('./'))
+            ? config.exports
+            : { '.': config.exports };
+        const request = subpath ? `./${subpath}` : '.';
+        const entry = matchingPackageEntry(exportsMap, request);
+        if (!entry) throw packageError('ERR_PACKAGE_PATH_NOT_EXPORTED', `Package subpath '${request}' is not defined`);
+        const exported = resolvePackageTarget(entry.target, directory, entry.match, conditions, 'exports');
+        if (exported === PACKAGE_TARGET_BLOCKED || exported === undefined) {
+          throw packageError('ERR_PACKAGE_PATH_NOT_EXPORTED', `Package subpath '${request}' is not defined`);
+        }
+        return exported;
+      }
+      if (directory === '/' || directory === '.' || directory === '') break;
+      directory = posix.dirname(directory);
+    }
+    return undefined;
+  };
+
   const resolvePackageImports = (specifier, importer, conditions) => {
     if (!specifier.startsWith('#')) return undefined;
     if (specifier === '#' || specifier.startsWith('#/')) {
@@ -958,6 +1012,8 @@ export function createModuleLoader({
     const parts = specifier.split('/');
     const packageName = specifier.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
     const subpath = parts.slice(packageName.split('/').length).join('/');
+    const selfReference = resolvePackageSelfReference(specifier, importer, conditions);
+    if (selfReference !== undefined) return selfReference;
     const resolutionTrace = [];
     let directory = posix.dirname(importer);
     for (;;) {
@@ -1850,7 +1906,10 @@ export function createModuleLoader({
     }
     if (loaded.source !== undefined && loaded.source !== null) {
       if (isWasmBytes(loaded.source)) return wasmModuleSource(loaded.source, loadedResolved, processOverride);
-      const loadedText = sourceText(loaded.source);
+      const loadedText = typeof stripTypeScript === 'function'
+        && /\.(?:[cm]?ts)$/i.test(stripPathIdentity(loadedResolved))
+        ? stripTypeScript(sourceText(loaded.source))
+        : sourceText(loaded.source);
       if (loaded.format === 'json') return `export default ${JSON.stringify(JSON.parse(loadedText))};`;
       if (loaded.format === 'module' || hasEsmSyntax(loadedText)) {
         return `${bindProcess(rewriteImports(stripHashbang(loadedText), loadedResolved, processOverride), processOverride)}\n//# sourceURL=${loadedResolved}`;
@@ -1891,7 +1950,10 @@ export function createModuleLoader({
     if (resolved.endsWith('.json')) {
       return `export default ${JSON.stringify(JSON.parse(sourceText(value)))};`;
     }
-    const loadedText = sourceText(value);
+    const loadedText = typeof stripTypeScript === 'function'
+      && /\.(?:[cm]?ts)$/i.test(stripPathIdentity(resolved))
+      ? stripTypeScript(sourceText(value))
+      : sourceText(value);
     if (moduleFormat(resolved) !== 'module' && !hasEsmSyntax(loadedText)) return cjsModuleSource(resolved, loadedText, processOverride);
     return `${bindProcess(rewriteImports(stripHashbang(loadedText), resolved, processOverride), processOverride)}\n//# sourceURL=${resolved}`;
   }
@@ -2308,7 +2370,10 @@ export function createModuleLoader({
     }
     if (loaded.source !== undefined && loaded.source !== null) {
       if (isWasmBytes(loaded.source)) return wasmModuleSource(loaded.source, loadedResolved, processOverride);
-      const loadedText = sourceText(loaded.source);
+      const loadedText = typeof stripTypeScript === 'function'
+        && /\.(?:[cm]?ts)$/i.test(stripPathIdentity(loadedResolved))
+        ? stripTypeScript(sourceText(loaded.source))
+        : sourceText(loaded.source);
       if (loaded.format === 'json') return `export default ${JSON.stringify(JSON.parse(loadedText))};`;
       const loadedFormat = hasEsmSyntax(loadedText) ? 'module' : loaded.format;
       if (loadedFormat === 'module') {
@@ -2331,7 +2396,10 @@ export function createModuleLoader({
       : readTextFile(resolved);
     if (isWasmBytes(value)) return wasmModuleSource(value, resolved, processOverride);
     if (resolved.endsWith('.json')) return `export default ${JSON.stringify(JSON.parse(sourceText(value)))};`;
-    const loadedText = sourceText(value);
+    const loadedText = typeof stripTypeScript === 'function'
+      && /\.(?:[cm]?ts)$/i.test(stripPathIdentity(resolved))
+      ? stripTypeScript(sourceText(value))
+      : sourceText(value);
     if (moduleFormat(resolved) !== 'module' && !hasEsmSyntax(loadedText)) return cjsModuleSource(resolved, loadedText, processOverride);
     const moduleText = stripHashbang(loadedText);
     return `${bindProcess(await rewriteImportsAsync(moduleText, resolved, processOverride, ancestors), processOverride)}\n//# sourceURL=${resolved}`;

@@ -72,9 +72,82 @@ function parseCallSites(stack) {
     .filter(Boolean);
 }
 
+const nativeCallSiteMethods = [
+  'getFunctionName',
+  'getScriptNameOrSourceURL',
+  'getFileName',
+  'getLineNumber',
+  'getColumnNumber',
+  'getEnclosingLineNumber',
+  'getEnclosingColumnNumber',
+  'getEvalOrigin',
+  'isToplevel',
+  'isEval',
+  'isNative',
+  'isConstructor',
+  'isAsync',
+  'getThis',
+  'getTypeName',
+  'getMethodName',
+  'getFunction',
+  'getPosition',
+  'getPromiseIndex',
+  'isPromiseAll',
+  'toString',
+];
+
+function wrapNativeCallSite(site, overrides = {}) {
+  const wrapped = Object.create(site);
+  for (const methodName of nativeCallSiteMethods) {
+    let method;
+    try { method = site[methodName]; } catch { continue; }
+    if (typeof method !== 'function') continue;
+    Object.defineProperty(wrapped, methodName, {
+      configurable: true,
+      value: method.bind(site),
+    });
+  }
+  for (const [methodName, method] of Object.entries(overrides)) {
+    Object.defineProperty(wrapped, methodName, {
+      configurable: true,
+      value: method,
+    });
+  }
+  return wrapped;
+}
+
 function normalizePrepareStackSites(callSites) {
   if (!Array.isArray(callSites)) return callSites;
-  return callSites.filter((site) => site !== undefined && site !== null);
+  return callSites
+    .filter((site) => site !== undefined && site !== null)
+    .map(normalizeNativeCallSite);
+}
+
+function normalizeNativeCallSite(site) {
+  if (!site || typeof site !== 'object' || typeof site.getFileName !== 'function') return site;
+  let fileName;
+  try { fileName = site.getFileName(); } catch { return site; }
+  if (typeof fileName === 'string' && fileName) {
+    return Object.isExtensible(site) ? site : wrapNativeCallSite(site);
+  }
+
+  // Chromium's structured CallSites report undefined for frames created by
+  // eval-based module wrappers even though their toString() includes the
+  // virtual module filename. Node callers such as resolve/lib/caller.js use
+  // getFileName() directly, so recover that filename from the stable text
+  // representation and layer the corrected method over the native site.
+  let text;
+  try { text = String(site); } catch { return site; }
+  const parsed = parseCallSites(text)[0];
+  const parsedFileName = parsed?.getFileName?.();
+  if (typeof parsedFileName !== 'string' || !parsedFileName) return site;
+  // V8's native CallSite methods validate their receiver. Bind every native
+  // method back to the original object, not just toString: consumers such as
+  // Next call getLineNumber/getColumnNumber on the normalized wrapper too.
+  return wrapNativeCallSite(site, {
+    getFileName: () => parsedFileName,
+    getScriptNameOrSourceURL: () => parsedFileName,
+  });
 }
 
 function supportsNativePreparedErrorStack(ErrorConstructor) {
@@ -270,11 +343,12 @@ function installStructuredCaptureFallback(ErrorConstructor) {
         // extensible. Node consumers are allowed to annotate CallSites (tap
         // records the owning cwd), so put those objects behind an extensible
         // wrapper while retaining their prototype methods and values.
-        capturedStack = capturedStack.map((site) => (
-          site && typeof site === 'object' && !Object.isExtensible(site)
-            ? Object.create(site)
-            : site
-        ));
+        capturedStack = capturedStack.map((site) => {
+          const normalized = normalizeNativeCallSite(site);
+          return normalized && typeof normalized === 'object' && !Object.isExtensible(normalized)
+            ? Object.create(normalized)
+            : normalized;
+        });
       }
     }
     try {

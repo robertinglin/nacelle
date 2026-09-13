@@ -848,9 +848,25 @@ async function runNpm(name, args, input, context, options) {
   const meaningfulArgs = args.filter((arg) => !['--silent', '--loglevel=silent'].includes(arg));
   if (meaningfulArgs[0] === '--version' || meaningfulArgs[0] === '-v') return result(0, '10.0.0-browser\n');
   const isTest = meaningfulArgs[0] === 'test';
-  if ((!['run', 'run-script'].includes(meaningfulArgs[0]) && !isTest)
-    || (!isTest && !meaningfulArgs[1])) {
+  const isInstall = ['install', 'i', 'add'].includes(meaningfulArgs[0]);
+  if ((!['run', 'run-script'].includes(meaningfulArgs[0]) && !isTest && !isInstall)
+    || (!isTest && !isInstall && !meaningfulArgs[1])) {
     return commandError('npm', 'only npm run is supported by the browser shell');
+  }
+  if (isInstall) {
+    if (typeof options.runCommand !== 'function') return commandError('npm', 'npm installation is unavailable');
+    return options.runCommand({
+      entry: '/node/node_modules/.bin/npm',
+      argv: args,
+      cwd: context.cwd,
+      env: context.env,
+      stdin: input,
+      signal: context.signal,
+      timeout: context.timeout,
+      onNetwork: (event) => context.onNetwork?.(event),
+      onStdout: context.onStdout,
+      onStderr: context.onStderr,
+    });
   }
   if (typeof options.npmRun !== 'function') return commandError('npm', 'npm execution is unavailable');
   const scriptName = isTest ? 'test' : meaningfulArgs[1];

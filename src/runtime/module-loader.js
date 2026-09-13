@@ -14,6 +14,7 @@ const NATIVE_ADDON_EXTENSION = '.node';
 const SYNC_HOOKS_WRAPPED = Symbol('bnhSyncHooksWrapped');
 const REGISTERED_HOOKS = Symbol('bnhRegisteredHooks');
 const RUNTIME_PROCESS_MARKER = Symbol.for('bnh.runtime-process');
+const SCHEME_ONLY_BUILTIN_NAMES = new Set(['test', 'sea', 'sqlite', 'test/reporters']);
 let nextLoaderId = 0;
 const GENERATED_OBJECT_IMPORTERS = new WeakMap();
 
@@ -399,8 +400,13 @@ export function createModuleLoader({
       source: await response.text(),
     };
   };
-  const hasBuiltin = (name) => Object.prototype.hasOwnProperty.call(builtins || {}, name)
-    || Object.prototype.hasOwnProperty.call(builtins || {}, `node:${name}`);
+  const hasBuiltin = (specifier) => {
+    const raw = String(specifier);
+    const name = builtinName(raw);
+    if (SCHEME_ONLY_BUILTIN_NAMES.has(name) && !raw.startsWith('node:')) return false;
+    return Object.prototype.hasOwnProperty.call(builtins || {}, name)
+      || Object.prototype.hasOwnProperty.call(builtins || {}, `node:${name}`);
+  };
   const builtinName = (specifier) => String(specifier).startsWith('node:')
     ? String(specifier).slice(5)
     : String(specifier);
@@ -443,12 +449,12 @@ export function createModuleLoader({
   };
   const builtin = (specifier, processOverride) => {
     const name = builtinName(specifier);
-    if (!hasBuiltin(name)) return undefined;
+    if (!hasBuiltin(specifier)) return undefined;
     const overridden = resolveBuiltin?.(name, processOverride);
     if (overridden !== undefined) return overridden;
     return builtins[name] ?? builtins[`node:${name}`];
   };
-  const isBuiltinSpecifier = (specifier) => hasBuiltin(builtinName(specifier));
+  const isBuiltinSpecifier = (specifier) => hasBuiltin(specifier);
 
   const fileURL = (path) => `file://${path}`;
   const importMetaURL = (importer) => (
@@ -1008,6 +1014,25 @@ export function createModuleLoader({
     return directoryCandidateList(base).find((candidate) => hasFile(candidate));
   };
 
+  const globalModulePaths = () => {
+    const configured = Array.isArray(builtins?.module?.globalPaths)
+      ? builtins.module.globalPaths.filter((pathname) => typeof pathname === 'string')
+      : [];
+    if (configured.length > 0) return configured;
+    const processObject = builtins?.process;
+    const home = processObject?.platform === 'win32'
+      ? processObject?.env?.USERPROFILE || builtins?.os?.homedir?.()
+      : processObject?.env?.HOME || builtins?.os?.homedir?.();
+    const nodePath = processObject?.env?.NODE_PATH;
+    const delimiter = processObject?.platform === 'win32' ? ';' : ':';
+    const paths = nodePath ? String(nodePath).split(delimiter).filter(Boolean) : [];
+    if (home) {
+      paths.push(posix.join(home, '.node_modules'));
+      paths.push(posix.join(home, '.node_libraries'));
+    }
+    return paths;
+  };
+
   const resolvePackage = (specifier, importer, conditions = ['node', 'import']) => {
     const parts = specifier.split('/');
     const packageName = specifier.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
@@ -1015,9 +1040,16 @@ export function createModuleLoader({
     const selfReference = resolvePackageSelfReference(specifier, importer, conditions);
     if (selfReference !== undefined) return selfReference;
     const resolutionTrace = [];
+    const searchRoots = [];
     let directory = posix.dirname(importer);
     for (;;) {
-      const packageRoot = posix.join(directory, 'node_modules', packageName);
+      searchRoots.push(posix.join(directory, 'node_modules'));
+      if (directory === '/' || directory === '.' || directory === '') break;
+      directory = posix.dirname(directory);
+    }
+    searchRoots.push(...globalModulePaths());
+    for (const searchRoot of searchRoots) {
+      const packageRoot = posix.join(searchRoot, packageName);
       resolutionTrace.push(`${packageRoot}:${hasFile(posix.join(packageRoot, 'package.json')) ? 'present' : 'missing'}`);
       let config;
       try {
@@ -1058,8 +1090,6 @@ export function createModuleLoader({
       const base = subpath ? posix.join(packageRoot, subpath) : packageRoot;
       const resolved = resolveFileOrDirectory(base, false, fileCandidateList, directoryCandidateList);
       if (resolved) return resolved;
-      if (directory === '/' || directory === '.' || directory === '') break;
-      directory = posix.dirname(directory);
     }
     const error = packageError(
       'MODULE_NOT_FOUND',
@@ -1111,7 +1141,7 @@ export function createModuleLoader({
       }
     }
     const name = builtinName(value);
-    if (hasBuiltin(name)) return value.startsWith('node:') ? `node:${name}` : name;
+    if (hasBuiltin(value)) return value.startsWith('node:') ? `node:${name}` : name;
     if (value.startsWith('node:')) {
       const libraryFile = resolveInternalModule(name) || resolveNodeLibrary(name);
       if (libraryFile) return libraryFile;
@@ -1157,7 +1187,7 @@ export function createModuleLoader({
     const rawValue = String(specifier);
     const value = rawValue.startsWith('file:') ? fileURLToPath(rawValue) : rawValue;
     const name = builtinName(value);
-    if (hasBuiltin(name)) return value.startsWith('node:') ? `node:${name}` : name;
+    if (hasBuiltin(value)) return value.startsWith('node:') ? `node:${name}` : name;
     if (value.startsWith('node:')) {
       const libraryFile = resolveInternalModule(name) || resolveNodeLibrary(name);
       if (libraryFile) return libraryFile;

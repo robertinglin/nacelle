@@ -16,6 +16,7 @@ import {
   installBlobStreamClass,
   isAscii,
   isUtf8,
+  resolveEncodingOps,
 } from './runtime/buffer.js';
 import {
   createAsyncLocalStorage,
@@ -184,16 +185,28 @@ const BUILTIN_NAMES = Object.freeze([
   'assert', 'assert/strict', 'buffer', 'console', 'constants', 'crypto', 'domain', 'events', 'fs', 'fs/promises', 'http', 'https', 'module', 'os',
   'path', 'path/posix', 'path/win32', 'process', 'querystring', 'stream', 'stream/consumers', 'stream/promises', 'stream/web',
   'string_decoder', 'timers', 'timers/promises', 'url', 'util', 'sys', 'util/types', 'wasi', 'worker_threads', 'zlib', 'perf_hooks', 'async_hooks', 'diagnostics_channel', 'punycode',
-  'child_process', 'cluster', 'dgram', 'dns', 'dns/promises', 'http2', 'inspector', 'inspector/promises', 'net', 'readline', 'readline/promises', 'repl', 'tls', 'test', 'v8', 'vm', '_http_server',
-  'sea', 'sqlite', 'test/reporters', '_http_common', '_http_outgoing', 'trace_events', 'tty',
+  'child_process', 'cluster', 'dgram', 'dns', 'dns/promises', 'http2', 'inspector', 'inspector/promises', 'net', 'readline', 'readline/promises', 'repl', 'tls', 'node:test', 'v8', 'vm', '_http_agent', '_http_client', '_http_incoming', '_http_server',
+  'node:sea', 'node:sqlite', 'node:test/reporters', '_http_common', '_http_outgoing', '_stream_duplex', '_stream_transform', '_stream_wrap', '_stream_passthrough', '_stream_readable', '_stream_writable', '_tls_common', '_tls_wrap', 'trace_events', 'tty',
   'internal/event_target', 'internal/async_context_frame', 'internal/async_hooks', 'internal/test/binding', 'internal/test/transfer', 'internal/test_runner/snapshot',
   'internal/bootstrap/realm', 'internal/modules/cjs/loader', 'internal/modules/esm/utils', 'internal/vm/module',
   'internal/webstreams/adapters',
   'internal/util', 'internal/util/debuglog', 'internal/util/types', 'internal/options', 'internal/dgram', 'internal/crypto/x509', 'internal/crypto/keys',
 ]);
 
+const PUBLIC_BUILTIN_NAMES = Object.freeze(BUILTIN_NAMES.filter((name) => !name.startsWith('internal/')));
+
 function builtinName(name) {
-  return name.startsWith('node:') ? name.slice(5) : name;
+  const value = String(name);
+  if (!value.startsWith('node:')) return value;
+  const stripped = value.slice(5);
+  return stripped === 'sea' || stripped === 'sqlite' || stripped === 'test' || stripped === 'test/reporters'
+    ? value
+    : stripped;
+}
+
+function builtinSpecifier(name) {
+  const value = builtinName(name);
+  return value.startsWith('node:') ? value : `node:${value}`;
 }
 
 function ensureReplDispose(replModule) {
@@ -4351,8 +4364,7 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     enumerable: true,
     get: () => exitCode,
     set: (value) => {
-      const next = Number(value) || 0;
-      exitCode = next;
+      exitCode = Number(value) || 0;
     },
   });
   installProcessFinalization(processObject);
@@ -6187,13 +6199,17 @@ export function createRuntime({
         return paths;
       };
       const moduleInitPaths = () => {
-        const homeDir = processObj.platform === 'win32' ? processObj.env?.USERPROFILE : processObj.env?.HOME;
+        const configuredHome = processObj.platform === 'win32'
+          ? processObj.env?.USERPROFILE || platform.os.homedir?.()
+          : processObj.env?.HOME || platform.os.homedir?.();
+        const osHome = platform.os.homedir?.();
+        const homeDirs = [...new Set([configuredHome, osHome].filter(Boolean))];
         const nodePath = processObj.platform === 'win32' ? processObj.env?.NODE_PATH : processObj.env?.NODE_PATH;
         const prefixDir = processObj.platform === 'win32'
           ? path.resolve(processObj.execPath, '..')
           : path.resolve(processObj.execPath, '..', '..');
         const paths = [path.resolve(prefixDir, 'lib', 'node')];
-        if (homeDir) {
+        for (const homeDir of homeDirs) {
           paths.unshift(path.resolve(homeDir, '.node_libraries'));
           paths.unshift(path.resolve(homeDir, '.node_modules'));
         }
@@ -6338,8 +6354,10 @@ export function createRuntime({
         }
         if (resolved?.startsWith('file:')) resolved = fileURLToPath(resolved);
         if (resolved && (resolved.startsWith('/') || resolved.startsWith('file:'))) {
-          const candidate = moduleCandidates(resolved).find((pathname) => vfs.files.has(pathname));
-          if (candidate) return candidate;
+            const candidate = moduleCandidates(resolved)
+              .map((pathname) => tryModuleFile(pathname, isMain))
+              .find(Boolean);
+            if (candidate) return candidate;
         }
         const requireStack = [];
         for (let cursor = typeof parent === 'object' ? parent : null; cursor; cursor = cursor.parent) {
@@ -6351,7 +6369,7 @@ export function createRuntime({
         throw error;
       };
       const moduleApi = Object.assign(Module, {
-        builtinModules: BUILTIN_NAMES,
+        builtinModules: PUBLIC_BUILTIN_NAMES,
         globalPaths,
         _debug: moduleDeprecatedDebug,
         _extensions: moduleExtensions,
@@ -6419,7 +6437,7 @@ export function createRuntime({
           req.extensions = moduleExtensions;
           return req;
         },
-        isBuiltin: (name) => BUILTIN_NAMES.includes(builtinName(name)),
+        isBuiltin: (name) => PUBLIC_BUILTIN_NAMES.includes(builtinName(name)),
         findSourceMap,
         getSourceMapsSupport,
         runMain: (main = processObj.argv?.[1]) => {
@@ -6586,6 +6604,7 @@ export function createRuntime({
         configurable: true,
         value: (implementation) => { syncBuiltinESMExportsImpl = implementation; },
       });
+      moduleApi._initPaths();
       Object.defineProperty(processObj, '__bnhModuleApi', { configurable: true, value: moduleApi });
       return moduleApi;
     };
@@ -7080,7 +7099,7 @@ export function createRuntime({
       newHandle: dgram.newHandle,
     };
     class BrowserBuiltinModule {
-      static exists(name) { return BUILTIN_NAMES.includes(String(name).replace(/^node:/, '')); }
+      static exists(name) { return PUBLIC_BUILTIN_NAMES.includes(builtinName(name)); }
       static canBeRequiredByUsers(name) { return this.exists(name); }
       static canBeRequiredWithoutScheme(name) { return this.exists(name); }
       static normalizeRequirableId(name) {
@@ -7089,7 +7108,7 @@ export function createRuntime({
         return this.exists(normalized) ? normalized : undefined;
       }
       static getSchemeOnlyModuleNames() { return []; }
-      static getCanBeRequiredByUsersWithoutSchemeList() { return [...BUILTIN_NAMES]; }
+      static getCanBeRequiredByUsersWithoutSchemeList() { return [...PUBLIC_BUILTIN_NAMES]; }
       static exposeInternals() {}
     }
     class BrowserCjsModule {
@@ -7104,7 +7123,7 @@ export function createRuntime({
       static _nodeModulePaths() { return []; }
       static _resolveLookupPaths() { return []; }
     }
-    BrowserCjsModule.builtinModules = BUILTIN_NAMES;
+    BrowserCjsModule.builtinModules = PUBLIC_BUILTIN_NAMES;
     BrowserCjsModule.globalPaths = [];
     BrowserCjsModule._extensions = Object.create(null);
     const internalBootstrapRealm = { BuiltinModule: BrowserBuiltinModule };
@@ -7358,7 +7377,11 @@ export function createRuntime({
         EventEmitter.once = once;
         return EventEmitter;
       })(), fs, 'fs/promises': fs.promises,
-      http: httpCompatibility.http, https: httpCompatibility.https, '_http_common': httpCompatibility.httpCommon,
+      http: httpCompatibility.http, https: httpCompatibility.https,
+      '_http_agent': { Agent: httpCompatibility.http.Agent, globalAgent: httpCompatibility.http.globalAgent },
+      '_http_client': { ClientRequest: httpCompatibility.ClientRequest, OutgoingMessage: httpCompatibility.OutgoingMessage },
+      '_http_incoming': { IncomingMessage: httpCompatibility.IncomingMessage },
+      '_http_common': httpCompatibility.httpCommon,
       '_http_outgoing': httpCompatibility.http, '_http_server': {
         ...httpCompatibility.http,
         kConnectionsCheckingInterval,
@@ -7392,6 +7415,12 @@ export function createRuntime({
       },
       path: nodePath, 'path/posix': nodePath.posix, 'path/win32': nodePath.win32, process: processObject, querystring: createQuerystring(Buffer),
       stream: streamApi, 'stream/consumers': streamConsumers, 'stream/web': streamWebApi,
+      '_stream_duplex': { Duplex },
+      '_stream_transform': { Transform },
+      '_stream_wrap': {},
+      '_stream_passthrough': { PassThrough },
+      '_stream_readable': { Readable: callableReadable },
+      '_stream_writable': { Writable },
       'internal/webstreams/adapters': streamAdapters,
       'stream/promises': streamPromises,
       timers, 'timers/promises': timerPromises, string_decoder: { StringDecoder: createStringDecoder() },
@@ -7460,12 +7489,13 @@ export function createRuntime({
       zlib: createZlibShimModule(scope, Buffer, trackTask), perf_hooks: performancePrimitives.perfHooks, v8,
       async_hooks: asyncHooks,
       diagnostics_channel: diagnosticsChannels,
-      test: nodeTest,
+      'node:test': nodeTest,
       ...unsupportedBuiltins,
-      sea,
-      sqlite,
-      'test/reporters': createTestReportersModule(processObject),
-      net, dgram, cluster, tls, inspector, 'inspector/promises': inspectorPromises,
+      'node:sea': sea,
+      'node:sqlite': sqlite,
+      'node:test/reporters': createTestReportersModule(processObject),
+      net, dgram, cluster, tls, '_tls_common': {}, '_tls_wrap': { TLSSocket: tls.TLSSocket },
+      inspector, 'inspector/promises': inspectorPromises,
       trace_events: traceEvents,
       readline,
       'readline/promises': readline.promises,
@@ -12205,7 +12235,50 @@ export function createRuntime({
               );
             }
           }
-          return { code: 0, stdout: '', stderr: '' };
+          // A package lifecycle runner deliberately does not execute install
+          // hooks for every downloaded dependency. An explicit `npm install`
+          // inside a package's own script still runs that package's
+          // preinstall/install/postinstall hooks, as native npm does. This is
+          // required by repositories such as resolve whose postinstall
+          // bootstraps a local symlinked multirepo fixture.
+          const lifecycleOutput = [];
+          const lifecycleErrors = [];
+          let lifecycleForwarded = false;
+          const insideInstallLifecycle = ['preinstall', 'install', 'postinstall']
+            .includes(String(env.npm_lifecycle_event || ''));
+          if (!insideInstallLifecycle) {
+            for (const lifecycleName of ['preinstall', 'install', 'postinstall']) {
+              if (typeof packageJson?.scripts?.[lifecycleName] !== 'string') continue;
+              const lifecycleResult = await runScriptBody(lifecycleName, packageJson, {
+                cwd: prepared.cwd,
+                env,
+                onStdout: childOptions.onStdout,
+                onStderr: childOptions.onStderr,
+                onNetwork: childOptions.onNetwork,
+                signal: childOptions.signal,
+                timeout: childOptions.timeout,
+              });
+              lifecycleOutput.push(lifecycleResult.stdout || '');
+              lifecycleErrors.push(lifecycleResult.stderr || '');
+              lifecycleForwarded ||= lifecycleResult.forwarded;
+              if (lifecycleResult.code !== 0) {
+                return {
+                  code: lifecycleResult.code,
+                  stdout: lifecycleOutput.join(''),
+                  stderr: lifecycleErrors.join(''),
+                  streamed: true,
+                  forwarded: lifecycleForwarded,
+                };
+              }
+            }
+          }
+          return {
+            code: 0,
+            stdout: lifecycleOutput.join(''),
+            stderr: lifecycleErrors.join(''),
+            streamed: true,
+            forwarded: lifecycleForwarded,
+          };
         };
 
         scope.__BNH_SPAWN_SYNC__ = (spawnOptions) => {
@@ -13685,14 +13758,18 @@ export function createRuntime({
     processObject.getBuiltinModule = function getBuiltinModule(id) {
       if (typeof id !== 'string') throw moduleArgumentTypeError('id', 'of type string', id);
       const name = builtinName(id);
-      return BUILTIN_NAMES.includes(name) ? builtins[name] : undefined;
+      return PUBLIC_BUILTIN_NAMES.includes(name) ? builtins[name] : undefined;
     };
     reportExecutePhase('builtin-api-ready');
     builtins.module._cache = new Map();
     builtins.module._main = null;
     builtins.module._resolve = (name, parent) => {
       const importer = typeof parent === 'string' ? parent : parent?.filename || entry;
-      return BUILTIN_NAMES.includes(builtinName(name)) ? name : esmLoader.resolveRequire(name, importer);
+      if (BUILTIN_NAMES.includes(builtinName(name))) return name;
+      const resolved = esmLoader.resolveRequire(name, importer);
+      if (typeof resolved !== 'string' || !resolved.startsWith('/')) return resolved;
+      if (processObject.execArgv?.some((argument) => String(argument) === '--preserve-symlinks')) return resolved;
+      try { return vfs.fs.realpathSync(resolved); } catch { return resolved; }
     };
     const rootResolveFilename = builtins.module._resolveFilename;
     builtins.module._load = (name, parent, isMain) => {
@@ -14405,10 +14482,10 @@ export function createRuntime({
         if (name === 'dns') scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ = Math.max(1, Number(scope.__BNH_HEAP_SNAPSHOT_DNS_TASKS__ || 0));
         const context = moduleHookContext(importer);
         const resolved = runModuleHook('resolve', specifier, context, (currentSpecifier) => ({
-          url: `node:${builtinName(currentSpecifier)}`,
+          url: builtinSpecifier(currentSpecifier),
           format: 'builtin',
         }), processObj, { synchronousOnly: true });
-        const url = resolved?.url || `node:${name}`;
+        const url = resolved?.url || builtinSpecifier(name);
         const loaded = runModuleHook('load', url, context, () => ({ format: 'builtin', source: null }), processObj, { synchronousOnly: true });
         if (loaded?.format === 'builtin') {
           const value = builtinValue(builtinName(url));
@@ -15110,7 +15187,7 @@ export function createRuntime({
       if (entryIsEsm) await esmLoader.import(entry, entry, {}, undefined, processObject);
       else loadModule(entry, entry);
       reportExecutePhase('entry-loaded');
-      builtins.test?.__bnhSourceLoaded?.();
+      builtins['node:test']?.__bnhSourceLoaded?.();
       reportExecutePhase('entry-source-notified');
       await Promise.resolve();
       reportExecutePhase('entry-microtask');

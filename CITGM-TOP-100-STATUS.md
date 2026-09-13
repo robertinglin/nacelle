@@ -1102,3 +1102,37 @@ npm run test:browser:firefox                            PASS — 290/290
 ```
 
 Rank 38 is recorded as `PASS` and the ordered cursor advances to rank 39.
+
+## Rank 39 failure record
+
+The published `resolve@1.22.12` candidate at gitHead
+`d2d30de86300fa862e7792057b82b59cd44f2b5d` was tested with CITGM 10.0.2.
+Complete browser, native comparison, focused-regression, and repository-gate
+artifacts are preserved under `artifacts/citgm-top-100/rank-039-resolve/`.
+
+| Run / log | Observed failure | Classification and resolution |
+| --- | --- | --- |
+| `citgm-1789328694486` through `citgm-final3-chromium.stdout.log`, plus the matching Firefox attempts | The published resolver initially exposed browser-only gaps in V8 CallSite file names, private/public builtin classification, module global paths, symlink realpaths, and child resolution. | Ours. The shared error-stack, builtin, module-loader, and resolver paths were corrected and covered by focused browser oracles. |
+| `citgm-trace-stream-chromium.stdout.log` | The legacy `tape` child printed all tests as passing but exited 1 because `fs.writeSync` referenced an unimported `resolveEncodingOps`. | Ours. The missing buffer operation import was restored; the legacy stream exit oracle now passes. |
+| `citgm-fixed4-chromium.stdout.log` / `citgm-fixed5-chromium.stdout.log` | The nested multirepo `npm install` path first rejected install scripts, then recursively re-entered Lerna's `postinstall`. | Ours. Browser-shell npm install routing and package-owned lifecycle execution now match the native boundary, with a lifecycle recursion guard. |
+| `citgm-1789331594801` / `focused-event-emitter*.log` | `config-chain@1.1.13` copied `Object.keys(EventEmitter.prototype)` and then failed on `this.emit`, followed by private `_ensureState` and `checkListenerLimit` dependencies. | Ours. EventEmitter's enumerable Node-compatible methods now use module-local state helpers, and the published config-chain inheritance shape passes in Chromium and Firefox. |
+| `citgm-1789331867255` (Chromium) / `citgm-1789331975003` (Firefox) | The resolver's 695 package assertions, nested symlink pretests, and Lerna multirepo test all pass. The package posttest then runs `npx npm@'>= 10.2' audit --production` and reports `npm@>= 10.2: command not found`. | Blocked by the published package test script/toolchain. Exact native Node v26 reproduces the same posttest command failure after its 812 passing assertions and successful multirepo test (`native-citgm-node-v26.log`). No browser-only shim or fake npm package was added. This is not a nested dependency failure and is not classified as ours. |
+
+Rank 39 is recorded as `BLOCKED` for the native-reproduced upstream/package
+posttest failure. All browser-specific failures were fixed before that
+classification; the ordered cursor advances to rank 40 only after the
+repository changes are committed cleanly.
+
+## Rank 39 gate evidence
+
+The package required runtime and regression-test changes, so repository-wide
+gates ran after the final browser CITGM attempts and before committing:
+
+```text
+npm run citgm:browser:chromium -- resolve  FAIL — citgm-1789331867255; package tests and multirepo pass, native-reproduced posttest blocker
+npm run citgm:browser:firefox -- resolve   FAIL — citgm-1789331975003; same native-reproduced posttest blocker
+npm run build                              PASS — build-final2.log
+npm test                                   PASS — 345/345, npm-test-final2.log
+npm run test:browser:chromium              PASS — 296/296, playwright-chromium-final2.log
+npm run test:browser:firefox                PASS — 296/296, playwright-firefox-final2.log
+```

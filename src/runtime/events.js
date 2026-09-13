@@ -211,6 +211,20 @@ function emitMaxListenersWarning(emitter, name, count) {
   processObject.emit('warning', warning);
 }
 
+function ensureState(emitter) {
+  if (!emitter._listeners) emitter._listeners = new Map();
+  if (!emitter._onceListeners) emitter._onceListeners = new Map();
+  if (!emitter._warned) emitter._warned = new Set();
+}
+
+function checkListenerLimit(emitter, name, listeners) {
+  ensureState(emitter);
+  const limit = emitter.getMaxListeners();
+  if (limit === 0 || listeners.size <= limit || emitter._warned.has(name)) return;
+  emitter._warned.add(name);
+  emitMaxListenersWarning(emitter, name, listeners.size);
+}
+
 export class BrowserEventEmitter {
   constructor(options) {
     this._listeners = new Map();
@@ -230,14 +244,12 @@ export class BrowserEventEmitter {
   }
 
   _ensureState() {
-    if (!this._listeners) this._listeners = new Map();
-    if (!this._onceListeners) this._onceListeners = new Map();
-    if (!this._warned) this._warned = new Set();
+    ensureState(this);
   }
 
   on(name, listener) {
     validateFunction(listener, 'listener');
-    this._ensureState();
+    ensureState(this);
     // Node's internal listener bookkeeping does not dispatch `newListener`
     // through an EventEmitter subclass' public emit override. Minipass uses
     // that override to defer `end` while paused; routing this internal event
@@ -247,7 +259,7 @@ export class BrowserEventEmitter {
     listeners.add(listener);
     this._listeners.set(name, listeners);
     syncEvents(this);
-    this.checkListenerLimit(name, listeners);
+    checkListenerLimit(this, name, listeners);
     return this;
   }
 
@@ -257,12 +269,12 @@ export class BrowserEventEmitter {
 
   prependListener(name, listener) {
     validateFunction(listener, 'listener');
-    this._ensureState();
+    ensureState(this);
     if (name !== 'newListener') BrowserEventEmitter.prototype.emit.call(this, 'newListener', name, listener.listener || listener);
     const listeners = this._listeners.get(name) || new ListenerList();
     this._listeners.set(name, new ListenerList(listener, ...listeners));
     syncEvents(this);
-    this.checkListenerLimit(name, this._listeners.get(name));
+    checkListenerLimit(this, name, this._listeners.get(name));
     return this;
   }
 
@@ -276,15 +288,12 @@ export class BrowserEventEmitter {
   }
 
   checkListenerLimit(name, listeners) {
-    const limit = this.getMaxListeners();
-    if (limit === 0 || listeners.size <= limit || this._warned.has(name)) return;
-    this._warned.add(name);
-    emitMaxListenersWarning(this, name, listeners.size);
+    checkListenerLimit(this, name, listeners);
   }
 
   once(name, listener) {
     validateFunction(listener, 'listener');
-    this._ensureState();
+    ensureState(this);
     const onceListener = function onceListener(...args) {
       this.off(name, onceListener);
       listener.apply(this, args);
@@ -298,7 +307,7 @@ export class BrowserEventEmitter {
 
   prependOnceListener(name, listener) {
     validateFunction(listener, 'listener');
-    this._ensureState();
+    ensureState(this);
     const onceListener = (...args) => {
       this.off(name, onceListener);
       listener.apply(this, args);
@@ -312,7 +321,7 @@ export class BrowserEventEmitter {
 
   off(name, listener) {
     validateFunction(listener, 'listener');
-    this._ensureState();
+    ensureState(this);
     const listeners = this._listeners.get(name);
     if (!listeners) return this;
     let index = listeners.length - 1;
@@ -336,7 +345,7 @@ export class BrowserEventEmitter {
   }
 
   removeAllListeners(name = undefined) {
-    this._ensureState();
+    ensureState(this);
     if (name === undefined) {
       this._listeners.clear();
       this._onceListeners.clear();
@@ -351,7 +360,7 @@ export class BrowserEventEmitter {
   }
 
   emit(name, ...args) {
-    this._ensureState();
+    ensureState(this);
     if (name === 'error') {
       const monitors = this._listeners.get(errorMonitor);
       if (monitors?.size) {
@@ -431,26 +440,26 @@ export class BrowserEventEmitter {
   }
 
   listenerCount(name) {
-    this._ensureState();
+    ensureState(this);
     return this._listeners.get(name)?.size || 0;
   }
 
   listeners(name) {
-    this._ensureState();
+    ensureState(this);
     const listeners = this._listeners.get(name);
     if (!listeners || listeners.size === 0) return [];
     return [...listeners].map((listener) => listener.listener || listener);
   }
 
   rawListeners(name) {
-    this._ensureState();
+    ensureState(this);
     const listeners = this._listeners.get(name);
     if (!listeners || listeners.size === 0) return [];
     return [...listeners];
   }
 
   eventNames() {
-    this._ensureState();
+    ensureState(this);
     return this._eventsCount > 0 ? Reflect.ownKeys(this._events) : [];
   }
 }
@@ -503,6 +512,32 @@ export function getMaxListeners(emitterOrTarget) {
 // function objects directly, so delegation is not equivalent here.
 BrowserEventEmitter.prototype.addListener = BrowserEventEmitter.prototype.on;
 BrowserEventEmitter.prototype.removeListener = BrowserEventEmitter.prototype.off;
+
+// EventEmitter methods are enumerable on Node's prototype. Older packages
+// such as config-chain copy the methods with Object.keys(EventEmitter.prototype)
+// while constructing a multi-inherited emitter, so preserve that observable
+// prototype contract in the browser implementation too.
+for (const methodName of [
+  'setMaxListeners',
+  'getMaxListeners',
+  'emit',
+  'on',
+  'prependListener',
+  'once',
+  'prependOnceListener',
+  'off',
+  'removeAllListeners',
+  'listeners',
+  'rawListeners',
+  'listenerCount',
+  'eventNames',
+]) {
+  const descriptor = Object.getOwnPropertyDescriptor(BrowserEventEmitter.prototype, methodName);
+  if (descriptor) Object.defineProperty(BrowserEventEmitter.prototype, methodName, {
+    ...descriptor,
+    enumerable: true,
+  });
+}
 
 export function once(emitter, name, options = {}) {
   try {

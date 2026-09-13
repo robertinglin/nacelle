@@ -92,6 +92,256 @@ test.describe('browser runtime bridge and core primitives', () => {
     expect(result.stdout).toContain('inspect and vm compatibility completed');
   });
 
+  test('provides V8 caller file names to synchronous Node resolver callers', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const { spawn } = require('node:child_process');
+        const child = spawn(process.execPath, ['/node/app/entry.js'], {
+          stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (chunk) => { stdout += chunk; });
+        child.stderr.on('data', (chunk) => { stderr += chunk; });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        if (code !== 0) throw new Error('caller child failed: ' + code + '\\n' + stderr);
+        process.stdout.write(stdout);
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/app/caller.js': `
+        module.exports = function caller() {
+          const originalPrepareStackTrace = Error.prepareStackTrace;
+          Error.prepareStackTrace = (_, stack) => stack;
+          const stack = new Error().stack;
+          Error.prepareStackTrace = originalPrepareStackTrace;
+          const fileName = stack[2].getFileName();
+          const lineNumber = stack[2].getLineNumber();
+          if (typeof lineNumber !== 'number') throw new Error('missing CallSite line number');
+          return fileName;
+        };
+        `,
+        '/node/app/sync.js': `
+          const path = require('node:path');
+          const caller = require('./caller.js');
+          module.exports = () => path.dirname(caller());
+        `,
+        '/node/app/entry.js': `
+          const assert = require('node:assert/strict');
+          const resolveLike = require('./sync.js');
+          assert.match(resolveLike(), /node[\\/]app$/);
+          console.log('caller file name completed');
+        `,
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('caller file name completed');
+  });
+
+  test('initializes module global paths in virtual child processes', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const { spawn } = require('node:child_process');
+        const child = spawn(process.execPath, ['/node/app/entry.js'], {
+          stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (chunk) => { stdout += chunk; });
+        child.stderr.on('data', (chunk) => { stderr += chunk; });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        if (code !== 0) throw new Error('global path child failed: ' + code + '\\n' + stderr);
+        process.stdout.write(stdout);
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      env: { HOME: '/node/test-home', USERPROFILE: '/node/test-home' },
+      files: {
+        '/node/app/entry.js': `
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const moduleApi = require('node:module');
+          const packageRoot = path.join(process.env.HOME, '.node_modules', 'global-fixture');
+          fs.mkdirSync(packageRoot, { recursive: true });
+          fs.writeFileSync(path.join(packageRoot, 'index.js'), 'module.exports = 42;');
+          assert.ok(moduleApi.globalPaths.includes(path.join(process.env.HOME, '.node_modules')));
+          assert.strictEqual(require.resolve('global-fixture'), path.join(packageRoot, 'index.js'));
+          console.log('global paths completed');
+        `,
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('global paths completed');
+  });
+
+  test('resolves trailing-slash packages through virtual symlinks', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const fs = require('node:fs');
+      const path = require('node:path');
+      fs.mkdirSync('/node/app/common/node_modules/buffer', { recursive: true });
+      fs.writeFileSync('/node/app/common/node_modules/buffer/index.js', 'module.exports = 42;');
+      fs.mkdirSync('/node/app/mylib/node_modules', { recursive: true });
+      fs.symlinkSync('../../common/node_modules/buffer', '/node/app/mylib/node_modules/buffer', 'dir');
+      fs.writeFileSync('/node/app/mylib/entry.js', "module.exports = require.resolve('buffer/');");
+      assert.strictEqual(
+        require('/node/app/mylib/entry.js'),
+        '/node/app/common/node_modules/buffer/index.js',
+      );
+      console.log('trailing-slash symlink resolution completed');
+    `);
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('trailing-slash symlink resolution completed');
+  });
+
+  test('resolves trailing-slash packages through virtual symlinks in child processes', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert/strict');
+        const { spawn } = require('node:child_process');
+        const fs = require('node:fs');
+        fs.mkdirSync('/node/app/common/node_modules/buffer', { recursive: true });
+        fs.writeFileSync('/node/app/common/node_modules/buffer/index.js', 'module.exports = 42;');
+        fs.mkdirSync('/node/app/mylib/node_modules', { recursive: true });
+        fs.symlinkSync('../../common/node_modules/buffer', '/node/app/mylib/node_modules/buffer', 'dir');
+        fs.writeFileSync('/node/app/mylib/entry',
+          "process.stdout.write(JSON.stringify({ value: require.resolve('buffer/'), cwd: process.cwd() }));");
+        const child = spawn(process.execPath, ['/node/app/mylib/entry'], {
+          cwd: '/node/app/mylib',
+          stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (chunk) => { stdout += chunk; });
+        child.stderr.on('data', (chunk) => { stderr += chunk; });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        if (code !== 0) throw new Error('symlink child failed: ' + code + '\\n' + stderr);
+        const parsed = JSON.parse(stdout);
+        assert.strictEqual(parsed.cwd, '/node/app/mylib');
+        assert.strictEqual(parsed.value, '/node/app/common/node_modules/buffer/index.js');
+        console.log('child trailing-slash symlink resolution completed');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `);
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('child trailing-slash symlink resolution completed');
+  });
+
+  test('keeps a passing legacy stream harness at exit code zero', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert/strict');
+        const { spawn } = require('node:child_process');
+        const child = spawn(process.execPath, ['/node/app/tape-like.js'], {
+          cwd: '/node/app',
+          stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (chunk) => { stdout += chunk; });
+        child.stderr.on('data', (chunk) => { stderr += chunk; });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, stderr);
+        assert.match(stdout, /legacy stream harness completed/);
+        console.log('legacy stream harness exit completed');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/app/tape-like.js': `
+          'use strict';
+          const { Stream } = require('node:stream');
+          function through(write, end) {
+            const stream = new Stream();
+            let ended = false;
+            let destroyed = false;
+            let bufferedEnd = false;
+            stream.readable = true;
+            stream.writable = true;
+            stream.paused = false;
+            stream.write = function (data) {
+              write.call(this, data);
+              return !stream.paused;
+            };
+            stream.queue = function (data) {
+              if (bufferedEnd) return stream;
+              if (data === null) bufferedEnd = true;
+              if (data === null) stream.emit('end');
+              else stream.emit('data', data);
+              return stream;
+            };
+            stream.end = function (data) {
+              if (ended) return stream;
+              ended = true;
+              if (arguments.length) stream.write(data);
+              stream.writable = false;
+              end.call(stream);
+              return stream;
+            };
+            stream.destroy = function () {
+              if (destroyed) return stream;
+              destroyed = true;
+              stream.writable = false;
+              stream.readable = false;
+              stream.emit('close');
+              return stream;
+            };
+            stream.on('end', function () {
+              stream.readable = false;
+              if (!stream.writable) process.nextTick(() => stream.destroy());
+            });
+            return stream;
+          }
+          const source = through(function (data) { this.queue(data); }, function () { this.queue(null); });
+          const output = through(function (data) { console.log(String(data)); }, function () { this.queue(null); });
+          let ended = false;
+          let exitCode = 0;
+          source.on('end', function () { ended = true; });
+          source.pipe(output);
+          output.on('error', function () { exitCode = 1; });
+          source.write('legacy stream harness completed\\n');
+          source.end();
+          process.on('exit', function (code) {
+            if (typeof code === 'number' && code !== 0) return;
+            if (!ended) source.end();
+            output.end();
+            process.removeAllListeners('exit');
+            process.exit(code || exitCode);
+          });
+        `,
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('legacy stream harness exit completed');
+  });
+
   test('does not keep the parent alive for detached unref children', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const { spawn } = require('node:child_process');
@@ -2852,6 +3102,29 @@ test.describe('browser runtime bridge and core primitives', () => {
     });
     expect(outcome.code).toBe(0);
     expect(forwarded).toEqual(['returned child output\n']);
+  });
+
+  test('preserves enumerable EventEmitter methods for legacy multi-inheritance', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const EE = require('node:events').EventEmitter;
+      function ConfigChain() {
+        EE.apply(this);
+      }
+      const extras = { constructor: { value: ConfigChain } };
+      Object.keys(EE.prototype).forEach((name) => {
+        extras[name] = Object.getOwnPropertyDescriptor(EE.prototype, name);
+      });
+      ConfigChain.prototype = Object.create(Object.prototype, extras);
+      const chain = new ConfigChain();
+      let loaded = false;
+      chain.on('load', () => { loaded = true; });
+      chain.emit('load');
+      assert.strictEqual(loaded, true);
+      process.stdout.write('legacy EventEmitter inheritance passed');
+    `);
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('legacy EventEmitter inheritance passed');
   });
 
   test('kills a timed-out child through the bridge lifecycle', async ({ harnessPage }) => {

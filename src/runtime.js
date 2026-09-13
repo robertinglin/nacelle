@@ -38,9 +38,12 @@ import {
   createAsyncHooksModule,
   isPromiseHandled,
   isPromiseRejectionReported,
+  observablePromise,
   registerAsyncCompletion,
   runAsyncGenerator,
+  setPromiseRejectionHandledObserver,
   setPromiseRejectionObserver,
+  trackPromise,
 } from './runtime/async-hooks.js';
 import { createCommonJsSourcePreparer } from './runtime/commonjs-source.js';
 import { EventEmitter, addAbortListener, getEventListeners, getMaxListeners, once } from './runtime/events.js';
@@ -2592,7 +2595,7 @@ function createExecutionGlobal(scope) {
 // Promise job boundary. Keep the guest constructor native-branded, but defer
 // settlement by one native microtask so a module callback cannot mutate its
 // caller's state before the callback returns.
-function createFirefoxGuestPromiseConstructor(NativePromise, enqueue, enqueueAbort, isAbortDispatching) {
+function createFirefoxGuestPromiseConstructor(NativePromise, enqueue, enqueueAbort, isAbortDispatching, registryScope = globalThis) {
   // async-hooks installs a tracked constructor which deliberately returns a
   // thenable proxy. Do not use that constructor for the guest's backing
   // promise: native Promise.prototype methods reject the proxy as a receiver
@@ -2605,6 +2608,20 @@ function createFirefoxGuestPromiseConstructor(NativePromise, enqueue, enqueueAbo
   const schedule = typeof enqueue === 'function'
     ? enqueue
     : (callback) => nativePromise.resolve().then(callback);
+  const guestPromiseTargetsKey = Symbol.for('bnh.firefox-guest-promise-targets');
+  let guestPromiseTargets = registryScope[guestPromiseTargetsKey];
+  if (!guestPromiseTargets) {
+    guestPromiseTargets = new WeakSet();
+    try {
+      Object.defineProperty(registryScope, guestPromiseTargetsKey, {
+        configurable: true,
+        value: guestPromiseTargets,
+      });
+    } catch {
+      // A host may expose a non-extensible global. The local registry still
+      // preserves identity within this execution boundary.
+    }
+  }
   let GuestPromise;
   const create = (executor) => {
     if (typeof executor !== 'function') throw new TypeError('Promise resolver is not a function');
@@ -2622,6 +2639,21 @@ function createFirefoxGuestPromiseConstructor(NativePromise, enqueue, enqueueAbo
       };
       resolveGuest = (value) => settle(resolve, value);
       rejectGuest = (reason) => settle(reject, reason);
+    });
+    guestPromiseTargets.add(target);
+    trackPromise(target);
+    // Firefox keeps the native Promise constructor on the shared prototype,
+    // so Promise.resolve cannot identify a guest promise by its constructor.
+    // Tag the promise returned by each guest continuation instead of treating
+    // every native-branded promise as a guest promise.
+    Object.defineProperty(target, 'then', {
+      configurable: true,
+      writable: true,
+      value(onFulfilled, onRejected) {
+        const result = nativePromise.prototype.then.call(target, onFulfilled, onRejected);
+        guestPromiseTargets.add(result);
+        return result;
+      },
     });
     try {
       executor(resolveGuest, rejectGuest);
@@ -2647,12 +2679,14 @@ function createFirefoxGuestPromiseConstructor(NativePromise, enqueue, enqueueAbo
       configurable: true,
       writable: true,
       value(value) {
-        if (value && value.constructor === GuestPromise) return value;
+        if (value && guestPromiseTargets.has(value)) return value;
         // Static Promise.resolve already adopts its value through the native
-        // Promise job queue. Avoid adding a second deferred resolver here: in
-        // Firefox that extra hop can let setImmediate run before the Promise
-        // reaction, unlike Node's event-loop ordering.
-        return nativePromise.resolve(value);
+        // Promise job queue. Keep the result observable as a thenable so an
+        // async function awaiting it re-enters the tracked promise boundary;
+        // otherwise Firefox's intrinsic await path bypasses Promise.prototype
+        // hooks and loses AsyncLocalStorage context. The native promise is
+        // still used for adoption, so this does not change guest identity.
+        return observablePromise(nativePromise.resolve(value));
       },
     },
     reject: {
@@ -12203,6 +12237,7 @@ export function createRuntime({
           runtimeQueueMicrotask,
           (callback) => nativeSetTimeout(callback, 0),
           () => abortDispatchDepth > 0,
+          scope,
         )
       : null;
     if (firefoxPromiseBoundaryTool && nativeGuestPromise) scope.Promise = nativeGuestPromise;
@@ -14349,7 +14384,9 @@ export function createRuntime({
       // overwrite an explicit successful exit with an unhandled-rejection
       // failure.
       if (processObject._exitRequested?.() || processObject._bnhIsExited?.()) return;
-      if (promise && (earlyUnhandledRejections.has(promise) || isPromiseHandled(promise))) return;
+      if (promise && (earlyUnhandledRejections.has(promise) || isPromiseHandled(promise))) {
+        return;
+      }
       if (promise) earlyUnhandledRejections.add(promise);
       const dispatch = () => {
         const handled = processObject.emit('unhandledRejection', reason, promise);
@@ -14371,7 +14408,29 @@ export function createRuntime({
       dispatchUnhandledRejection(event.promise, event.reason);
       event.preventDefault?.();
     };
+    const rejectionHandledEvents = new WeakSet();
+    const emitRejectionHandled = (promise) => {
+      if (!promise || rejectionHandledEvents.has(promise)) return;
+      rejectionHandledEvents.add(promise);
+      processObject.emit('rejectionHandled', promise);
+    };
+    const restorePromiseRejectionHandledObserver = setPromiseRejectionHandledObserver((promise, target) => {
+      // A handler can be attached before the browser gets its
+      // `unhandledrejection` turn. Only emit after this runtime has recorded
+      // that rejection, so an early handler does not produce a false
+      // `rejectionHandled` event (Node does not emit one in that case).
+      if (earlyUnhandledRejections.has(promise)) emitRejectionHandled(promise);
+      else if (target && earlyUnhandledRejections.has(target)) emitRejectionHandled(target);
+    });
+    const onRejectionHandled = (event) => {
+      // Node exposes the browser's later rejectionhandled transition as the
+      // process-level `rejectionHandled` event. Libraries such as AVA use it
+      // to remove a rejection that was intentionally observed after the
+      // promise first settled (p-limit does this for clearQueue()).
+      if (earlyUnhandledRejections.has(event.promise)) emitRejectionHandled(event.promise);
+    };
     if (typeof scope.addEventListener === 'function') scope.addEventListener('unhandledrejection', onUnhandledRejection);
+    if (typeof scope.addEventListener === 'function') scope.addEventListener('rejectionhandled', onRejectionHandled);
     const exposeGc = processObject.execArgv?.some((argument) => {
       const flag = String(argument);
       return flag === '--expose-gc' || flag === '--expose_gc';
@@ -14634,6 +14693,8 @@ export function createRuntime({
       for (const handle of timerHandles) clearTimer?.(handle);
       if (vfs.getTaskTracker?.() === runtimeVfsTaskTracker) vfs.setTaskTracker?.(previousVfsTaskTracker);
       if (typeof scope.removeEventListener === 'function') scope.removeEventListener('unhandledrejection', onUnhandledRejection);
+      if (typeof scope.removeEventListener === 'function') scope.removeEventListener('rejectionhandled', onRejectionHandled);
+      restorePromiseRejectionHandledObserver();
       restorePromiseRejectionObserver();
       esmLoader.dispose();
       processObject._markExited?.();

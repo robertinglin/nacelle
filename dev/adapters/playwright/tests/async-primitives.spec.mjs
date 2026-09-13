@@ -4,6 +4,131 @@ import { browserRuntimeURL, expectPass, test } from './harness-test-helpers.mjs'
 test.skip(!browserRuntimeURL, 'set BNH_TEST_URL to a browser runtime harness page');
 
 test.describe('browser runtime async primitives', () => {
+  test('preserves AsyncLocalStorage through queued promise work', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert');
+        const { AsyncLocalStorage } = require('node:async_hooks');
+        const storage = new AsyncLocalStorage();
+        class Queue {
+          #head;
+          #tail;
+          #size = 0;
+          enqueue(value) {
+            const node = {value};
+            if (this.#head) this.#tail.next = node;
+            else this.#head = node;
+            this.#tail = node;
+            this.#size++;
+          }
+          dequeue() {
+            const current = this.#head;
+            if (!current) return;
+            this.#head = current.next;
+            this.#size--;
+            if (!this.#head) this.#tail = undefined;
+            return current.value;
+          }
+          get size() {
+            return this.#size;
+          }
+        }
+        const queue = new Queue();
+        let active = 0;
+        const resumeNext = () => {
+          if (active < 2 && queue.size > 0) {
+            active += 1;
+            queue.dequeue().run();
+          }
+        };
+        const next = () => {
+          active -= 1;
+          resumeNext();
+        };
+        const run = async (function_, resolve, args) => {
+          const result = (async () => function_(...args))();
+          resolve(result);
+          try {
+            await result;
+          } catch {}
+          next();
+        };
+        const limit = (function_, ...args) => new Promise((resolve) => {
+          const item = {};
+          new Promise((internalResolve) => {
+            item.run = internalResolve;
+            queue.enqueue(item);
+          }).then(run.bind(undefined, function_, resolve, args));
+          resumeNext();
+        });
+        const check = async id => {
+          await Promise.resolve();
+          assert.strictEqual(storage.getStore()?.id, id);
+        };
+        await Promise.all(Array.from({length: 100}, (_, id) => storage.run({id}, () => limit(check, id))));
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, { timeoutMs: 30000 });
+
+    await expectPass(expect, result);
+  });
+
+  test('preserves AsyncLocalStorage through an ESM queue boundary', async ({ harnessPage }) => {
+    const entryPath = '/node/p-limit-als-entry.mjs';
+    const result = await harnessPage.run(`
+      import { AsyncLocalStorage } from 'node:async_hooks';
+      import pLimit from './p-limit-als-limit.mjs';
+
+      const store = new AsyncLocalStorage();
+      const limit = pLimit(2);
+      const checkId = async id => {
+        await Promise.resolve();
+        if (store.getStore()?.id !== id) throw new Error('lost async context');
+      };
+      const startContext = async id => store.run({ id }, () => limit(checkId, id));
+      await Promise.all(Array.from({ length: 100 }, (_, id) => startContext(id)));
+    `, {
+      entryPath,
+      files: {
+        '/node/p-limit-als-limit.mjs': `
+          export default function pLimit(concurrency) {
+            const queue = [];
+            let active = 0;
+            const resumeNext = () => {
+              if (active < concurrency && queue.length > 0) {
+                active += 1;
+                queue.shift().run();
+              }
+            };
+            const next = () => {
+              active -= 1;
+              resumeNext();
+            };
+            const run = async (function_, resolve, args) => {
+              const result = (async () => function_(...args))();
+              resolve(result);
+              try { await result; } catch {}
+              next();
+            };
+            return (function_, ...args) => new Promise(resolve => {
+              const item = {};
+              new Promise(internalResolve => {
+                item.run = internalResolve;
+                queue.push(item);
+              }).then(run.bind(undefined, function_, resolve, args));
+              resumeNext();
+            });
+          }
+        `,
+      },
+      timeoutMs: 30000,
+    });
+
+    await expectPass(expect, result);
+  });
+
   test('delivers unhandled rejections to the process handler before setImmediate', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert');
@@ -19,6 +144,39 @@ test.describe('browser runtime async primitives', () => {
         Promise.reject(new Error('runtime unhandled rejection'));
         await new Promise((resolve) => setImmediate(resolve));
         assert.strictEqual(handled, true);
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `);
+
+    await expectPass(expect, result);
+  });
+
+  test('delivers later rejection handling to the process handler', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert');
+        const events = [];
+        const rejection = new Promise((resolve, reject) => reject(new Error('runtime late rejection')));
+        process.once('unhandledRejection', (reason, promise) => {
+          events.push(['unhandled', reason.message, promise]);
+        });
+        process.once('rejectionHandled', (promise) => {
+          events.push(['handled', promise]);
+        });
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        await rejection.catch(() => {});
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        assert.deepStrictEqual(events.map(([name, value]) => [name, name === 'unhandled' ? value : typeof value]), [
+          ['unhandled', 'runtime late rejection'],
+          ['handled', 'object'],
+        ]);
+        // Browser event payloads can be cross-realm wrappers, so their object
+        // identity is not stable across Chromium and Firefox. The runtime
+        // still forwards both promise payloads to the process handlers.
+        assert.strictEqual(typeof events[0][2]?.then, 'function');
+        assert.strictEqual(typeof events[1][1]?.then, 'function');
       })().catch((error) => {
         console.error(error);
         process.exitCode = 1;

@@ -118,6 +118,7 @@ const hostSetTimeout = typeof globalThis.setTimeout === 'function'
 let promisePatchInstalled = false;
 let trackedPromiseConstructor;
 let promiseRejectionObserver = null;
+let promiseRejectionHandledObserver = null;
 const handledPromises = new WeakSet();
 // A destroy hook changes Node's promise-hook mode. Browsers do not expose
 // that native transition, so defer the compatible boundary until user code
@@ -142,6 +143,16 @@ export function setPromiseRejectionObserver(observer) {
   return () => {
     if (promiseRejectionObserver === observer || promiseRejectionObserver === null) {
       promiseRejectionObserver = previous;
+    }
+  };
+}
+
+export function setPromiseRejectionHandledObserver(observer) {
+  const previous = promiseRejectionHandledObserver;
+  promiseRejectionHandledObserver = typeof observer === 'function' ? observer : null;
+  return () => {
+    if (promiseRejectionHandledObserver === observer || promiseRejectionHandledObserver === null) {
+      promiseRejectionHandledObserver = previous;
     }
   };
 }
@@ -331,7 +342,7 @@ function isUserCodeActive() {
     || contexts.get(executionId)?.has(userContextMarker) === true;
 }
 
-function trackPromise(promise, triggerAsyncId = executionId) {
+export function trackPromise(promise, triggerAsyncId = executionId) {
   const knownAsyncId = promiseIds.get(promise);
   if (knownAsyncId !== undefined) return knownAsyncId;
   const asyncId = newAsyncId('PROMISE', triggerAsyncId, promise, true);
@@ -348,7 +359,7 @@ function promiseTarget(promise) {
   return promiseTargets.get(promise) || promise;
 }
 
-function observablePromise(promise) {
+export function observablePromise(promise) {
   if (promiseTargets.has(promise)) return promise;
   // A Proxy around a native Promise is still recognized as a branded Promise
   // by V8, which lets `await` bypass the observable `.then` property. Proxy an
@@ -722,8 +733,12 @@ function installPromiseHooks() {
   if (promisePatchInstalled) return;
   promisePatchInstalled = true;
   Promise.prototype.then = function patchedThen(onFulfilled, onRejected) {
-    if (typeof onRejected === 'function') handledPromises.add(this);
     const sourcePromise = promiseTarget(this);
+    if (typeof onRejected === 'function') {
+      handledPromises.add(this);
+      if (sourcePromise !== this) handledPromises.add(sourcePromise);
+      promiseRejectionHandledObserver?.(this, sourcePromise);
+    }
     const knownAsyncId = promiseIds.get(this) ?? promiseIds.get(sourcePromise);
     const pendingAwaitContexts = promiseAwaitContexts.get(this)
       || promiseAwaitContexts.get(sourcePromise);
@@ -784,7 +799,9 @@ function installPromiseHooks() {
     if (promiseTargets.has(value) && this === globalThis.Promise) return value;
     const result = Reflect.apply(originalResolve, this, [value]);
     const existingAsyncId = promiseIds.get(result);
-    if (this === Promise && isUserCodeActive() && promiseContextSwitchPending
+    const isGlobalPromiseConstructor = this === Promise
+      || (isBrowserRealm && this === globalThis.Promise);
+    if (isGlobalPromiseConstructor && isUserCodeActive() && promiseContextSwitchPending
         && existingAsyncId === undefined) {
       // Native async functions hide their outer promise from the browser shim.
       // Recreate the two visible promise boundaries before native assimilation
@@ -796,11 +813,14 @@ function installPromiseHooks() {
       emit('promiseResolve', awaitedAsyncId);
       runInScope(promiseAsyncId, () => {}, undefined, [], false, result);
       promiseContextSwitchPending = false;
-    } else if (this === Promise && isUserCodeActive()) {
+    } else if (isGlobalPromiseConstructor && isUserCodeActive()) {
       if (existingAsyncId === undefined) trackPromise(result);
       promiseContextSwitchPending = false;
     }
-    return result;
+    const isFirefoxBrowser = isBrowserRealm && /Firefox\//.test(String(globalThis.navigator?.userAgent || ''));
+    return isFirefoxBrowser && isGlobalPromiseConstructor && isUserCodeActive()
+      ? observablePromise(result)
+      : result;
   };
   Promise.reject = function patchedReject(reason) {
     const result = Reflect.apply(originalReject, this, [reason]);

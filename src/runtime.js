@@ -182,7 +182,7 @@ const BUILTIN_NAMES = Object.freeze([
   'string_decoder', 'timers', 'timers/promises', 'url', 'util', 'sys', 'util/types', 'wasi', 'worker_threads', 'zlib', 'perf_hooks', 'async_hooks', 'diagnostics_channel', 'punycode',
   'child_process', 'cluster', 'dgram', 'dns', 'dns/promises', 'http2', 'inspector', 'inspector/promises', 'net', 'readline', 'readline/promises', 'repl', 'tls', 'test', 'v8', 'vm', '_http_server',
   'sea', 'sqlite', 'test/reporters', '_http_common', '_http_outgoing', 'trace_events', 'tty',
-  'internal/event_target', 'internal/async_context_frame', 'internal/async_hooks', 'internal/test/binding', 'internal/test/transfer',
+  'internal/event_target', 'internal/async_context_frame', 'internal/async_hooks', 'internal/test/binding', 'internal/test/transfer', 'internal/test_runner/snapshot',
   'internal/bootstrap/realm', 'internal/modules/cjs/loader', 'internal/modules/esm/utils', 'internal/vm/module',
   'internal/webstreams/adapters',
   'internal/util', 'internal/util/debuglog', 'internal/util/types', 'internal/options', 'internal/dgram', 'internal/crypto/x509', 'internal/crypto/keys',
@@ -3999,6 +3999,8 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       once(...args) { processObject.once(...args); return this; },
       removeListener(...args) { processObject.removeListener(...args); return this; },
       listenerCount: (...args) => processObject.listenerCount(...args),
+      setMaxListeners(value) { EventEmitter.prototype.setMaxListeners.call(this, value); return this; },
+      getMaxListeners() { return EventEmitter.prototype.getMaxListeners.call(this); },
     },
     stderr: {
       isTTY: false,
@@ -4019,6 +4021,8 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
       once(...args) { processObject.once(...args); return this; },
       removeListener(...args) { processObject.removeListener(...args); return this; },
       listenerCount: (...args) => processObject.listenerCount(...args),
+      setMaxListeners(value) { EventEmitter.prototype.setMaxListeners.call(this, value); return this; },
+      getMaxListeners() { return EventEmitter.prototype.getMaxListeners.call(this); },
     },
     cwd: () => options.cwd || '/node',
     chdir: (value) => { options.cwd = normalizePath(value, options.cwd || '/node'); },
@@ -7231,7 +7235,16 @@ export function createRuntime({
       }, http2, dns, 'dns/promises': dnsPromises,
       'internal/event_target': internalEventTarget, 'internal/async_context_frame': BrowserAsyncContextFrame,
       'internal/async_hooks': asyncHooks.internal,
-      'internal/test/binding': internalTestBinding, 'internal/test/transfer': {}, module: moduleApi, os: platform.os,
+      'internal/test/binding': internalTestBinding, 'internal/test/transfer': {},
+      // node:test's public snapshot methods delegate to this internal module
+      // in Node. Keep the browser implementation's per-run snapshot state
+      // authoritative while exposing the internal setter contract expected by
+      // test runners such as type-fest's linter fixtures.
+      'internal/test_runner/snapshot': {
+        setDefaultSnapshotSerializers() {},
+        setResolveSnapshotPath() {},
+      },
+      module: moduleApi, os: platform.os,
       'internal/bootstrap/realm': internalBootstrapRealm, 'internal/modules/cjs/loader': internalCjsLoader,
       'internal/util': internalUtil, 'internal/util/debuglog': {
         debuglog,
@@ -7533,7 +7546,7 @@ export function createRuntime({
           }
         }
 
-        function prepareChild(file, args, options = {}, owner = scope.process || processObject) {
+        function prepareChild(file, args, options = {}, owner = scope.__bnhActiveProcess || scope.process || processObject) {
           validateChildCommand(file);
           if (args !== undefined && args !== null && !Array.isArray(args)) {
             throw childArgumentTypeError('args', 'an array', args);
@@ -7816,7 +7829,7 @@ export function createRuntime({
           const stdoutStream = outputStream();
           const stderrStream = outputStream();
           const child = new BrowserChildProcess();
-          const ownerProcess = scope.process || processObject;
+          const ownerProcess = scope.__bnhActiveProcess || scope.process || processObject;
           const childActivity = ownerProcess.__bnhChildActivity ||= {
             launched: 0,
             completed: 0,
@@ -8462,6 +8475,43 @@ export function createRuntime({
             return child;
           }
           const commandName = prepared.command.split('/').pop();
+          if (commandName === 'ps') {
+            setActivityPhase('ps');
+            // pidtree (used by npm-run-all2) asks POSIX ps for the parent/child
+            // table with this exact format. The browser has no host process
+            // table, but every virtual child has a stable pid/ppid identity;
+            // report those identities using the same two-column contract.
+            const rows = [];
+            const seenPids = new Set();
+            const addRow = (candidate, fallbackPpid = 0) => {
+              const pid = Number(candidate?.pid);
+              if (!Number.isInteger(pid) || seenPids.has(pid)) return;
+              seenPids.add(pid);
+              rows.push({
+                ppid: Number(candidate?.ppid ?? fallbackPpid) || 0,
+                pid,
+              });
+            };
+            addRow(ownerProcess, 0);
+            for (const handle of scope.__BNH_VIRTUAL_PROCESS_REGISTRY__?.values?.() || []) {
+              addRow(handle, ownerProcess.pid);
+            }
+            for (const record of ownerProcess.__bnhChildActivity?.active || []) {
+              addRow(record.processHandle, ownerProcess.pid);
+            }
+            rows.sort((left, right) => left.pid - right.pid);
+            const output = `PPID PID\n${rows.map(({ ppid, pid }) => `${ppid} ${pid}`).join('\n')}${rows.length ? '\n' : ''}`;
+            child.spawn(spawnOptions());
+            scope.queueMicrotask(() => {
+              if (closed) return;
+              stdout += output;
+              writeStdout(output);
+              finish(0, null);
+            });
+            releaseChildTask?.();
+            releaseChildTask = null;
+            return child;
+          }
           if (commandName === 'node') {
           }
           const launchesNpmEntrypoint = commandName === 'node'
@@ -8550,7 +8600,8 @@ export function createRuntime({
               const childOptions = ipc
                 ? { ...options, ipc, asyncLifecycle: true, onSignal: (signal) => finish(null, signal) }
                 : { ...options, asyncLifecycle: true, onSignal: (signal) => finish(null, signal) };
-              if (prepared.scriptPath === null && prepared.evalCode === null && !prepared.interactive && childInput) {
+              if (prepared.scriptPath === null && prepared.evalCode === null && !prepared.interactive && childInput
+                && !prepared.executionArgv.some((value) => String(value) === '--test')) {
                 let input = '';
                 let chunk;
                 while ((chunk = childInput.read?.()) !== null && chunk !== undefined) {
@@ -12736,7 +12787,7 @@ export function createRuntime({
     };
     const runtimeWorkerStates = new WeakMap();
     function RuntimeWorker(...args) {
-      const ownerProcess = scope.process || processObject;
+      const ownerProcess = scope.__bnhActiveProcess || scope.process || processObject;
       if (ownerProcess._bnhNextWorkerThreadId === undefined) ownerProcess._bnhNextWorkerThreadId = 1;
       const threadId = ownerProcess._bnhNextWorkerThreadId++;
       const [source, workerOptions = {}] = args;
@@ -13805,6 +13856,24 @@ export function createRuntime({
           return builtin === 'path/posix' ? processPath.posix
             : builtin === 'path/win32' ? processPath.win32
               : processPath;
+        }
+        if (builtin === 'child_process' && processObj !== processObject) {
+          if (!processObj.__bnhChildProcessModule) {
+            const childProcess = builtins.child_process;
+            const boundChildProcess = Object.create(childProcess);
+            for (const key of Reflect.ownKeys(childProcess)) {
+              const descriptor = Object.getOwnPropertyDescriptor(childProcess, key);
+              if (!descriptor || typeof descriptor.value !== 'function') continue;
+              Object.defineProperty(boundChildProcess, key, {
+                ...descriptor,
+                value: (...args) => runInProcessContext(
+                  () => Reflect.apply(descriptor.value, childProcess, args),
+                ),
+              });
+            }
+            processObj.__bnhChildProcessModule = boundChildProcess;
+          }
+          return processObj.__bnhChildProcessModule;
         }
         return builtins[builtin] ?? {};
       };

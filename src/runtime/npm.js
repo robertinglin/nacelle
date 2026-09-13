@@ -949,7 +949,11 @@ export class BrowserNpm {
           pkgFilesCount += 1;
           pkgTotalBytes += fileData.byteLength;
 
-          if (entry.path === `${pkgDir}/package.json` || entry.path.endsWith('/package.json')) {
+          // Dependencies can legitimately contain another package manifest
+          // (for example @tsd/typescript embeds the real TypeScript package
+          // under typescript/). Only the unpacked package root describes the
+          // package being installed and its executable/bin contract.
+          if (entry.path === `${pkgDir}/package.json`) {
             try {
               const raw = typeof fileData === 'string' ? fileData : new TextDecoder().decode(fileData);
               parsedPkgJson = JSON.parse(raw);

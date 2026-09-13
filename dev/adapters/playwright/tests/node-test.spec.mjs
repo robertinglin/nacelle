@@ -17,6 +17,35 @@ test.describe('browser-native node:test builtin', () => {
     await expectPass(expect, result);
   });
 
+  test('supports configuring node:test snapshot hooks', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { snapshot, test } = require('node:test');
+
+      snapshot.setDefaultSnapshotSerializers([() => 'serialized']);
+      snapshot.setResolveSnapshotPath((path) => path + '.snapshot');
+      test('snapshot hooks', () => assert.strictEqual(typeof snapshot, 'function'));
+    `);
+
+    await expectPass(expect, result);
+  });
+
+  test('preserves literal backticks in node:test snapshots', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const { test } = require('node:test');
+
+      test.snapshot.setDefaultSnapshotSerializers([(value) => value]);
+      test.snapshot.setResolveSnapshotPath(() => '/node/backtick-test.js');
+      test('literal backticks', (context) => context.assert.snapshot('\`\`\`'));
+    `, {
+      files: {
+        '/node/backtick-test.js': 'exports["literal backticks 1"] = ' + JSON.stringify('\n```\n') + ';\n',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
   test('sets exitCode and writes stderr for a synchronous assertion failure', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert');

@@ -452,6 +452,8 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     let uid = 1000;
     let gid = 1000;
     let mask = 0o022;
+    let stdoutMaxListeners = 10;
+    let stderrMaxListeners = 10;
     const invalidType = (value) => {
       const received = value === null ? 'null' : value?.constructor?.name || typeof value;
       const error = new TypeError('The "id" argument must be one of type number or string. Received ' +
@@ -769,6 +771,8 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         callback?.();
         return this;
       },
+      setMaxListeners(value) { stdoutMaxListeners = value; return this; },
+      getMaxListeners() { return stdoutMaxListeners; },
     };
     process.stderr = {
       isTTY: false,
@@ -785,6 +789,8 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         callback?.();
         return this;
       },
+      setMaxListeners(value) { stderrMaxListeners = value; return this; },
+      getMaxListeners() { return stderrMaxListeners; },
     };
 
     control.onmessage = (event) => {

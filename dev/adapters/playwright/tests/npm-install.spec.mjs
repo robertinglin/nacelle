@@ -215,6 +215,61 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     ]);
   });
 
+  test('uses the package-root manifest when an installed tarball contains nested manifests', async () => {
+    const encoder = new TextEncoder();
+    const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
+    const archive = await packTarGz([
+      {
+        path: 'package/package.json',
+        data: encoder.encode(JSON.stringify({
+          name: 'nested-manifest-package',
+          version: '1.0.0',
+          bin: { outer: 'bin/outer.js' },
+        })),
+      },
+      { path: 'package/bin/outer.js', data: encoder.encode('#!/usr/bin/env node\n') },
+      {
+        path: 'package/embedded/package.json',
+        data: encoder.encode(JSON.stringify({
+          name: 'embedded-package',
+          version: '1.0.0',
+          bin: { embedded: 'bin/embedded.js' },
+        })),
+      },
+      { path: 'package/embedded/bin/embedded.js', data: encoder.encode('#!/usr/bin/env node\n') },
+    ]);
+    const npm = new BrowserNpm({
+      vfs,
+      registry: 'https://registry.test',
+      proxyUrl: null,
+      fetchFn: async (url) => {
+        if (url === 'https://registry.test/nested-manifest-package') {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              name: 'nested-manifest-package',
+              'dist-tags': { latest: '1.0.0' },
+              versions: {
+                '1.0.0': {
+                  name: 'nested-manifest-package',
+                  version: '1.0.0',
+                  dist: { tarball: 'https://registry.test/nested-manifest-package/-/nested-manifest-package-1.0.0.tgz' },
+                },
+              },
+            }),
+          };
+        }
+        return { ok: true, status: 200, arrayBuffer: async () => archive.buffer };
+      },
+    });
+
+    await npm.install('nested-manifest-package@1.0.0', { cwd: '/node' });
+
+    expect(vfs.files.has('/node/node_modules/.bin/outer')).toBe(true);
+    expect(vfs.files.has('/node/node_modules/.bin/embedded')).toBe(false);
+  });
+
   test('BrowserNpm installs packages into VFS and module-loader requires them', async () => {
     const encoder = new TextEncoder();
     const vfs = createVfs({

@@ -53,6 +53,20 @@ test.describe('browser runtime bridge and core primitives', () => {
     expect(result.stderr).toContain('browser stderr');
   });
 
+  test('provides max-listener controls on process stdio streams', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      process.stdout.setMaxListeners(50);
+      process.stderr.setMaxListeners(Infinity);
+      assert.strictEqual(process.stdout.getMaxListeners(), 50);
+      assert.strictEqual(process.stderr.getMaxListeners(), Infinity);
+      process.stdout.write('stdio listener contract completed');
+    `);
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('stdio listener contract completed');
+  });
+
   test('does not keep the parent alive for detached unref children', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const { spawn } = require('node:child_process');
@@ -853,6 +867,116 @@ test.describe('browser runtime bridge and core primitives', () => {
         '/node/node_modules/.bin/yarn': '#!/usr/bin/env node\\n',
       },
     });
+
+    await expectPass(expect, result);
+  });
+
+  test('inherits the package cwd for asynchronous nested npm scripts', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+      const packageCwd = '/node/.citgm/tmp/package-under-test';
+
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/node', [
+          '/node/node_modules/.bin/npm', 'test',
+        ], { cwd: packageCwd });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(output, packageCwd + '\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/.citgm/tmp/package-under-test/package.json': JSON.stringify({
+          name: 'nested-async-cwd-fixture',
+          version: '1.0.0',
+          scripts: { test: 'run-p test:*', 'test:cwd': 'node -e "process.stdout.write(process.cwd() + \\\"\\\\n\\\")"' },
+        }),
+        '/node/.citgm/tmp/package-under-test/node_modules/.bin/run-p': [
+          '#!/usr/bin/env node',
+          "const { spawn } = require('node:child_process');",
+          "const child = spawn('/node/node_modules/.bin/node', ['/node/node_modules/.bin/npm', 'run', 'test:cwd']);",
+          "child.stdout.on('data', (chunk) => process.stdout.write(chunk));",
+          "child.stderr.on('data', (chunk) => process.stderr.write(chunk));",
+          "child.once('close', (code) => { process.exitCode = code; });",
+        ].join('\n'),
+        '/node/node_modules/.bin/node': '#!/usr/bin/env node\\n',
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\\n',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('runs bare node test discovery in a child process', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+      const fs = require('node:fs');
+
+      (async () => {
+        assert.deepStrictEqual(fs.globSync('/node/**/*.test.js'), ['/node/bare-test.test.js']);
+        assert.deepStrictEqual(fs.globSync('**/*.test.js', { cwd: '/node', exclude: ['node_modules'] }), ['bare-test.test.js']);
+        const child = spawn(process.execPath, ['--test'], { cwd: '/node' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput + output);
+        assert.match(output, /tests 1/);
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/bare-test.test.js': [
+          "import test from 'node:test';",
+          "test('bare discovery', () => {});",
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('provides a POSIX process table to child tooling', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('ps', ['-A', '-o', 'ppid,pid']);
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.match(output, /^PPID PID\\n/);
+        assert.match(output, new RegExp('\\\\b' + process.ppid + ' ' + process.pid + '\\\\n'));
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `);
 
     await expectPass(expect, result);
   });

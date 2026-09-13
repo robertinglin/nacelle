@@ -109,6 +109,7 @@ const originalPromiseConstructor = Promise;
 const originalThen = Promise.prototype.then;
 const originalResolve = Promise.resolve;
 const originalReject = Promise.reject;
+const originalAll = Promise.all;
 const hostQueueMicrotask = typeof globalThis.queueMicrotask === 'function'
   ? globalThis.queueMicrotask.bind(globalThis)
   : null;
@@ -159,6 +160,28 @@ export function setPromiseRejectionHandledObserver(observer) {
 
 export function isPromiseHandled(promise) {
   return handledPromises.has(promise) || handledPromises.has(promiseTarget(promise));
+}
+
+export function markPromiseHandled(promise) {
+  if (!promise) return;
+  const target = promiseTarget(promise);
+  handledPromises.add(promise);
+  if (target !== promise) handledPromises.add(target);
+  promiseRejectionHandledObserver?.(promise, target);
+}
+
+function markPromiseCollectionInputs(values) {
+  const items = Array.from(values);
+  for (const item of items) {
+    const target = promiseTarget(item);
+    if (!promiseIds.has(item) && !promiseIds.has(target)) continue;
+    markPromiseHandled(item);
+    // Native Promise collection methods bypass the patched `.then` method.
+    // Attach a no-op rejection branch so the browser's native tracker sees
+    // the same consumption that Node's Promise.all does.
+    originalThen.call(target, undefined, () => {});
+  }
+  return items;
 }
 
 function observePromiseRejection(promise, reason) {
@@ -735,9 +758,7 @@ function installPromiseHooks() {
   Promise.prototype.then = function patchedThen(onFulfilled, onRejected) {
     const sourcePromise = promiseTarget(this);
     if (typeof onRejected === 'function') {
-      handledPromises.add(this);
-      if (sourcePromise !== this) handledPromises.add(sourcePromise);
-      promiseRejectionHandledObserver?.(this, sourcePromise);
+      markPromiseHandled(this);
     }
     const knownAsyncId = promiseIds.get(this) ?? promiseIds.get(sourcePromise);
     const pendingAwaitContexts = promiseAwaitContexts.get(this)
@@ -834,8 +855,20 @@ function installPromiseHooks() {
       }
     }
     observePromiseRejection(result, reason);
-    return result;
+    const isFirefoxBrowser = isBrowserRealm && /Firefox\//.test(String(globalThis.navigator?.userAgent || ''));
+    return isFirefoxBrowser && isUserCodeActive() ? observablePromise(result) : result;
   };
+  if (isBrowserRealm && typeof originalAll === 'function') {
+    Promise.all = function patchedAll(values) {
+      let items;
+      try {
+        items = markPromiseCollectionInputs(values);
+      } catch {
+        return Reflect.apply(originalAll, this, [values]);
+      }
+      return Reflect.apply(originalAll, this, [items]);
+    };
+  }
   if (isBrowserRealm && globalThis.Promise === originalPromiseConstructor) {
     // Async functions use the browser's intrinsic Promise constructor. A
     // wrapper that merely returns a native Promise is therefore invisible to

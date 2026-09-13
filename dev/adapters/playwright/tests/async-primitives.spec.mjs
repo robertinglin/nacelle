@@ -129,6 +129,181 @@ test.describe('browser runtime async primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('does not report a rejection handled through queued Promise.all work', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert');
+        const unhandled = [];
+        let fixtureError;
+        const onUnhandled = (reason, promise) => unhandled.push({
+          reasonIsFixture: reason === fixtureError,
+          reasonMessage: reason?.message,
+          promiseConstructor: promise?.constructor?.name,
+          promiseHasOwnThen: Boolean(promise && Object.prototype.hasOwnProperty.call(promise, 'then')),
+        });
+        process.on('unhandledRejection', onUnhandled);
+
+        const pLimit = concurrency => {
+          const queue = [];
+          let activeCount = 0;
+          const resumeNext = () => {
+            if (activeCount < concurrency && queue.length > 0) {
+              activeCount++;
+              queue.shift()();
+            }
+          };
+          const next = () => {
+            activeCount--;
+            resumeNext();
+          };
+          const run = async (function_, resolve, args) => {
+            const result = (async () => function_(...args))();
+            resolve(result);
+            try { await result; } catch {}
+            next();
+          };
+          const enqueue = (function_, resolve, args) => {
+            new Promise(internalResolve => {
+              queue.push(internalResolve);
+            }).then(run.bind(undefined, function_, resolve, args));
+            resumeNext();
+          };
+          return (function_, ...args) => new Promise(resolve => {
+            enqueue(function_, resolve, args);
+          });
+        };
+        class EndError extends Error {
+          constructor(value) {
+            super();
+            this.value = value;
+          }
+        }
+        const testElement = async (element, tester) => tester(await element);
+        const finder = async element => {
+          const values = await Promise.all(element);
+          if (values[1] === true) throw new EndError(values[0]);
+          return false;
+        };
+        const pLocate = async (iterable, tester) => {
+          const limit = pLimit(Number.POSITIVE_INFINITY);
+          const items = [...iterable].map(element => [element, limit(testElement, element, tester)]);
+          const checkLimit = pLimit(1);
+          try {
+            await Promise.all(items.map(element => checkLimit(finder, element)));
+          } catch (error) {
+            if (error instanceof EndError) return error.value;
+            throw error;
+          }
+        };
+
+        fixtureError = new Error('fixture');
+        await assert.rejects(
+          pLocate([1, 2, 3], () => Promise.reject(fixtureError)),
+          error => error === fixtureError,
+        );
+        await new Promise(resolve => setTimeout(resolve, 50));
+        process.removeListener('unhandledRejection', onUnhandled);
+        assert.deepStrictEqual(unhandled, [], JSON.stringify(unhandled));
+      })().catch(error => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, { timeoutMs: 30000 });
+
+    await expectPass(expect, result);
+  });
+
+  test('does not report the published p-locate ESM rejection path', async ({ harnessPage }) => {
+    const entryPath = '/node/p-locate-rejection-entry.mjs';
+    const result = await harnessPage.run(`
+      import assert from 'node:assert';
+      import pLocate from './p-locate-rejection.mjs';
+
+      const unhandled = [];
+      const onUnhandled = (reason, promise) => unhandled.push({
+        reasonMessage: reason?.message,
+        promiseConstructor: promise?.constructor?.name,
+        promiseHasOwnThen: Boolean(promise && Object.prototype.hasOwnProperty.call(promise, 'then')),
+      });
+      process.on('unhandledRejection', onUnhandled);
+      const fixtureError = new Error('fixture');
+      await assert.rejects(
+        pLocate([1, 2, 3], () => Promise.reject(fixtureError)),
+        error => error === fixtureError,
+      );
+      await new Promise(resolve => setTimeout(resolve, 50));
+      process.removeListener('unhandledRejection', onUnhandled);
+      assert.deepStrictEqual(unhandled, [], JSON.stringify(unhandled));
+    `, {
+      entryPath,
+      files: {
+        '/node/p-locate-rejection.mjs': `
+          import pLimit from './p-locate-rejection-limit.mjs';
+
+          class EndError extends Error {
+            constructor(value) {
+              super();
+              this.value = value;
+            }
+          }
+
+          const testElement = async (element, tester) => tester(await element);
+          const finder = async element => {
+            const values = await Promise.all(element);
+            if (values[1] === true) throw new EndError(values[0]);
+            return false;
+          };
+
+          export default async function pLocate(iterable, tester) {
+            const limit = pLimit(Number.POSITIVE_INFINITY);
+            const items = [...iterable].map(element => [element, limit(testElement, element, tester)]);
+            const checkLimit = pLimit(1);
+            try {
+              await Promise.all(items.map(element => checkLimit(finder, element)));
+            } catch (error) {
+              if (error instanceof EndError) return error.value;
+              throw error;
+            }
+          }
+        `,
+        '/node/p-locate-rejection-limit.mjs': `
+          export default function pLimit(concurrency) {
+            const queue = [];
+            let activeCount = 0;
+            const resumeNext = () => {
+              if (activeCount < concurrency && queue.length > 0) {
+                activeCount++;
+                queue.shift()();
+              }
+            };
+            const next = () => {
+              activeCount--;
+              resumeNext();
+            };
+            const run = async (function_, resolve, arguments_) => {
+              const result = (async () => function_(...arguments_))();
+              resolve(result);
+              try { await result; } catch {}
+              next();
+            };
+            const enqueue = (function_, resolve, arguments_) => {
+              new Promise(internalResolve => {
+                queue.push(internalResolve);
+              }).then(run.bind(undefined, function_, resolve, arguments_));
+              if (activeCount < concurrency) resumeNext();
+            };
+            return (function_, ...arguments_) => new Promise(resolve => {
+              enqueue(function_, resolve, arguments_);
+            });
+          }
+        `,
+      },
+      timeoutMs: 30000,
+    });
+
+    await expectPass(expect, result);
+  });
+
   test('delivers unhandled rejections to the process handler before setImmediate', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert');

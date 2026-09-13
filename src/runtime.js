@@ -38,6 +38,7 @@ import {
   createAsyncHooksModule,
   isPromiseHandled,
   isPromiseRejectionReported,
+  markPromiseHandled,
   observablePromise,
   registerAsyncCompletion,
   runAsyncGenerator,
@@ -2648,6 +2649,11 @@ function createFirefoxGuestPromiseConstructor(NativePromise, enqueue, enqueueAbo
       configurable: true,
       writable: true,
       value(onFulfilled, onRejected) {
+        // This own method bypasses async-hooks' patched Promise.prototype.then.
+        // Keep Firefox's native rejection tracker aligned with Node when a
+        // consumer (for example Promise.all or await) supplies an onRejected
+        // continuation before the browser's unhandled-rejection turn.
+        if (typeof onRejected === 'function') markPromiseHandled(target);
         const result = nativePromise.prototype.then.call(target, onFulfilled, onRejected);
         guestPromiseTargets.add(result);
         return result;
@@ -2690,13 +2696,29 @@ function createFirefoxGuestPromiseConstructor(NativePromise, enqueue, enqueueAbo
     reject: {
       configurable: true,
       writable: true,
-      value(reason) { return create((_resolve, reject) => reject(reason)); },
+      value(reason) {
+        // Native async functions adopt thenables through their visible
+        // `.then` method. Expose rejected guest promises through that
+        // observable boundary so Firefox cannot report the rejection before
+        // the async function's consumer attaches its rejection handler.
+        return observablePromise(create((_resolve, reject) => reject(reason)));
+      },
     },
     all: {
       configurable: true,
       writable: true,
       value(values) {
-        return create((resolve, reject) => nativePromise.all(values).then(resolve, reject));
+        const items = Array.from(values);
+        for (const item of items) {
+          if (!guestPromiseTargets.has(item)) continue;
+          // Firefox's native Promise.all consumes native-branded guest
+          // promises internally, bypassing their visible `.then` method.
+          // Register the same handled state that Node observes for Promise.all
+          // inputs; native Promise.all still supplies the actual propagation.
+          markPromiseHandled(item);
+          nativePromise.prototype.then.call(item, undefined, () => {});
+        }
+        return create((resolve, reject) => nativePromise.all(items).then(resolve, reject));
       },
     },
     allSettled: {
@@ -14406,7 +14428,11 @@ export function createRuntime({
       else dispatch();
     };
     const restorePromiseRejectionObserver = setPromiseRejectionObserver((promise, reason) => {
-      nativeQueueMicrotask(() => dispatchUnhandledRejection(promise, reason));
+      // Node gives promise consumers the rest of the current microtask turn
+      // to attach a rejection handler. A native microtask is too early for
+      // Firefox's guest Promise adoption path, where Promise.all may attach
+      // its handler through one additional thenable job.
+      nativeSetTimeout(() => dispatchUnhandledRejection(promise, reason), 0);
     });
     const onUnhandledRejection = (event) => {
       if (event.promise && (earlyUnhandledRejections.has(event.promise)

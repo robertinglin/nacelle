@@ -42,15 +42,15 @@ not being reclassified as newly rerun here.
 | 20 | balanced-match | PASS | none observed | Published `balanced-match@4.0.4` passed exact Chromium CITGM `citgm-1789260264391` and Firefox CITGM `citgm-1789260316808`; its `tshy` build and TAP suite exited 0 in both browsers. No runtime, nested-dependency, or upstream package/repository failure was observed. No repository changes were made, so the repository-wide gates were skipped under the continuation gate rule. |
 | 21 | p-limit | PASS | ours | Published `p-limit@7.3.2` at gitHead `783068bb9e967fd7bea8642e1bf5a3627fe38bdf` passed exact final Chromium CITGM `citgm-1789266269148` and Firefox CITGM `citgm-1789266420987`; the upstream XO, AVA, and tsd phases exited 0 in both browsers. The fix covers browser `unhandledRejection`/`rejectionHandled` delivery and Firefox ESM Promise tracking across the p-limit queue boundary. Required final gates passed after the runtime and oracle changes: build; `npm test` 338/338; Chromium Playwright 280/280; Firefox Playwright 280/280. Complete artifacts are preserved under `artifacts/citgm-top-100/rank-021-p-limit/`. |
 | 22 | glob-parent | PASS | ours | Published `glob-parent@6.0.2` at gitHead `26ce5ecec10c687cffb9891c108fb2d2800b9140` passes exact CITGM in Chromium (`citgm-1789269089178`) and Firefox (`citgm-1789269512625`). The runtime now preserves the `ChildProcess` constructor/prototype in process-bound `child_process` modules, forwards `process.binding()` to virtual children, and supplies Firefox with V8-compatible structured Error CallSites. Required final gates passed after the runtime/test changes: build; `npm test` 339/339; Chromium Playwright 280/280; Firefox Playwright 280/280. |
-| 23 | p-locate | PENDING | — | Not attempted; rank 22 is complete and rank 23 is current. |
-| 24 | has-flag | PENDING | — | Not attempted; rank 23 is current. |
-| 25 | iconv-lite | PENDING | — | Not attempted; rank 23 is current. |
-| 26 | entities | PENDING | — | Not attempted; rank 23 is current. |
-| 27 | uuid | PENDING | — | Not attempted; rank 23 is current. |
-| 28 | json-schema-traverse | PENDING | — | Not attempted; rank 23 is current. |
-| 29 | string-width | PENDING | — | Not attempted; rank 23 is current. |
-| 30 | escape-string-regexp | PENDING | — | Not attempted; rank 23 is current. |
-| 31 | globals | PENDING | — | Not attempted; rank 23 is current. |
+| 23 | p-locate | PASS | ours | Published `p-locate@7.0.0` at gitHead `b9ccdaaa83f8d2f53f8acf8ff3c97b7aa21f655b` passes exact CITGM in Chromium (`citgm-1789272646645`) and Firefox (`citgm-1789272546386`). The initial Firefox failure was an unhandled-rejection compatibility defect in the Firefox Promise/Promise.all adoption path; it was fixed generally and covered by two browser regression oracles, including the published ESM queue path. Complete CITGM artifacts and the transient initial Firefox gate log are preserved under `artifacts/citgm-top-100/rank-023-p-locate/`. Required final gates passed: build; `npm test`; Chromium Playwright 282/282; Firefox Playwright 282/282. |
+| 24 | has-flag | PENDING | — | Not attempted; rank 23 is complete and rank 24 is current. |
+| 25 | iconv-lite | PENDING | — | Not attempted; rank 23 is complete and rank 24 is current. |
+| 26 | entities | PENDING | — | Not attempted; rank 23 is complete and rank 24 is current. |
+| 27 | uuid | PENDING | — | Not attempted; rank 23 is complete and rank 24 is current. |
+| 28 | json-schema-traverse | PENDING | — | Not attempted; rank 23 is complete and rank 24 is current. |
+| 29 | string-width | PENDING | — | Not attempted; rank 23 is complete and rank 24 is current. |
+| 30 | escape-string-regexp | PENDING | — | Not attempted; rank 23 is complete and rank 24 is current. |
+| 31 | globals | PENDING | — | Not attempted; rank 23 is complete and rank 24 is current. |
 | 32 | is-fullwidth-code-point | PENDING | — | Not attempted; rank 23 is current. |
 | 33 | argparse | PENDING | — | Not attempted; rank 23 is current. |
 | 34 | ignore | PENDING | — | Not attempted; rank 23 is current. |
@@ -121,7 +121,7 @@ not being reclassified as newly rerun here.
 | 99 | fast-json-stable-stringify | PENDING | — | Not attempted; rank 23 is current. |
 | 100 | get-intrinsic | PENDING | — | Not attempted; rank 23 is current. |
 
-The pending-row cursor now points to rank 22; no later package has been
+The pending-row cursor now points to rank 23; no later package has been
 started.
 
 ## Rank 6 failure record
@@ -644,3 +644,36 @@ The focused browser stack oracle passed in Firefox, and the existing focused
 runtime regression file passed 73/73. The first full Firefox gate run also
 captured a Next.js failure caused by the missing CallSite alias; that failure
 is resolved and the final full Firefox suite passed 280/280.
+
+## Rank 23 failure record
+
+The published `p-locate@7.0.0` candidate at gitHead
+`b9ccdaaa83f8d2f53f8acf8ff3c97b7aa21f655b` was tested with CITGM 10.0.2.
+Complete artifacts for every attempt are preserved under
+`artifacts/citgm-top-100/rank-023-p-locate/`.
+
+| Run / log | Observed failure | Classification and resolution |
+| --- | --- | --- |
+| `citgm-1789270887676` | Published p-locate installed and its upstream suite completed successfully in Chromium. | PASS; no Chromium package, nested dependency, or upstream repository failure was observed. |
+| `citgm-1789270985150`, `citgm-1789271492031`, `citgm-1789271736252`, `citgm-1789271920048`, `citgm-1789272207983`, `citgm-1789272379804` | Firefox completed the p-locate assertions but reported the fixture rejection as unhandled through the p-limit queue and `Promise.all` adoption path. Diagnostic runs isolated the issue to browser-native Promise rejection tracking bypassing the runtime’s visible thenable/handler bookkeeping. | Ours. Firefox user-code `Promise.reject`, guest Promise `.then`, and Promise collection inputs now preserve Node-compatible handled state across native async adoption. The fix is general, with focused CommonJS and published-ESM queue regression oracles. |
+| `/tmp/bnh-p-locate-src` | The exact published source was inspected, including the rejection fixture and the p-limit queue implementation. | Confirms the failure is in browser runtime Promise compatibility, not a nested dependency or upstream package/repository defect. |
+| `citgm-1789272546386` / `citgm-1789272646645` | Published package install and upstream tests completed with exit code 0 in Firefox and Chromium. | PASS. No nested dependency or upstream package/repository blocker remained. |
+
+## Rank 23 gate evidence
+
+The final CITGM pair and repository-wide gates were run after the last runtime
+and oracle changes and before the rank-23 commit was created:
+
+```text
+NACELLE_CITGM_ARTIFACT_DIR=artifacts/citgm-top-100/rank-023-p-locate npm run citgm:browser:chromium -- p-locate  PASS — citgm-1789272646645
+NACELLE_CITGM_ARTIFACT_DIR=artifacts/citgm-top-100/rank-023-p-locate npm run citgm:browser:firefox -- p-locate   PASS — citgm-1789272546386
+npm run build -- --node-version=v22                         PASS
+npm test                                                     PASS — 339/339
+npm run test:browser:chromium                               PASS — 282/282
+npm run test:browser:firefox                                 PASS — 282/282
+```
+
+The initial full Firefox gate attempt (`repo-gate-firefox-initial-failure.log`)
+was 281/282 because the Playwright page closed during fixture navigation before
+the test body ran. The clean rerun passed 282/282; this transient runner
+interruption was not a package or runtime failure.

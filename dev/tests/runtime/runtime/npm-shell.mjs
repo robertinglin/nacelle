@@ -60,6 +60,46 @@ test('shell parser treats physical newlines as command separators', () => {
   assert.deepEqual(script.map((pipeline) => pipeline.commands[0].words[0].parts[0].text), ['echo', 'echo']);
 });
 
+test('shell executes POSIX build scripts with parameters, loops, and subshells', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/src/bin/tool': '#!/usr/bin/env node\n',
+      '/node/scripts/build.sh': `#!/bin/bash -eu
+set -euo pipefail
+ROOT=$(builtin cd $(pwd)/$(dirname "$0")/..; pwd)
+cd "$ROOT" || exit 1
+rm -rf dist*
+mkdir -p dist
+touch dist/alpha-browser.js dist/beta-browser.js
+cp -pr "$ROOT/dist" "$ROOT/dist-node"
+for FILE in \${ROOT}/dist-node/*-browser*; do
+  rm -f $FILE
+done
+(
+  cd "$ROOT/dist"
+  for FILE in *-browser*; do
+    mv "$FILE" "\${FILE/-browser/}"
+  done
+)
+if [ "\${1-}" != "--no-pack" ]; then
+  mkdir -p .build
+  touch .build/packed
+fi
+`,
+    },
+  });
+  const child = await node.bash('./scripts/build.sh', { args: ['--no-pack'] });
+  const exitCode = await child.exit;
+  const errorText = await child.stderrText();
+  const outputText = await child.stdoutText();
+  assert.equal(exitCode, 0, `${errorText}${outputText}`);
+  assert.equal(await node.fs.exists('/node/dist/alpha.js'), true);
+  assert.equal(await node.fs.exists('/node/dist/beta.js'), true);
+  assert.equal(await node.fs.exists('/node/dist-node/alpha-browser.js'), false);
+  assert.equal(await node.fs.exists('/node/.build/packed'), false);
+});
+
 test('shell dot and source builtins execute in the current shell state', async () => {
   const fs = memoryShellFs({
     '/node/env.sh': 'export MODE=production\ncd work\n',

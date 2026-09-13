@@ -447,8 +447,29 @@ export interface ShellPipeline {
   commands: ShellCommand[];
 }
 
+export interface ShellProgramItem {
+  connector: null | '&&' | '||' | ';';
+  node: {
+    type: 'pipeline';
+    pipeline: ShellPipeline;
+  } | {
+    type: 'group';
+    body: ShellProgramItem[];
+  } | {
+    type: 'for';
+    variable: string;
+    values: ShellWord[];
+    body: ShellProgramItem[];
+  } | {
+    type: 'if';
+    branches: Array<{ condition: ShellProgramItem[]; body: ShellProgramItem[] }>;
+    alternate: ShellProgramItem[];
+  };
+}
+
 export function tokenizeShellScript(command: string): ShellToken[];
 export function parseShellScript(command: string): ShellPipeline[];
+export function parseShellProgram(command: string): ShellProgramItem[];
 
 export function listSupportedNodeVersions(): readonly NodeVersionRecord[];
 export function listNodeVersionProfiles(): readonly NodeVersionProfile[];

@@ -1485,6 +1485,69 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('runs a parameterized POSIX build script through npm in the browser', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/npm', ['test'], { cwd: '/node' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.match(output, /shell build script passed/);
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/package.json': JSON.stringify({
+          name: 'shell-build-script-fixture',
+          version: '1.0.0',
+          scripts: { test: './scripts/build.sh --no-pack' },
+        }),
+        '/node/src/bin/tool': '#!/usr/bin/env node\n',
+        '/node/scripts/build.sh': [
+          '#!/bin/bash -eu',
+          'set -euo pipefail',
+          'ROOT=$(builtin cd $(pwd)/$(dirname "$0")/..; pwd)',
+          'cd "$ROOT" || exit 1',
+          'rm -rf dist*',
+          'mkdir -p dist',
+          'touch dist/alpha-browser.js dist/beta-browser.js',
+          'cp -pr "$ROOT/dist" "$ROOT/dist-node"',
+          'for FILE in \${ROOT}/dist-node/*-browser*; do',
+          '  rm -f $FILE',
+          'done',
+          '(',
+          '  cd "$ROOT/dist"',
+          '  for FILE in *-browser*; do',
+          '    mv "$FILE" "\${FILE/-browser/}"',
+          '  done',
+          ')',
+          'find "$ROOT/dist-node" -type f -name "*.d.ts" -exec rm -f {} \\;',
+          'cp -pr "$ROOT/src/bin" "$ROOT/dist-node"',
+          'if [ "\${1-}" != "--no-pack" ]; then',
+          '  mkdir -p .build',
+          '  touch .build/packed',
+          'fi',
+          "echo 'shell build script passed'",
+        ].join('\n'),
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\n',
+      },
+      isolation: 'worker',
+    });
+
+    await expectPass(expect, result);
+  });
+
   test('runs an ESM node:test reporter launcher through an npm script', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert');

@@ -1,7 +1,7 @@
 import {
   expandShellWordAsync,
   literalShellWord,
-  parseShellScript,
+  parseShellProgram,
   rawShellWord,
 } from './shell-parser.js';
 import { resolveNodeVersionProfile } from '../versions/index.js';
@@ -11,7 +11,8 @@ const DEFAULT_NODE_VERSION = resolveNodeVersionProfile('lts').runtimeVersion;
 const BUILTINS = new Set([
   ':', '.', '[', 'alias', 'basename', 'cat', 'cd', 'command', 'cp', 'cut', 'dirname', 'echo', 'env', 'export',
   'false', 'find', 'grep', 'head', 'ls', 'mkdir', 'mv', 'printenv', 'printf', 'ps', 'pwd', 'realpath', 'rm',
-  'rmdir', 'sed', 'sort', 'source', 'tail', 'tee', 'test', 'touch', 'tr', 'true', 'type', 'umask', 'uniq', 'unset', 'wc', 'which',
+  'rmdir', 'sed', 'set', 'sort', 'source', 'tail', 'tee', 'test', 'touch', 'tr', 'true', 'type', 'umask', 'uniq', 'unset', 'wc', 'which',
+  'builtin', 'exit',
 ]);
 
 const GLOB_PATTERN = /[*?\[\]{}()!@]/;
@@ -66,7 +67,7 @@ async function expandWord(word, context, { pathname = false } = {}) {
       if (nested?.stderr) context.onStderr?.(nested.stderr);
       return nested;
     }
-    : undefined);
+    : undefined, context.parameters || []);
   if (pathname || !expanded.glob || !GLOB_PATTERN.test(expanded.value) || !context.fs.glob) {
     return [expanded.value];
   }
@@ -377,12 +378,19 @@ async function runFind(args, context) {
   let namePattern = null;
   let type = null;
   let maxDepth = Infinity;
+  let execAction = null;
   while (index < args.length) {
     const option = args[index++];
     if (option === '-name') namePattern = args[index++];
     else if (option === '-type') type = args[index++];
     else if (option === '-maxdepth') maxDepth = Number(args[index++]);
     else if (option === '-print' || option === '--') continue;
+    else if (option === '-exec') {
+      const command = [];
+      while (index < args.length && args[index] !== ';') command.push(args[index++]);
+      if (args[index] === ';') index += 1;
+      execAction = command;
+    }
     else return commandError('find', `unknown predicate: ${option}`);
   }
   if (maxDepth !== Infinity && (!Number.isInteger(maxDepth) || maxDepth < 0)) {
@@ -403,6 +411,22 @@ async function runFind(args, context) {
     }
   };
   await visit(shellPath(root, context.cwd), root, 0);
+  if (execAction) {
+    if (!execAction.length || execAction[0] !== 'rm') return commandError('find', 'unsupported -exec command');
+    const flags = execAction.filter((arg) => arg.startsWith('-')).join('');
+    const recursive = flags.includes('r') || flags.includes('R');
+    const force = flags.includes('f');
+    for (const match of matches) {
+      const targets = execAction.slice(1).filter((arg) => !arg.startsWith('-')).length
+        ? execAction.slice(1).filter((arg) => !arg.startsWith('-')).map((arg) => arg === '{}' ? match : arg)
+        : [match];
+      for (const target of targets) {
+        try { await context.fs.remove(shellPath(target, context.cwd), { recursive, force }); }
+        catch (error) { if (!force) return commandError('find', error.message || String(error)); }
+      }
+    }
+    return result(0);
+  }
   return result(0, matches.length ? `${matches.join('\n')}\n` : '');
 }
 
@@ -579,6 +603,18 @@ async function runFileUtility(name, args, input, context) {
 async function runBuiltin(name, args, input, context, runProgram, options) {
   if (name === ':' || name === 'true') return result(0);
   if (name === 'false') return result(1);
+  if (name === 'set') return result(0);
+  if (name === 'builtin') {
+    if (!args.length) return result(0);
+    return runProgram(args[0], args.slice(1), input, context);
+  }
+  if (name === 'exit') {
+    const shellState = context.shellState || context;
+    const code = args[0] === undefined ? shellState.lastStatus || 0 : Number(args[0]);
+    shellState.exitRequested = true;
+    shellState.exitCode = Number.isInteger(code) ? code : 2;
+    return result(shellState.exitCode);
+  }
   if (name === 'echo') return runEcho(args);
   if (name === 'printf') return runPrintf(args);
   if (name === 'pwd') return runPwd(context);
@@ -608,7 +644,8 @@ async function runBuiltin(name, args, input, context, runProgram, options) {
     const stderr = [];
     const nested = await runShellScript(source, {
       ...options,
-      args: args.slice(1),
+      args: [],
+      parameters: [script, ...args.slice(1)],
       cwd: shellState.cwd,
       env: shellState.env,
       fs: context.fs,
@@ -686,7 +723,8 @@ async function runBuiltin(name, args, input, context, runProgram, options) {
     return result(0);
   }
   if (name === 'cp' || name === 'mv') {
-    const recursive = args.some((arg) => arg === '-r' || arg === '-R' || arg === '-a');
+    const recursive = args.some((arg) => arg === '-r' || arg === '-R' || arg === '-a'
+      || (arg.startsWith('-') && !arg.startsWith('--') && /[rRa]/.test(arg)));
     const operands = args.filter((arg) => arg !== '--' && !arg.startsWith('-'));
     if (operands.length < 2) return commandError(name, 'missing file operand');
     const destination = shellPath(operands.at(-1), context.cwd);
@@ -770,13 +808,16 @@ async function runNode(args, input, context, options) {
 async function runShell(name, args, input, context, options) {
   let source;
   let scriptArgs = [];
+  let parameters = [];
   if (args[0] === '-c') {
     source = args[1];
     scriptArgs = args.slice(2);
+    parameters = scriptArgs;
   } else {
     const script = args[0];
     if (!script) return commandError(name, 'no script specified');
     scriptArgs = args.slice(1);
+    parameters = [script, ...scriptArgs];
     try { source = String(await context.fs.readFile(shellPath(script, context.cwd))); }
     catch { return commandError(name, `${script}: No such file or directory`); }
   }
@@ -785,9 +826,11 @@ async function runShell(name, args, input, context, options) {
   const stderr = [];
   const nested = await runShellScript(source, {
     ...options,
-    args: scriptArgs,
+    args: [],
+    parameters,
     cwd: context.cwd,
     env: context.env,
+    parameters,
     stdin: input,
     onNetwork: (event) => context.onNetwork?.(event),
     onStdout: (chunk) => stdout.push(String(chunk)),
@@ -988,14 +1031,90 @@ async function executePipeline(pipeline, context, options) {
   return { code: last.code, stdout: last.stdout, stderr, streamedStdout, streamedStderr };
 }
 
+async function executeShellNode(node, state, options) {
+  if (node.type === 'pipeline') {
+    return executePipeline(node.pipeline, {
+      ...state,
+      stdin: shellText(options.stdin),
+      shellState: state,
+    }, options);
+  }
+  if (node.type === 'group') {
+    const savedCwd = state.cwd;
+    const savedPreviousCwd = state.previousCwd;
+    const savedEnv = { ...state.env };
+    const savedExitRequested = state.exitRequested;
+    const savedExitCode = state.exitCode;
+    const code = await executeShellSequence(node.body, state, options);
+    state.cwd = savedCwd;
+    state.previousCwd = savedPreviousCwd;
+    for (const key of Object.keys(state.env)) delete state.env[key];
+    Object.assign(state.env, savedEnv);
+    state.exitRequested = savedExitRequested;
+    state.exitCode = savedExitCode;
+    return { code };
+  }
+  if (node.type === 'for') {
+    const values = [];
+    const shellContext = { ...state, shellState: state };
+    if (node.values.length) {
+      for (const word of node.values) values.push(...await expandWord(word, shellContext));
+    } else {
+      values.push(...state.parameters.slice(1));
+    }
+    let code = 0;
+    for (const value of values) {
+      state.env[node.variable] = value;
+      code = await executeShellSequence(node.body, state, options);
+      if (state.exitRequested) break;
+    }
+    return { code };
+  }
+  if (node.type === 'if') {
+    let code = 0;
+    let matched = false;
+    for (const branch of node.branches) {
+      code = await executeShellSequence(branch.condition, state, options);
+      if (code !== 0) continue;
+      matched = true;
+      code = await executeShellSequence(branch.body, state, options);
+      break;
+    }
+    if (!matched) code = node.alternate.length ? await executeShellSequence(node.alternate, state, options) : 0;
+    return { code };
+  }
+  return result(2, '', `shell: unsupported compound command ${node.type}\n`);
+}
+
+async function executeShellSequence(sequence, state, options) {
+  let last = result(state.lastStatus || 0);
+  for (const item of sequence) {
+    if (options.signal?.aborted || state.exitRequested) break;
+    const shouldRun = item.connector === null
+      || item.connector === ';'
+      || (item.connector === '&&' && state.lastStatus === 0)
+      || (item.connector === '||' && state.lastStatus !== 0);
+    if (!shouldRun) continue;
+    const nodeResult = await executeShellNode(item.node, state, options);
+    last = result(nodeResult.code ?? 1, nodeResult.stdout, nodeResult.stderr);
+    state.lastStatus = last.code;
+    if (last.stdout && !nodeResult.streamedStdout) options.onStdout?.(last.stdout);
+    if (last.stderr && !nodeResult.streamedStderr) options.onStderr?.(last.stderr);
+  }
+  return last.code;
+}
+
 /** Execute the supported npm-script subset of POSIX shell syntax. */
 export async function runShellScript(command, options) {
-  const pipelines = parseShellScript(command);
+  const program = parseShellProgram(command);
   const state = {
     cwd: shellPath(options.cwd || '/node', '/'),
     env: { ...(options.env || {}) },
+    parameters: [...(options.parameters || options.args || [])],
     previousCwd: null,
     lastStatus: 0,
+    exitRequested: false,
+    exitCode: 0,
     fs: options.fs,
     onNetwork: options.onNetwork,
   };
@@ -1005,6 +1124,7 @@ export async function runShellScript(command, options) {
     const nested = await runShellScript(nestedCommand, {
       ...options,
       args: [],
+      parameters: state.parameters,
       cwd: state.cwd,
       env: state.env,
       onStdout: (chunk) => stdout.push(String(chunk)),
@@ -1012,25 +1132,13 @@ export async function runShellScript(command, options) {
     });
     return { ...nested, stdout: stdout.join(''), stderr: stderr.join('') };
   };
-  const finalPipeline = pipelines.at(-1);
   const extraArgs = Array.isArray(options.args) ? options.args : [];
-  if (extraArgs.length) {
-    finalPipeline.commands.at(-1).words.push(...extraArgs.map(literalShellWord));
+  const finalNode = program.at(-1)?.node;
+  if (extraArgs.length && finalNode?.type === 'pipeline') {
+    finalNode.pipeline.commands.at(-1).words.push(...extraArgs.map(literalShellWord));
   }
-
-  for (const pipeline of pipelines) {
-    if (options.signal?.aborted) return { code: 130, cwd: state.cwd, env: state.env };
-    const shouldRun = pipeline.connector === null
-      || pipeline.connector === ';'
-      || (pipeline.connector === '&&' && state.lastStatus === 0)
-      || (pipeline.connector === '||' && state.lastStatus !== 0);
-    if (!shouldRun) continue;
-    const pipelineResult = await executePipeline(pipeline, { ...state, stdin: shellText(options.stdin), shellState: state }, options);
-    state.lastStatus = pipelineResult.code;
-    if (pipelineResult.stdout && !pipelineResult.streamedStdout) options.onStdout?.(pipelineResult.stdout);
-    if (pipelineResult.stderr && !pipelineResult.streamedStderr) options.onStderr?.(pipelineResult.stderr);
-  }
-  return { code: state.lastStatus, cwd: state.cwd, env: state.env };
+  const code = await executeShellSequence(program, state, options);
+  return { code: state.exitRequested ? state.exitCode : code, cwd: state.cwd, env: state.env };
 }
 
 /** Return a process-like handle for npm's shell-backed script API. */

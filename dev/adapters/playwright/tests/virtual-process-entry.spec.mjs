@@ -56,6 +56,185 @@ test('runs VFS .mjs child entries as native ESM in both process modes', async ({
   });
 });
 
+test('maps asynchronous fs reads from fd 0 to a worker child stdin pipe', async ({ page }) => {
+  await page.goto(browserRuntimeURL, { waitUntil: 'domcontentloaded' });
+  const result = await page.evaluate(async () => {
+    const { createVirtualProcess } = await import('/runtime/virtual-process.js');
+    const capabilities = {
+      vfs: { mounts: [{ path: '/node', mode: 'read-write' }] },
+      workers: { entryModules: ['*'], maxChildren: 1 },
+      ipc: { enabled: false },
+      signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
+      output: { maxBytes: 1024 * 1024, stdoutBytes: 1024 * 1024, stderrBytes: 1024 * 1024 },
+      envVars: { allowed: [] },
+    };
+    const output = [];
+    const child = createVirtualProcess({
+      forceFallback: false,
+      entry: '/node/read-stdin.js',
+      argv: ['/browser/node', '/node/read-stdin.js'],
+      cwd: '/node',
+      vfs: {
+        capabilities,
+        files: {
+          '/node/read-stdin.js': `
+            const fs = require('node:fs');
+            const buffer = Buffer.alloc(5);
+            fs.read(0, buffer, 0, buffer.length, null, (error, bytesRead) => {
+              process.stdout.write(JSON.stringify({
+                code: error?.code || null,
+                bytesRead,
+                value: buffer.toString(),
+              }));
+              process.exit(error ? 1 : 0);
+            });
+          `,
+        },
+      },
+      stdout: (value) => output.push(typeof value === 'string' ? value : new TextDecoder().decode(value)),
+    });
+    child.send({ __bnhWorkerStdin: true, value: new TextEncoder().encode('hello') });
+    child.send({ __bnhWorkerStdinEnd: true });
+    const terminal = await child.wait();
+    return { code: terminal.code, stdout: output.join('') };
+  });
+
+  expect(result).toEqual({ code: 0, stdout: '{"code":null,"bytesRead":5,"value":"hello"}' });
+});
+
+test('forwards async child_process stdin to an ESM child fd 0 read', async ({ page }) => {
+  await page.goto(browserRuntimeURL, { waitUntil: 'domcontentloaded' });
+  const result = await page.evaluate(async () => {
+    const { createVirtualProcess } = await import('/runtime/virtual-process.js');
+    const capabilities = {
+      vfs: { mounts: [{ path: '/node', mode: 'read-write' }] },
+      workers: { entryModules: ['*'], maxChildren: 2 },
+      ipc: { enabled: false },
+      signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
+      output: { maxBytes: 1024 * 1024, stdoutBytes: 1024 * 1024, stderrBytes: 1024 * 1024 },
+      envVars: { allowed: [] },
+    };
+    const output = [];
+    const child = createVirtualProcess({
+      forceFallback: false,
+      entry: '/node/parent.js',
+      argv: ['/browser/node', '/node/parent.js'],
+      cwd: '/node',
+      vfs: {
+        capabilities,
+        files: {
+          '/node/parent.js': `
+            const { spawn } = require('node:child_process');
+            const child = spawn(process.execPath, ['/node/read-stdin.mjs'], { stdio: ['pipe', 'pipe', 'pipe'] });
+            let stdout = '';
+            let stderr = '';
+            child.stdout.on('data', value => { stdout += value; });
+            child.stderr.on('data', value => { stderr += value; });
+            child.once('close', code => {
+              process.stdout.write(JSON.stringify({ code, stdout, stderr }));
+            });
+            child.stdin.write('hello');
+            child.stdin.end();
+          `,
+          '/node/read-stdin.mjs': `
+            import fs from 'node:fs';
+            const buffer = Buffer.alloc(5);
+            fs.read(0, buffer, 0, buffer.length, null, (error, bytesRead) => {
+              process.stdout.write(JSON.stringify({ code: error?.code || null, bytesRead, value: buffer.toString() }));
+            });
+          `,
+        },
+      },
+      stdout: value => output.push(String(value)),
+      stderr: value => output.push('stderr:' + String(value)),
+    });
+    const terminal = await child.wait();
+    return { code: terminal.code, output: output.join('') };
+  });
+  expect(result).toEqual({ code: 0, output: '{"code":0,"stdout":"{\\"code\\":null,\\"bytesRead\\":5,\\"value\\":\\"hello\\"}","stderr":""}' });
+});
+
+test('preserves binary stdout from an ESM child process pipe', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const { spawn } = require('node:child_process');
+    const child = spawn(process.execPath, ['/node/emit-binary.mjs'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const chunks = [];
+    let stderr = '';
+    child.stdout.on('data', value => chunks.push([...new Uint8Array(value)]));
+    child.stderr.on('data', value => { stderr += value; });
+    child.once('close', code => {
+      process.stdout.write(JSON.stringify({ code, bytes: chunks.flat(), stderr }));
+    });
+  `, {
+    files: {
+      '/node/emit-binary.mjs': `
+        process.stdout.write(new Uint8Array([0, 255, 1, 2, 128]));
+      `,
+    },
+  });
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.timedOut, JSON.stringify(result)).toBe(false);
+  expect(result.stderr).toBe('');
+  expect(result.stdout).toBe('{"code":0,"bytes":[0,255,1,2,128],"stderr":""}');
+});
+
+test('does not keep the parent alive for an unrefed ESM child', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const { spawn } = require('node:child_process');
+    const child = spawn(process.execPath, ['/node/long-lived.mjs'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+    process.stdout.write('unrefed ESM child released');
+  `, {
+    files: {
+      '/node/long-lived.mjs': 'setTimeout(() => {}, 1000);',
+    },
+    timeoutMs: 500,
+  });
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.timedOut, JSON.stringify(result)).toBe(false);
+  expect(result.stderr).toBe('');
+  expect(result.stdout).toBe('unrefed ESM child released');
+});
+
+test('preserves fork entry identity with Node execution arguments', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const { fork } = require('node:child_process');
+    const child = fork('/node/fork-identity.mjs', [], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      execArgv: ['--conditions', 'development', '--experimental-import-meta-resolve'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', value => { stdout += value; });
+    child.stderr.on('data', value => { stderr += value; });
+    child.once('close', code => {
+      process.stdout.write(JSON.stringify({ code, stdout, stderr }));
+    });
+  `, {
+    files: {
+      '/node/fork-identity.mjs': `
+        import process from 'node:process';
+        process.stdout.write(JSON.stringify({ execPath: process.execPath, argv: process.argv, execArgv: process.execArgv }));
+      `,
+    },
+  });
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.timedOut, JSON.stringify(result)).toBe(false);
+  expect(result.stderr).toBe('');
+  expect(JSON.parse(result.stdout)).toEqual({
+    code: 0,
+    stdout: JSON.stringify({
+      execPath: '/browser/node',
+      argv: ['/browser/node', '/node/fork-identity.mjs'],
+      execArgv: ['--conditions', 'development', '--experimental-import-meta-resolve'],
+    }),
+    stderr: '',
+  });
+});
+
 test('delivers child output before a nonzero terminal frame', async ({ page }) => {
   await page.goto(browserRuntimeURL, { waitUntil: 'domcontentloaded' });
   const result = await page.evaluate(async () => {
@@ -163,6 +342,44 @@ test('forwards POSIX signals beyond the default termination trio', async ({ page
       { code: 0, stdout: 'ready\nSIGUSR1\n' },
       { code: 0, stdout: 'ready\nSIGUSR2\n' },
     ],
+  });
+});
+
+test('cleans up an ESM worker after an unhandled signal', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const { fork } = require('node:child_process');
+    const child = fork('/node/unhandled-signal.mjs', [], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', value => { stdout += value; });
+    child.stderr.on('data', value => { stderr += value; });
+           child.once('spawn', () => setTimeout(() => child.kill('SIGTERM'), 100));
+    child.once('close', (code, signal) => {
+      process.stdout.write(JSON.stringify({ code, signal, stdout, stderr }));
+    });
+  `, {
+    files: {
+             '/node/unhandled-signal.mjs': `
+               import { setTimeout } from 'node:timers';
+               import('./unhandled-signal-child.mjs');
+               setTimeout(() => process.stdout.write('still-running'), 10_000);
+             `,
+             '/node/unhandled-signal-child.mjs': `
+               export const loaded = true;
+             `,
+    },
+    timeoutMs: 5_000,
+  });
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.timedOut, JSON.stringify(result)).toBe(false);
+  expect(result.stderr).toBe('');
+  expect(JSON.parse(result.stdout)).toEqual({
+    code: null,
+    signal: 'SIGTERM',
+    stdout: '',
+    stderr: '',
   });
 });
 

@@ -260,6 +260,8 @@ export async function runProcessEntry(context) {
   const vfsBridge = vfsUpdatePort
     ? connectVfsUpdates(runtime.vfs, vfsUpdatePort)
     : sharedVfsPort ? connectVfsUpdates(runtime.vfs, sharedVfsPort) : null;
+  context.process.__bnhApplyVfsUpdate = (update) => runtime.applyVfsUpdate(update);
+  context.process.__bnhFlushVfsUpdates?.();
   let code;
   try {
     setRuntimePhase('execute');

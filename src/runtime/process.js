@@ -1045,6 +1045,7 @@ export function createBrowserProcess(options = {}) {
   let disconnectDone = false;
   let terminalRecord;
   let spawned = false;
+  let referenced = true;
   let startupTimer;
   let pendingTerminal;
   const proxyTransports = new Map();
@@ -1090,6 +1091,9 @@ export function createBrowserProcess(options = {}) {
       events.emit('disconnect');
       return true;
     },
+    ref() { referenced = true; return child; },
+    unref() { referenced = false; return child; },
+    hasRef() { return referenced; },
     kill(signal = 'SIGTERM') {
       const name = validateSignal(signal, grants);
       if (terminalRecord) throw errorWithCode('ERR_PROCESS_EXITED', 'process has already exited');

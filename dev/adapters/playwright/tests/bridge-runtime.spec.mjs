@@ -1582,6 +1582,18 @@ test.describe('browser runtime bridge and core primitives', () => {
     expect(result.stdout).toContain('typed-array buffer intrinsic completed');
   });
 
+  test('keeps TextEncoder output compatible with the guest Uint8Array', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const encoded = new TextEncoder().encode('esbuild-wasm');
+      assert.strictEqual(encoded instanceof Uint8Array, true);
+      assert.deepStrictEqual([...encoded], [101, 115, 98, 117, 105, 108, 100, 45, 119, 97, 115, 109]);
+      process.stdout.write('text encoder typed-array compatibility completed');
+    `);
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('text encoder typed-array compatibility completed');
+  });
+
   test('exposes the available native module registry through process.binding', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert');

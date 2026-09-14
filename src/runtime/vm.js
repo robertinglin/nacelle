@@ -10,6 +10,7 @@ const VM_CONSTANTS = Object.freeze(Object.assign(Object.create(null), {
 }));
 const GLOBAL_SHADOWS = Object.freeze(['process', 'Buffer']);
 const CONTEXT_REALMS = new WeakMap();
+const REGEXP_PROTOTYPES = new WeakSet();
 let nextScriptDynamicImportId = 1;
 const TYPED_ARRAY_NAMES = Object.freeze([
   'Int8Array',
@@ -356,6 +357,45 @@ function vmOutOfRange(name, reason, value) {
   );
 }
 
+function normalizeRegexEngineError(globalObject, value) {
+  if (!value || typeof value !== 'object') return value;
+  const name = value.name || value.constructor?.name;
+  if (name !== 'InternalError' || value.message !== 'too much recursion') return value;
+  return new (globalObject?.RangeError || RangeError)('Maximum call stack size exceeded');
+}
+
+function installRegexErrorCompatibility(globalObject) {
+  if (typeof globalObject?.InternalError !== 'function') return false;
+  const prototype = globalObject.RegExp?.prototype;
+  if (!prototype || REGEXP_PROTOTYPES.has(prototype)) return false;
+  const methods = ['exec', 'test'];
+  const originals = methods.map((name) => [name, prototype[name]]);
+  if (originals.some(([, method]) => typeof method !== 'function')) return false;
+  try {
+    for (const [name, original] of originals) {
+      Object.defineProperty(prototype, name, {
+        configurable: true,
+        enumerable: false,
+        writable: true,
+        value(...args) {
+          try {
+            return Reflect.apply(original, this, args);
+          } catch (error) {
+            throw normalizeRegexEngineError(globalObject, error);
+          }
+        },
+      });
+    }
+    REGEXP_PROTOTYPES.add(prototype);
+    return true;
+  } catch {
+    for (const [name, original] of originals) {
+      try { Object.defineProperty(prototype, name, { value: original }); } catch { /* preserve the native methods */ }
+    }
+    return false;
+  }
+}
+
 function validateObject(value, name, allowArray = false) {
   if (value === null || typeof value !== 'object' || (!allowArray && Array.isArray(value))) {
     throw vmInvalidArgType(name, 'Object', value);
@@ -660,6 +700,7 @@ function moduleExportNames(source) {
 export function createVmModule(scope = globalThis) {
   const evaluate = createContextEvaluator(scope);
   const FunctionConstructor = scope.Function || Function;
+  installRegexErrorCompatibility(scope);
   const moduleIds = new WeakMap();
   let defaultContextNameIndex = 1;
   let measureMemoryWarned = false;
@@ -671,7 +712,19 @@ export function createVmModule(scope = globalThis) {
     return `vm:module(${id})`;
   };
 
+  function normalizeEngineError(value) {
+    if (!value || typeof value !== 'object') return value;
+    const name = value.name || value.constructor?.name;
+    const message = value.message;
+    // SpiderMonkey reports a regexp stack overflow as InternalError: too much
+    // recursion. Node exposes the same execution failure as a RangeError, and
+    // packages such as js-tokens assert that portable Node contract.
+    if (name !== 'InternalError' || message !== 'too much recursion') return value;
+    return new (scope.RangeError || RangeError)('Maximum call stack size exceeded');
+  }
+
   function normalizeContextError(value) {
+    value = normalizeEngineError(value);
     if (!value || typeof value !== 'object' || !(value instanceof (scope.Error || Error))) return value;
     const name = value.name || value.constructor?.name;
     if (typeof name !== 'string' || !name.endsWith('Error')) return value;
@@ -715,6 +768,7 @@ export function createVmModule(scope = globalThis) {
       markContext(context);
       const realm = createBrowserRealm(scope);
       if (!realm) installSyntheticRealm(scope, context);
+      if (realm) installRegexErrorCompatibility(realm.global);
       // Worker contexts do not have a separate browser realm, so make sure
       // their owning global has the V8 stack contract before evaluation. A
       // browser iframe already supplies its own native Error implementation;
@@ -865,6 +919,7 @@ export function createVmModule(scope = globalThis) {
       const source = hasDynamicImport
         ? rewriteScriptDynamicImports(this.code, dynamicImportBinding)
         : this.code;
+      const sourceWithFilename = `${source}\n//# sourceURL=${this.options.filename}`;
       if (runOptions.timeout > 0 && isObviouslyUnbounded(source)) throw timedOutScriptError(runOptions.timeout);
       const context = contextifiedObject;
       const candidateProcess = context.process || scope.process;
@@ -924,13 +979,21 @@ export function createVmModule(scope = globalThis) {
         if (!realm) {
           const globalProperties = captureOwnPropertyDescriptors(scope);
           try {
-            return normalizeContextError(evaluate(context, source, scope));
+            try {
+              return normalizeContextError(evaluate(context, sourceWithFilename, scope));
+            } catch (error) {
+              throw normalizeContextError(error);
+            }
           } finally {
             copySyntheticGlobalAssignments(context, scope, globalProperties);
           }
         }
         copyContextToRealm(context, realm.global, realm.managedKeys);
-        return normalizeContextError(realm.evaluate(source));
+        try {
+          return normalizeContextError(realm.evaluate(sourceWithFilename));
+        } catch (error) {
+          throw normalizeContextError(error);
+        }
       } finally {
         if (previousFilename === undefined) delete scope.__bnhVmFilename;
         else scope.__bnhVmFilename = previousFilename;
@@ -952,6 +1015,7 @@ export function createVmModule(scope = globalThis) {
       const source = hasDynamicImport
         ? rewriteScriptDynamicImports(this.code, dynamicImportBinding)
         : this.code;
+      const sourceWithFilename = `${source}\n//# sourceURL=${this.options.filename}`;
       if (hasDynamicImport) {
         const dynamicImport = (specifier) => {
           if (typeof this.options.importModuleDynamically === 'function') {
@@ -989,7 +1053,9 @@ export function createVmModule(scope = globalThis) {
         scope.Function = createVmFunctionConstructor(FunctionConstructor, activeProcess, this.options.filename);
       }
       try {
-        return (scope.eval || eval)(source);
+        return (scope.eval || eval)(sourceWithFilename);
+      } catch (error) {
+        throw normalizeEngineError(error);
       } finally {
         scope.Function = previousFunction;
       }

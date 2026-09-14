@@ -94,4 +94,68 @@ test.describe('browser-native node:vm builtin', () => {
     await expectPass(expect, result);
   });
 
+  test('normalizes browser regex recursion errors to Node RangeErrors', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (() => {
+        const assert = require('node:assert');
+        const vm = require('node:vm');
+        const run = vm.runInThisContext(
+          'function runLongRegex() { const input = "a".repeat(1e7); return /(?:a|b)+/.test(input); } runLongRegex',
+        );
+        let thrown;
+        try {
+          run();
+        } catch (error) {
+          thrown = error;
+        }
+        assert(thrown, 'the long regular expression should overflow the regex stack');
+        assert.strictEqual(thrown.name, 'RangeError');
+        assert.strictEqual(thrown.message, 'Maximum call stack size exceeded');
+      })();
+    `);
+
+    await expectPass(expect, result);
+  });
+
+  test('honors vm.Script filename in evaluated callsites', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (() => {
+        const assert = require('node:assert');
+        const capture = (label) => {
+          const previousPrepare = Error.prepareStackTrace;
+          const previousLimit = Error.stackTraceLimit;
+          Error.stackTraceLimit = 20;
+          Error.prepareStackTrace = (_error, sites) => sites.map((site) => ({
+            file: site.getFileName?.(),
+            line: site.getLineNumber?.(),
+            column: site.getColumnNumber?.(),
+            method: site.getFunctionName?.(),
+            text: String(site),
+          }));
+          try {
+            return { label, stack: new Error(label).stack };
+          } finally {
+            Error.prepareStackTrace = previousPrepare;
+            Error.stackTraceLimit = previousLimit;
+          }
+        };
+        function first() { return capture('first'); }
+        function second() { return capture('second'); }
+        globalThis.__bnhCaptureCallsite = () => capture('vm-script');
+        const vm = require('node:vm');
+        const vmScript = new vm.Script(
+          'function callCapture() { return globalThis.__bnhCaptureCallsite(); } callCapture();',
+          { filename: '/node/vm-script.js' },
+        ).runInThisContext();
+        delete globalThis.__bnhCaptureCallsite;
+        assert.strictEqual(vmScript.label, 'vm-script');
+        const callCaptureFrame = vmScript.stack.find((site) => site.method === 'callCapture');
+        assert(callCaptureFrame, 'vm.Script should preserve the evaluated function callsite');
+        assert.strictEqual(callCaptureFrame.file, '/node/vm-script.js');
+        assert.strictEqual(callCaptureFrame.line, 1);
+      })();
+    `);
+    await expectPass(expect, result);
+  });
+
 });

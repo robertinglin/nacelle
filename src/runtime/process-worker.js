@@ -25,8 +25,9 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
   let deferredVfsPathChunks = [];
   let deferredVfsRecordChunks = [];
   let outputFlushQueued = false;
-  let pendingStdout = '';
-  let pendingStderr = '';
+  let pendingStdout = [];
+  let pendingStderr = [];
+  let pendingOutputBytes = 0;
   let syncBuffer;
   // The control terminal frame is the reliable end-of-process boundary. Keep
   // the injected process here so state produced immediately before natural
@@ -68,6 +69,22 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     return String(value);
   }
 
+  function encodeText(value) {
+    if (typeof TextEncoder === 'function') return new TextEncoder().encode(value);
+    const encoded = encodeURIComponent(value);
+    const bytes = [];
+    for (let index = 0; index < encoded.length;) {
+      if (encoded[index] === '%') {
+        bytes.push(Number.parseInt(encoded.slice(index + 1, index + 3), 16));
+        index += 3;
+      } else {
+        bytes.push(encoded.charCodeAt(index));
+        index += 1;
+      }
+    }
+    return Uint8Array.from(bytes);
+  }
+
   function sendControl(type, fields = {}) {
     if (!control) return;
     control.postMessage({ channel: CONTROL, key, runId: identity.runId, childId: identity.childId, type, ...fields });
@@ -96,24 +113,44 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
   // separate stdout/stderr ordering guarantees of the two streams.
   function flushOutput() {
     outputFlushQueued = false;
-    if (pendingStdout) {
-      const value = pendingStdout;
-      pendingStdout = '';
-      if (syncBuffer) appendSyncRecord({ type: 'output', stream: 'stdout', value });
-      else sendControl('output', { stream: 'stdout', value });
-    }
-    if (pendingStderr) {
-      const value = pendingStderr;
-      pendingStderr = '';
-      if (syncBuffer) appendSyncRecord({ type: 'output', stream: 'stderr', value });
-      else sendControl('output', { stream: 'stderr', value });
-    }
+    const flush = (stream, chunks) => {
+      if (!chunks.length) return;
+      const totalBytes = chunks.reduce((total, chunk) => total + chunk.bytes.byteLength, 0);
+      const value = chunks.length === 1
+        ? chunks[0].value
+        : chunks.every((chunk) => typeof chunk.value === 'string')
+          ? chunks.map((chunk) => chunk.value).join('')
+        : (() => {
+            const combined = new Uint8Array(totalBytes);
+            let offset = 0;
+            for (const chunk of chunks) {
+              combined.set(chunk.bytes, offset);
+              offset += chunk.bytes.byteLength;
+            }
+            return combined;
+          })();
+      chunks.length = 0;
+      pendingOutputBytes -= totalBytes;
+      if (syncBuffer) appendSyncRecord({ type: 'output', stream, value: outputText(value) });
+      else sendControl('output', { stream, value });
+    };
+    flush('stdout', pendingStdout);
+    flush('stderr', pendingStderr);
   }
 
   function queueOutput(stream, value) {
-    if (stream === 'stderr') pendingStderr += value;
-    else pendingStdout += value;
-    if (pendingStdout.length + pendingStderr.length >= 64 * 1024) {
+    const bytes = typeof value === 'string'
+      ? encodeText(value)
+      : value instanceof Uint8Array
+        ? value
+        : value instanceof ArrayBuffer
+          ? new Uint8Array(value)
+          : ArrayBuffer.isView(value)
+            ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+            : new TextEncoder().encode(String(value));
+    (stream === 'stderr' ? pendingStderr : pendingStdout).push({ value, bytes });
+    pendingOutputBytes += bytes.byteLength;
+    if (pendingOutputBytes >= 64 * 1024) {
       flushOutput();
       return;
     }
@@ -580,7 +617,16 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     // Keep the user port alive for one turn. MessagePort has independent
     // delivery from the control port, so closing it synchronously can discard
     // user messages that were accepted before the terminal frame.
-    setTimeout(() => { user?.close(); control?.close(); self.close(); }, 0);
+    setTimeout(() => {
+      // Tell the parent that the worker-side ports and runtime have reached
+      // their terminal boundary. The parent owns Worker#terminate(); without
+      // this acknowledgement an unref'd Vitest timeout can still observe the
+      // browser Worker as live after the guest process has exited.
+      sendControl('worker-closed');
+      user?.close();
+      control?.close();
+      self.close();
+    }, 0);
   }
 
   function start(message) {
@@ -599,6 +645,17 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     });
     processStateSource = process;
     const pendingMessages = [];
+    const pendingVfsUpdates = [];
+    const deliverVfsUpdate = (update) => {
+      const apply = process.__bnhApplyVfsUpdate;
+      if (typeof apply === 'function') apply(update);
+      else pendingVfsUpdates.push(update);
+    };
+    process.__bnhFlushVfsUpdates = () => {
+      const apply = process.__bnhApplyVfsUpdate;
+      if (typeof apply !== 'function') return;
+      for (const update of pendingVfsUpdates.splice(0)) apply(update);
+    };
     let pendingMessageFlushQueued = false;
     const flushPendingMessages = () => {
       pendingMessageFlushQueued = false;
@@ -633,9 +690,37 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     process.stdin = makeEmitter();
     process.stdin.readable = true;
     process.stdin.isTTY = false;
+    const pendingStdin = [];
+    let stdinEnded = false;
+    let stdinEndDelivered = false;
+    const flushStdin = () => {
+      if (process.stdin.listenerCount('data') > 0) {
+        for (const value of pendingStdin.splice(0)) process.stdin.emit('data', value);
+      }
+      if (stdinEnded && !stdinEndDelivered && process.stdin.listenerCount('end') > 0) {
+        stdinEndDelivered = true;
+        process.stdin.emit('end');
+      }
+    };
+    const stdinOn = process.stdin.on.bind(process.stdin);
+    const stdinOnce = process.stdin.once.bind(process.stdin);
+    process.stdin.on = (name, listener) => {
+      const result = stdinOn(name, listener);
+      if (name === 'data' || name === 'end') flushStdin();
+      return result;
+    };
+    process.stdin.once = (name, listener) => {
+      const result = stdinOnce(name, listener);
+      if (name === 'data' || name === 'end') flushStdin();
+      return result;
+    };
     process.stdin.push = (value) => {
-      if (value === null) process.stdin.emit('end');
-      else process.stdin.emit('data', value);
+      if (value === null) {
+        stdinEnded = true;
+        flushStdin();
+      } else if (stdinEnded) return false;
+      else if (process.stdin.listenerCount('data') > 0) process.stdin.emit('data', value);
+      else pendingStdin.push(value);
       return true;
     };
     process.stdin.resume = () => process.stdin;
@@ -760,7 +845,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       _pendingEncoding: '',
       write(value, encoding, callback) {
         if (typeof encoding === 'function') callback = encoding;
-        queueOutput('stdout', outputText(value));
+        queueOutput('stdout', value);
         callback?.();
         return true;
       },
@@ -778,7 +863,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       isTTY: false,
       write(value, encoding, callback) {
         if (typeof encoding === 'function') callback = encoding;
-        queueOutput('stderr', outputText(value));
+        queueOutput('stderr', value);
         callback?.();
         return true;
       },
@@ -814,7 +899,9 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         const target = remoteHandles.get(frame.payload?.handleId);
         if (target) target.emit(frame.payload.event, ...(frame.payload.args || []).map((value) => value?.id ? createRemoteHandle(value) : value));
       } else if (frame.type === 'message') {
-        if (frame.payload?.__bnhProxyResponse) {
+        if (frame.payload?.__bnhVfsUpdate) {
+          deliverVfsUpdate(frame.payload.__bnhVfsUpdate);
+        } else if (frame.payload?.__bnhProxyResponse) {
           const response = frame.payload;
           const pending = proxyRequests.get(response.requestId);
           if (!pending) return;

@@ -72,9 +72,9 @@ not being reclassified as newly rerun here.
 | 50 | react-is | BLOCKED | upstream package/repository (native-reproduced install contract; browser test-layout failure also observed) | Exact native Node CITGM fails during fresh install with `ERESOLVE`: React's root `eslint@^7.7.0` resolves to `eslint@7.32.0`, while `eslint-plugin-ft-flow@2.0.3` requires peer `eslint@^8.1.0`. Chromium independently installs and reaches the React Jest test command, which fails with `Cannot find module 'jest-circus/runner'`; the browser did fetch `jest-circus@30.5.1`, and the equivalent CommonJS `exports:./runner` loader oracle passes, so no adapter change or fake shim is justified. |
 | 51 | readdirp | BLOCKED | upstream package/repository (native-reproduced source archive/build-layout failure) | Exact native Node CITGM, Chromium, and Firefox all install successfully then fail the package test because `test/index.test.js` imports `../index.js`, but the exact gitHead archive contains only `index.ts` and no built `index.js`; see the rank 51 record below. |
 | 52 | commander | PASS | ours | Exact native Node CITGM passes after clearing ambient `NO_COLOR`; Chromium (`citgm-1789375263249`) and Firefox (`citgm-1789375328593`) pass after shared child signal, lifecycle, and nested ESM executable fixes. Repository gates pass: build; `npm test` 346/346; complete Chromium and Firefox Playwright coverage 310/310 each. The initial ambient-color failure and all browser failures are preserved under `artifacts/citgm-top-100/rank-052-commander/`. |
-| 53 | js-tokens | PENDING | — | Not attempted; rank 52 is complete and rank 53 is current. |
-| 54 | shebang-regex | PENDING | — | Not attempted; rank 52 is complete and rank 53 is current. |
-| 55 | fs-extra | PENDING | — | Not attempted; rank 51 is complete and rank 52 is current. |
+| 53 | js-tokens | PASS | ours | Exact native Node CITGM and final Chromium/Firefox CITGM pass after shared browser-runtime fixes; complete gate evidence and failure logs are recorded below. |
+| 54 | shebang-regex | PENDING | — | Not attempted; rank 53 is complete and rank 54 is current. |
+| 55 | fs-extra | PENDING | — | Not attempted; rank 53 is complete and rank 54 is current. |
 | 56 | readable-stream | PENDING | — | Not attempted; rank 51 is complete and rank 52 is current. |
 | 57 | punycode | PENDING | — | Not attempted; rank 51 is complete and rank 52 is current. |
 | 58 | tr46 | PENDING | — | Not attempted; rank 51 is complete and rank 52 is current. |
@@ -1598,3 +1598,51 @@ incomplete full-run logs and the failed focused diagnostics remain preserved
 alongside the green reruns. The rank-52 native proof, both exact browser CITGM
 results, focused oracles, and repository gates are committed, and the ordered
 cursor advances to rank 53.
+
+## Rank 53 failure record
+
+The exact candidate is `js-tokens@10.0.0` at gitHead
+`d7ec3643eac02418881ddb46ec420cfc10a653ba`. The exact native Node run passed
+before browser classification, so every browser-only failure below is recorded
+as ours. All attempts, diagnostics, and final results are preserved under
+`artifacts/citgm-top-100/rank-053-js-tokens/`.
+
+| Run / log | Observed failure or behavior | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v26-network.log` | Exact native Node CITGM downloaded the exact gitHead archive, installed it, and passed the smoke test in 17.8 seconds. | Native proof that the package and its dependency graph are healthy outside the browser. No upstream or nested-dependency classification was used. |
+| `citgm-firefox-fixed-text-encoder.log`, `citgm-firefox-fixed-fd0.log`, `citgm-firefox-fixed-fd0-forwarded.log`, `citgm-firefox-fixed-fd0-forwarded-immediate.log` | Firefox exposed browser-only failures in the nested `esbuild-wasm` service: Go/WASM stdin reads re-entered the runtime, and `util.TextEncoder` returned a host typed array that failed the guest `Uint8Array` contract. | Ours. The runtime now adapts TextEncoder output into the guest typed-array realm, services fd 0 reads directly, and forwards stdin into ESM worker children without re-entering the Go/WASM callback. |
+| `citgm-firefox-byte-preserving-final.log`, `esbuild-wasm-service-firefox-byte-preserving.log`, `citgm-chromium-ordered-vfs.log` | After the first fixes, preserving child output bytes exposed the actual Vitest snapshot mismatch (`InternalError: too much recursion` versus Node’s `RangeError`) and Chromium-only ENOENT races while Vitest read temporary SSR files. | Ours. The runtime normalizes Firefox’s regexp recursion error to Node’s RangeError, preserves raw child bytes, and orders parent VFS updates through the child IPC sequence so file contents arrive before the corresponding SSR path response. |
+| `citgm-chromium-unref-fixed.log`, `citgm-firefox-unref-fixed.log`, `virtual-process-unref-esm-*.log` | Vitest’s esbuild service calls `child.unref()`. Ignoring that ref state kept a detached service in the virtual event-loop liveness calculation and caused shutdown failures. | Ours. Virtual child and worker handles now expose ref state, and lifecycle accounting honors `ChildProcess#unref()` after startup. The original IPC-channel `unref()` behavior remains intact. |
+| `citgm-chromium-ordered-vfs.log`, `citgm-chromium-vm-filename.log`, `citgm-chromium-vm-filename-restored-ipc-unref.log` | Ordered VFS delivery removed ENOENTs but revealed Chromium inline-snapshot callsite collisions because `vm.Script({ filename })` evaluated through an anonymous host location. | Ours. `vm.Script` evaluation now attaches the requested filename via `sourceURL`; the permanent VM oracle verifies `/node/vm-script.js` callsites. Final Chromium CITGM passes all 8 files and 25,568/25,568 tests. |
+| `citgm-firefox-vm-filename-restored-ipc-unref.log` | Final Firefox CITGM passes all 8 files and 25,568/25,568 tests; Vitest exits 0 with zero child stderr and no lifecycle warning. | PASS. This is the final Firefox result after the complete runtime fix set. |
+| `citgm-chromium-vm-filename-restored-ipc-unref.log` | Final Chromium CITGM passes all 8 files and 25,568/25,568 tests; Vitest exits 0 with zero child stderr. | PASS. This is the final Chromium result after the complete runtime fix set. |
+
+Rank 53 is recorded as `PASS`: exact native Node CITGM passed, and both browser
+CITGM runs passed after fixing browser-runtime behavior. No failure was
+classified as an upstream package, repository, or nested-dependency blocker.
+The initial sandbox DNS failure is preserved as an environment diagnostic and
+was not used as a package result.
+
+## Rank 53 gate evidence
+
+Because runtime and regression-test changes were required, all repository-wide
+gates were run after the final source state. The full Playwright suite is
+covered in bounded groups because the Next.js App Router test is a multi-minute
+single test; the groups together cover every default test with no omissions.
+
+```text
+npm run build                                      PASS — build-final.log; 5 WASM artifacts; Node 22.23.2
+npm test                                           PASS — npm-test-final-network.log; 346/346
+Chromium Playwright main files                    PASS — playwright-chromium-group-main-final.log; 313/313
+Chromium Playwright Next.js demo                  PASS — playwright-chromium-nextjs-final.log; 1/1
+Firefox Playwright main files                     PASS — playwright-firefox-group-main-final.log; 313/313
+Firefox Playwright Next.js demo                   PASS — playwright-firefox-nextjs-final.log; 1/1
+Focused platform diagnostic                       PASS — platform-primitives-chromium-diagnostic.log; 7/7
+Focused worker regression                         PASS — unit-worker-diagnostics-fixed.log; 4/4
+```
+
+The first sandboxed unit-gate log and the interrupted initial full Chromium
+runner are retained in the same artifact directory as diagnostics; the
+network-enabled unit gate and bounded browser groups are the authoritative
+green results. The ordered cursor advances to rank 54 only after this record
+is committed cleanly.

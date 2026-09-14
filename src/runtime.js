@@ -5157,8 +5157,34 @@ export function createRuntime({
 
   function createVfsUpdateBridge() {
     const channel = createMessageChannel(scope);
-    const bridge = connectVfsUpdates(vfs, channel.raw.port1, runtimeQueueMicrotask);
-    return { port: channel.raw.port2, close: () => bridge.close() };
+    let orderedSend = null;
+    // A worker can receive an RPC response and a VFS update on different
+    // MessagePorts in either order. For updates originating in this runtime,
+    // use the child process' user channel when available so a response that
+    // names a just-written file cannot overtake that file's contents. The
+    // dedicated port remains the reverse direction for worker writes and
+    // barriers.
+    const orderedPort = {
+      postMessage(message, ...args) {
+        if ((message?.action === 'delta' || message?.action === 'sync') && orderedSend) {
+          try {
+            const result = orderedSend(message);
+            if (result !== false) return result;
+          } catch { /* fall through to the dedicated bridge */ }
+        }
+        return channel.raw.port1.postMessage(message, ...args);
+      },
+      addEventListener(...args) { return channel.raw.port1.addEventListener(...args); },
+      removeEventListener(...args) { return channel.raw.port1.removeEventListener(...args); },
+      start(...args) { return channel.raw.port1.start?.(...args); },
+      close(...args) { return channel.raw.port1.close?.(...args); },
+    };
+    const bridge = connectVfsUpdates(vfs, orderedPort, runtimeQueueMicrotask);
+    return {
+      port: channel.raw.port2,
+      setOrderedSend(send) { orderedSend = typeof send === 'function' ? send : null; },
+      close: () => bridge.close(),
+    };
   }
 
   // The upstream ESM resolver is bundled as a Node internal module, but its
@@ -5415,6 +5441,105 @@ export function createRuntime({
       ['unlink', [0]], ['unlinkSync', [0]], ['utimes', [0]], ['utimesSync', [0]],
       ['writeFile', [0]], ['writeFileSync', [0]], ['createReadStream', [0]], ['createWriteStream', [0]],
     ]);
+    const stdinStates = new WeakMap();
+    let stdinReadSequence = 0;
+    const stdinBytes = (value) => {
+      if (typeof value === 'string') return new TextEncoder().encode(value);
+      if (value instanceof ArrayBuffer) return new Uint8Array(value);
+      if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+      return new TextEncoder().encode(String(value ?? ''));
+    };
+    const stdinStateFor = (ownerProcess) => {
+      const stream = ownerProcess?.stdin;
+      if (!stream || typeof stream.on !== 'function') return null;
+      const existing = stdinStates.get(ownerProcess);
+      if (existing?.stream === stream) return existing;
+      const state = {
+        stream,
+        chunks: [],
+        waiters: [],
+        ended: Boolean(stream.readableEnded),
+      };
+      const drain = () => {
+        while (state.waiters.length > 0) {
+          const request = state.waiters[0];
+          if (state.chunks.length === 0) {
+            if (!state.ended) return;
+            state.waiters.shift();
+            try { request.callback(null, 0, request.buffer); }
+            finally { request.release?.(); }
+            continue;
+          }
+          state.waiters.shift();
+          let bytesRead = 0;
+          while (state.chunks.length > 0 && bytesRead < request.length) {
+            const chunk = state.chunks[0];
+            const count = Math.min(chunk.byteLength, request.length - bytesRead);
+            request.buffer.set(chunk.subarray(0, count), request.offset + bytesRead);
+            bytesRead += count;
+            if (count === chunk.byteLength) state.chunks.shift();
+            else state.chunks[0] = chunk.subarray(count);
+          }
+          try { request.callback(null, bytesRead, request.buffer); }
+          finally { request.release?.(); }
+        }
+      };
+      stream.on('data', (value) => {
+        const bytes = stdinBytes(value);
+        if (bytes.byteLength > 0) state.chunks.push(bytes);
+        drain();
+      });
+      stream.once?.('end', () => {
+        state.ended = true;
+        drain();
+      });
+      state.drain = drain;
+      stdinStates.set(ownerProcess, state);
+      return state;
+    };
+    const readStdin = (ownerProcess, buffer, offset, length, callback) => {
+      if (!ArrayBuffer.isView(buffer)) {
+        const error = new TypeError('The "buffer" argument must be an instance of Buffer, TypedArray, or DataView');
+        error.code = 'ERR_INVALID_ARG_TYPE';
+        callback(error);
+        return;
+      }
+      const start = Number(offset) || 0;
+      const count = length === undefined ? buffer.byteLength - start : Number(length);
+      if (start < 0 || count < 0 || start + count > buffer.byteLength) {
+        const error = new RangeError('The value of "offset" or "length" is out of range');
+        error.code = 'ERR_OUT_OF_RANGE';
+        callback(error);
+        return;
+      }
+      const state = stdinStateFor(ownerProcess);
+      if (!state) {
+        const error = new Error('stdin is unavailable');
+        error.code = 'EBADF';
+        callback(error);
+        return;
+      }
+      state.waiters.push({
+        buffer,
+        offset: start,
+        length: count,
+        callback,
+        sequence: ++stdinReadSequence,
+        release: trackTask?.('FSReqCallback'),
+      });
+      // A browser worker's stdin emitter does not expose Node Readable's
+      // internal buffer. Calling read() here still handles a same-realm
+      // Readable that received input before fs.read() installed its listener.
+      if (state.chunks.length === 0 && typeof state.stream.read === 'function') {
+        let value;
+        try { value = state.stream.read(); } catch { value = null; }
+        if (value !== null && value !== undefined) {
+          const bytes = stdinBytes(value);
+          if (bytes.byteLength > 0) state.chunks.push(bytes);
+        }
+      }
+      state.drain();
+    };
     const createBoundFs = (ownerProcess) => {
       const bindFs = (api) => {
         if (!api || (typeof api !== 'object' && typeof api !== 'function')) return api;
@@ -5440,6 +5565,14 @@ export function createRuntime({
                 const stream = fd === 1 ? ownerProcess?.stdout : ownerProcess?.stderr;
                 stream?.write?.(bytes.subarray(start, start + count));
                 return count;
+              };
+            }
+            if (name === 'read' && typeof value === 'function') {
+              return (...args) => {
+                const [fd, buffer, offset = 0, length = buffer?.byteLength - offset, position, callback] = args;
+                if (fd !== 0 || typeof callback !== 'function') return Reflect.apply(value, target, args);
+                void position;
+                readStdin(ownerProcess, buffer, offset, length, callback);
               };
             }
             const indices = boundFsPathIndices.get(name);
@@ -7794,6 +7927,7 @@ export function createRuntime({
             '--test-reporter', '--test-reporter-destination', '--test-name-pattern',
             '--test-coverage-include', '--test-coverage-exclude', '--test-coverage-lines',
             '--test-coverage-functions', '--test-coverage-branches', '--test-shard',
+            '--conditions',
           ]);
           for (let index = 0; index < rawArgs.length; index += 1) {
             const argument = rawArgs[index];
@@ -8234,10 +8368,9 @@ export function createRuntime({
             ? options.stdio[2]
             : stdioInherited(2) ? ownerProcess.stderr : null;
           const writeStdout = (value) => {
-            const chunk = normalizeOutputChunk(value);
             stdoutEmitted = true;
-            if (stdoutDestination) stdoutDestination.write(chunk);
-            else stdoutStream.write(chunk);
+            if (stdoutDestination) stdoutDestination.write(value);
+            else stdoutStream.write(value);
           };
           const writeStderr = (value) => {
             const chunk = normalizeOutputChunk(value);
@@ -8912,10 +9045,19 @@ export function createRuntime({
               }
               const useEsm = prepared.entryPath.endsWith('.mjs') || prepared.moduleInput
                 || prepared.experimentalLoader
-                || isRuntimeEsmModule(prepared.entryPath, prepared.executionArgv);
+                || isRuntimeEsmModule(prepared.entryPath, prepared.executionArgv)
+                // The official esbuild-wasm Node launcher is a CommonJS
+                // shebang that starts an asynchronous Go/WASM service. Run
+                // this exact tool boundary in its own worker so Firefox's
+                // guest Promise compatibility layer cannot interrupt the
+                // service after synchronous launcher bootstrap.
+                || /\/node_modules\/esbuild(?:-wasm)?\/bin\/esbuild$/.test(prepared.entryPath);
               if (useEsm) {
                 setActivityPhase('esm-child');
-                const processHandle = runPreparedESM(prepared, childOptions, (value) => {
+                const processHandle = runPreparedESM(prepared, {
+                  ...childOptions,
+                  stdinSource,
+                }, (value) => {
                   stdout += normalizeOutputChunk(value);
                   writeStdout(value);
                 }, (value) => {
@@ -10920,8 +11062,11 @@ export function createRuntime({
             : null;
           const suppressWarnings = esmPrepared.executionArgv.some((value) => String(value) === '--no-warnings');
           const forwardStdout = (value) => {
-            const text = normalizeOutputChunk(value);
-            if (text) writeStdout(text);
+            if (value === undefined || value === null) return;
+            if (typeof value === 'string' && value.length === 0) return;
+            if (ArrayBuffer.isView(value) && value.byteLength === 0) return;
+            if (value instanceof ArrayBuffer && value.byteLength === 0) return;
+            writeStdout(value);
           };
           const forwardStderr = (value) => {
             let text = normalizeOutputChunk(value);
@@ -10938,7 +11083,7 @@ export function createRuntime({
             : prepared.executionArgv.length;
           const childExecArgv = [];
           const optionEnd = scriptIndex < 0 ? prepared.executionArgv.length : scriptIndex;
-          const valueTakingFlags = new Set(['--import', '--experimental-loader', '--loader', '--require', '--input-type']);
+          const valueTakingFlags = new Set(['--import', '--experimental-loader', '--loader', '--require', '--input-type', '--conditions']);
           for (let index = 1; index < optionEnd; index += 1) {
             const argument = String(prepared.executionArgv[index]);
             if (!argument.startsWith('-')) continue;
@@ -11062,6 +11207,38 @@ export function createRuntime({
             stdout: forwardStdout,
             stderr: forwardStderr,
           });
+          vfsUpdateBridge?.setOrderedSend?.((update) => processHandle.send({ __bnhVfsUpdate: update }));
+          if (options.stdinSource && typeof processHandle.send === 'function') {
+            const sendStdin = (value) => {
+              let bytes;
+              if (typeof value === 'string') bytes = new TextEncoder().encode(value);
+              else if (value instanceof ArrayBuffer) bytes = new Uint8Array(value);
+              else if (ArrayBuffer.isView(value)) bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+              else bytes = new TextEncoder().encode(String(value ?? ''));
+              if (bytes.byteLength === 0) return;
+              try { processHandle.send({ __bnhWorkerStdin: true, value: bytes }); } catch {}
+            };
+            const endStdin = () => {
+              try { processHandle.send({ __bnhWorkerStdinEnd: true }); } catch {}
+            };
+            const startStdinBridge = () => {
+              let bufferedInput;
+              while ((bufferedInput = options.stdinSource.read?.()) !== null && bufferedInput !== undefined) {
+                sendStdin(bufferedInput);
+              }
+              if (options.stdinSource.readableEnded) endStdin();
+              else {
+                options.stdinSource.on?.('data', sendStdin);
+                options.stdinSource.once?.('end', endStdin);
+              }
+            };
+            // The worker may finish its ready handshake before this caller
+            // can attach a spawn listener. Start immediately: MessagePort
+            // preserves frames sent before the child runtime installs its
+            // user-message handler, and the stream listener catches bytes
+            // written later by child_process.spawn callers.
+            startStdinBridge();
+          }
           // A nested browser worker can itself launch virtual children. Stream
           // those bounded diagnostics to the owning process as each control
           // frame arrives; waiting for the worker's terminal frame would lose
@@ -11323,7 +11500,13 @@ export function createRuntime({
               }, ownerProcess);
               const useEsm = prepared.entryPath.endsWith('.mjs') || prepared.moduleInput
                 || prepared.experimentalLoader
-                || isRuntimeEsmModule(prepared.entryPath, prepared.executionArgv);
+                || isRuntimeEsmModule(prepared.entryPath, prepared.executionArgv)
+                // The official esbuild-wasm Node launcher is a CommonJS
+                // shebang that starts an asynchronous Go/WASM service. Run
+                // this exact tool boundary in its own worker so Firefox's
+                // guest Promise compatibility layer cannot interrupt the
+                // service after synchronous launcher bootstrap.
+                || /\/node_modules\/esbuild(?:-wasm)?\/bin\/esbuild$/.test(prepared.entryPath);
               if (useEsm) {
                 const stdout = [];
                 const stderr = [];
@@ -11538,7 +11721,13 @@ export function createRuntime({
                 stderr: stderr.join(''),
                 streamed: Boolean(stdout.length || stderr.length),
               });
-              if (isRuntimeEsmModule(prepared.entryPath, prepared.executionArgv)) {
+              if (isRuntimeEsmModule(prepared.entryPath, prepared.executionArgv)
+                // The official esbuild-wasm Node launcher is a CommonJS
+                // shebang that starts an asynchronous Go/WASM service. Run
+                // this exact tool boundary in its own worker so Firefox's
+                // guest Promise compatibility layer cannot interrupt the
+                // service after synchronous launcher bootstrap.
+                || /\/node_modules\/esbuild(?:-wasm)?\/bin\/esbuild$/.test(prepared.entryPath)) {
                 const processHandle = runPreparedESM(prepared, {
                   signal,
                   timeout,
@@ -12791,6 +12980,7 @@ export function createRuntime({
     }
     let pending = 0;
     const pendingTaskRecords = new Map();
+    const pendingTaskReleases = new Set();
     let nextPendingTaskId = 0;
     let wakeLifecycleWait = null;
     let markTaskActivity = () => {};
@@ -12814,9 +13004,10 @@ export function createRuntime({
       });
       publishLifecycleState();
       let released = false;
-      return () => {
+      const releaseTask = () => {
         if (released) return;
         released = true;
+        pendingTaskReleases.delete(releaseTask);
         pending -= 1;
         pendingTaskRecords.delete(taskId);
         publishLifecycleState();
@@ -12826,6 +13017,8 @@ export function createRuntime({
           nativeSetTimeout(() => wakeLifecycleWait?.(), 0);
         }
       };
+      pendingTaskReleases.add(releaseTask);
+      return releaseTask;
     };
     const injectedProcess = options.processObject;
     const reportExecutePhase = (phase) => {
@@ -12950,7 +13143,13 @@ export function createRuntime({
           // remains a referenced child.
           if (options.clusterWorker
             && Number(handle?.ppid) === Number(injectedProcess?.ppid)) continue;
-          if (!handle.terminal && !['exited', 'failed'].includes(handle.state)) return true;
+        if (!handle.terminal && !['exited', 'failed'].includes(handle.state)) {
+          // ChildProcess#unref() removes an already-running child from the
+          // Node event-loop keepalive set. Preserve that behavior for virtual
+          // children such as esbuild's long-lived service process.
+          if (typeof handle.hasRef === 'function' && !handle.hasRef() && handle.state !== 'starting') continue;
+          return true;
+        }
         }
       }
       for (const worker of scope.__BNH_BROWSER_WORKERS__ || []) {
@@ -12999,6 +13198,11 @@ export function createRuntime({
               if (runtimeChildSignalNames.has(name)) {
                 const handled = processObject.emit(name, ...args);
                 if (handled) return true;
+                // An unhandled signal terminates a native Node process. The
+                // injected worker boundary also sends its terminal frame, but
+                // it must first release the runtime-owned lifecycle so module
+                // runners and VFS bridges do not remain open during teardown.
+                processObject._bnhAbort?.(name);
               }
               return injectedEmit(name, ...args);
             };
@@ -13156,6 +13360,15 @@ export function createRuntime({
       : fullProcessData;
     reportExecutePhase('process-bound');
     const processObject = processData.processObject;
+    // A worker-backed child has two process objects: the injected worker
+    // boundary and this runtime-owned guest process. Native signal delivery
+    // terminates both, so the guest process must be able to release every
+    // task tracked by this execute() invocation before the worker terminal
+    // frame is sent. Same-realm children replace this with their narrower
+    // child-task release hook once their process setup is complete.
+    processObject._bnhReleaseTasks = () => {
+      for (const release of [...pendingTaskReleases]) release();
+    };
     // Browser-native ESM can settle the entry module job before the Promise
     // continuation that consumes an unawaited dynamic import. Keep one
     // startup task across a host turn so that continuation can create its
@@ -15036,6 +15249,7 @@ export function createRuntime({
       process: scope.process,
       Buffer: scope.Buffer,
       Uint8Array: scope.Uint8Array,
+      TextEncoder: scope.TextEncoder,
       File: scope.File,
       atob: scope.atob,
       btoa: scope.btoa,
@@ -15145,6 +15359,39 @@ export function createRuntime({
       } catch {
         // A host with an immutable typed-array constructor keeps its native
         // behavior; the compatibility wrapper is best effort at the boundary.
+      }
+    }
+    // Firefox's native TextEncoder returns a host Uint8Array. After the
+    // guest Uint8Array constructor above is installed, that result fails the
+    // standard `encoded instanceof Uint8Array` check used by esbuild's Node
+    // API. Keep TextEncoder's native implementation and API surface, but
+    // normalize only its byte-producing method into the guest typed-array
+    // realm for the duration of this virtual process.
+    if (typeof scope.TextEncoder === 'function'
+      && typeof scope.Uint8Array === 'function'
+      && typeof scope.TextEncoder.prototype?.encode === 'function') {
+      const nativeTextEncoder = scope.TextEncoder;
+      try {
+        class GuestTextEncoder extends nativeTextEncoder {
+          encode(input = '') {
+            return new scope.Uint8Array(super.encode(input));
+          }
+
+          encodeInto(source, destination) {
+            return super.encodeInto(source, destination);
+          }
+        }
+        Object.defineProperty(GuestTextEncoder, 'name', { configurable: true, value: 'TextEncoder' });
+        scope.TextEncoder = GuestTextEncoder;
+        if (builtins.util && builtins.util.TextEncoder === nativeTextEncoder) {
+          // Go's wasm_exec_node.js intentionally replaces globalThis.TextEncoder
+          // with require('util').TextEncoder. Keep that official launcher path
+          // in the same guest typed-array realm as direct user code.
+          builtins.util.TextEncoder = GuestTextEncoder;
+        }
+      } catch {
+        // A host with an immutable or non-subclassable TextEncoder keeps its
+        // native behavior; the compatibility wrapper is best effort.
       }
     }
     const deterministicEnvironment = Object.freeze({
@@ -15789,6 +16036,7 @@ export function createRuntime({
       const worker = proxyCapability.adapter && !workerIsolation
         ? createVirtualProcess({ ...processOptions, scope, forceFallback: true })
         : capabilities.process.create(processOptions);
+      vfsUpdateBridge?.setOrderedSend?.((update) => worker.send({ __bnhVfsUpdate: update }));
       if (vfsUpdateBridge) {
         worker.wait().then(
           () => vfsUpdateBridge.close(),

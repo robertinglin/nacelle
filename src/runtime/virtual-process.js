@@ -202,6 +202,7 @@ function createInMemoryProcess(options) {
     cwd: String(options.cwd || '/node'),
   };
   let state = 'created';
+  let referenced = true;
   const history = ['created'];
   let terminal = null;
   let pendingFailure = null;
@@ -245,12 +246,17 @@ function createInMemoryProcess(options) {
     exit: () => {},
   });
   ipcPair.child.unref?.();
-
   // A forked entry can receive its first message while its module graph is
   // still being evaluated. Node queues that IPC payload until the child has
   // installed its message listener; retain the same behavior for the
   // in-memory browser boundary.
   const pendingChildMessages = [];
+  const pendingVfsUpdates = [];
+  const deliverVfsUpdate = (update) => {
+    const apply = childProcess.__bnhApplyVfsUpdate;
+    if (typeof apply === 'function') apply(update);
+    else pendingVfsUpdates.push(update);
+  };
   let childMessageFlushQueued = false;
   const flushChildMessages = () => {
     childMessageFlushQueued = false;
@@ -263,6 +269,14 @@ function createInMemoryProcess(options) {
     if (name !== 'message' || childMessageFlushQueued) return;
     childMessageFlushQueued = true;
     queueMicrotask(flushChildMessages);
+  });
+  Object.defineProperty(childProcess, '__bnhFlushVfsUpdates', {
+    configurable: true,
+    value() {
+      const apply = childProcess.__bnhApplyVfsUpdate;
+      if (typeof apply !== 'function') return;
+      for (const update of pendingVfsUpdates.splice(0)) apply(update);
+    },
   });
 
   const finish = (kind, code = childProcess.getCode?.() || 0, signal = null, error = null, forced = false) => {
@@ -301,6 +315,10 @@ function createInMemoryProcess(options) {
   });
   ipcPair.parent.on('peerDisconnect', emitDisconnect);
   ipcPair.child.on('message', (message, handle) => {
+    if (message?.__bnhVfsUpdate) {
+      deliverVfsUpdate(message.__bnhVfsUpdate);
+      return;
+    }
     if (childProcess.listenerCount('message') > 0) childProcess.emit('message', message, handle);
     else pendingChildMessages.push([message, handle]);
   });
@@ -368,6 +386,9 @@ function createInMemoryProcess(options) {
       });
       return true;
     },
+    ref() { referenced = true; return processHandle; },
+    unref() { referenced = false; return processHandle; },
+    hasRef() { return referenced; },
     kill(signal = 'SIGTERM') {
       if (terminal) throw errorWithCode('ERR_PROCESS_EXITED', 'process has already exited');
       const name = validateSignal(signal, new Set(options.signalGrants || SIGNALS));

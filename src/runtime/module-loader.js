@@ -1828,7 +1828,10 @@ export function createModuleLoader({
       /(^|[;\n}])([ \t]*import[ \t]*)(['"])((?:\\.|[^'"])*)\3/gm,
       false,
     );
-    const dynamicImportPattern = /\bimport\s*(?:(?:\/\*[\s\S]*?\*\/|\/\/[^\r\n]*(?:\r\n|\r|\n|$))\s*)*\(/g;
+    // Rewrite native import() expressions only. A module runner may expose an
+    // `runner.import()` method; treating that member call as native import()
+    // leaves the receiver in front of the registry callback.
+    const dynamicImportPattern = /(?<![\w$?.])import\s*(?:(?:\/\*[\s\S]*?\*\/|\/\/[^\r\n]*(?:\r\n|\r|\n|$))\s*)*\(/g;
     const rewriteDynamicImports = (value, replacement) => {
       const masked = maskJavaScriptLiterals(value);
       dynamicImportPattern.lastIndex = 0;
@@ -2347,7 +2350,10 @@ export function createModuleLoader({
         rewritten = `${rewritten.slice(0, replacement.start)}${replacement.replacement}${rewritten.slice(replacement.end)}`;
       }
     }
-    const dynamicImportPattern = /\bimport\s*(?:(?:\/\*[\s\S]*?\*\/|\/\/[^\r\n]*(?:\r\n|\r|\n|$))\s*)*\(/g;
+    // Rewrite native import() expressions only. A module runner may expose an
+    // `runner.import()` method; treating that member call as native import()
+    // leaves the receiver in front of the registry callback.
+    const dynamicImportPattern = /(?<![\w$?.])import\s*(?:(?:\/\*[\s\S]*?\*\/|\/\/[^\r\n]*(?:\r\n|\r|\n|$))\s*)*\(/g;
     const rewriteDynamicImports = (value, replacement) => {
       const masked = maskJavaScriptLiterals(value);
       dynamicImportPattern.lastIndex = 0;

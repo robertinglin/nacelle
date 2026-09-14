@@ -19,6 +19,18 @@ test('preserves the node: prefix for builtin module identity', () => {
 });
 
 test.describe('browser ESM loader', () => {
+  test('does not rewrite module-runner member imports', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import assert from 'node:assert/strict';
+      const runner = { async import(value) { return { value }; } };
+      const loaded = await runner.import('module-runner-target');
+      assert.equal(loaded.value, 'module-runner-target');
+      process.stdout.write('module runner import completed');
+    `, { entryPath: '/node/esm/module-runner-import.mjs' });
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('module runner import completed');
+  });
+
   test('runs a mounted mjs entry with VFS-relative modules and builtins', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       import assert from 'node:assert/strict';

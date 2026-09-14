@@ -849,6 +849,16 @@ class ZlibStream extends Transform {
       const streamFormat = typeof this._zlibFormat === 'function'
         ? this._zlibFormat(this._zlibChunks)
         : this._zlibFormat;
+      if (streamFormat === 'br') {
+        const input = concatenateBytes(this._zlibChunks);
+        const output = this._zlibMode === 'compress'
+          ? wasmBrotliCompress(input, this._zlibOptions)
+          : wasmBrotliDecompress(input, this._zlibOptions);
+        const BufferClass = this._zlibBufferClass;
+        this.push(BufferClass ? new BufferClass(output) : new Uint8Array(output));
+        callback();
+        return;
+      }
       transformed = webTransform(this._zlibChunks, streamFormat, this._zlibMode, this._zlibScope);
     } catch (error) {
       callback(this._zlibMode === 'decompress' ? zlibDataError(error) : error);
@@ -1095,7 +1105,7 @@ function BrotliCompress(options, bufferClass, scope) {
   validateBrotliOptions(options);
   return Reflect.construct(
     ZlibStream,
-    ['br', 'compress', bufferClass, scope],
+    ['br', 'compress', bufferClass, scope, options],
     new.target || BrotliCompress,
   );
 }
@@ -1106,7 +1116,7 @@ function BrotliDecompress(options, bufferClass, scope) {
   validateBrotliOptions(options);
   return Reflect.construct(
     ZlibStream,
-    ['br', 'decompress', bufferClass, scope],
+    ['br', 'decompress', bufferClass, scope, options],
     new.target || BrotliDecompress,
   );
 }

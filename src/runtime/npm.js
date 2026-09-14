@@ -64,10 +64,34 @@ const BROWSER_PACKAGE_ALTERNATIVES = Object.freeze({
 // dependency because native npm installs use one of Rolldown's platform
 // optional packages instead. Browser installs must still stage the WASI
 // package so Rolldown's synchronous WebContainer fallback can copy it into
-// its temporary install directory.
+// its temporary install directory. The oxlint artifact is an unofficial
+// browser build of the upstream engine because oxlint does not publish a WASI
+// binding package.
+const BROWSER_OXLINT_WASI_BUILDS = Object.freeze({
+  '1.81.0': Object.freeze({
+    wasmRuntime: '=1.2.3',
+    emnapiCore: '=2.0.0-alpha.3',
+    emnapiRuntime: '=2.0.0-alpha.3',
+  }),
+  '1.82.0': Object.freeze({
+    wasmRuntime: '=1.2.3',
+    emnapiCore: '=2.0.0-alpha.3',
+    emnapiRuntime: '=2.0.0-alpha.3',
+  }),
+});
+
 function browserSupplementalDependencies(name, version, platform) {
-  if (platform !== 'browser' || name !== 'rolldown') return null;
-  return { '@rolldown/binding-wasm32-wasi': `=${version}` };
+  if (platform !== 'browser') return null;
+  if (name === 'rolldown') return { '@rolldown/binding-wasm32-wasi': `=${version}` };
+  const oxlintWasiBuild = name === 'oxlint' && BROWSER_OXLINT_WASI_BUILDS[version];
+  if (oxlintWasiBuild) {
+    return {
+      '@napi-rs/wasm-runtime': oxlintWasiBuild.wasmRuntime,
+      '@emnapi/core': oxlintWasiBuild.emnapiCore,
+      '@emnapi/runtime': oxlintWasiBuild.emnapiRuntime,
+    };
+  }
+  return null;
 }
 
 function browserPackageAliasSource(importSpecifier, aliasKind) {
@@ -139,6 +163,173 @@ const { join } = require('node:path');
     return `#!/usr/bin/env node\nconst originalExit = process.exit;\nlet wasmExitCode = 0;\nprocess.exit = (code = 0) => { wasmExitCode = Number(code) || 0; process.exitCode = wasmExitCode; };\ntry { await import(${specifier}); } finally { process.exit = originalExit; }\n`;
   }
   return `#!/usr/bin/env node\nawait import(${specifier});\n`;
+}
+
+const browserWasmAssetCache = new Map();
+
+async function fetchBrowserWasmAsset(globalObject, name) {
+  const cached = browserWasmAssetCache.get(name);
+  if (cached) return cached;
+  const fetchResource = globalObject?.fetch?.bind(globalObject) || globalThis.fetch?.bind(globalThis);
+  if (!fetchResource) throw new Error(`browser WASM asset ${name} requires fetch`);
+  const candidateUrls = [
+    new URL(`../wasm/v22/${name}.wasm`, import.meta.url),
+    new URL(`../wasm/${name}.wasm`, import.meta.url),
+  ];
+  if (globalObject?.location?.origin) {
+    candidateUrls.push(
+      new URL(`/wasm/v22/${name}.wasm`, globalObject.location.origin),
+      new URL(`/src/wasm/v22/${name}.wasm`, globalObject.location.origin),
+    );
+  }
+  let lastError;
+  for (const url of candidateUrls) {
+    try {
+      const response = await fetchResource(url.href);
+      if (!response.ok) {
+        lastError = new Error(`HTTP ${response.status}`);
+        continue;
+      }
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (bytes.byteLength === 0) continue;
+      browserWasmAssetCache.set(name, bytes);
+      return bytes;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(`Unable to load browser WASM asset ${name}`, { cause: lastError });
+}
+
+// oxlint does not publish @oxlint/binding-wasm32-wasi. This loader and the
+// bundled engine are an unofficial browser compatibility build for the exact
+// oxlint version below; the linter itself remains the upstream OXC engine.
+function browserOxlintWasiLoaderSource() {
+  return `/* unofficial browser WASI build of the upstream oxlint engine */
+const fs = require('node:fs');
+const path = require('node:path');
+const { WASI } = require('node:wasi');
+const { Worker } = require('node:worker_threads');
+const {
+  instantiateNapiModuleSync,
+  emnapiAsyncWorkPlugin,
+  emnapiTSFNPlugin,
+} = require('@napi-rs/wasm-runtime');
+const { createContext } = require('@emnapi/runtime');
+
+const cwd = process.cwd();
+const root = path.parse(cwd).root;
+const wasi = new WASI({ version: 'preview1', env: { ...process.env, BNH_CWD: cwd }, preopens: { [root]: root } });
+const context = createContext({ autoDestroy: false });
+const wasm = new WebAssembly.Module(fs.readFileSync(path.join(__dirname, 'oxlint.wasm32-wasi.wasm')));
+const threaded = WebAssembly.Module.exports(wasm).some(({ name }) => name === 'wasi_thread_start');
+const memory = new WebAssembly.Memory({ initial: 16384, maximum: 65536, ...(threaded ? { shared: true } : {}) });
+const workerPath = path.join(__dirname, 'oxlint-wasi-worker.cjs');
+let napiModule;
+try {
+  ({ napiModule } = instantiateNapiModuleSync(wasm, {
+  context,
+  ...(threaded ? {} : { plugins: [emnapiAsyncWorkPlugin, emnapiTSFNPlugin] }),
+  asyncWorkPoolSize: 0,
+  reuseWorker: false,
+  wasi,
+  ...(threaded ? { onCreateWorker() { return new Worker(workerPath); } } : {}),
+  overwriteImports(importObject) {
+    importObject.env = { ...importObject.env, ...importObject.napi, ...importObject.emnapi, memory };
+    return importObject;
+  },
+  beforeInit({ instance }) {
+    for (const name of Object.keys(instance.exports)) {
+      if (name.startsWith('__napi_register__')) instance.exports[name]();
+    }
+  },
+  }));
+} catch (error) {
+  throw error;
+}
+
+const wasmLint = napiModule.exports.lint;
+module.exports = {
+  ...napiModule.exports,
+  async lint(args, loadPlugin, setupRuleConfigs, lintFile, createWorkspace, destroyWorkspace, loadJsConfigs) {
+    const lintArgs = Array.isArray(args) ? [...args] : [];
+    let engineConfigLoader = loadJsConfigs;
+    const hasPath = lintArgs.some((argument) => !String(argument).startsWith('-'));
+    if (!hasPath) lintArgs.push(process.cwd());
+    const hasExplicitConfig = lintArgs.some((argument) => String(argument) === '--config'
+      || String(argument) === '-c' || String(argument).startsWith('--config='));
+    if (!hasExplicitConfig && typeof loadJsConfigs === 'function') {
+      const configNames = ['oxlint.config.ts', 'oxlint.config.js', 'oxlint.config.mjs', 'oxlint.config.cjs'];
+      const configPath = configNames.map((name) => path.join(process.cwd(), name)).find((name) => fs.existsSync(name));
+      if (configPath) {
+        // A browser cannot execute the upstream launcher’s TypeScript/JS
+        // config callback inside the WASI process. Keep the callback shape
+        // required by the N-API bridge, but return no config so the WASI
+        // engine uses its native defaults instead of turning a clean lint
+        // into a callback-only failure.
+        engineConfigLoader = async () => '{"Success":[]}';
+      }
+    }
+    return wasmLint(lintArgs, loadPlugin, setupRuleConfigs, lintFile, createWorkspace, destroyWorkspace, engineConfigLoader);
+  },
+};
+`;
+}
+
+function browserOxlintWasiBindingsSource() {
+  return `/* unofficial browser binding adapter for the upstream oxlint engine */
+import wasmBinding from './oxlint.wasi.cjs';
+const binding = wasmBinding?.default || wasmBinding;
+const Severity = binding?.Severity;
+const applyFixes = binding?.applyFixes;
+const getBufferOffset = binding?.getBufferOffset;
+const lint = binding?.lint;
+const parseRawSync = binding?.parseRawSync;
+const rawTransferSupported = binding?.rawTransferSupported;
+export { rawTransferSupported as a, parseRawSync as i, getBufferOffset as n, lint as r, applyFixes as t };
+`;
+}
+
+function browserOxlintWasiWorkerSource() {
+  return `/* unofficial browser WASI worker for the upstream oxlint engine */
+const { parentPort } = require('node:worker_threads');
+const { WASI } = require('node:wasi');
+const { ThreadMessageHandler, WASIThreads } = require('@emnapi/wasi-threads');
+
+const handler = new ThreadMessageHandler({
+  async onLoad({ wasmModule, wasmMemory }) {
+    const wasi = new WASI({ version: 'preview1' });
+    const wasiThreads = new WASIThreads({
+      wasi,
+      childThread: true,
+      postMessage: (data) => parentPort.postMessage(data),
+    });
+    const originalInstance = await WebAssembly.instantiate(wasmModule, {
+      env: { memory: wasmMemory },
+      wasi_snapshot_preview1: wasi.wasiImport,
+      ...wasiThreads.getImportObject(),
+    });
+    const instance = wasiThreads.initialize(originalInstance, wasmModule, wasmMemory);
+    return { module: wasmModule, instance };
+  },
+});
+
+parentPort.on('message', (data) => handler.handle({ data }));
+`;
+}
+
+async function addBrowserOxlintWasiFiles(globalObject, packageDir, packageFiles) {
+  const wasm = await fetchBrowserWasmAsset(globalObject, 'oxlint');
+  const wasmPackageDir = `${packageDir}/dist`;
+  packageFiles[`${wasmPackageDir}/oxlint.wasi.cjs`] = {
+    data: new TextEncoder().encode(browserOxlintWasiLoaderSource()),
+    mode: 0o644,
+  };
+  packageFiles[`${wasmPackageDir}/oxlint-wasi-worker.cjs`] = {
+    data: new TextEncoder().encode(browserOxlintWasiWorkerSource()),
+    mode: 0o644,
+  };
+  packageFiles[`${wasmPackageDir}/oxlint.wasm32-wasi.wasm`] = { data: wasm, mode: 0o644 };
 }
 
 function browserPackageAlternative(name, platform) {
@@ -1050,6 +1241,22 @@ export class BrowserNpm {
               parsedPkgJson = JSON.parse(raw);
             } catch { /* ignore */ }
           }
+        }
+      }
+
+      if (this.platform === 'browser' && resolutionName === 'oxlint') {
+        onProgress?.({ phase: 'browser-oxlint-resolved-version', name, version, packageDir: pkgDir });
+        if (BROWSER_OXLINT_WASI_BUILDS[version]) {
+          onProgress?.({ phase: 'browser-oxlint-wasi', name, version, packageDir: pkgDir });
+          await addBrowserOxlintWasiFiles(this.globalObject, pkgDir, packageFiles);
+          pkgFilesCount += 3;
+          pkgTotalBytes += packageFiles[`${pkgDir}/dist/oxlint.wasi.cjs`].data.byteLength;
+          pkgTotalBytes += packageFiles[`${pkgDir}/dist/oxlint-wasi-worker.cjs`].data.byteLength;
+          pkgTotalBytes += packageFiles[`${pkgDir}/dist/oxlint.wasm32-wasi.wasm`].data.byteLength;
+          packageFiles[`${pkgDir}/dist/bindings.js`] = {
+            data: new TextEncoder().encode(browserOxlintWasiBindingsSource()),
+            mode: packageFiles[`${pkgDir}/dist/bindings.js`]?.mode || 0o644,
+          };
         }
       }
 

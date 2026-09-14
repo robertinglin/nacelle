@@ -1260,29 +1260,71 @@ export function createModuleLoader({
 
   const esmExportNames = (source, resolved = null, seen = new Set()) => {
     if (resolved && seen.has(resolved)) {
-      return { defaultExport: false, names: new Set(), bindings: new Map(), reexports: [] };
+      return {
+        defaultExport: false,
+        names: new Set(),
+        bindings: new Map(),
+        functionBindings: new Map(),
+        reexports: [],
+      };
     }
     if (resolved) seen.add(resolved);
     const value = String(source);
     const names = new Set();
     const bindings = new Map();
+    const functionBindings = new Map();
     const reexports = [];
+    // Function declarations are initialized during ESM module instantiation,
+    // before dependency bodies run. Cycle proxies need the same early value
+    // when a dependency calls an exported function before the real module can
+    // publish its complete namespace.
+    for (const match of value.matchAll(/(?:^|[;\n])([ \t]*(?:export\s+)?(?:async\s+)?function\s*\*?\s+([$A-Z_a-z][$\w]*)\s*\()/gm)) {
+      const declarationStart = match.index + match[0].indexOf(match[1]);
+      const bodyStart = value.indexOf('{', declarationStart + match[1].length);
+      if (bodyStart < 0) continue;
+      const masked = maskJavaScriptLiterals(value);
+      let depth = 0;
+      let bodyEnd = -1;
+      for (let index = bodyStart; index < masked.length; index += 1) {
+        if (masked[index] === '{') depth += 1;
+        else if (masked[index] === '}' && --depth === 0) {
+          bodyEnd = index + 1;
+          break;
+        }
+      }
+      if (bodyEnd > 0) {
+        functionBindings.set(match[2], value.slice(declarationStart, bodyEnd).replace(/^export\s+/, ''));
+      }
+    }
     for (const match of value.matchAll(/\bexport\s+(?:async\s+)?(?:const|let|var|function|class)\s+([$A-Z_a-z][$\w]*)/g)) {
       if (isValidExportName(match[1])) {
         names.add(match[1]);
         bindings.set(match[1], match[1]);
       }
     }
-    for (const match of value.matchAll(/\bexport\s*\{([^}]+)\}/g)) {
-      for (const part of match[1].split(',')) {
+    for (const match of value.matchAll(/\bexport\s*\{([^}]+)\}(?:\s*from\s*(['"])(.*?)\2)?/g)) {
+      // Export lists commonly group names under comments. Strip those
+      // comments before splitting so a name after a comment remains a valid
+      // static export (for example terser's `_INLINE` annotation flags).
+      const exportList = match[1].replace(/\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g, '');
+      const reexport = match[3] === undefined
+        ? null
+        : { specifier: decodeStaticString(match[3]), names: new Set() };
+      for (const part of exportList.split(',')) {
         const pieces = part.trim().split(/\s+as\s+/);
         const local = pieces[0].trim().replace(/^(['"])(.*?)\1$/, '$2');
         const name = (pieces[1] || pieces[0]).trim().replace(/^(['"])(.*?)\1$/, '$2');
         if (isValidExportName(name)) {
           names.add(name);
-          if (!match[0].includes(' from ')) bindings.set(name, local);
+          if (reexport) {
+            reexport.names.add(name);
+          } else {
+            bindings.set(name, local);
+            if (functionBindings.has(local)) functionBindings.set(name, functionBindings.get(local));
+          }
         }
       }
+      if (reexport) reexports.push(reexport);
     }
     const exportStarPattern = /\bexport\s*\*\s*from\s*(['"])(.*?)\1/g;
     for (const match of value.matchAll(exportStarPattern)) {
@@ -1307,6 +1349,7 @@ export function createModuleLoader({
       defaultExport: /\bexport\s+default\b/.test(value),
       names,
       bindings,
+      functionBindings,
       defaultBinding: defaultDeclaration?.[1],
       reexports,
     };
@@ -1398,6 +1441,7 @@ export function createModuleLoader({
     const reexportImports = [];
     const directReexports = new Set();
     const namedExports = [];
+    const functionFallbacks = new Map();
     for (const [index, reexport] of analysis.reexports.entries()) {
       const reexportKey = cycleReexportKey(resolved, reexport.specifier, processOverride);
       let url = cycleReexportURLs.get(reexportKey);
@@ -1430,7 +1474,13 @@ export function createModuleLoader({
     for (const name of analysis.names) {
       if (directReexports.has(name)) continue;
       const local = `__bnhCycleExport_${name.replace(/[^$\w]/g, '_')}`;
-      namedExports.push(`let ${local} = ${access}.values[${quote(name)}];\nexport { ${local} as ${quote(name)} };`);
+      const functionSource = analysis.functionBindings.get(name);
+      if (functionSource) {
+        namedExports.push(`let ${local} = (${functionSource});\nexport { ${local} as ${quote(name)} };`);
+        functionFallbacks.set(name, local);
+      } else {
+        namedExports.push(`let ${local} = ${access}.values[${quote(name)}];\nexport { ${local} as ${quote(name)} };`);
+      }
     }
     const defaultExport = analysis.defaultExport
       ? `let __bnhCycleDefault = ${access}.values.default;\nexport { __bnhCycleDefault as default };`
@@ -1442,7 +1492,8 @@ export function createModuleLoader({
       const local = name === 'default'
         ? '__bnhCycleDefault'
         : `__bnhCycleExport_${name.replace(/[^$\w]/g, '_')}`;
-      return `${local} = values?.[${quote(name)}];`;
+      const fallback = functionFallbacks.get(name);
+      return `${local} = values?.[${quote(name)}] ?? ${fallback || 'undefined'};`;
     }).join(' ');
     return [
       ...reexportImports,

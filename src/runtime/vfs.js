@@ -4282,6 +4282,29 @@ export function createVfs(options = {}) {
 
   const trackedPromises = Object.fromEntries(Object.entries(promises).map(([name, operation]) => {
     if (typeof operation !== 'function') return [name, operation];
+    const isAsyncGenerator = operation.constructor?.name === 'AsyncGeneratorFunction';
+    if (isAsyncGenerator) {
+      return [name, async function* trackedAsyncGenerator(...args) {
+        const release = taskTracker?.(`fs.promises.${name}:${String(args[0] ?? '').slice(0, 192)}`);
+        let turn;
+        if (++promiseOperations >= 128 || ioTurn) {
+          if (!ioTurn) {
+            ioTurn = new Promise((resolve) => hostSetTimeout(() => {
+              promiseOperations = 0;
+              ioTurn = null;
+              resolve();
+            }, 0));
+          }
+          turn = ioTurn;
+        }
+        try {
+          if (turn) await turn;
+          yield* operation(...args);
+        } finally {
+          release?.();
+        }
+      }];
+    }
     return [name, async (...args) => {
       const release = taskTracker?.(`fs.promises.${name}:${String(args[0] ?? '').slice(0, 192)}`);
       let turn;

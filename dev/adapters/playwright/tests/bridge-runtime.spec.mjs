@@ -1189,6 +1189,381 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('runs pnpm regex script selectors through a Node child', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/node', [
+          '/node/node_modules/.bin/npm', 'test',
+        ], { cwd: '/node/.citgm/tmp/package-under-test' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput + output);
+        assert.match(output, /pnpm selector one/);
+        assert.match(output, /pnpm selector two/);
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/.citgm/tmp/package-under-test/package.json': JSON.stringify({
+          name: 'pnpm-selector-fixture',
+          version: '1.0.0',
+          scripts: {
+            test: 'pnpm run /^test:/',
+            'test:one': "node -e \"process.stdout.write('pnpm selector one\\n')\"",
+            'test:two': "node -e \"process.stdout.write('pnpm selector two\\n')\"",
+          },
+        }),
+        '/node/node_modules/.bin/node': '#!/usr/bin/env node\n',
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\n',
+        '/node/node_modules/.bin/pnpm': '#!/usr/bin/env node\n',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('runs pnpm shorthand package scripts through a Node child', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/node', [
+          '/node/node_modules/.bin/npm', 'test',
+        ], { cwd: '/node/.citgm/tmp/package-under-test' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput + output);
+        assert.match(output, /pnpm shorthand clean ran/);
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/.citgm/tmp/package-under-test/package.json': JSON.stringify({
+          name: 'pnpm-shorthand-fixture',
+          version: '1.0.0',
+          scripts: {
+            test: 'pnpm clean',
+            clean: "node -e \"process.stdout.write('pnpm shorthand clean ran\\n')\"",
+          },
+        }),
+        '/node/node_modules/.bin/node': '#!/usr/bin/env node\\n',
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\\n',
+        '/node/node_modules/.bin/pnpm': '#!/usr/bin/env node\\n',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('returns file Dirents from fs promises glob with withFileTypes', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { glob } = require('node:fs/promises');
+
+      (async () => {
+        const entries = await Array.fromAsync(glob('non-secure/index.js', {
+          cwd: '/node/.citgm/tmp/package-under-test',
+          withFileTypes: true,
+        }));
+        assert.strictEqual(entries.length, 1);
+        assert.strictEqual(entries[0].name, 'index.js');
+        assert.strictEqual(entries[0].parentPath, '/node/.citgm/tmp/package-under-test/non-secure');
+        assert.strictEqual(entries[0].isFile(), true);
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/.citgm/tmp/package-under-test/non-secure/index.js': 'export const nanoid = () => "id";\n',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('falls back to WASM for Brotli transform streams', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { createBrotliCompress, brotliDecompressSync } = require('node:zlib');
+
+      (async () => {
+        const input = Buffer.from('Brotli transform stream compatibility');
+        const compressor = createBrotliCompress();
+        const chunks = [];
+        compressor.on('data', (chunk) => chunks.push(chunk));
+        const completed = new Promise((resolve, reject) => {
+          compressor.once('error', reject);
+          compressor.once('end', resolve);
+        });
+        compressor.end(input);
+        await completed;
+        const compressed = Buffer.concat(chunks);
+        assert.strictEqual(compressed.length > 0, true);
+        assert.strictEqual(brotliDecompressSync(compressed).toString(), input.toString());
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `);
+
+    await expectPass(expect, result);
+  });
+
+  test('preserves named exports after comments in ESM export lists', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+
+      (async () => {
+        const module = await import('/node/.citgm/tmp/package-under-test/entry.js');
+        assert.strictEqual(module.inlineMarker, 'inline marker');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/.citgm/tmp/package-under-test/package.json': JSON.stringify({
+          name: 'commented-export-fixture',
+          version: '1.0.0',
+          type: 'module',
+        }),
+        '/node/.citgm/tmp/package-under-test/ast.js': [
+          "const inline = 'inline marker';",
+          'export {',
+          '  // keep this export in the static list',
+          '  inline as _INLINE,',
+          '};',
+        ].join('\n'),
+        '/node/.citgm/tmp/package-under-test/entry.js': [
+          "import { _INLINE } from './ast.js';",
+          'export const inlineMarker = _INLINE;',
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('preserves live bindings through an ESM cycle', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+
+      (async () => {
+        const module = await import('/node/.citgm/tmp/package-under-test/entry.js');
+        assert.deepStrictEqual(module.predicate, ['alpha', 'beta', 'alpha', 'beta']);
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/.citgm/tmp/package-under-test/package.json': JSON.stringify({
+          name: 'cycle-binding-fixture',
+          version: '1.0.0',
+          type: 'module',
+        }),
+        '/node/.citgm/tmp/package-under-test/entry.js': [
+          "import { makePredicate } from './utils/index.js';",
+          "import { parsed } from './parse.js';",
+          'export const predicate = [...makePredicate("alpha beta"), ...parsed];',
+        ].join('\n'),
+        '/node/.citgm/tmp/package-under-test/parse.js': [
+          "import { makePredicate } from './utils/index.js';",
+          "import { astMarker } from './ast.js';",
+          'export const parsed = [...makePredicate("alpha beta")];',
+          'export const parseMarker = astMarker;',
+        ].join('\n'),
+        '/node/.citgm/tmp/package-under-test/utils/index.js': [
+          "import { marker } from '../ast.js';",
+          'function makePredicate(words) {',
+          '  return new Set(words.split(" "));',
+          '}',
+          'export { makePredicate };',
+          'export const utilsMarker = marker;',
+        ].join('\n'),
+        '/node/.citgm/tmp/package-under-test/ast.js': [
+          "import { parseMarker } from './parse.js';",
+          "import { utilsMarker } from './utils/index.js';",
+          "export const marker = parseMarker || utilsMarker || 'ast';",
+          "export const astMarker = marker;",
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('does not treat Node test coverage option values as test files', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/node', [
+          '/node/node_modules/.bin/npm', 'test',
+        ], { cwd: '/node/.citgm/tmp/package-under-test' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput + output);
+        assert.match(output, /coverage option test ran/);
+        assert.doesNotMatch(output, /benchmark should not run/);
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/.citgm/tmp/package-under-test/package.json': JSON.stringify({
+          name: 'node-coverage-option-fixture',
+          version: '1.0.0',
+          scripts: {
+            test: "node --test --test-reporter spec --test-coverage-exclude 'test/*' test/basic.test.js",
+          },
+        }),
+        '/node/.citgm/tmp/package-under-test/test/basic.test.js': [
+          "import test from 'node:test';",
+          "test('coverage option test', () => console.log('coverage option test ran'));",
+        ].join('\n'),
+        '/node/.citgm/tmp/package-under-test/test/benchmark.js': "throw new Error('benchmark should not run');",
+        '/node/node_modules/.bin/node': '#!/usr/bin/env node\n',
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\n',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('preserves Node exec promise stdout and stderr fields', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { exec, execFile } = require('node:child_process');
+      const { promisify } = require('node:util');
+
+      (async () => {
+        const execResult = await promisify(exec)(
+          process.execPath + " -e \\\"process.stdout.write('exec result')\\\"",
+        );
+        assert.deepStrictEqual(execResult, { stdout: 'exec result', stderr: '' });
+        const execFileResult = await promisify(execFile)(process.execPath, [
+          '-e',
+          "process.stdout.write('execFile result')",
+        ]);
+        assert.deepStrictEqual(execFileResult, { stdout: 'execFile result', stderr: '' });
+        await assert.rejects(
+          promisify(execFile)(process.execPath, [
+            '-e',
+            "process.stderr.write('exec failure'); process.exitCode = 3",
+          ]),
+          /exec failure/,
+        );
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `);
+
+    await expectPass(expect, result);
+  });
+
+  test('preserves nanoid large and negative size errors', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      import { nanoid, random } from '/node/index.js';
+
+      const failures = [];
+      for (const [name, callback] of [
+        ['nanoid large', () => nanoid(2147483648)],
+        ['nanoid negative', () => nanoid(-10)],
+        ['random negative', () => random(-1)],
+      ]) {
+        try {
+          callback();
+          failures.push(name + ': no error');
+        } catch (error) {
+          if (!/Wrong ID size|Invalid typed array length/.test(String(error?.message))) {
+            failures.push(name + ': ' + error?.name + ': ' + error?.message);
+          }
+        }
+      }
+      if (failures.length) throw new Error(failures.join('\\n'));
+    `, {
+      files: {
+        '/node/index.js': `
+          import { urlAlphabet } from './url-alphabet/index.js';
+          const GET_RANDOM_LIMIT = 65536;
+          function fillRandom(buffer) {
+            let from = 0;
+            while (from < buffer.length) {
+              const to = Math.min(from + GET_RANDOM_LIMIT, buffer.length);
+              crypto.getRandomValues(buffer.subarray(from, to));
+              from = to;
+            }
+          }
+          export function random(bytes) {
+            bytes |= 0;
+            if (bytes < 0) throw new RangeError('Wrong ID size');
+            const buffer = Buffer.allocUnsafe(bytes);
+            fillRandom(buffer);
+            return buffer;
+          }
+          const POOL_MAX = GET_RANDOM_LIMIT / 2;
+          export function customAlphabet(alphabet, defaultSize = 21) {
+            const mask = (2 << (31 - Math.clz32((alphabet.length - 1) | 1))) - 1;
+            let pool = '';
+            let poolOffset = 0;
+            let poolNext = 0;
+            return (size = defaultSize) => {
+              size |= 0;
+              if (size < 0) throw new RangeError('Wrong ID size');
+              if (size === 0) return '';
+              if (poolOffset + size > pool.length) {
+                const target = Math.max(poolNext, size);
+                poolNext = Math.min(target * 16, POOL_MAX);
+                const buffer = Buffer.allocUnsafe(target);
+                fillRandom(buffer);
+                for (let i = 0; i < target; i++) buffer[i] = alphabet[buffer[i] & mask];
+                pool = buffer.toString('latin1');
+                poolOffset = 0;
+              }
+              poolOffset += size;
+              return pool.substring(poolOffset - size, poolOffset);
+            };
+          }
+          export const nanoid = customAlphabet(urlAlphabet);
+        `,
+        '/node/url-alphabet/index.js': "export const urlAlphabet = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz-'",
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
   test('inherits the package cwd for asynchronous nested npm scripts', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert');

@@ -683,6 +683,81 @@ test.describe('Next.js SWC package selection', () => {
     expect(result.stdout).toContain('NEXT_WATCHPACK_SCAN_COMPLETED');
   });
 
+  test('isolated worker observes parent VFS writes through fs.watch', async ({ page }) => {
+    test.setTimeout(120000);
+    await page.goto(serverUrl);
+
+    const result = await page.evaluate(async () => {
+      const { Nacelle } = await import('/index.js');
+      const node = await Nacelle.create({
+        cwd: '/node',
+        globalObject: window,
+        isolation: 'worker',
+        gateway: false,
+      });
+      await node.fs.writeFile('/node/watch-target.txt', 'initial');
+      let readyResolve;
+      const ready = new Promise((resolve) => { readyResolve = resolve; });
+      const child = await node.execute(`
+        const fs = require('node:fs');
+        const target = '/node/watch-target.txt';
+        const timeout = setTimeout(() => {
+          console.error('VFS_WATCH_TIMEOUT:' + fs.readFileSync(target, 'utf8'));
+          process.exitCode = 1;
+        }, 5000);
+        const watcher = fs.watch('/node', { recursive: true }, (eventType, filename) => {
+          if (String(filename) !== 'watch-target.txt') return;
+          clearTimeout(timeout);
+          watcher.close();
+          process.stdout.write('VFS_WATCH_OBSERVED:' + fs.readFileSync(target, 'utf8'));
+        });
+        process.stdout.write('VFS_WATCH_READY');
+      `, {
+        onStdout: (chunk) => {
+          if (String(chunk).includes('VFS_WATCH_READY')) readyResolve();
+        },
+      });
+      await ready;
+      await node.fs.writeFile('/node/watch-target.txt', 'updated');
+      return {
+        exitCode: await child.exit,
+        stdout: await child.stdoutText(),
+        stderr: await child.stderrText(),
+      };
+    });
+
+    expect(result.exitCode, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain('VFS_WATCH_OBSERVED:updated');
+  });
+
+  test('isolated worker exposes Buffer.byteLength to nested modules', async ({ page }) => {
+    await page.goto(serverUrl);
+    const result = await page.evaluate(async () => {
+      const { Nacelle } = await import('/index.js');
+      const node = await Nacelle.create({
+        cwd: '/node',
+        globalObject: window,
+        isolation: 'worker',
+        gateway: false,
+      });
+      const child = await node.execute(`
+        const { Buffer: moduleBuffer } = require('node:buffer');
+        process.stdout.write(JSON.stringify({
+          global: moduleBuffer === globalThis.Buffer,
+          type: typeof moduleBuffer.byteLength,
+          value: moduleBuffer.byteLength('hello', 'utf8'),
+        }));
+      `);
+      return { code: await child.exit, stdout: await child.stdoutText(), stderr: await child.stderrText() };
+    });
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      global: true,
+      type: 'function',
+      value: 5,
+    });
+  });
+
   test('Next.js 16 dev app route matcher discovers the root page from VFS', async ({ page }) => {
     test.setTimeout(120000);
     await page.goto(serverUrl);

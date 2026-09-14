@@ -7779,6 +7779,11 @@ export function createRuntime({
           let maxHttpHeaderSize = null;
           let experimentalLoader = null;
           let stopOptions = false;
+          const nodeOptionsWithValue = new Set([
+            '--test-reporter', '--test-reporter-destination', '--test-name-pattern',
+            '--test-coverage-include', '--test-coverage-exclude', '--test-coverage-lines',
+            '--test-coverage-functions', '--test-coverage-branches', '--test-shard',
+          ]);
           for (let index = 0; index < rawArgs.length; index += 1) {
             const argument = rawArgs[index];
             if (script !== null) {
@@ -7868,6 +7873,10 @@ export function createRuntime({
             }
             if (!stopOptions && argument.startsWith('--import=')) {
               importPreloads.push(argument.slice('--import='.length));
+              continue;
+            }
+            if (!stopOptions && nodeOptionsWithValue.has(argument)) {
+              index += 1;
               continue;
             }
             if (!stopOptions && argument.startsWith('-')) continue;
@@ -8490,7 +8499,8 @@ export function createRuntime({
             return true;
           };
           const commandError = (code, signal) => {
-            const error = new Error(`Command failed: ${[file, ...(Array.isArray(args) ? args : [])].join(' ')}`);
+            const command = `Command failed: ${[file, ...(Array.isArray(args) ? args : [])].join(' ')}`;
+            const error = new Error(stderr ? `${command}\n${stderr}` : command);
             error.code = code < 0 ? 'EPERM' : code;
             error.signal = signal;
             error.cmd = [file, ...(Array.isArray(args) ? args : [])].join(' ');
@@ -11960,9 +11970,61 @@ export function createRuntime({
             return { code: 0, stdout: stdout.join(''), stderr: stderr.join(''), streamed: true, forwarded };
           };
 
+          const runPnpmScriptSelector = async (selector, scriptOptions = {}) => {
+            const selectorMatch = String(selector || '').match(/^\/(.*)\/([dgimsuvy]*)$/);
+            if (!selectorMatch) return null;
+            let pattern;
+            try {
+              pattern = new RegExp(selectorMatch[1], selectorMatch[2]);
+            } catch {
+              return {
+                code: 1,
+                stdout: '',
+                stderr: ` ERR_PNPM_BAD_PATTERN  Invalid script selector: ${selector}\n`,
+                streamed: false,
+              };
+            }
+            const npm = createNpm();
+            const packageJson = await npm.readPackageJson(scriptOptions.cwd || prepared.cwd);
+            const scriptNames = Object.keys(packageJson?.scripts || {})
+              .filter((name) => pattern.test(name));
+            if (scriptNames.length === 0) {
+              return {
+                code: 1,
+                stdout: '',
+                stderr: ` ERR_PNPM_NO_SCRIPT  None of the selected scripts match ${selector}\n`,
+                streamed: false,
+              };
+            }
+            const stdout = [];
+            const stderr = [];
+            let forwarded = false;
+            for (const scriptName of scriptNames) {
+              const result = await runPackageScript(scriptName, {
+                ...scriptOptions,
+                args: scriptOptions.args || [],
+              });
+              stdout.push(result.stdout || '');
+              stderr.push(result.stderr || '');
+              forwarded ||= result.forwarded;
+              if (result.code !== 0) {
+                return {
+                  code: result.code,
+                  stdout: stdout.join(''),
+                  stderr: stderr.join(''),
+                  streamed: true,
+                  forwarded,
+                };
+              }
+            }
+            return { code: 0, stdout: stdout.join(''), stderr: stderr.join(''), streamed: true, forwarded };
+          };
+
           const isYarn = packageManagerName === 'yarn' || packageManagerName === 'yarnpkg';
-          if (isYarn && command.name && !new Set([
-            '--version', '-v', 'add', 'config', 'info', 'install', 'link', 'pack', 'remove', 'run', 'run-script', 'test', 'upgrade',
+          const isPnpm = packageManagerName === 'pnpm';
+          if ((isYarn || isPnpm) && command.name && !new Set([
+            '--version', '-v', 'add', 'config', 'exec', 'i', 'info', 'install', 'link', 'pack', 'remove', 'rm', 'r',
+            'run', 'run-script', 'test', 'uninstall', 'un', 'unlink', 'upgrade', 'view',
           ]).has(command.name)) {
             const separator = commandArguments.indexOf('--');
             const scriptArgs = separator >= 0 ? commandArguments.slice(separator + 1) : commandArguments;
@@ -12078,6 +12140,19 @@ export function createRuntime({
             const scriptName = command.name === 'test' ? 'test' : commandArguments[0];
             const separator = commandArguments.indexOf('--');
             const scriptArgs = separator >= 0 ? commandArguments.slice(separator + 1) : command.name === 'test' ? [] : commandArguments.slice(1);
+            if (packageManagerName === 'pnpm' && command.name !== 'test') {
+              const selected = await runPnpmScriptSelector(scriptName, {
+                cwd: prepared.cwd,
+                env,
+                args: scriptArgs,
+                stdin: prepared.stdin,
+                signal: childOptions.signal,
+                timeout: childOptions.timeout,
+                onStdout: childOptions.onStdout,
+                onStderr: childOptions.onStderr,
+              });
+              if (selected) return selected;
+            }
             return runPackageScript(scriptName, {
               cwd: prepared.cwd,
               env,
@@ -12298,7 +12373,7 @@ export function createRuntime({
           return runPreparedSync(prepared, options);
         };
 
-        return {
+        const childProcessModule = {
           ChildProcess: BrowserChildProcess,
           spawnSync(file, args, options = {}) {
             const normalized = normalizeChildInvocation(file, args, options, arguments.length);
@@ -12447,6 +12522,32 @@ export function createRuntime({
             return undefined;
           },
         };
+        const customPromisifiedExec = (original) => function promisifiedExec(...args) {
+          let child;
+          const promise = new Promise((resolve, reject) => {
+            child = original(...args, (error, stdout, stderr) => {
+              if (error !== null) {
+                error.stdout = stdout;
+                error.stderr = stderr;
+                reject(error);
+              } else {
+                resolve({ stdout, stderr });
+              }
+            });
+          });
+          promise.child = child;
+          return promise;
+        };
+        const promisifySymbol = Symbol.for('nodejs.util.promisify.custom');
+        for (const name of ['exec', 'execFile']) {
+          Object.defineProperty(childProcessModule[name], promisifySymbol, {
+            configurable: true,
+            enumerable: false,
+            value: customPromisifiedExec(childProcessModule[name]),
+            writable: false,
+          });
+        }
+        return childProcessModule;
       })(),
       vm,
     };
@@ -14864,6 +14965,7 @@ export function createRuntime({
     const previous = {
       process: scope.process,
       Buffer: scope.Buffer,
+      Uint8Array: scope.Uint8Array,
       File: scope.File,
       atob: scope.atob,
       btoa: scope.btoa,
@@ -14910,6 +15012,55 @@ export function createRuntime({
       internalBinding: scope.internalBinding,
       getInternalBinding: scope.getInternalBinding,
     };
+    if (typeof scope.navigator === 'object'
+      && /Firefox\//.test(String(scope.navigator?.userAgent || ''))
+      && typeof scope.Uint8Array === 'function') {
+      const nativeUint8Array = scope.Uint8Array;
+      class GuestUint8Array extends nativeUint8Array {
+        constructor(...args) {
+          try {
+            super(...args);
+          } catch (error) {
+            if (error instanceof RangeError && /invalid array length/i.test(String(error?.message || ''))) {
+              throw new RangeError(`Invalid typed array length${args.length === 1 ? `: ${String(args[0])}` : ''}`);
+            }
+            throw error;
+          }
+        }
+      }
+      try {
+        Object.defineProperty(GuestUint8Array, 'name', { configurable: true, value: 'Uint8Array' });
+        // A subclass's default prototype inherits from the native
+        // Uint8Array.prototype. Firefox keeps the typed-array accessors on
+        // the next prototype up, so that extra link makes the Node pattern
+        // `Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype),
+        // 'buffer')` return no descriptor. Keep the native Uint8Array own
+        // surface, but make the guest prototype inherit directly from the
+        // typed-array prototype as it does for the native constructor.
+        const typedArrayPrototype = Object.getPrototypeOf(nativeUint8Array.prototype);
+        for (const key of Reflect.ownKeys(nativeUint8Array.prototype)) {
+          if (key === 'constructor') continue;
+          const descriptor = Object.getOwnPropertyDescriptor(nativeUint8Array.prototype, key);
+          if (descriptor) Object.defineProperty(GuestUint8Array.prototype, key, descriptor);
+        }
+        Object.setPrototypeOf(GuestUint8Array.prototype, typedArrayPrototype);
+        // Buffer is a Uint8Array subclass too. The compatibility Buffer class
+        // is created before this per-run Firefox constructor exists, so bridge
+        // its prototype chain after the guest constructor is installed;
+        // otherwise ESM loader hooks observe a real Buffer but reject it with
+        // `source instanceof Uint8Array`.
+        Object.setPrototypeOf(Buffer.prototype, GuestUint8Array.prototype);
+        Object.defineProperty(scope, 'Uint8Array', {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: GuestUint8Array,
+        });
+      } catch {
+        // A host with an immutable typed-array constructor keeps its native
+        // behavior; the compatibility wrapper is best effort at the boundary.
+      }
+    }
     const deterministicEnvironment = Object.freeze({
       variant: options.variant || 'browser',
       platform: processObject.platform,
@@ -15248,7 +15399,10 @@ export function createRuntime({
         processObject.exitCode = Number(requestedExit.code) || 0;
         return processObject.exitCode;
       }
-      stderr(`${error?.stack || error}\n`);
+      // Firefox may expose only the source location through Error#stack for
+      // errors crossing the worker boundary. Preserve the message as well so
+      // child startup failures remain diagnosable in both browsers.
+      stderr(`${formatError(error)}\n`);
       processObject.exitCode = 1;
       // Preserve the uncaught boundary for process-entry. Browser Worker
       // callers must receive an error event rather than only exit code 1.

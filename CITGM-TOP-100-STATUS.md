@@ -62,67 +62,68 @@ not being reclassified as newly rerun here.
 | 40 | mime-types | PASS | none observed | Exact native, Chromium, and Firefox CITGM pass unchanged; repository-wide gates were skipped under the double-CITGM rule. |
 | 41 | nanoid | PASS | ours | Exact native Node CITGM passed before browser diagnosis; final Chromium `citgm-1789352834860` and Firefox `citgm-1789352865027` pass after shared runtime fixes and browser regressions. Required post-change gates pass at 345/345, 307/307, and 307/307. |
 | 42 | yargs-parser | PASS | none observed | Exact native, Chromium, and Firefox CITGM pass unchanged; repository-wide gates were skipped under the double-CITGM rule. |
-| 43 | source-map | PENDING | — | Not attempted; rank 42 is complete and rank 43 is current. |
-| 44 | string_decoder | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 45 | color-convert | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 46 | estraverse | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 47 | https-proxy-agent | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 48 | @babel/helper-validator-identifier | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 49 | json5 | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 50 | react-is | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 51 | readdirp | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 52 | commander | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 53 | js-tokens | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 54 | shebang-regex | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 55 | fs-extra | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 56 | readable-stream | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 57 | punycode | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 58 | tr46 | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 59 | find-up | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 60 | webidl-conversions | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 61 | path-exists | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 62 | graceful-fs | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 63 | eslint-scope | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 64 | yargs | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 65 | cross-spawn | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 66 | statuses | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 67 | whatwg-url | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 68 | fast-deep-equal | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 69 | locate-path | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 70 | is-number | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 71 | get-stream | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 72 | yaml | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 73 | path-scurry | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 74 | @babel/parser | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 75 | browserslist | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 76 | @babel/helper-string-parser | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 77 | camelcase | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 78 | yallist | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 79 | @babel/template | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 80 | cookie | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 81 | agent-base | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 82 | safe-buffer | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 83 | qs | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 84 | fill-range | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 85 | path-to-regexp | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 86 | lodash | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 87 | universalify | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 88 | form-data | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 89 | jiti | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 90 | @radix-ui/react-primitive | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 91 | onetime | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 92 | node-releases | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 93 | ajv | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 94 | is-glob | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 95 | escalade | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 96 | update-browserslist-db | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 97 | yocto-queue | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 98 | to-regex-range | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 99 | fast-json-stable-stringify | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 100 | get-intrinsic | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
+| 43 | source-map | BLOCKED | upstream package/repository (native-reproduced archive/submodule failure) | Exact native Node, Chromium, and Firefox CITGM all fail because the source archive lacks the `source-map-tests` submodule data required by the package test script; see the rank 43 record below. |
+| 44 | string_decoder | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 45 | color-convert | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 46 | estraverse | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 47 | https-proxy-agent | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 48 | @babel/helper-validator-identifier | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 49 | json5 | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 50 | react-is | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 51 | readdirp | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 52 | commander | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 53 | js-tokens | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 54 | shebang-regex | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 55 | fs-extra | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 56 | readable-stream | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 57 | punycode | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 58 | tr46 | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 59 | find-up | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 60 | webidl-conversions | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 61 | path-exists | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 62 | graceful-fs | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 63 | eslint-scope | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 64 | yargs | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 65 | cross-spawn | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 66 | statuses | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 67 | whatwg-url | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 68 | fast-deep-equal | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 69 | locate-path | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 70 | is-number | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 71 | get-stream | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 72 | yaml | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 73 | path-scurry | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 74 | @babel/parser | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 75 | browserslist | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 76 | @babel/helper-string-parser | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 77 | camelcase | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 78 | yallist | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 79 | @babel/template | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 80 | cookie | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 81 | agent-base | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 82 | safe-buffer | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 83 | qs | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 84 | fill-range | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 85 | path-to-regexp | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 86 | lodash | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 87 | universalify | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 88 | form-data | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 89 | jiti | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 90 | @radix-ui/react-primitive | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 91 | onetime | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 92 | node-releases | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 93 | ajv | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 94 | is-glob | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 95 | escalade | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 96 | update-browserslist-db | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 97 | yocto-queue | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 98 | to-regex-range | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 99 | fast-json-stable-stringify | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
+| 100 | get-intrinsic | PENDING | — | Not attempted; rank 43 is blocked and rank 44 is current. |
 
-The pending-row cursor now points to rank 43. Every row marked `PENDING` from
-rank 43 onward has not been started; rank 43 is the next package in order.
+The pending-row cursor now points to rank 44. Rank 43 is recorded as blocked
+after native proof; every row marked `PENDING` from rank 44 onward has not been
+started, and rank 44 is the next package in order.
 
 ## Rank 6 failure record
 
@@ -1211,3 +1212,38 @@ npm test / full Chromium / full Firefox Playwright suites        NOT RUN — unc
 ```
 
 Rank 42 is recorded as `PASS` and the ordered cursor advances to rank 43.
+
+## Rank 43 failure record
+
+The published `source-map@0.8.0` candidate at gitHead
+`ac0a1a6342dd0e50b407b1997b32784a3fbe8a67` was tested with CITGM 10.0.2.
+Complete native, Chromium, Firefox, and repository-gate artifacts are
+preserved under `artifacts/citgm-top-100/rank-043-source-map/`.
+
+| Run / log | Observed failure | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v26.log` | The package's test script runs `git submodule update --init --recursive` and then fails to load `./source-map-tests/source-map-spec-tests.json`; the archive checkout has no Git repository or submodule contents. | Native proof: exact Node v26 CITGM fails before any browser runtime is involved. This is an upstream package/repository archive/submodule contract failure. No fake Git executable, submodule shim, or package-specific workaround was added. |
+| `citgm-1789357265377` / `citgm-chromium-run.log` | Chromium reports the same missing `source-map-tests/source-map-spec-tests.json` after the archive checkout's `git` command is unavailable. | Same failure as native Node; not classified as browser-only or ours. |
+| `citgm-1789357302275` / `citgm-firefox-run.log` | Firefox reports the same missing `source-map-tests/source-map-spec-tests.json` after the archive checkout's `git` command is unavailable. | Same failure as native Node; not classified as browser-only or ours. |
+
+Rank 43 is therefore recorded as `BLOCKED` only after the exact native Node run
+reproduced the package failure. The browser runs confirm the same package
+checkout problem; they do not establish a separate browser defect.
+
+## Rank 43 gate evidence
+
+The package remained non-green, so the repository-wide gates were run before
+committing the blocked record:
+
+```text
+npm exec --yes --package=citgm@10.0.2 -- citgm source-map  FAIL — native-citgm-node-v26.log; missing source-map-tests submodule data
+npm run citgm:browser:chromium -- source-map  FAIL — citgm-1789357265377; same missing submodule data
+npm run citgm:browser:firefox -- source-map   FAIL — citgm-1789357302275; same missing submodule data
+npm test                                         PASS — npm-test-gate.log; 345/345
+npm run test:browser:chromium                    PASS — playwright-chromium-gate.log; 307/307
+npm run test:browser:firefox                      PASS — playwright-firefox-gate.log; 307/307
+```
+
+No repository source changes were made for rank 43. The rank-43 blocker
+record and all failure/gate logs are committed, and the ordered cursor advances
+to rank 44.

@@ -61,8 +61,8 @@ not being reclassified as newly rerun here.
 | 39 | resolve | BLOCKED | upstream package/repository (native-reproduced posttest) | Exact browser and native CITGM reach the passing package tests, then the published posttest invokes unavailable `npm@>= 10.2`; see the rank 39 record below. |
 | 40 | mime-types | PASS | none observed | Exact native, Chromium, and Firefox CITGM pass unchanged; repository-wide gates were skipped under the double-CITGM rule. |
 | 41 | nanoid | PASS | ours | Exact native Node CITGM passed before browser diagnosis; final Chromium `citgm-1789352834860` and Firefox `citgm-1789352865027` pass after shared runtime fixes and browser regressions. Required post-change gates pass at 345/345, 307/307, and 307/307. |
-| 42 | yargs-parser | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
-| 43 | source-map | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
+| 42 | yargs-parser | PASS | none observed | Exact native, Chromium, and Firefox CITGM pass unchanged; repository-wide gates were skipped under the double-CITGM rule. |
+| 43 | source-map | PENDING | — | Not attempted; rank 42 is complete and rank 43 is current. |
 | 44 | string_decoder | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
 | 45 | color-convert | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
 | 46 | estraverse | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
@@ -121,8 +121,8 @@ not being reclassified as newly rerun here.
 | 99 | fast-json-stable-stringify | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
 | 100 | get-intrinsic | PENDING | — | Not attempted; rank 41 is complete and rank 42 is current. |
 
-The pending-row cursor now points to rank 42. Every row marked `PENDING` from
-rank 42 onward has not been started; rank 42 is the next package in order.
+The pending-row cursor now points to rank 43. Every row marked `PENDING` from
+rank 43 onward has not been started; rank 43 is the next package in order.
 
 ## Rank 6 failure record
 
@@ -1193,3 +1193,21 @@ npm run test:browser:firefox                                 PASS — playwright
 ```
 
 Rank 41 is recorded as `PASS` and the ordered cursor advances to rank 42.
+
+## Rank 42 status
+
+The published `yargs-parser@22.0.0` candidate at gitHead
+`66f0bb2d2c8a2c9689489784cfe2e5128b0abfc2` passed exact CITGM 10.0.2 under
+native Node v26, Chromium, and Firefox. Complete artifacts are preserved under
+`artifacts/citgm-top-100/rank-042-yargs-parser/`. No runtime, nested dependency,
+or upstream package/repository failure was observed, and no repository source
+changes were made.
+
+```text
+npm exec --yes --package=citgm@10.0.2 -- citgm yargs-parser  PASS — native-citgm-node-v26.log
+npm run citgm:browser:chromium -- yargs-parser                    PASS — citgm-1789357041221
+npm run citgm:browser:firefox -- yargs-parser                     PASS — citgm-1789357121881
+npm test / full Chromium / full Firefox Playwright suites        NOT RUN — unchanged double-CITGM pass
+```
+
+Rank 42 is recorded as `PASS` and the ordered cursor advances to rank 43.

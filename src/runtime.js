@@ -9728,6 +9728,8 @@ export function createRuntime({
           processObj.__bnhActiveModulePath = entryPath;
           scopeObj.__bnhModulePermissionProcess = processObj;
           nodeTest.__bnhSetActiveProcess?.(processObj);
+          const previousMain = activeModuleApi._main;
+          if (isMain) activeModuleApi._main = moduleRecord;
           try {
             runCommonJSWrapper(
               moduleSource,
@@ -9743,6 +9745,7 @@ export function createRuntime({
             if (siblings?.includes(moduleRecord)) siblings.splice(siblings.indexOf(moduleRecord), 1);
             throw error;
           } finally {
+            if (isMain) activeModuleApi._main = previousMain;
             if (previousActiveProcess === undefined) scopeObj.__bnhActiveProcess = undefined;
             else scopeObj.__bnhActiveProcess = previousActiveProcess;
             if (previousRuntimeActiveProcess === undefined) delete processObject.__bnhActiveProcess;
@@ -9824,6 +9827,34 @@ export function createRuntime({
               }
             }
             let entryPath = prepared.entryPath;
+            // Node resolves a directly executed script through symlinks before
+            // assigning require.main.filename. npm installs package
+            // executables as node_modules/.bin symlinks, and tools such as
+            // version-guard use that real filename to locate their package
+            // manifest. Keep process.argv[1] as the invoked .bin path, but
+            // use the target path for module identity and relative loading.
+            const directPackageBin = prepared.scriptPath
+              && prepared.entryPath.includes('/node_modules/.bin/')
+              && !/(?:^|\/)(?:npm|npx|yarn|yarnpkg|pnpm)(?:\.cmd)?$/.test(prepared.entryPath);
+            if (directPackageBin) {
+              try {
+                const realEntryPath = vfs.fs.realpathSync(entryPath);
+                if (realEntryPath !== entryPath) entryPath = realEntryPath;
+              } catch { /* preserve unresolved diagnostics */ }
+              if (entryPath === prepared.entryPath) {
+                try {
+                  const launcherSource = vfs.readSource(prepared.entryPath);
+                  const launcherText = typeof launcherSource === 'string'
+                    ? launcherSource
+                    : new TextDecoder().decode(launcherSource);
+                  const generatedCjsLauncher = /^#![^\n]*(?:\n|$)\/\* bnh:npm-bin-shim \*\/\nrequire\(("(?:[^"\\]|\\.)*")\);\s*$/u.exec(launcherText);
+                  if (generatedCjsLauncher) {
+                    const targetPath = JSON.parse(generatedCjsLauncher[1]);
+                    if (typeof targetPath === 'string') entryPath = normalizePath(targetPath, path.dirname(prepared.entryPath));
+                  }
+                } catch { /* preserve normal launcher diagnostics */ }
+              }
+            }
             const stdoutArr = [];
             const stderrArr = [];
             const nestedEsmProcess = scope.process?.__bnhEsmNested === true ? scope.process : null;

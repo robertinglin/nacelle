@@ -2667,6 +2667,93 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('realpaths directly executed .bin symlinks for require.main.filename', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const fs = require('node:fs');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        fs.symlinkSync('../bin-package/bin/cli.cjs', '/node/node_modules/.bin/bin-package');
+        const child = spawn('/node/node_modules/.bin/bin-package', [], { cwd: '/node' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.deepStrictEqual(JSON.parse(output), {
+          main: '/node/node_modules/bin-package/bin/cli.cjs',
+          packageName: 'bin-package',
+        });
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/node_modules/.bin/.keep': '',
+        '/node/node_modules/bin-package/package.json': JSON.stringify({ name: 'bin-package', version: '1.0.0' }),
+          '/node/node_modules/bin-package/bin/cli.cjs': [
+          '#!/usr/bin/env node',
+          "const path = require('node:path');",
+          "const pkg = JSON.parse(require('node:fs').readFileSync(path.resolve(path.dirname(require.main.filename), '../package.json'), 'utf8'));",
+          "process.stdout.write(JSON.stringify({ main: require.main.filename, packageName: pkg.name }));",
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('uses the target as main for browser-generated npm .bin shims', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/bin-package', [], { cwd: '/node' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.deepStrictEqual(JSON.parse(output), {
+          main: '/node/node_modules/bin-package/bin/cli.cjs',
+          packageName: 'bin-package',
+        });
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/node_modules/.bin/.keep': '',
+        '/node/node_modules/.bin/bin-package': [
+          '#!/usr/bin/env node',
+          '/* bnh:npm-bin-shim */',
+          'require("/node/node_modules/bin-package/bin/cli.cjs");',
+        ].join('\n'),
+        '/node/node_modules/bin-package/package.json': JSON.stringify({ name: 'bin-package', version: '1.0.0' }),
+        '/node/node_modules/bin-package/bin/cli.cjs': [
+          '#!/usr/bin/env node',
+          "const path = require('node:path');",
+          "const pkg = JSON.parse(require('node:fs').readFileSync(path.resolve(path.dirname(require.main.filename), '../package.json'), 'utf8'));",
+          "process.stdout.write(JSON.stringify({ main: require.main.filename, packageName: pkg.name }));",
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
   test('runs ESM package bins from npm-style launcher files', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert');

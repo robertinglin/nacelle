@@ -74,7 +74,7 @@ not being reclassified as newly rerun here.
 | 52 | commander | PASS | ours | Exact native Node CITGM passes after clearing ambient `NO_COLOR`; Chromium (`citgm-1789375263249`) and Firefox (`citgm-1789375328593`) pass after shared child signal, lifecycle, and nested ESM executable fixes. Repository gates pass: build; `npm test` 346/346; complete Chromium and Firefox Playwright coverage 310/310 each. The initial ambient-color failure and all browser failures are preserved under `artifacts/citgm-top-100/rank-052-commander/`. |
 | 53 | js-tokens | PASS | ours | Exact native Node CITGM and final Chromium/Firefox CITGM pass after shared browser-runtime fixes; complete gate evidence and failure logs are recorded below. |
 | 54 | shebang-regex | BLOCKED | nested dependency/toolchain (native-reproduced) | Exact native Node CITGM fails in `xo` before package tests because nested `eslint-plugin-ava` calls removed `util.isDate`; exact Chromium and clean final Firefox CITGM pass the package. A separate Firefox attempt received an HTTP 504 HTML response from GitHub and was retried to green; see the rank 54 record below. |
-| 55 | fs-extra | PENDING | — | Not attempted; rank 53 is complete and rank 54 is current. |
+| 55 | fs-extra | PASS | ours | Exact native Node CITGM passes `fs-extra@11.4.0` at gitHead `53a8d1a63c8eb30573110ed0f6528975f98801f`; final Chromium (`citgm-1789400169971`) and Firefox (`citgm-1789400245339`) CITGM pass. The browser failures were ours: materialized npm `.bin` launchers did not expose the target package as `require.main`, which broke nested `version-guard` package lookup. The runtime now resolves direct `.bin` symlinks and marked browser-generated CJS shims to the target entry, and publishes that target as the CommonJS main module. Required final gates passed: build; `npm test` 346/346; full Chromium and Firefox Playwright 316/316 each. |
 | 56 | readable-stream | PENDING | — | Not attempted; rank 51 is complete and rank 52 is current. |
 | 57 | punycode | PENDING | — | Not attempted; rank 51 is complete and rank 52 is current. |
 | 58 | tr46 | PENDING | — | Not attempted; rank 51 is complete and rank 52 is current. |
@@ -1689,3 +1689,45 @@ Chromium and Firefox Playwright suites                         SKIPPED — no re
 The native proof, both final browser results, the HTTP 504 wire evidence, and
 all preserved retries are committed. The ordered cursor advances to rank 55
 only after this blocked record is committed cleanly.
+
+## Rank 55 pass record
+
+The exact candidate is `fs-extra@11.4.0` at gitHead
+`53a8d1a63c8eb30573110ed0f6528975f98801f`. The native and browser attempts,
+including the intermediate browser failures, are preserved under
+`artifacts/citgm-top-100/rank-055-fs-extra/`.
+
+| Run / log | Observed failure or behavior | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v26-network.log` | Exact native Node CITGM downloaded the exact gitHead archive, installed it, ran the upstream test suite, and reported `The smoke test has passed` in 17.1 seconds. | Native proof that the candidate and dependency graph are healthy outside the browser. The later browser failures therefore were not classified as upstream or nested-dependency problems. |
+| `citgm-chromium-final.log`, `citgm-chromium-fixed.log`, `citgm-chromium-fixed-2.log` | Chromium installed the candidate but `standard`'s nested `version-guard` saw `require.main.filename` as the materialized `.bin/standard` launcher and looked for `.bin/package.json`. The first fixes also exposed npm's own launcher boundary while testing symlink realpathing. | Ours. Browser-generated npm CJS launchers are materialized files rather than native symlinks, so the runtime must identify its generated shim and execute the package target as the main module. npm and other package-manager entrypoints remain excluded from the direct package-bin realpath rule. |
+| `citgm-chromium-fixed-3.log` | After selecting the target entry, `version-guard` reported `Missing mainFile` because the nested `.cjs` target did not see the target module through the active CommonJS main API. | Ours. The CommonJS loader now publishes and restores the target module as `require.main` for a directly executed module, including `.cjs` package bins. |
+| `citgm-chromium-fixed-4.log` | Final Chromium CITGM run `citgm-1789400169971` installed 158 packages and completed all five child phases with exit code 0. | PASS after the general runtime/npm-shim fix. |
+| `citgm-firefox-fixed.log` | Final Firefox CITGM run `citgm-1789400245339` installed 158 packages and completed all five child phases with exit code 0. | PASS after the same shared fix; no Firefox-only or upstream failure remained. |
+
+Rank 55 is recorded as `PASS`: exact native Node CITGM passed, and both exact
+browser CITGM runs passed after correcting our `.bin` main-module behavior.
+The initial failures were browser-runtime mismatches exposed by the nested
+`version-guard` dependency, not evidence against `fs-extra` or its dependency
+graph. The regression oracles cover both native `.bin` symlinks and the
+browser-generated shim form.
+
+## Rank 55 gate evidence
+
+Because runtime, npm-installer, and regression-test changes were required, all
+repository-wide gates were run after the final source state. The first partial
+Chromium run, the isolated diagnostics, and the transient first full Firefox
+run are retained as artifacts; the rerun logs below are authoritative.
+
+```text
+npm run build:v22                                  PASS — build-final.log; 5 WASM artifacts; Node 22.23.2
+npm test                                           PASS — npm-test-final.log; 346/346
+Chromium Playwright full suite                    PASS — playwright-chromium-final-rerun.log; 316/316
+Firefox Playwright full suite                     PASS — playwright-firefox-final-rerun.log; 316/316
+Focused Chromium .bin oracles                     PASS — direct symlink and generated shim main identity
+Focused Firefox .bin oracles                      PASS — playwright-firefox-regression-final.log; 2/2
+```
+
+The final source, oracle tests, hard status record, and all rank-55 CITGM and
+gate artifacts are ready to commit. The ordered cursor advances to rank 56
+only after that commit is clean.

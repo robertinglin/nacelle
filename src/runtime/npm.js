@@ -1323,7 +1323,7 @@ export class BrowserNpm {
             // therefore CommonJS when loaded directly. Keep the await inside
             // an async wrapper while retaining a relative ESM target.
             ? `(async () => { await import(${JSON.stringify(targetSpecifier)}); })().catch((error) => { process.stderr.write(String(error?.stack || error) + "\\n"); process.exitCode = 1; });`
-            : `require(${JSON.stringify(targetFile)});`;
+            : `/* bnh:npm-bin-shim */\nrequire(${JSON.stringify(targetFile)});`;
           filesToMount[binPath] = {
             data: new TextEncoder().encode(
               `#!/usr/bin/env node\n${launcher}\n`,

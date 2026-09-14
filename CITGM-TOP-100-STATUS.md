@@ -69,57 +69,57 @@ not being reclassified as newly rerun here.
 | 47 | https-proxy-agent | BLOCKED | upstream package/repository (native-reproduced invalid published devDependency) | Published `https-proxy-agent@9.1.0` fails exact native Node, Chromium, and Firefox CITGM during install because its published manifest declares nonexistent `tsconfig@0.0.0`; see the rank 47 record below. |
 | 48 | @babel/helper-validator-identifier | BLOCKED | upstream package/repository (native-reproduced no test script) | Published `@babel/helper-validator-identifier@8.0.4` installs under native Node, Chromium, and Firefox, but its published manifest has no `scripts.test`; exact CITGM therefore fails with `Module does not support npm-test!`. See the rank 48 record below. |
 | 49 | json5 | BLOCKED | nested dependency issue (native-reproduced legacy tap/esm test stack) | Exact native Node CITGM installs `json5@2.2.3`, then all five tests fail before assertions with the nested `tap@12.6.0`/`esm` stack (`The canary is dead`). Browser CITGM reached the same upstream test phase after the ours-side Rollup resolver fix; see the rank 49 record below. |
-| 50 | react-is | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 51 | readdirp | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 52 | commander | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 53 | js-tokens | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 54 | shebang-regex | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 55 | fs-extra | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 56 | readable-stream | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 57 | punycode | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 58 | tr46 | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 59 | find-up | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 60 | webidl-conversions | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 61 | path-exists | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 62 | graceful-fs | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 63 | eslint-scope | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 64 | yargs | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 65 | cross-spawn | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 66 | statuses | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 67 | whatwg-url | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 68 | fast-deep-equal | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 69 | locate-path | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 70 | is-number | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 71 | get-stream | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 72 | yaml | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 73 | path-scurry | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 74 | @babel/parser | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 75 | browserslist | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 76 | @babel/helper-string-parser | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 77 | camelcase | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 78 | yallist | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 79 | @babel/template | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 80 | cookie | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 81 | agent-base | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 82 | safe-buffer | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 83 | qs | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 84 | fill-range | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 85 | path-to-regexp | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 86 | lodash | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 87 | universalify | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 88 | form-data | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 89 | jiti | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 90 | @radix-ui/react-primitive | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 91 | onetime | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 92 | node-releases | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 93 | ajv | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 94 | is-glob | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 95 | escalade | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 96 | update-browserslist-db | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 97 | yocto-queue | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 98 | to-regex-range | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 99 | fast-json-stable-stringify | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
-| 100 | get-intrinsic | PENDING | — | Not attempted; rank 49 is complete and rank 50 is current. |
+| 50 | react-is | BLOCKED | upstream package/repository (native-reproduced install contract; browser test-layout failure also observed) | Exact native Node CITGM fails during fresh install with `ERESOLVE`: React's root `eslint@^7.7.0` resolves to `eslint@7.32.0`, while `eslint-plugin-ft-flow@2.0.3` requires peer `eslint@^8.1.0`. Chromium independently installs and reaches the React Jest test command, which fails with `Cannot find module 'jest-circus/runner'`; the browser did fetch `jest-circus@30.5.1`, and the equivalent CommonJS `exports:./runner` loader oracle passes, so no adapter change or fake shim is justified. |
+| 51 | readdirp | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 52 | commander | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 53 | js-tokens | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 54 | shebang-regex | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 55 | fs-extra | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 56 | readable-stream | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 57 | punycode | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 58 | tr46 | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 59 | find-up | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 60 | webidl-conversions | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 61 | path-exists | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 62 | graceful-fs | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 63 | eslint-scope | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 64 | yargs | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 65 | cross-spawn | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 66 | statuses | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 67 | whatwg-url | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 68 | fast-deep-equal | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 69 | locate-path | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 70 | is-number | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 71 | get-stream | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 72 | yaml | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 73 | path-scurry | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 74 | @babel/parser | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 75 | browserslist | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 76 | @babel/helper-string-parser | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 77 | camelcase | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 78 | yallist | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 79 | @babel/template | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 80 | cookie | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 81 | agent-base | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 82 | safe-buffer | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 83 | qs | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 84 | fill-range | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 85 | path-to-regexp | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 86 | lodash | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 87 | universalify | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 88 | form-data | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 89 | jiti | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 90 | @radix-ui/react-primitive | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 91 | onetime | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 92 | node-releases | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 93 | ajv | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 94 | is-glob | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 95 | escalade | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 96 | update-browserslist-db | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 97 | yocto-queue | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 98 | to-regex-range | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 99 | fast-json-stable-stringify | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
+| 100 | get-intrinsic | PENDING | — | Not attempted; rank 50 is complete and rank 51 is current. |
 
 The pending-row cursor now points to rank 50. Ranks 43–44, 47–49 are recorded
 as blocked only after native proof; ranks 45–46 are complete, and every row
@@ -1467,3 +1467,46 @@ npm run test:browser:firefox                         PASS — playwright-firefox
 The rank-49 native proof, initial ours-side resolver failures, post-fix browser
 diagnostics, red/green oracle, manifest evidence, and final gate logs are
 committed. The ordered cursor advances to rank 50.
+
+## Rank 50 failure record
+
+The exact candidate is `react-is@19.3.0`, tested from React gitHead
+`1d34f91dfde6bba84d08b683aaba164c7194dacb`. The selected root manifest from
+the exact React source archive is preserved at
+`artifacts/citgm-top-100/rank-050-react-is/published-package.json`; complete
+native, browser, diagnostic, and repository-gate artifacts are preserved under
+`artifacts/citgm-top-100/rank-050-react-is/`.
+
+| Run / log | Observed failure or behavior | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v26.log` | Exact native Node CITGM fails before package tests during npm install with `ERESOLVE unable to resolve dependency tree`: the React root's `eslint:^7.7.0` resolves to `eslint@7.32.0`, while `eslint-plugin-ft-flow@2.0.3` declares peer `eslint:^8.1.0`. | Native proof that rank 50 is non-green outside the browser runtime. This is the upstream React repository's published test-toolchain dependency contract; no package source change, peer bypass, or fake dependency was added. |
+| `citgm-chromium-run.log` | Chromium's non-peer-enforcing installer gets through the React workspace install and starts the exact test command, then fails twice with `Cannot find module 'jest-circus/runner'` from `jest-config`/`jest-cli`. | Separate browser observation, not the native proof for the classification. Browser network artifacts show `jest-circus@30.5.1` was fetched, and the focused CommonJS package `exports:./runner` oracle passes; there is therefore no evidenced shared-loader defect to fix and no fake `jest-circus` shim was added. |
+| `citgm-firefox-run.log` | Firefox installs the same 158-package workspace and reaches candidate execution with lifecycle code 1, but the host artifact persistence step then fails with `Unknown system error -122` while writing the final CITGM artifacts. | Runner artifact-persistence failure, recorded separately and not used as package classification. The lifecycle failure is preserved; the Chromium log contains the decisive child-module diagnostic. |
+| `exports-subpath-red.log` | The diagnostic export-subpath oracle passes for an equivalent CommonJS package with `exports: {"./runner":"./build/runner.js"}`. | Diagnostic only. It confirms the shared loader handles the relevant export subpath; no rank-specific change remains. |
+| `jest-install-oracle.log` | An attempted in-browser VFS probe used an invalid test context and was rejected by the harness before exercising BrowserNpm. | Preserved investigative artifact, not package evidence and not used in the classification. Direct BrowserNpm inspection separately confirmed that `jest-circus/package.json` and `build/runner.js` are mounted. |
+
+Rank 50 is recorded as `BLOCKED` only because the exact native Node run
+independently fails the package's fresh-install contract. The native proof is
+the ESLint peer conflict; the browser-only missing `jest-circus/runner` message
+is recorded as an additional package/toolchain layout observation, not claimed
+to be native-reproduced. No fake shim or package-specific compatibility path
+was added.
+
+## Rank 50 gate evidence
+
+The package remained non-green, so the repository-wide gates were run before
+committing the blocked record:
+
+```text
+npm exec --yes --package=citgm@10.0.2 -- citgm react-is  FAIL — native-citgm-node-v26.log; ERESOLVE eslint@7 vs eslint-plugin-ft-flow peer eslint@8
+npm run citgm:browser:chromium -- react-is             FAIL — citgm-1789368062535; Jest reports missing jest-circus/runner after install
+npm run citgm:browser:firefox -- react-is              FAIL/persistence error — citgm-1789368144249; lifecycle code 1, final artifact write hit system error -122
+npm test                                              PASS — npm-test-gate.log; 346/346
+npm run test:browser:chromium                        PASS — playwright-chromium-gate.log; 310/310
+npm run test:browser:firefox                         PASS — playwright-firefox-gate.log; 310/310
+```
+
+No repository source changes were made for rank 50. The native proof, both
+browser runs, separate Firefox persistence error, diagnostic loader artifacts,
+manifest evidence, and final gate logs are committed, and the ordered cursor
+advances to rank 51.

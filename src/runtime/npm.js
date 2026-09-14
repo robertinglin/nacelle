@@ -43,7 +43,10 @@ const BROWSER_PACKAGE_ALTERNATIVES = Object.freeze({
   rollup: Object.freeze({
     name: '@rollup/wasm-node',
     reason: 'official-wasm-distribution',
-    useIf: (range) => !parseSemver(range) || parseSemver(range).major >= 4,
+    useIf: (range) => {
+      const major = semverRangeMajor(range);
+      return major === null || major >= 4;
+    },
   }),
   '@biomejs/biome': Object.freeze({
     name: '@biomejs/wasm-nodejs',
@@ -386,6 +389,13 @@ export function parseSemver(v) {
     build: match[5] || null,
     raw: clean,
   };
+}
+
+function semverRangeMajor(v) {
+  const exact = parseSemver(v);
+  if (exact) return exact.major;
+  const match = String(v || '').trim().match(/^(?:[<>=~^]|v|\s)*(\d+)/);
+  return match ? Number(match[1]) : null;
 }
 
 export function compareSemver(a, b) {

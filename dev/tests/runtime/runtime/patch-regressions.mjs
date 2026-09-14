@@ -1061,6 +1061,51 @@ test('browser npm uses the official Rollup WASM alternative at the native packag
   ]);
 });
 
+test('browser npm keeps legacy Rollup ranges on the native package', async () => {
+  const vfs = createVfs();
+  const legacyTarball = await packTarGz([{
+    path: 'package/package.json',
+    data: new TextEncoder().encode(JSON.stringify({
+      name: 'rollup',
+      version: '0.64.1',
+      main: 'dist/rollup.js',
+    })),
+  }, {
+    path: 'package/dist/rollup.js',
+    data: new TextEncoder().encode('module.exports = { version: "0.64.1" };'),
+  }]);
+  const selectedUrls = [];
+  const npm = new BrowserNpm({
+    vfs,
+    registry: 'https://registry.example',
+    fetchFn: async (url) => {
+      selectedUrls.push(String(url));
+      if (String(url) === 'https://registry.example/rollup') {
+        return new Response(JSON.stringify({
+          name: 'rollup',
+          versions: {
+            '0.64.1': {
+              name: 'rollup',
+              version: '0.64.1',
+              dist: { tarball: 'https://registry.example/rollup-0.64.1.tgz' },
+            },
+          },
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      if (String(url) === 'https://registry.example/rollup-0.64.1.tgz') return new Response(legacyTarball);
+      throw new Error(`unexpected URL: ${url}`);
+    },
+  });
+
+  await npm.install('rollup@^0.64.1');
+
+  assert.equal(npm.installed.get('rollup'), '0.64.1');
+  assert.deepEqual(selectedUrls, [
+    'https://registry.example/rollup',
+    'https://registry.example/rollup-0.64.1.tgz',
+  ]);
+});
+
 test('browser npm exposes the unofficial tsgo-wasm launcher at the native compiler path', async () => {
   const vfs = createVfs();
   const launcher = '#!/usr/bin/env node\nconsole.log("tsgo wasm");';

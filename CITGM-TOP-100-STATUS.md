@@ -75,7 +75,7 @@ not being reclassified as newly rerun here.
 | 53 | js-tokens | PASS | ours | Exact native Node CITGM and final Chromium/Firefox CITGM pass after shared browser-runtime fixes; complete gate evidence and failure logs are recorded below. |
 | 54 | shebang-regex | BLOCKED | nested dependency/toolchain (native-reproduced) | Exact native Node CITGM fails in `xo` before package tests because nested `eslint-plugin-ava` calls removed `util.isDate`; exact Chromium and clean final Firefox CITGM pass the package. A separate Firefox attempt received an HTTP 504 HTML response from GitHub and was retried to green; see the rank 54 record below. |
 | 55 | fs-extra | PASS | ours | Exact native Node CITGM passes `fs-extra@11.4.0` at gitHead `53a8d1a63c8eb30573110ed0f6528975f98801f`; final Chromium (`citgm-1789400169971`) and Firefox (`citgm-1789400245339`) CITGM pass. The browser failures were ours: materialized npm `.bin` launchers did not expose the target package as `require.main`, which broke nested `version-guard` package lookup. The runtime now resolves direct `.bin` symlinks and marked browser-generated CJS shims to the target entry, and publishes that target as the CommonJS main module. Required final gates passed: build; `npm test` 346/346; full Chromium and Firefox Playwright 316/316 each. |
-| 56 | readable-stream | PENDING | — | Not attempted; rank 51 is complete and rank 52 is current. |
+| 56 | readable-stream | BLOCKED | upstream package/repository (native-reproduced global-leak test contract; browser environment mismatch) | Exact native Node CITGM for `readable-stream@4.7.0` at gitHead `88df21041dc26c210fab3e074ab6bb681a604b8e` fails the package's `test/common/index.js` global-leak assertion because Node 26.7 exposes `sessionStorage`. Chromium and Firefox also reach the upstream tests but fail the same global-leak guard on browser/runtime globals. Native proof means this is not being attributed to a browser-only Nacelle defect; no fake shim or package-specific workaround was added. |
 | 57 | punycode | PENDING | — | Not attempted; rank 51 is complete and rank 52 is current. |
 | 58 | tr46 | PENDING | — | Not attempted; rank 51 is complete and rank 52 is current. |
 | 59 | find-up | PENDING | — | Not attempted; rank 51 is complete and rank 52 is current. |
@@ -1731,3 +1731,41 @@ Focused Firefox .bin oracles                      PASS — playwright-firefox-re
 The final source, oracle tests, hard status record, and all rank-55 CITGM and
 gate artifacts are ready to commit. The ordered cursor advances to rank 56
 only after that commit is clean.
+
+## Rank 56 failure record
+
+The exact candidate is `readable-stream@4.7.0` at gitHead
+`88df21041dc26c210fab3e074ab6bb681a604b8e`. The native and browser attempts
+are preserved under `artifacts/citgm-top-100/rank-056-readable-stream/`.
+
+| Run / log | Observed failure or behavior | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v26-network.log` | Exact native Node CITGM downloads the exact gitHead archive, installs 661 packages, and starts the package's TAP suite. The child tests fail at `test/common/index.js:352` with `AssertionError: Unexpected global(s) found: sessionStorage`. | Native proof that the published package/test contract is non-green outside the browser under the required Node 26 environment. This establishes the blocker before considering browser behavior. No package source or runtime shim was added. |
+| `citgm-chromium.log` | Chromium installs 158 packages and reaches the upstream `tap` test command. The same global-leak guard fails because the browser execution environment exposes DOM globals and browser-runtime globals such as `process`, `require`, `WebAssembly`, and Nacelle internals. | Browser environment mismatch observed in addition to the native failure. It is not being used as a browser-only upstream conclusion, and no broad global-object emulation or fake shim was justified for a package whose exact native test already fails. |
+| `citgm-firefox.log` | Firefox installs 158 packages and reaches the same upstream `tap` test command. Its global-leak assertion rejects browser globals including `postMessage`, `close`, `requestAnimationFrame`, `Uint8Array`, `WebAssembly`, and Nacelle internals. | Independent browser confirmation of the package test harness's assumptions. The native `sessionStorage` failure is the decisive cross-environment proof; this remains an upstream/package-test-contract blocker, not an unverified browser-only attribution. |
+
+Rank 56 is recorded as `BLOCKED` only after the exact native Node run proved
+that the package itself fails outside the browser. Both browsers independently
+reach the package tests and fail their global-leak guard as well. The package
+test harness assumes a narrower global environment than Node 26.7 and the
+browser runtime provide; no fake `sessionStorage` or browser-global shim was
+added.
+
+## Rank 56 gate evidence
+
+No repository source or regression-test change was made for rank 56. The
+repository-wide gates were not run because the exact native and both browser
+CITGM runs are non-green and there is no candidate runtime fix to verify. The
+native proof and both browser results are the authoritative blocker evidence.
+
+```text
+npm exec --yes --package=citgm@10.0.2 -- citgm readable-stream  FAIL — native-citgm-node-v26-network.log; unexpected global sessionStorage
+npm run citgm:browser:chromium -- readable-stream              FAIL — citgm-1789402583005; upstream global-leak guard rejects browser/runtime globals
+npm run citgm:browser:firefox -- readable-stream               FAIL — citgm-1789402697855; upstream global-leak guard rejects browser/runtime globals
+npm test                                                        SKIPPED — no repository changes; package is blocked by its native test contract
+Chromium and Firefox Playwright suites                              SKIPPED — no repository changes; package is blocked by its native test contract
+```
+
+The native proof, both browser failures, and their complete logs are ready to
+commit. The ordered cursor advances to rank 57 only after this blocker record
+is committed cleanly.

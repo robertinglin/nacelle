@@ -943,7 +943,12 @@ export function createModuleLoader({
     let directory = posix.dirname(importer);
     while (true) {
       const config = packageConfig(directory);
-      if (config?.name === packageName && config.exports !== undefined) {
+      if (config !== undefined) {
+        // Package self-references are scoped to the nearest package.json.
+        // Do not walk through a nested dependency's package boundary and
+        // accidentally treat an enclosing application with the same name as
+        // the importer package.
+        if (config.name !== packageName || config.exports === undefined) return undefined;
         const exportsMap = config.exports === null || typeof config.exports === 'string' || Array.isArray(config.exports)
           ? { '.': config.exports }
           : Object.keys(config.exports).some((key) => key === '.' || key.startsWith('./'))
@@ -1274,13 +1279,27 @@ export function createModuleLoader({
     const bindings = new Map();
     const functionBindings = new Map();
     const reexports = [];
+    const functionBodyStart = (value, openParen) => {
+      const masked = maskJavaScriptLiterals(value);
+      let depth = 0;
+      for (let index = openParen; index < masked.length; index += 1) {
+        if (masked[index] === '(') depth += 1;
+        else if (masked[index] === ')' && --depth === 0) {
+          let bodyStart = index + 1;
+          while (/\s/.test(masked[bodyStart] || '')) bodyStart += 1;
+          return masked[bodyStart] === '{' ? bodyStart : -1;
+        }
+      }
+      return -1;
+    };
     // Function declarations are initialized during ESM module instantiation,
     // before dependency bodies run. Cycle proxies need the same early value
     // when a dependency calls an exported function before the real module can
     // publish its complete namespace.
     for (const match of value.matchAll(/(?:^|[;\n])([ \t]*(?:export\s+)?(?:async\s+)?function\s*\*?\s+([$A-Z_a-z][$\w]*)\s*\()/gm)) {
       const declarationStart = match.index + match[0].indexOf(match[1]);
-      const bodyStart = value.indexOf('{', declarationStart + match[1].length);
+      const openParen = match.index + match[0].length - 1;
+      const bodyStart = functionBodyStart(value, openParen);
       if (bodyStart < 0) continue;
       const masked = maskJavaScriptLiterals(value);
       let depth = 0;

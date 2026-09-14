@@ -12934,8 +12934,11 @@ export function createRuntime({
         const target = normalizePath(entry.path, effectiveCwd);
         if (target !== effectiveCwd && !target.startsWith(`${effectiveCwd}/`)) return fail('checkout path escapes worktree');
         fs.mkdirSync(normalizePath('.', target.slice(0, target.lastIndexOf('/')) || effectiveCwd), { recursive: true });
-        fs.writeFileSync(target, entry.data);
-        if (Number.isInteger(entry.mode) && entry.mode > 0) {
+        if (entry.type === 'symlink') {
+          fs.symlinkSync(entry.target, target);
+        }
+        else fs.writeFileSync(target, entry.data);
+        if (entry.type !== 'symlink' && Number.isInteger(entry.mode) && entry.mode > 0) {
           try { fs.chmodSync(target, entry.mode & 0o777); } catch { /* preserve the file when chmod is unavailable */ }
         }
       }
@@ -12989,8 +12992,11 @@ export function createRuntime({
       const target = normalizePath(path.join(destination, entry.path), '/');
       if (target !== destination && !target.startsWith(`${destination}/`)) return fail('worktree path escapes checkout');
       fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.writeFileSync(target, entry.data);
-      if (Number.isInteger(entry.mode) && entry.mode > 0) {
+      if (entry.type === 'symlink') {
+        fs.symlinkSync(entry.target, target);
+      }
+      else fs.writeFileSync(target, entry.data);
+      if (entry.type !== 'symlink' && Number.isInteger(entry.mode) && entry.mode > 0) {
         try { fs.chmodSync(target, entry.mode & 0o777); } catch { /* preserve the file when chmod is unavailable */ }
       }
     }
@@ -13651,10 +13657,9 @@ export function createRuntime({
         error.code = 'ERR_CAPABILITY_DENIED';
         throw error;
       }
-      const files = Object.fromEntries(
-        vfs.snapshot({ copy: false, includeAllFiles: true }).artifacts.map(({ path, bytes }) => [path, bytes]),
-      );
-      const directories = vfs.snapshot({ copy: false, includeAllFiles: true }).directories;
+      const snapshot = vfs.snapshot({ copy: false, includeAllFiles: true });
+      const files = Object.fromEntries(snapshot.artifacts.map(({ path, bytes }) => [path, bytes]));
+      const { directories, symlinks } = snapshot;
       if (isEval) files[workerPath] = new scope.TextEncoder().encode(String(source));
       // Node-oriented WASI workers commonly install `self` as an alias for
       // globalThis before wiring parentPort. Browser WorkerGlobalScope already
@@ -13703,9 +13708,10 @@ export function createRuntime({
         nodeVersion: resolvedProfile.id,
         files,
         directories,
-          entry: workerPath,
-          execArgv: workerOptions.execArgv || ownerProcess.execArgv,
-          proxy: capabilities.manifest.proxy,
+        symlinks,
+        entry: workerPath,
+        execArgv: workerOptions.execArgv || ownerProcess.execArgv,
+        proxy: capabilities.manifest.proxy,
           workerThread: true,
           threadId,
           threadName: workerOptions.name ? String(workerOptions.name).trim() : '',

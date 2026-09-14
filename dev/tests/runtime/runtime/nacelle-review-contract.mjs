@@ -140,6 +140,25 @@ test('tar extraction rejects traversal, absolute paths, symlinks, and resource e
   const absolute = packTar([{ path: '/package/absolute.txt', data: new Uint8Array([1]) }]);
   assert.throws(() => unpackTar(absolute, { stripPrefix: 'package/', targetDir: '/app' }), { code: 'ERR_ARCHIVE_PATH' });
 
+  const symlink = packTar([
+    { path: 'project/fixture/target.js', data: new Uint8Array([1]), mtime: 1 },
+    { path: 'project/fixture/link.js', type: 'symlink', target: 'target.js', mtime: 1 },
+  ]);
+  assert.throws(() => unpackTar(symlink, { stripPrefix: '' }), { code: 'ERR_ARCHIVE_PATH' });
+  assert.deepEqual(
+    unpackTar(symlink, { stripPrefix: '', allowSymlinks: true }).at(-1),
+    {
+      path: 'project/fixture/link.js',
+      name: 'project/fixture/link.js',
+      type: 'symlink',
+      target: 'target.js',
+      size: 0,
+      mode: 0o644,
+      mtime: 0,
+      data: null,
+    },
+  );
+
   const many = packTar([
     { path: 'package/a', data: new Uint8Array([1]) },
     { path: 'package/b', data: new Uint8Array([2]) },

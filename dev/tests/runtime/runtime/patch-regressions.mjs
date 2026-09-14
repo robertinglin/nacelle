@@ -630,6 +630,28 @@ test('package self-references prefer the owning package exports over nested depe
   assert.equal(stdout, 'self-reference exports completed\n');
 });
 
+test('package self-reference lookup stops at a nested dependency package scope', async () => {
+  const { stdout } = await run(`
+    const value = require('/node/app/node_modules/consumer');
+    if (value !== 'nested-dependency') throw new Error('resolved enclosing package instead of dependency');
+    console.log('nested package scope completed');
+  `, {
+    '/node/app/package.json': JSON.stringify({
+      name: 'same-name-package',
+      exports: { '.': { require: './cjs.cjs' } },
+    }),
+    '/node/app/cjs.cjs': `module.exports = 'enclosing-package';`,
+    '/node/app/node_modules/consumer/package.json': JSON.stringify({
+      name: 'consumer-package',
+      main: './index.cjs',
+    }),
+    '/node/app/node_modules/consumer/index.cjs': `module.exports = require('same-name-package');`,
+    '/node/node_modules/same-name-package/package.json': JSON.stringify({ main: './index.cjs' }),
+    '/node/node_modules/same-name-package/index.cjs': `module.exports = 'nested-dependency';`,
+  });
+  assert.equal(stdout, 'nested package scope completed\n');
+});
+
 test('killing a referenced async child does not race its close event', async () => {
   const { stdout } = await run(`
     const child = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 60000)']);

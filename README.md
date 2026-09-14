@@ -264,6 +264,18 @@ npm run citgm:browser:chromium -- express
 npm run citgm:browser:firefox -- express
 ```
 
+For the ordered compatibility sweep, run the exact native Node CITGM path and
+both browser CITGM paths for each rank. If the candidate and runtime are
+unchanged and all three CITGM runs pass, those CITGM results are the gate:
+skip the repository-wide unit and full Playwright suites, commit the CITGM
+artifacts, and advance. Any runtime or test change requires the build,
+`npm test`, and full Chromium and Firefox Playwright suites before advancing.
+Classify a failure as an upstream package/repository blocker only after the
+same package, git revision, and failing path also fail under native Node;
+browser-only failures remain runtime/harness failures until that comparison is
+complete. Preserve the failure logs and state whether the cause is ours, a
+nested dependency, or an upstream package/repository problem.
+
 If no matching artifact exists, the runner falls back to direct browser registry
 fetches. Arguments after the module are forwarded to CITGM. The runner currently
 targets registry packages; local-directory and native-addon cases need an

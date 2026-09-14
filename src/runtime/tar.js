@@ -22,6 +22,24 @@ function validateArchiveName(name) {
   return normalized;
 }
 
+function validateArchiveLink(name, target) {
+  const normalized = String(target).replace(/\\/g, '/');
+  if (!normalized || normalized.startsWith('/') || /^[A-Za-z]:\//.test(normalized)) {
+    throw archiveError('ERR_ARCHIVE_PATH', `absolute or empty archive link is not allowed: ${target}`);
+  }
+  const resolved = String(name).split('/').slice(0, -1);
+  for (const part of normalized.split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') {
+      if (!resolved.length) throw archiveError('ERR_ARCHIVE_PATH', `archive link escapes its root: ${target}`);
+      resolved.pop();
+    } else {
+      resolved.push(part);
+    }
+  }
+  return normalized;
+}
+
 function decodeNullTerminatedString(bytes, offset, length, encoding = 'utf-8') {
   let end = offset;
   const max = offset + length;
@@ -61,6 +79,7 @@ function parsePaxHeader(paxBytes) {
 export function unpackTar(tarBytes, {
   stripPrefix = 'package/',
   targetDir = '',
+  allowSymlinks = false,
   maxEntries = DEFAULT_MAX_ENTRIES,
   maxExpandedBytes = DEFAULT_MAX_EXPANDED_BYTES,
 } = {}) {
@@ -71,6 +90,7 @@ export function unpackTar(tarBytes, {
   }
   let offset = 0;
   let nextOverrideName = null;
+  let nextOverrideLinkpath = null;
   let globalPax = {};
   let expandedBytes = 0;
   let archivePrefix = stripPrefix;
@@ -121,6 +141,7 @@ export function unpackTar(tarBytes, {
     if (typeflag === 'x') {
       const pax = parsePaxHeader(content);
       if (pax.path) nextOverrideName = pax.path;
+      if (pax.linkpath) nextOverrideLinkpath = pax.linkpath;
       continue;
     }
 
@@ -129,7 +150,8 @@ export function unpackTar(tarBytes, {
       continue;
     }
 
-    if (!['0', '\0', '5'].includes(typeflag)) {
+    const isSymlink = typeflag === '2';
+    if (!['0', '\0', '2', '5'].includes(typeflag) || (isSymlink && !allowSymlinks)) {
       throw archiveError('ERR_ARCHIVE_PATH', `archive entry type is not allowed: ${typeflag}`);
     }
 
@@ -137,6 +159,10 @@ export function unpackTar(tarBytes, {
       name = nextOverrideName;
       nextOverrideName = null;
     }
+    const linkpath = isSymlink
+      ? validateArchiveLink(name, nextOverrideLinkpath || decodeNullTerminatedString(header, 157, 100))
+      : null;
+    nextOverrideLinkpath = null;
 
     let normalizedName = validateArchiveName(name);
     if (archivePrefix === 'package/' && normalizedName === 'package' && typeflag === '5') {
@@ -155,15 +181,27 @@ export function unpackTar(tarBytes, {
     if (!normalizedName) continue;
 
     if (entries.length >= maxEntries) throw archiveError('ERR_ARCHIVE_LIMIT', 'archive entry limit exceeded');
+    const fullPath = targetDir
+      ? (targetDir.endsWith('/') ? `${targetDir}${normalizedName}` : `${targetDir}/${normalizedName}`)
+      : normalizedName;
     const isDir = typeflag === '5' || normalizedName.endsWith('/');
+    if (isSymlink) {
+      entries.push({
+        path: fullPath,
+        name: normalizedName,
+        type: 'symlink',
+        target: linkpath,
+        size: 0,
+        mode,
+        mtime,
+        data: null,
+      });
+      continue;
+    }
     if (!isDir) {
       expandedBytes += size;
       if (expandedBytes > maxExpandedBytes) throw archiveError('ERR_ARCHIVE_LIMIT', 'archive expanded-byte limit exceeded');
     }
-
-    const fullPath = targetDir
-      ? (targetDir.endsWith('/') ? `${targetDir}${normalizedName}` : `${targetDir}/${normalizedName}`)
-      : normalizedName;
 
     entries.push({
       path: fullPath,
@@ -242,7 +280,10 @@ export function packTar(entries) {
     header.set(new TextEncoder().encode(mtimeStr), 136);
 
     // typeflag
-    header[156] = entry.type === 'directory' ? 53 : 48; // '5' or '0'
+    header[156] = entry.type === 'directory' ? 53 : entry.type === 'symlink' ? 50 : 48; // '5', '2', or '0'
+    if (entry.type === 'symlink' && entry.target !== undefined) {
+      header.set(new TextEncoder().encode(String(entry.target)).subarray(0, 100), 157);
+    }
 
     // magic "ustar\0"
     header.set(new TextEncoder().encode('ustar\0'), 257);

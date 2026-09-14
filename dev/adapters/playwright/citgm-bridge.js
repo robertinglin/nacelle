@@ -1,6 +1,7 @@
 import { BrowserNpm, BrowserNpmCache } from './runtime/npm.js';
 import { createRuntime } from './runtime.js';
-import { unpackTarGz } from './runtime/tar.js';
+import { decompressGzipBytes, unpackTar, unpackTarGz } from './runtime/tar.js';
+import { compress } from './runtime/compression.js';
 import { createProgressReporter } from './progress-protocol.mjs';
 import { createCitgmProcessArgv } from './citgm-argv.mjs';
 import { createSerializedCaptureQueue } from './citgm-capture.mjs';
@@ -581,17 +582,19 @@ async function materializeGitProjectArchives(cache) {
     if (!archive) continue;
     let entries;
     try {
-      entries = await unpackTarGz(archive, { stripPrefix: '' }, globalThis);
+      entries = await unpackTarGz(archive, { stripPrefix: '', allowSymlinks: true }, globalThis);
     } catch {
       continue;
     }
     const firstPath = entries.find((entry) => entry.type === 'file')?.path || '';
     const root = firstPath.includes('/') ? `${firstPath.slice(0, firstPath.indexOf('/'))}/` : '';
     const files = entries
-      .filter((entry) => entry.type === 'file' && entry.data)
+      .filter((entry) => (entry.type === 'file' && entry.data) || entry.type === 'symlink')
       .map((entry) => ({
         path: root && entry.path.startsWith(root) ? entry.path.slice(root.length) : entry.path,
         data: entry.data,
+        target: entry.target,
+        type: entry.type,
         mode: entry.mode,
       }))
       .filter((entry) => entry.path && !entry.path.startsWith('/') && !entry.path.split('/').includes('..'));
@@ -621,9 +624,62 @@ async function materializeGitProjectArchives(cache) {
 
 const runtime = createRuntime({ globalObject: globalThis, nodeVersion: 'v22' });
 const npmCache = new ArtifactNpmCache({ globalObject: globalThis });
+const projectArchiveWithGitCache = new Map();
+
+async function githubProjectArchiveWithGitDirectory(url, archive) {
+  const key = String(url);
+  if (!/github\.com\/[^/]+\/[^/]+\/archive\/[^/]+\.tar\.gz(?:$|[?#])/i.test(key)) return archive;
+  const cached = projectArchiveWithGitCache.get(key);
+  if (cached) return cached;
+  const tarBytes = await decompressGzipBytes(archive, globalThis);
+  const entries = unpackTar(tarBytes, { stripPrefix: '', allowSymlinks: true });
+  const firstPath = entries.find((entry) => entry.path)?.path || '';
+  const separator = firstPath.indexOf('/');
+  const root = separator > 0 ? firstPath.slice(0, separator) : '';
+  if (!root || entries.some((entry) => entry.path === `${root}/.git` || entry.path === `${root}/.git/`)) return archive;
+
+  // CITGM downloads GitHub source archives, while the same package tests run
+  // against a real Git checkout under Node. Preserve the archive bytes and
+  // append only the empty .git directory that a GitHub checkout would expose;
+  // tests that inspect repository presence must see the same filesystem shape.
+  let terminalOffset = tarBytes.byteLength;
+  const isZeroBlock = (offset) => {
+    for (let index = offset; index < offset + 512; index += 1) {
+      if (tarBytes[index] !== 0) return false;
+    }
+    return true;
+  };
+  while (terminalOffset >= 512 && isZeroBlock(terminalOffset - 512)) terminalOffset -= 512;
+  const header = new Uint8Array(512);
+  header.set(encoder.encode(`${root}/.git/`).subarray(0, 100), 0);
+  header.set(encoder.encode('0000755\0'), 100);
+  header.set(encoder.encode('0000000\0'), 108);
+  header.set(encoder.encode('0000000\0'), 116);
+  header.set(encoder.encode('00000000000\0'), 124);
+  header.set(encoder.encode('00000000000\0'), 136);
+  header[156] = 53;
+  header.set(encoder.encode('ustar\0'), 257);
+  header.set(encoder.encode('00'), 263);
+  for (let index = 148; index < 156; index += 1) header[index] = 32;
+  let checksum = 0;
+  for (const value of header) checksum += value;
+  header.set(encoder.encode(checksum.toString(8).padStart(6, '0') + '\0 '), 148);
+  const output = new Uint8Array(terminalOffset + 512 + 1024);
+  output.set(tarBytes.subarray(0, terminalOffset), 0);
+  output.set(header, terminalOffset);
+  const result = await compress(output, 'gzip', globalThis);
+  projectArchiveWithGitCache.set(key, result);
+  return result;
+}
+
 const browserProxyAdapter = createBrowserProxyAdapter(async (url) => {
   const project = await npmCache.getProject(url);
-  if (project) return project;
+  if (project) return githubProjectArchiveWithGitDirectory(url, project);
+  if (/github\.com\/[^/]+\/[^/]+\/archive\/[^/]+\.tar\.gz(?:$|[?#])/i.test(String(url))) {
+    const response = await fetchProxyTarget(url, { method: 'GET', redirect: 'follow' });
+    if (!response || response.status < 200 || response.status >= 300) return null;
+    return githubProjectArchiveWithGitDirectory(url, await responseBytes(response));
+  }
   let parsed;
   try { parsed = new URL(url); } catch { return null; }
   const registryOrigin = npmCache.artifactManifest?.registry

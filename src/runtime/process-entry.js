@@ -246,15 +246,23 @@ export async function runProcessEntry(context) {
         value?.type !== 'directory' && !runtime.vfs.files.has(path)
       )),
     );
-    const missingSymlinks = (descriptor.symlinks || []).filter(([path]) => !runtime.vfs.files.has(path));
+    // `vfs.files.has()` follows a final symlink by design. Use lstat here so
+    // a link whose target is already present is not mistaken for a mounted
+    // link node when a child attaches to a shared VFS backend.
+    const missingSymlinks = (descriptor.symlinks || []).filter(([path]) => {
+      try { return !runtime.vfs.fs.lstatSync(path).isSymbolicLink(); }
+      catch { return true; }
+    });
     if (Object.keys(missingFiles).length || missingSymlinks.length) {
       await runtime.mount(missingFiles, { symlinks: missingSymlinks, copyBuffers: false });
     }
-  } else await runtime.mount(descriptor.files, {
-    directories: descriptor.directories,
-    symlinks: descriptor.symlinks,
-    copyBuffers: false,
-  });
+  } else {
+    await runtime.mount(descriptor.files, {
+      directories: descriptor.directories,
+      symlinks: descriptor.symlinks,
+      copyBuffers: false,
+    });
+  }
   const vfsUpdatePort = context.vfsUpdatePort || descriptor.vfsUpdatePort;
   const sharedVfsPort = descriptor.syncBuffer ? createSharedVfsUpdatePort(descriptor.syncBuffer) : null;
   const vfsBridge = vfsUpdatePort

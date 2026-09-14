@@ -664,7 +664,16 @@ function capabilitiesFor(env) {
     // cannot exhaust the page before the package reports its result.
     workers: { entryModules: ['*'], maxChildren: 8 },
     ipc: { enabled: true },
-    signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
+    // CITGM exercises ordinary POSIX child-process behavior, including
+    // signal forwarding. Grant the full browser-supported signal vocabulary
+    // for compatibility tests; application manifests can remain narrower.
+    signals: { allowed: [
+      'SIGHUP', 'SIGINT', 'SIGQUIT', 'SIGILL', 'SIGTRAP', 'SIGABRT', 'SIGBUS',
+      'SIGFPE', 'SIGKILL', 'SIGUSR1', 'SIGSEGV', 'SIGUSR2', 'SIGPIPE', 'SIGALRM',
+      'SIGTERM', 'SIGCHLD', 'SIGCONT', 'SIGSTOP', 'SIGTSTP', 'SIGTTIN', 'SIGTTOU',
+      'SIGURG', 'SIGXCPU', 'SIGXFSZ', 'SIGVTALRM', 'SIGPROF', 'SIGWINCH', 'SIGIO',
+      'SIGPWR', 'SIGSYS',
+    ] },
     output: { maxBytes: 16 * 1024 * 1024, stdoutBytes: 8 * 1024 * 1024, stderrBytes: 8 * 1024 * 1024 },
     envVars: { allowed: Object.keys(env) },
     proxy: { mode: 'proxy', enabled: true, capability: true },

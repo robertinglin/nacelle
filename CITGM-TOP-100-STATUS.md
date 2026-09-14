@@ -71,9 +71,9 @@ not being reclassified as newly rerun here.
 | 49 | json5 | BLOCKED | nested dependency issue (native-reproduced legacy tap/esm test stack) | Exact native Node CITGM installs `json5@2.2.3`, then all five tests fail before assertions with the nested `tap@12.6.0`/`esm` stack (`The canary is dead`). Browser CITGM reached the same upstream test phase after the ours-side Rollup resolver fix; see the rank 49 record below. |
 | 50 | react-is | BLOCKED | upstream package/repository (native-reproduced install contract; browser test-layout failure also observed) | Exact native Node CITGM fails during fresh install with `ERESOLVE`: React's root `eslint@^7.7.0` resolves to `eslint@7.32.0`, while `eslint-plugin-ft-flow@2.0.3` requires peer `eslint@^8.1.0`. Chromium independently installs and reaches the React Jest test command, which fails with `Cannot find module 'jest-circus/runner'`; the browser did fetch `jest-circus@30.5.1`, and the equivalent CommonJS `exports:./runner` loader oracle passes, so no adapter change or fake shim is justified. |
 | 51 | readdirp | BLOCKED | upstream package/repository (native-reproduced source archive/build-layout failure) | Exact native Node CITGM, Chromium, and Firefox all install successfully then fail the package test because `test/index.test.js` imports `../index.js`, but the exact gitHead archive contains only `index.ts` and no built `index.js`; see the rank 51 record below. |
-| 52 | commander | PENDING | — | Not attempted; rank 51 is complete and rank 52 is current. |
-| 53 | js-tokens | PENDING | — | Not attempted; rank 51 is complete and rank 52 is current. |
-| 54 | shebang-regex | PENDING | — | Not attempted; rank 51 is complete and rank 52 is current. |
+| 52 | commander | PASS | ours | Exact native Node CITGM passes after clearing ambient `NO_COLOR`; Chromium (`citgm-1789375263249`) and Firefox (`citgm-1789375328593`) pass after shared child signal, lifecycle, and nested ESM executable fixes. Repository gates pass: build; `npm test` 346/346; complete Chromium and Firefox Playwright coverage 310/310 each. The initial ambient-color failure and all browser failures are preserved under `artifacts/citgm-top-100/rank-052-commander/`. |
+| 53 | js-tokens | PENDING | — | Not attempted; rank 52 is complete and rank 53 is current. |
+| 54 | shebang-regex | PENDING | — | Not attempted; rank 52 is complete and rank 53 is current. |
 | 55 | fs-extra | PENDING | — | Not attempted; rank 51 is complete and rank 52 is current. |
 | 56 | readable-stream | PENDING | — | Not attempted; rank 51 is complete and rank 52 is current. |
 | 57 | punycode | PENDING | — | Not attempted; rank 51 is complete and rank 52 is current. |
@@ -1552,3 +1552,49 @@ npm run test:browser:firefox                         PASS — playwright-firefox
 No repository source changes were made for rank 51. The native proof, both
 browser confirmations, exact manifest/archive evidence, and final gate logs
 are committed, and the ordered cursor advances to rank 52.
+
+## Rank 52 failure record
+
+The exact candidate is `commander@15.0.0` at gitHead
+`ba6d13ddb4243e5913367734f8c159089ffe7834`. Complete native, browser, focused
+regression, and repository-gate artifacts are preserved under
+`artifacts/citgm-top-100/rank-052-commander/`.
+
+| Run / log | Observed failure or behavior | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v26.log` | The first exact native run failed only in commander’s color tests because this shell inherited `NO_COLOR=1`; commander intentionally gives that variable precedence over `FORCE_COLOR` and `CLICOLOR_FORCE`. | Harness-environment contamination, not a commander or upstream failure. The exact native rerun with `env -u NO_COLOR` passed; the clean proof is `native-citgm-node-v26-fixed.log`. |
+| `native-citgm-node-v26-fixed.log` | Exact native Node CITGM installed the exact gitHead archive and passed the smoke test, including commander’s upstream tests and TypeScript checks. | Native proof that commander is healthy outside the browser. Any browser-only failure was therefore treated as ours until fixed; no upstream classification was used. |
+| `citgm-chromium-run.log`, `citgm-firefox-run.log` | Initial browser runs exposed missing signal forwarding beyond the default termination trio, premature wrapper completion after `child.kill()`, and incorrect nested ESM executable/exit-code propagation. | Ours. The failures were reproduced by focused browser oracles and fixed in the shared runtime; no package-specific workaround or fake dependency was added. |
+| `signal-regression-*-final.log`, `spawn-signal-diagnostic-chromium-fixed.log`, `spawn-sync-direct-shebang-chromium-fixed.log`, `self-signal-fixed-chromium.log` | Focused oracles pass for POSIX signal delivery, handled-signal child completion, direct shebang `spawnSync` exit status, and unhandled self-signal termination. | Ours-side compatibility proof. The runtime now bridges the full POSIX signal vocabulary across injected child boundaries, waits for the underlying virtual terminal, keeps runtime lifecycle state synchronized with guest `process.exit()`, and routes direct shebang nested ESM executables through the shared synchronous bridge. |
+| `citgm-chromium-fixed-final-6.log` | Chromium CITGM run `citgm-1789375263249` installs commander and completes all upstream phases with exit code 0. | PASS after general runtime compatibility fixes. |
+| `citgm-firefox-fixed-final.log` | Firefox CITGM run `citgm-1789375328593` installs commander and completes all upstream phases with exit code 0. | PASS after the same general runtime fixes. |
+
+Rank 52 is recorded as `PASS` because the exact native Node run is green and
+both browser CITGM runs are green after fixing failures that native Node does
+not reproduce. The earlier `NO_COLOR` result is retained as an environment
+diagnostic, not attributed to the package or upstream repository.
+
+## Rank 52 gate evidence
+
+The runtime and test changes required repository-wide gates. The full default
+Playwright file set is covered in bounded groups because the long-running Next
+integration test and Firefox ALS pressure test exceed the command wrapper’s
+single-session lifetime; the groups together cover all 310 default tests in
+each browser, with no files omitted.
+
+```text
+npm run build                                      PASS — 5 WASM artifacts; Node 22.23.2
+npm test                                           PASS — gate-npm-test-final-network.log; 346/346
+Chromium Playwright default files                  PASS — 310/310 across gate-chromium-*.log
+Firefox Playwright default files                   PASS — 310/310 across gate-firefox-*.log
+Focused virtual-process Chromium                  PASS — 7/7; virtual-process-entry-chromium-postfix.log
+Focused virtual-process Firefox                   PASS — 7/7; virtual-process-entry-firefox-postfix.log
+```
+
+The gate logs include the two browser-specific integration applications,
+bridge-runtime, ESM loader, async/ALS, platform, path, HTTP, storage,
+performance, metadata, umask, node:test, VM, and assert files. The initial
+incomplete full-run logs and the failed focused diagnostics remain preserved
+alongside the green reruns. The rank-52 native proof, both exact browser CITGM
+results, focused oracles, and repository gates are committed, and the ordered
+cursor advances to rank 53.

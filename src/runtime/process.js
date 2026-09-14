@@ -11,7 +11,13 @@ import { resolveNodeVersionProfile } from '../versions/index.js';
 
 export { PROCESS_WORKER_SOURCE } from './process-worker.js';
 
-const SIGNALS = Object.freeze(new Set(['SIGTERM', 'SIGINT', 'SIGKILL']));
+const SIGNALS = Object.freeze(new Set([
+  'SIGHUP', 'SIGINT', 'SIGQUIT', 'SIGILL', 'SIGTRAP', 'SIGABRT', 'SIGBUS',
+  'SIGFPE', 'SIGKILL', 'SIGUSR1', 'SIGSEGV', 'SIGUSR2', 'SIGPIPE', 'SIGALRM',
+  'SIGTERM', 'SIGCHLD', 'SIGCONT', 'SIGSTOP', 'SIGTSTP', 'SIGTTIN', 'SIGTTOU',
+  'SIGURG', 'SIGXCPU', 'SIGXFSZ', 'SIGVTALRM', 'SIGPROF', 'SIGWINCH', 'SIGIO',
+  'SIGPWR', 'SIGSYS',
+]));
 const STATES = Object.freeze(['created', 'starting', 'running', 'stopping', 'exited', 'failed']);
 let nextProcessId = 1000;
 let nextRunId = 1;
@@ -348,7 +354,14 @@ function errorWithCode(code, message) {
 }
 
 function signalName(signal) {
-  if (typeof signal === 'number') return ({ 2: 'SIGINT', 9: 'SIGKILL', 15: 'SIGTERM' })[signal] || String(signal);
+  if (typeof signal === 'number') return ({
+    1: 'SIGHUP', 2: 'SIGINT', 3: 'SIGQUIT', 4: 'SIGILL', 5: 'SIGTRAP', 6: 'SIGABRT',
+    7: 'SIGBUS', 8: 'SIGFPE', 9: 'SIGKILL', 10: 'SIGUSR1', 11: 'SIGSEGV', 12: 'SIGUSR2',
+    13: 'SIGPIPE', 14: 'SIGALRM', 15: 'SIGTERM', 17: 'SIGCHLD', 18: 'SIGCONT',
+    19: 'SIGSTOP', 20: 'SIGTSTP', 21: 'SIGTTIN', 22: 'SIGTTOU', 23: 'SIGURG',
+    24: 'SIGXCPU', 25: 'SIGXFSZ', 26: 'SIGVTALRM', 27: 'SIGPROF', 28: 'SIGWINCH',
+    29: 'SIGIO', 30: 'SIGPWR', 31: 'SIGSYS',
+  })[signal] || String(signal);
   return String(signal || 'SIGTERM').toUpperCase();
 }
 

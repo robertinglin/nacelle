@@ -35,7 +35,13 @@ const CAPABILITY_KEYS = Object.freeze([
   'budgets',
 ]);
 
-const SIGNALS = Object.freeze(['SIGTERM', 'SIGINT', 'SIGKILL']);
+const SIGNALS = Object.freeze([
+  'SIGHUP', 'SIGINT', 'SIGQUIT', 'SIGILL', 'SIGTRAP', 'SIGABRT', 'SIGBUS',
+  'SIGFPE', 'SIGKILL', 'SIGUSR1', 'SIGSEGV', 'SIGUSR2', 'SIGPIPE', 'SIGALRM',
+  'SIGTERM', 'SIGCHLD', 'SIGCONT', 'SIGSTOP', 'SIGTSTP', 'SIGTTIN', 'SIGTTOU',
+  'SIGURG', 'SIGXCPU', 'SIGXFSZ', 'SIGVTALRM', 'SIGPROF', 'SIGWINCH', 'SIGIO',
+  'SIGPWR', 'SIGSYS',
+]);
 
 function capabilityError(code, message, details = {}) {
   const error = new Error(message);

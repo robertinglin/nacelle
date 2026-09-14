@@ -8498,6 +8498,7 @@ export function createRuntime({
             // child's exit before its close listeners have run.
             runtimeQueueMicrotask(() => {
               if (closed) return;
+              const killedProcess = ipc?.processHandle || childProcess;
               if (ipc?.processHandle) {
                 try { ipc.processHandle.kill(signal); } catch { /* already terminal */ }
               } else if (childProcess?.kill && childProcess?.wait) {
@@ -8505,6 +8506,13 @@ export function createRuntime({
               } else if (childProcess?._bnhAbort) {
                 try { childProcess._bnhAbort(signal); } catch { /* already terminal */ }
               }
+              // The underlying virtual process owns the real terminal
+              // boundary. A handled POSIX signal may run guest code and exit
+              // normally, so emitting the wrapper's exit/close immediately
+              // would truncate that code's output and report a false signal
+              // termination. The normal wait/exit observer below finishes
+              // the wrapper after the child terminal frame arrives.
+              if (killedProcess?.wait || killedProcess?.once) return;
               finish(null, normalizeChildKillSignal(signal));
             });
             return true;
@@ -9677,15 +9685,34 @@ export function createRuntime({
             const stdoutArr = [];
             const stderrArr = [];
             const nestedEsmProcess = scope.process?.__bnhEsmNested === true ? scope.process : null;
+            let preparedIsShebangScript = false;
+            if (vfs.files.has(prepared.entryPath)) {
+              try {
+                const preparedSource = vfs.readSource(prepared.entryPath);
+                const preparedText = typeof preparedSource === 'string'
+                  ? preparedSource
+                  : new TextDecoder().decode(preparedSource);
+                preparedIsShebangScript = preparedText.startsWith('#!');
+              } catch {
+                // Let the normal virtual command/module path report unreadable
+                // entries with its usual diagnostics.
+              }
+            }
             // A browser cannot synchronously block its event loop while an
             // ESM child with top-level await is running. A nested browser
             // worker can block on a shared coordination cell, however, while
             // a host-brokered child worker continues independently. Use that
-            // narrow bridge for spawnSync callers so compiler output and VFS
-            // mutations are available before the caller resumes.
+            // narrow bridge for nested spawnSync callers so executable
+            // children complete and propagate their status before the caller
+            // resumes. Direct shebang executables need this even with the
+            // default piped stdio; ordinary process.execPath children retain
+            // the existing inherited-stdio bridge without changing the
+            // asynchronous child-process path.
             if (nestedEsmProcess
-              && options.stdio === 'inherit'
-              && esmGraphHasTopLevelAwait(prepared.entryPath, nestedEsmProcess)) {
+              && vfs.files.has(prepared.entryPath)
+              && (options.stdio === 'inherit' || preparedIsShebangScript)
+              && (esmGraphHasTopLevelAwait(prepared.entryPath, nestedEsmProcess)
+                || isRuntimeEsmModule(prepared.entryPath, nestedEsmProcess.execArgv))) {
               const release = nestedEsmProcess._bnhTaskTracker?.(
                 `sync-esm-child:${String(prepared.entryPath).split('/').pop() || '<unknown>'}`,
               ) || null;
@@ -12961,6 +12988,21 @@ export function createRuntime({
     const processData = injectedProcess
         ? (() => {
           const processObject = fullProcessData.processObject;
+          // A worker-backed or in-memory child supplies its process object as
+          // the execution boundary, while guest modules receive the richer
+          // runtime process created above. Route POSIX signal delivery across
+          // that boundary so child_process.kill() reaches guest listeners and
+          // still preserves the native handled/unhandled return value.
+          if (injectedProcess !== processObject && typeof injectedProcess.emit === 'function') {
+            const injectedEmit = injectedProcess.emit.bind(injectedProcess);
+            injectedProcess.emit = (name, ...args) => {
+              if (runtimeChildSignalNames.has(name)) {
+                const handled = processObject.emit(name, ...args);
+                if (handled) return true;
+              }
+              return injectedEmit(name, ...args);
+            };
+          }
           // Preserve injected process identity and capabilities (stdout, stderr, exit control, IPC)
           const injectedStdout = injectedProcess.stdout || processObject.stdout;
           const injectedStderr = injectedProcess.stderr || processObject.stderr;
@@ -12990,6 +13032,7 @@ export function createRuntime({
             processObject.stdin = injectedStdin || processObject.stdin;
           }
           installProcessStdinSurface(processObject.stdin);
+          const originalProcessExit = processObject.exit;
           let injectedExitEventEmitted = false;
           processObject.exit = (code) => {
             processObject.exitCode = Number(code) || 0;
@@ -13001,7 +13044,11 @@ export function createRuntime({
             if (injectedProcess) injectedProcess.__bnhExitRequest = exitRequest;
             if (injectedExitEventEmitted) return;
             injectedExitEventEmitted = true;
-            processObject.emit('exit', processObject.exitCode);
+            // Keep the runtime-owned lifecycle state in sync with the
+            // injected process boundary. Without this, a signal handler that
+            // calls process.exit() writes its final output but leaves the
+            // runtime's referenced timers and idle loop alive forever.
+            originalProcessExit(processObject.exitCode);
             if (typeof injectedProcess.exit === 'function') return injectedProcess.exit(code);
           };
           const injectedKill = injectedProcess.kill;
@@ -13014,6 +13061,18 @@ export function createRuntime({
               const error = new Error(`kill ESRCH ${targetPid}`);
               error.code = 'ESRCH';
               throw error;
+            }
+            // The injected process owns the browser worker's transport, but
+            // its kill() implementation cannot update the runtime-owned
+            // process object when guest code signals itself. Deliver the
+            // signal through the runtime object first so an unhandled signal
+            // records the same non-zero termination that the injected child
+            // boundary reports to its parent.
+            if (targetPid === Number(processObject.pid)
+              && runtimeChildSignalNames.has(requestedSignal)) {
+              const handled = processObject.emit(requestedSignal);
+              if (!handled || requestedSignal === 'SIGKILL') processObject.exit(1);
+              return true;
             }
             if (typeof injectedKill === 'function') return injectedKill(pid, signal);
             return true;

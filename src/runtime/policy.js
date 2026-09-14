@@ -2,7 +2,16 @@ const KNOWN_KEYS = new Set([
   'vfs', 'workers', 'ipc', 'signals', 'output', 'envVars', 'process.env', 'proxy',
   'network', 'npm', 'secrets', 'hostBridge', 'persistence', 'preview', 'budgets',
 ]);
-const SIGNALS = new Set(['SIGTERM', 'SIGINT', 'SIGKILL']);
+// Keep the capability vocabulary aligned with the POSIX signal names exposed
+// by the browser Node compatibility layer. The manifest still controls which
+// of these a particular runtime may deliver.
+const SIGNALS = new Set([
+  'SIGHUP', 'SIGINT', 'SIGQUIT', 'SIGILL', 'SIGTRAP', 'SIGABRT', 'SIGBUS',
+  'SIGFPE', 'SIGKILL', 'SIGUSR1', 'SIGSEGV', 'SIGUSR2', 'SIGPIPE', 'SIGALRM',
+  'SIGTERM', 'SIGCHLD', 'SIGCONT', 'SIGSTOP', 'SIGTSTP', 'SIGTTIN', 'SIGTTOU',
+  'SIGURG', 'SIGXCPU', 'SIGXFSZ', 'SIGVTALRM', 'SIGPROF', 'SIGWINCH', 'SIGIO',
+  'SIGPWR', 'SIGSYS',
+]);
 
 function policyError(code, message, details = {}) {
   const error = new Error(message);

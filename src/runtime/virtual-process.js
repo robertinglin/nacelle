@@ -2,7 +2,13 @@ import { BrowserEventEmitter } from './events.js';
 import { createBrowserProcess, createProcess } from './process.js';
 
 const TERMINAL_STATES = new Set(['exited', 'failed']);
-const SIGNALS = new Set(['SIGTERM', 'SIGINT', 'SIGKILL']);
+const SIGNALS = new Set([
+  'SIGHUP', 'SIGINT', 'SIGQUIT', 'SIGILL', 'SIGTRAP', 'SIGABRT', 'SIGBUS',
+  'SIGFPE', 'SIGKILL', 'SIGUSR1', 'SIGSEGV', 'SIGUSR2', 'SIGPIPE', 'SIGALRM',
+  'SIGTERM', 'SIGCHLD', 'SIGCONT', 'SIGSTOP', 'SIGTSTP', 'SIGTTIN', 'SIGTTOU',
+  'SIGURG', 'SIGXCPU', 'SIGXFSZ', 'SIGVTALRM', 'SIGPROF', 'SIGWINCH', 'SIGIO',
+  'SIGPWR', 'SIGSYS',
+]);
 const PROCESS_REGISTRY_KEY = '__BNH_VIRTUAL_PROCESS_REGISTRY__';
 
 function registerProcess(scope, processHandle) {
@@ -44,7 +50,14 @@ function runVfsEntry(options, context) {
 }
 
 function normalizeSignal(signal) {
-  if (typeof signal === 'number') return ({ 2: 'SIGINT', 9: 'SIGKILL', 15: 'SIGTERM' })[signal] || String(signal);
+  if (typeof signal === 'number') return ({
+    1: 'SIGHUP', 2: 'SIGINT', 3: 'SIGQUIT', 4: 'SIGILL', 5: 'SIGTRAP', 6: 'SIGABRT',
+    7: 'SIGBUS', 8: 'SIGFPE', 9: 'SIGKILL', 10: 'SIGUSR1', 11: 'SIGSEGV', 12: 'SIGUSR2',
+    13: 'SIGPIPE', 14: 'SIGALRM', 15: 'SIGTERM', 17: 'SIGCHLD', 18: 'SIGCONT',
+    19: 'SIGSTOP', 20: 'SIGTSTP', 21: 'SIGTTIN', 22: 'SIGTTOU', 23: 'SIGURG',
+    24: 'SIGXCPU', 25: 'SIGXFSZ', 26: 'SIGVTALRM', 27: 'SIGPROF', 28: 'SIGWINCH',
+    29: 'SIGIO', 30: 'SIGPWR', 31: 'SIGSYS',
+  })[signal] || String(signal);
   return String(signal || 'SIGTERM').toUpperCase();
 }
 

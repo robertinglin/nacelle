@@ -15016,20 +15016,23 @@ export function createRuntime({
       && /Firefox\//.test(String(scope.navigator?.userAgent || ''))
       && typeof scope.Uint8Array === 'function') {
       const nativeUint8Array = scope.Uint8Array;
-      class GuestUint8Array extends nativeUint8Array {
-        constructor(...args) {
-          try {
-            super(...args);
-          } catch (error) {
-            if (error instanceof RangeError && /invalid array length/i.test(String(error?.message || ''))) {
-              throw new RangeError(`Invalid typed array length${args.length === 1 ? `: ${String(args[0])}` : ''}`);
-            }
-            throw error;
+      function GuestUint8Array(...args) {
+        if (!new.target) throw new TypeError('Constructor Uint8Array requires \'new\'');
+        try {
+          // Forward allocation with the guest newTarget so instances receive
+          // GuestUint8Array.prototype without making the wrapper a derived
+          // class whose `super()` would dispatch to abstract %TypedArray%.
+          return Reflect.construct(nativeUint8Array, args, new.target);
+        } catch (error) {
+          if (error instanceof RangeError && /invalid array length/i.test(String(error?.message || ''))) {
+            throw new RangeError(`Invalid typed array length${args.length === 1 ? `: ${String(args[0])}` : ''}`);
           }
+          throw error;
         }
       }
       try {
         Object.defineProperty(GuestUint8Array, 'name', { configurable: true, value: 'Uint8Array' });
+        Object.defineProperty(GuestUint8Array, 'length', { configurable: true, value: nativeUint8Array.length });
         // A subclass's default prototype inherits from the native
         // Uint8Array.prototype. Firefox keeps the typed-array accessors on
         // the next prototype up, so that extra link makes the Node pattern
@@ -15044,6 +15047,19 @@ export function createRuntime({
           if (descriptor) Object.defineProperty(GuestUint8Array.prototype, key, descriptor);
         }
         Object.setPrototypeOf(GuestUint8Array.prototype, typedArrayPrototype);
+        // Intrinsic helpers derive %TypedArray% with
+        // `Object.getPrototypeOf(Uint8Array)`. A subclass normally points
+        // there at the native Uint8Array constructor, which makes Firefox's
+        // inherited `buffer` accessor disappear from the lookup. Preserve
+        // the native static surface while giving the guest constructor the
+        // same constructor parent as a native Uint8Array.
+        const typedArrayConstructor = Object.getPrototypeOf(nativeUint8Array);
+        for (const key of Reflect.ownKeys(nativeUint8Array)) {
+          if (key === 'length' || key === 'name' || key === 'prototype' || key === 'caller' || key === 'arguments') continue;
+          const descriptor = Object.getOwnPropertyDescriptor(nativeUint8Array, key);
+          if (descriptor) Object.defineProperty(GuestUint8Array, key, descriptor);
+        }
+        Object.setPrototypeOf(GuestUint8Array, typedArrayConstructor);
         // Buffer is a Uint8Array subclass too. The compatibility Buffer class
         // is created before this per-run Firefox constructor exists, so bridge
         // its prototype chain after the guest constructor is installed;

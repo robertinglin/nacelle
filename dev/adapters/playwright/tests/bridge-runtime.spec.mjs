@@ -1564,6 +1564,24 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('keeps typed-array buffer intrinsics callable through the guest Uint8Array', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const typedArrayConstructor = Object.getPrototypeOf(Uint8Array);
+      assert.strictEqual(typeof typedArrayConstructor, 'function');
+      const bufferGetter = Object.getOwnPropertyDescriptor(
+        typedArrayConstructor.prototype, 'buffer',
+      )?.get;
+      assert.strictEqual(typeof bufferGetter, 'function');
+      const bytes = new Uint8Array([1, 2, 3]);
+      assert.strictEqual(bufferGetter.call(bytes), bytes.buffer);
+      assert.strictEqual(bytes.buffer.byteLength, 3);
+      process.stdout.write('typed-array buffer intrinsic completed');
+    `);
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('typed-array buffer intrinsic completed');
+  });
+
   test('inherits the package cwd for asynchronous nested npm scripts', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert');

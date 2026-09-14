@@ -1299,6 +1299,39 @@ export function createVfs(options = {}) {
     return mount;
   }
 
+  function isWriteStream(value) {
+    return value !== null && typeof value === 'object'
+      && (typeof value.getReader === 'function' || typeof value[Symbol.asyncIterator] === 'function');
+  }
+
+  async function collectWriteStream(value) {
+    const chunks = [];
+    if (typeof value.getReader === 'function') {
+      const reader = value.getReader();
+      try {
+        for (;;) {
+          const result = await reader.read();
+          if (result.done) break;
+          chunks.push(typeof result.value === 'string' ? textEncoder.encode(result.value) : decode(result.value));
+        }
+      } finally {
+        reader.releaseLock?.();
+      }
+    } else {
+      for await (const chunk of value) {
+        chunks.push(typeof chunk === 'string' ? textEncoder.encode(chunk) : decode(chunk));
+      }
+    }
+    const total = chunks.reduce((length, chunk) => length + chunk.byteLength, 0);
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return bytes;
+  }
+
   function readBytes(path, operation = 'open', permission = FS_CONSTANTS.R_OK) {
     path = resolvePath(path);
     access(path, operation);
@@ -1961,6 +1994,19 @@ export function createVfs(options = {}) {
       optionsObject = undefined;
     }
     resolve(pathValue);
+    if (isWriteStream(data)) {
+      const operation = collectWriteStream(data).then((value) => {
+        const path = resolve(pathValue);
+        const flag = typeof optionsObject === 'string' ? optionsObject : optionsObject?.flag || 'w';
+        if (flag.includes('x') && nodeExists(resolvePath(path, false))) throw existsError(path, 'write');
+        setFile(path, value, flag.includes('a'), 'write', optionsObject?.encoding);
+        if (typeof done === 'function') done(null);
+      }, (error) => {
+        if (typeof done === 'function') done(error);
+        else throw error;
+      });
+      return operation;
+    }
     try {
       const path = resolve(pathValue);
       const flag = typeof optionsObject === 'string' ? optionsObject : optionsObject?.flag || 'w';

@@ -1065,6 +1065,60 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('runs an npm install prepublish hook for the package being installed', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('/node/node_modules/.bin/node', [
+          '/node/node_modules/.bin/npm', 'install', '--no-save',
+        ], { cwd: '/node' });
+        let errorOutput = '';
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(require('node:fs').readFileSync('/node/prepublish-ran', 'utf8'), 'yes');
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/package.json': JSON.stringify({
+          name: 'npm-prepublish-fixture',
+          version: '1.0.0',
+          scripts: { prepublish: "node -e \"require('fs').writeFileSync('/node/prepublish-ran', 'yes')\"" },
+        }),
+        '/node/node_modules/.bin/node': '#!/usr/bin/env node\n',
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\n',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('accepts a browser ReadableStream as fs.promises.writeFile input', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { readFile, writeFile } = require('node:fs/promises');
+
+      (async () => {
+        const response = await fetch('data:text/plain,stream-body');
+        await writeFile('/node/stream-body.txt', response.body);
+        assert.strictEqual(await readFile('/node/stream-body.txt', 'utf8'), 'stream-body');
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `);
+
+    await expectPass(expect, result);
+  });
+
   test('runs file-based npm scripts from a nested package cwd', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert');

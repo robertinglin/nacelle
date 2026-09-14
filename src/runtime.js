@@ -161,6 +161,7 @@ import { createVirtualProcess } from './runtime/virtual-process.js';
 import { createBrowserExecve, createBrowserProcess } from './runtime/process.js';
 import { resolveNodeVersionProfile } from './versions/index.js';
 import { createProxyCapability } from './runtime/proxy.js';
+import { isBrowserFetchFailure } from './runtime/transport.js';
 import { createV8Module } from './runtime/v8.js';
 import { createProcessReport } from './runtime/report.js';
 import { installProcessFinalization } from './runtime/finalization.js';
@@ -12571,16 +12572,18 @@ export function createRuntime({
           // A package lifecycle runner deliberately does not execute install
           // hooks for every downloaded dependency. An explicit `npm install`
           // inside a package's own script still runs that package's
-          // preinstall/install/postinstall hooks, as native npm does. This is
-          // required by repositories such as resolve whose postinstall
-          // bootstraps a local symlinked multirepo fixture.
+          // preinstall/install/postinstall/prepublish hooks, as native npm
+          // does. The prepublish hook is still part of npm's install contract
+          // for older repositories such as tr46, whose exact Git checkout
+          // generates ignored distribution files there before testing.
           const lifecycleOutput = [];
           const lifecycleErrors = [];
           let lifecycleForwarded = false;
-          const insideInstallLifecycle = ['preinstall', 'install', 'postinstall']
+          const installLifecycleNames = ['preinstall', 'install', 'postinstall', 'prepublish'];
+          const insideInstallLifecycle = installLifecycleNames
             .includes(String(env.npm_lifecycle_event || ''));
           if (!insideInstallLifecycle) {
-            for (const lifecycleName of ['preinstall', 'install', 'postinstall']) {
+            for (const lifecycleName of installLifecycleNames) {
               if (typeof packageJson?.scripts?.[lifecycleName] !== 'string') continue;
               const lifecycleResult = await runScriptBody(lifecycleName, packageJson, {
                 cwd: prepared.cwd,
@@ -14577,8 +14580,32 @@ export function createRuntime({
         if (hasGrantedNativeNetwork) {
           // This is the browser-native egress route granted to the guest. It
           // is required by stock tools such as Next.js' own WASM downloader
-          // and does not rewrite or intercept the guest request.
-          return fetchWithTelemetry('browser-native', () => nativeFetch(input, init));
+          // and does not rewrite or intercept the guest request. A granted
+          // origin can still reject the request at the browser CORS boundary
+          // (for example GitHub's raw-content redirect). If an explicit proxy
+          // capability is available, preserve the native-first behavior and
+          // negotiate the same request through that capability on failure.
+          const nativeResult = fetchWithTelemetry('browser-native', () => nativeFetch(input, init));
+          if (!hasGrantedProxy) return nativeResult;
+          return Promise.resolve(nativeResult).catch((error) => {
+            if (!isBrowserFetchFailure(error)) throw error;
+            return fetchWithTelemetry('proxy-fallback', () => Promise.resolve(proxyCapability.request({
+              target,
+              method,
+              headers: init.headers,
+              body: init.body,
+              signal: init.signal,
+              redirect: init.redirect,
+            })).then((response) => {
+              if (response && typeof response.arrayBuffer === 'function' && response.status !== undefined) return response;
+              const body = response?.bodyBytes ?? response?.body ?? response?.data ?? response?.text ?? '';
+              return new scope.Response(body, {
+                status: Number(response?.status ?? response?.statusCode ?? 200),
+                statusText: response?.statusText,
+                headers: response?.headers,
+              });
+            }));
+          });
         }
         return fetchWithTelemetry('virtual-network', () => virtualHttpFetch(input, init));
       };

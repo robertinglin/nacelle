@@ -1582,6 +1582,59 @@ test.describe('browser runtime bridge and core primitives', () => {
     expect(result.stdout).toContain('typed-array buffer intrinsic completed');
   });
 
+  test('exposes the available native module registry through process.binding', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const natives = process.binding('natives');
+      assert.strictEqual(typeof natives, 'object');
+      assert.ok(natives && Object.prototype.hasOwnProperty.call(natives, 'path'));
+      assert.ok(natives && Object.prototype.hasOwnProperty.call(natives, 'fs'));
+      assert.ok(natives && Object.prototype.hasOwnProperty.call(natives, 'util'));
+      const lazyNative = {};
+      for (const name in natives) {
+        Object.defineProperty(lazyNative, name, {
+          configurable: true,
+          enumerable: true,
+          get: () => require(name),
+        });
+      }
+      assert.strictEqual(lazyNative.path.basename('/tmp/example.txt'), 'example.txt');
+      assert.strictEqual(typeof lazyNative.fs.readFileSync, 'function');
+      process.stdout.write('native module registry completed');
+    `);
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('native module registry completed');
+  });
+
+  test('provides callable Node CallSite methods to stack formatters', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const previousPrepare = Error.prepareStackTrace;
+      Error.prepareStackTrace = (_error, callSites) => callSites;
+      let callSites;
+      try { callSites = new Error('callsite oracle').stack; }
+      finally { Error.prepareStackTrace = previousPrepare; }
+      assert.ok(Array.isArray(callSites) && callSites.length > 0);
+      for (const method of [
+        'getFileName', 'getLineNumber', 'getColumnNumber', 'getFunctionName',
+        'getScriptNameOrSourceURL', 'getEvalOrigin', 'getTypeName', 'getMethodName',
+        'isToplevel', 'isEval', 'isNative', 'isConstructor', 'isAsync',
+      ]) assert.strictEqual(typeof callSites[0][method], 'function', method);
+      assert.strictEqual(typeof callSites[0].toString(), 'string');
+      const cloned = {};
+      for (const method of Object.getOwnPropertyNames(Object.getPrototypeOf(callSites[0]))) {
+        cloned[method] = /^(?:is|get)/.test(method)
+          ? (...args) => callSites[0][method](...args)
+          : callSites[0][method];
+      }
+      assert.strictEqual(typeof cloned.isNative, 'function');
+      assert.strictEqual(cloned.isNative(), false);
+      process.stdout.write('callsite contract completed');
+    `);
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('callsite contract completed');
+  });
+
   test('inherits the package cwd for asynchronous nested npm scripts', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert');

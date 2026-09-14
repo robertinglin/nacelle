@@ -195,6 +195,16 @@ const BUILTIN_NAMES = Object.freeze([
 
 const PUBLIC_BUILTIN_NAMES = Object.freeze(BUILTIN_NAMES.filter((name) => !name.startsWith('internal/')));
 
+// `process.binding('natives')` is a legacy registry of native module names.
+// Keep it aligned with the modules this runtime can actually load; old
+// CommonJS tooling such as cli@1.0.0 uses the keys to create lazy require
+// accessors and does not consume Node's internal source strings.
+const NATIVE_BUILTIN_REGISTRY = Object.fromEntries(
+  BUILTIN_NAMES
+    .filter((name) => !name.startsWith('node:'))
+    .map((name) => [name, '']),
+);
+
 function builtinName(name) {
   const value = String(name);
   if (!value.startsWith('node:')) return value;
@@ -6949,6 +6959,7 @@ export function createRuntime({
     installErrnoConstants(internalBindingContract.bindings.constants.os.errno, constants);
     delete internalBindingContract.bindings.constants.fs.crypto;
     processObject.binding = (name) => {
+      if (name === 'natives') return NATIVE_BUILTIN_REGISTRY;
       if (name === 'test') {
         const error = new Error('No such module: test');
         error.code = 'ERR_UNKNOWN_BUILTIN_MODULE';

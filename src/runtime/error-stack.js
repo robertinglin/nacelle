@@ -1,6 +1,30 @@
 const installedConstructors = new WeakSet();
 function CallSite() {}
 
+Object.defineProperties(CallSite.prototype, {
+  constructor: { configurable: true, value: CallSite, writable: true },
+  getFileName: { configurable: true, value() { return this.__bnhFileName; }, writable: true },
+  getScriptNameOrSourceURL: {
+    configurable: true,
+    value() { return this.__bnhFileName; },
+    writable: true,
+  },
+  getLineNumber: { configurable: true, value() { return this.__bnhLineNumber; }, writable: true },
+  getColumnNumber: { configurable: true, value() { return this.__bnhColumnNumber; }, writable: true },
+  getFunctionName: { configurable: true, value() { return this.__bnhFunctionName || null; }, writable: true },
+  getFunction: { configurable: true, value() { return undefined; }, writable: true },
+  getTypeName: { configurable: true, value() { return null; }, writable: true },
+  getMethodName: { configurable: true, value() { return null; }, writable: true },
+  getEvalOrigin: { configurable: true, value() { return undefined; }, writable: true },
+  isToplevel: { configurable: true, value() { return !this.__bnhFunctionName; }, writable: true },
+  isEval: { configurable: true, value() { return false; }, writable: true },
+  isNative: { configurable: true, value() { return false; }, writable: true },
+  isConstructor: { configurable: true, value() { return false; }, writable: true },
+  isAsync: { configurable: true, value() { return false; }, writable: true },
+  getThis: { configurable: true, value() { return undefined; }, writable: true },
+  toString: { configurable: true, value() { return this.__bnhLine; }, writable: true },
+});
+
 function parseLocation(location) {
   const match = String(location || '').match(/^(.*?)(?::(\d+))(?::(\d+))$/);
   if (!match) {
@@ -33,32 +57,17 @@ function createCallSite(line) {
   }
 
   const parsed = parseLocation(location);
-  const site = {
-    getFileName: () => parsed.fileName,
-    getScriptNameOrSourceURL: () => parsed.fileName,
-    getLineNumber: () => parsed.lineNumber,
-    getColumnNumber: () => parsed.columnNumber,
-    getFunctionName: () => functionName || null,
-    getFunction: () => undefined,
-    getTypeName: () => null,
-    getMethodName: () => null,
-    getEvalOrigin: () => undefined,
-    isToplevel: () => !functionName,
-    isEval: () => false,
-    isNative: () => false,
-    isConstructor: () => false,
-    isAsync: () => false,
-    getThis: () => undefined,
-    toString: () => line,
-  };
-  // @tapjs/stack recognizes structured V8 call sites by their constructor
-  // name before wrapping them in its richer CallSiteLike implementation.
-  // Browser stack parsing produces ordinary objects, so preserve that small
-  // observable part of the Node CallSite contract explicitly.
-  Object.defineProperty(site, 'constructor', {
-    configurable: true,
-    value: CallSite,
+  const site = Object.create(CallSite.prototype);
+  Object.defineProperties(site, {
+    __bnhFileName: { configurable: true, value: parsed.fileName },
+    __bnhLineNumber: { configurable: true, value: parsed.lineNumber },
+    __bnhColumnNumber: { configurable: true, value: parsed.columnNumber },
+    __bnhFunctionName: { configurable: true, value: functionName },
+    __bnhLine: { configurable: true, value: line },
   });
+  // @tapjs/stack and source-map-support recognize structured V8 call sites by
+  // their constructor/prototype shape before wrapping them in richer objects.
+  // Browser stack parsing therefore uses a real Node-shaped CallSite prototype.
   // Node's CallSite objects are extensible. Consumers such as @tapjs/stack
   // attach bounded metadata (for example, the owning cwd) while cleaning a
   // captured stack, so freezing the browser fallback breaks that contract.
@@ -97,7 +106,7 @@ const nativeCallSiteMethods = [
 ];
 
 function wrapNativeCallSite(site, overrides = {}) {
-  const wrapped = Object.create(site);
+  const wrapped = Object.create(CallSite.prototype);
   for (const methodName of nativeCallSiteMethods) {
     let method;
     try { method = site[methodName]; } catch { continue; }
@@ -128,7 +137,10 @@ function normalizeNativeCallSite(site) {
   let fileName;
   try { fileName = site.getFileName(); } catch { return site; }
   if (typeof fileName === 'string' && fileName) {
-    return Object.isExtensible(site) ? site : wrapNativeCallSite(site);
+    const complete = nativeCallSiteMethods.every((methodName) => {
+      try { return typeof site[methodName] === 'function'; } catch { return false; }
+    });
+    return complete && Object.isExtensible(site) ? site : wrapNativeCallSite(site);
   }
 
   // Chromium's structured CallSites report undefined for frames created by

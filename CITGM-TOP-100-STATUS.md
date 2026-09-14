@@ -76,7 +76,7 @@ not being reclassified as newly rerun here.
 | 54 | shebang-regex | BLOCKED | nested dependency/toolchain (native-reproduced) | Exact native Node CITGM fails in `xo` before package tests because nested `eslint-plugin-ava` calls removed `util.isDate`; exact Chromium and clean final Firefox CITGM pass the package. A separate Firefox attempt received an HTTP 504 HTML response from GitHub and was retried to green; see the rank 54 record below. |
 | 55 | fs-extra | PASS | ours | Exact native Node CITGM passes `fs-extra@11.4.0` at gitHead `53a8d1a63c8eb30573110ed0f6528975f98801f`; final Chromium (`citgm-1789400169971`) and Firefox (`citgm-1789400245339`) CITGM pass. The browser failures were ours: materialized npm `.bin` launchers did not expose the target package as `require.main`, which broke nested `version-guard` package lookup. The runtime now resolves direct `.bin` symlinks and marked browser-generated CJS shims to the target entry, and publishes that target as the CommonJS main module. Required final gates passed: build; `npm test` 346/346; full Chromium and Firefox Playwright 316/316 each. |
 | 56 | readable-stream | BLOCKED | upstream package/repository (native-reproduced global-leak test contract; browser environment mismatch) | Exact native Node CITGM for `readable-stream@4.7.0` at gitHead `88df21041dc26c210fab3e074ab6bb681a604b8e` fails the package's `test/common/index.js` global-leak assertion because Node 26.7 exposes `sessionStorage`. Chromium and Firefox also reach the upstream tests but fail the same global-leak guard on browser/runtime globals. Native proof means this is not being attributed to a browser-only Nacelle defect; no fake shim or package-specific workaround was added. |
-| 57 | punycode | PENDING | — | Not attempted; rank 51 is complete and rank 52 is current. |
+| 57 | punycode | PASS | none observed | Exact native Node CITGM passes `punycode@2.3.1` at gitHead `9e1b2cda98d215d3a73fcbfe93c62e021f4ba768`; exact Chromium (`citgm-1789402864193`) and Firefox (`citgm-1789402906868`) CITGM also pass unchanged. No runtime, nested-dependency, or upstream package/repository failure was observed. Repository-wide gates were skipped under the unchanged double-CITGM rule. |
 | 58 | tr46 | PENDING | — | Not attempted; rank 51 is complete and rank 52 is current. |
 | 59 | find-up | PENDING | — | Not attempted; rank 51 is complete and rank 52 is current. |
 | 60 | webidl-conversions | PENDING | — | Not attempted; rank 51 is complete and rank 52 is current. |
@@ -1769,3 +1769,35 @@ Chromium and Firefox Playwright suites                              SKIPPED — 
 The native proof, both browser failures, and their complete logs are ready to
 commit. The ordered cursor advances to rank 57 only after this blocker record
 is committed cleanly.
+
+## Rank 57 pass record
+
+The exact candidate is `punycode@2.3.1` at gitHead
+`9e1b2cda98d215d3a73fcbfe93c62e021f4ba768`. The native and browser results
+are preserved under `artifacts/citgm-top-100/rank-057-punycode/`.
+
+| Run / log | Observed behavior | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v26-network.log` | Exact native Node CITGM downloaded the exact gitHead archive, installed it, and reported `The smoke test has passed`. | PASS. No failure was observed. |
+| `citgm-chromium.log` | Exact Chromium CITGM installed the package and completed its upstream Mocha test phase with exit code 0; run `citgm-1789402864193`. | PASS. No runtime, nested-dependency, or upstream failure was observed. |
+| `citgm-firefox.log` | Exact Firefox CITGM installed the package and completed its upstream Mocha test phase with exit code 0; run `citgm-1789402906868`. | PASS. No runtime, nested-dependency, or upstream failure was observed. |
+
+Rank 57 is recorded as `PASS`: native Node and both browser CITGM runs passed
+without repository changes.
+
+## Rank 57 gate evidence
+
+Under the unchanged double-CITGM continuation rule, the repository-wide build,
+unit, and full Playwright suites were skipped. The exact native and browser
+CITGM results are the required gate for this unchanged pass.
+
+```text
+npm exec --yes --package=citgm@10.0.2 -- citgm punycode  PASS — native-citgm-node-v26-network.log; smoke test passed
+npm run citgm:browser:chromium -- punycode  PASS — citgm-1789402864193; package smoke test exits 0
+npm run citgm:browser:firefox -- punycode   PASS — citgm-1789402906868; package smoke test exits 0
+npm test                                      SKIPPED — unchanged double-CITGM pass
+Chromium and Firefox Playwright suites       SKIPPED — unchanged double-CITGM pass
+```
+
+The status record and all rank-57 CITGM artifacts are ready to commit. The
+ordered cursor advances to rank 58 only after that commit is clean.

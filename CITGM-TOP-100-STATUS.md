@@ -85,51 +85,51 @@ not being reclassified as newly rerun here.
 | 57 | punycode | PASS | none observed | Exact native Node CITGM passes `punycode@2.3.1` at gitHead `9e1b2cda98d215d3a73fcbfe93c62e021f4ba768`; exact Chromium (`citgm-1789402864193`) and Firefox (`citgm-1789402906868`) CITGM also pass unchanged. No runtime, nested-dependency, or upstream package/repository failure was observed. Repository-wide gates were skipped under the unchanged double-CITGM rule. |
 | 58 | tr46 | PASS | ours | Exact native Node and final Chromium/Firefox CITGM passed after fixing browser-native CORS fallback, package-install `prepublish`, and Web `ReadableStream` input to VFS `fs.writeFile`; repository gates passed. |
 | 59 | find-up | PASS | ours | Exact native Node, Chromium, and Firefox CITGM pass after fixing nested ESM package self-reference resolution, default-parameter cycle-proxy parsing, worker VFS symlink propagation, symlink-aware Git fixture materialization, and live GitHub source-archive `.git/` shape compatibility. Full repository gates passed; see the rank 59 record below. |
-| 60 | webidl-conversions | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 61 | path-exists | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 62 | graceful-fs | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 63 | eslint-scope | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 64 | yargs | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 65 | cross-spawn | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 66 | statuses | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 67 | whatwg-url | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 68 | fast-deep-equal | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 69 | locate-path | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 70 | is-number | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 71 | get-stream | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 72 | yaml | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 73 | path-scurry | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 74 | @babel/parser | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 75 | browserslist | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 76 | @babel/helper-string-parser | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 77 | camelcase | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 78 | yallist | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 79 | @babel/template | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 80 | cookie | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 81 | agent-base | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 82 | safe-buffer | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 83 | qs | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 84 | fill-range | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 85 | path-to-regexp | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 86 | lodash | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 87 | universalify | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 88 | form-data | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 89 | jiti | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 90 | @radix-ui/react-primitive | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 91 | onetime | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 92 | node-releases | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 93 | ajv | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 94 | is-glob | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 95 | escalade | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 96 | update-browserslist-db | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 97 | yocto-queue | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 98 | to-regex-range | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 99 | fast-json-stable-stringify | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
-| 100 | get-intrinsic | PENDING | — | Not attempted; rank 59 is complete and rank 60 is next. |
+| 60 | webidl-conversions | PASS | none observed; transient runner interruption | Published `webidl-conversions@8.0.1` passes exact native Node CITGM, Chromium CITGM (`citgm-1789419297905`), and Firefox CITGM (`citgm-1789419339461`). The first two Chromium attempts stopped before candidate execution with harness `ERR_INSUFFICIENT_RESOURCES`; both complete logs are preserved and the run passed after isolating temporary files in the workspace. No runtime, nested-dependency, or upstream package/repository failure was observed. Repository-wide gates were skipped under the unchanged triple-CITGM rule. |
+| 61 | path-exists | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 62 | graceful-fs | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 63 | eslint-scope | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 64 | yargs | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 65 | cross-spawn | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 66 | statuses | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 67 | whatwg-url | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 68 | fast-deep-equal | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 69 | locate-path | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 70 | is-number | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 71 | get-stream | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 72 | yaml | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 73 | path-scurry | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 74 | @babel/parser | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 75 | browserslist | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 76 | @babel/helper-string-parser | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 77 | camelcase | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 78 | yallist | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 79 | @babel/template | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 80 | cookie | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 81 | agent-base | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 82 | safe-buffer | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 83 | qs | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 84 | fill-range | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 85 | path-to-regexp | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 86 | lodash | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 87 | universalify | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 88 | form-data | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 89 | jiti | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 90 | @radix-ui/react-primitive | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 91 | onetime | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 92 | node-releases | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 93 | ajv | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 94 | is-glob | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 95 | escalade | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 96 | update-browserslist-db | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 97 | yocto-queue | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 98 | to-regex-range | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 99 | fast-json-stable-stringify | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
+| 100 | get-intrinsic | PENDING | — | Not attempted; rank 60 is complete and rank 61 is next. |
 
-The pending-row cursor now points to rank 60. Ranks 43–44, 47–49 are recorded
-as blocked only after native proof; ranks 45–46 and 58 are complete, and every
-rank 59 failure classification below follows the same native-comparison rule.
+The pending-row cursor now points to rank 61. Ranks 43–44, 47–49 are recorded
+as blocked only after native proof; ranks 45–46, 58, 59, and 60 are complete,
+and every failure classification below follows the same native-comparison rule.
 
 ## Rank 59 failure record
 
@@ -166,7 +166,25 @@ npm test                                       PASS — npm-test-after-find-up.l
 npm run test:browser:chromium                 PASS — playwright-chromium-after-find-up-final.log (318/318)
 npm run test:browser:firefox                  PASS — playwright-firefox-after-find-up.log (318/318)
 ```
-All rows after rank 59 remain pending until their turn.
+All rows after rank 60 remain pending until their turn.
+
+## Rank 60 failure record
+
+The exact candidate is `webidl-conversions@8.0.1`; native Node and both browser
+CITGM runs use the same CITGM 10.0.2 contract and the same published source
+revision. The complete logs and the passing browser artifact bundles are under
+`artifacts/citgm-top-100/rank-060-webidl-conversions/`.
+
+| Run / log | Observed failure or behavior | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node.log` | Install and the upstream smoke test passed under native Node. | Native proof that the exact package and dependency graph pass. |
+| `citgm-chromium.log`, `citgm-chromium-rerun.log` | The harness page failed before candidate execution with `page.goto: net::ERR_INSUFFICIENT_RESOURCES`. | Transient runner/resource interruption; not package evidence. The logs are preserved and the run was retried with workspace-local temporary files. |
+| `citgm-chromium-workspace-tmp.log` / `citgm-1789419297905`, `citgm-firefox.log` / `citgm-1789419339461` | Install, upstream smoke test, and CITGM completion all exited 0 in Chromium and Firefox. | PASS. No ours-side runtime, nested-dependency, or upstream package/repository failure was observed. |
+
+Rank 60 is recorded as `PASS` without repository changes. The exact native,
+Chromium, and Firefox CITGM runs all passed, so the repository-wide build, unit,
+and full Playwright gates were intentionally skipped under the continuation
+rule.
 
 ## Rank 6 failure record
 

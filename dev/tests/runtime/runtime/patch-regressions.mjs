@@ -245,6 +245,22 @@ test('ordinary ESM children do not expose the internal runtime channel as proces
   assert.equal(stdout, 'undefined\n');
 });
 
+test('child process close follows consumed stdout end', async () => {
+  const { stdout } = await run(`
+    const child = require('child_process').spawn(process.execPath, ['-e', 'process.stdout.write("child-output")']);
+    let output = '';
+    let ended = false;
+    child.stdout.on('data', (chunk) => { output += chunk; });
+    child.stdout.on('end', () => { ended = true; });
+    child.on('close', (code) => {
+      if (code !== 0) throw new Error('child exited with code ' + code);
+      if (!ended) throw new Error('child close preceded stdout end');
+      process.stdout.write(output);
+    });
+  `);
+  assert.equal(stdout, 'child-output');
+});
+
 test('guest WebAssembly contracts allow standard loader child overrides', async () => {
   const { stdout } = await run(`
     const child = Object.create(WebAssembly);

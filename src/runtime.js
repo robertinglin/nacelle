@@ -5541,13 +5541,45 @@ export function createRuntime({
       }
       state.drain();
     };
+    const fsBindingStates = new WeakMap();
     const createBoundFs = (ownerProcess) => {
+      let bindingState = fsBindingStates.get(ownerProcess);
+      if (!bindingState) {
+        bindingState = {
+          propertyOverlays: new WeakMap(),
+          deletedProperty: Symbol('deleted fs property'),
+        };
+        fsBindingStates.set(ownerProcess, bindingState);
+      }
+      const { propertyOverlays, deletedProperty } = bindingState;
+      const overlayFor = (api) => {
+        let overlay = propertyOverlays.get(api);
+        if (!overlay) {
+          overlay = new Map();
+          propertyOverlays.set(api, overlay);
+        }
+        return overlay;
+      };
       const bindFs = (api) => {
         if (!api || (typeof api !== 'object' && typeof api !== 'function')) return api;
-        return new Proxy(api, {
+        const handler = {
           get(target, name, receiver) {
-            if (name === 'promises' && target.promises) return bindFs(target.promises);
-            const value = Reflect.get(target, name, receiver);
+            const overlay = propertyOverlays.get(target);
+            const entry = overlay?.get(name);
+            if (entry === deletedProperty) return undefined;
+            if (name === 'promises' && target.promises && !entry) return bindFs(target.promises);
+            const value = entry
+              ? (entry.descriptor
+                ? (typeof entry.descriptor.get === 'function'
+                  ? entry.descriptor.get.call(receiver)
+                  : entry.descriptor.value)
+                : entry.value)
+              : Reflect.get(target, name, receiver);
+            // A userland assignment is already process-relative. Do not
+            // reinterpret arguments of monkeypatched fs methods as calls to
+            // the ambient VFS; graceful-fs tests intentionally replace
+            // chown/chmod/readdir and inspect their original arguments.
+            if (entry && typeof value === 'function' && !entry.descriptor) return value;
             if (name === 'writeSync' && typeof value === 'function') {
               return (fd, data, offset = 0, length) => {
                 if (fd !== 1 && fd !== 2) return Reflect.apply(value, target, [fd, data, offset, length]);
@@ -5596,7 +5628,55 @@ export function createRuntime({
             }
             return bound;
           },
-        });
+          set(target, name, value) {
+            overlayFor(target).set(name, { value });
+            return true;
+          },
+          defineProperty(target, name, descriptor) {
+            if (Object.hasOwn(descriptor, 'value')) {
+              overlayFor(target).set(name, { value: descriptor.value });
+            } else {
+              // graceful-fs publishes its request queue as an accessor on
+              // the process-bound fs object. Keep that accessor local to the
+              // process instead of silently dropping it from the overlay.
+              overlayFor(target).set(name, { descriptor: { ...descriptor } });
+            }
+            return true;
+          },
+          deleteProperty(target, name) {
+            overlayFor(target).set(name, deletedProperty);
+            return true;
+          },
+          // Userland packages commonly clone `require('fs')` with
+          // Object.getOwnPropertyDescriptor(). Preserve the process-bound
+          // wrappers in that cloned object; otherwise deferred relative-path
+          // operations fall back to the ambient same-realm process.
+          getOwnPropertyDescriptor(target, name) {
+            const descriptor = Reflect.getOwnPropertyDescriptor(target, name);
+            const overlay = propertyOverlays.get(target);
+            const entry = overlay?.get(name);
+            if (entry === deletedProperty) return undefined;
+            if (entry?.descriptor) {
+              // A virtual non-configurable property is forbidden when the
+              // proxy target does not own it. The accessor's behavior is what
+              // callers need, so report it as configurable in that case.
+              return descriptor
+                ? { ...entry.descriptor, configurable: descriptor.configurable ? entry.descriptor.configurable : true }
+                : { ...entry.descriptor, configurable: true };
+            }
+            if (entry && descriptor) return { ...descriptor, value: handler.get(target, name, target) };
+            if (entry && !descriptor) return {
+              value: handler.get(target, name, target),
+              writable: true,
+              enumerable: true,
+              configurable: true,
+            };
+            if (!descriptor || !Object.hasOwn(descriptor, 'value')) return descriptor;
+            const value = handler.get(target, name, target);
+            return value === descriptor.value ? descriptor : { ...descriptor, value };
+          },
+        };
+        return new Proxy(api, handler);
       };
       return bindFs(rawFs);
     };
@@ -8351,6 +8431,9 @@ export function createRuntime({
           if (childActivity.recent.length > 16) childActivity.recent.shift();
           let activityRecorded = false;
           let childTerminal = null;
+          let finishPending = false;
+          const finishTimer = scope.__BNH_NATIVE_TIMERS__?.setTimeout
+            || globalThis.setTimeout.bind(globalThis);
           const stdioEntry = (index) => Array.isArray(options?.stdio) ? options.stdio[index] : options?.stdio;
           const stdioIgnored = (index) => stdioEntry(index) === 'ignore';
           const stdioInherited = (index) => {
@@ -8660,7 +8743,7 @@ export function createRuntime({
             if (killed) error.killed = true;
             return error;
           };
-          const finish = (code, signal, error = null) => {
+          const completeFinish = (code, signal, error = null) => {
             if (closed) return;
             closed = true;
             const activeIndex = childActivity.active?.indexOf(activityRecord);
@@ -8729,8 +8812,6 @@ export function createRuntime({
                 pipeResources[2].runInAsyncScope(() => {});
                 if (stderr && !stderrEmitted) pipeResources[2].runInAsyncScope(stderrStream.write, stderrStream, stderr);
                 else pipeResources[2].runInAsyncScope(() => {});
-                stdoutStream.end();
-                stderrStream.end();
                 if (error) child.emit('error', error);
                 child.emit('exit', code, signal);
                 child.emit('close', code, signal);
@@ -8753,6 +8834,26 @@ export function createRuntime({
                 runtimeQueueMicrotask(release);
               }
             }
+          };
+          const finish = (code, signal, error = null) => {
+            if (closed || finishPending) return;
+            finishPending = true;
+            setActivityPhase('waiting-stream-end');
+            // A ChildProcess pipe must be put into flowing mode when the
+            // caller did not attach a data consumer. Native Node still
+            // delivers the pipe end and ChildProcess close in that case;
+            // waiting on an unconsumed readable would otherwise strand the
+            // process lifecycle indefinitely.
+            stdoutStream.resume?.();
+            stderrStream.resume?.();
+            stdoutStream.end();
+            stderrStream.end();
+            // outputStream.end() synchronously queues the readable end. Give
+            // both streams one host turn to deliver it before emitting the
+            // process terminal events, but do not make completion depend on
+            // an end listener: a custom consumer can legally keep a virtual
+            // Readable paused after resume() was requested.
+            finishTimer(() => runInOwnerContext(() => completeFinish(code, signal, error)), 0);
           };
           let invalidCwdError = null;
           if (prepared.cwd !== '/dev') {
@@ -10103,11 +10204,26 @@ export function createRuntime({
             let childHttpModule = null;
             let previousHttpMaxHeaderSize;
             const abortOnUncaughtException = prepared.abortOnUncaughtException;
+            const childScriptIndex = prepared.scriptPath
+              ? prepared.executionArgv.indexOf(prepared.scriptPath)
+              : prepared.executionArgv.length;
+            const childExecArgv = [];
+            const childOptionEnd = childScriptIndex < 0 ? prepared.executionArgv.length : childScriptIndex;
+            const childValueTakingFlags = new Set(['--import', '--experimental-loader', '--loader', '--require', '--input-type', '--conditions']);
+            for (let index = 1; index < childOptionEnd; index += 1) {
+              const argument = String(prepared.executionArgv[index]);
+              if (!argument.startsWith('-')) continue;
+              childExecArgv.push(argument);
+              if (childValueTakingFlags.has(argument) && index + 1 < childOptionEnd) {
+                childExecArgv.push(String(prepared.executionArgv[++index]));
+              }
+            }
             try {
             childProc = createProcess(scope, {
                 argv,
                 argv0: prepared.argv0,
                 execPath: prepared.command,
+                execArgv: childExecArgv,
                 pid: prepared.pid,
                 ppid: prepared.ppid,
                 env,
@@ -10131,6 +10247,7 @@ export function createRuntime({
               childProc.processObject.binding = processObject.binding;
             }
             childProc.processObject._bnhVirtualChild = true;
+            childProc.processObject._bnhGlobal = createExecutionGlobal(scope);
             // A same-realm child has no worker control port to carry network
             // telemetry. When the caller requested it, forward the child's
             // bounded network lifecycle events through the same sink used by
@@ -10386,6 +10503,7 @@ export function createRuntime({
               const previousProcess = scope.process;
               const previousActiveProcess = scope.__bnhActiveProcess;
               const previousConsole = scope.console;
+              const previousGlobal = scope.global;
               const previousTimers = {
                 setTimeout: scope.setTimeout,
                 clearTimeout: scope.clearTimeout,
@@ -10398,12 +10516,14 @@ export function createRuntime({
               setScopeProcess(childProc.processObject);
               scope.__bnhActiveProcess = childProc.processObject;
               if (childProc.processObject._bnhConsole) scope.console = childProc.processObject._bnhConsole;
+              scope.global = childProc.processObject._bnhGlobal;
               if (childProc.processObject._bnhTimerContext) Object.assign(scope, childProc.processObject._bnhTimerContext);
               try {
                 return runInChildAsyncContext(callback);
               } finally {
                 Object.assign(scope, previousTimers);
                 scope.console = previousConsole;
+                scope.global = previousGlobal;
                 if (previousActiveProcess === undefined) scope.__bnhActiveProcess = undefined;
                 else scope.__bnhActiveProcess = previousActiveProcess;
                 setScopeProcess(previousProcess);
@@ -10509,7 +10629,17 @@ export function createRuntime({
                 options.onStderr?.(value);
               }, scope.console || {});
               childProc.processObject._bnhConsole = scope.console;
-              scope.global = scope;
+              scope.global = childProc.processObject._bnhGlobal;
+              if (childExecArgv.some((argument) => argument === '--expose-gc' || argument === '--expose_gc')) {
+                const parentGc = typeof scope.gc === 'function' ? scope.gc.bind(scope) : null;
+                childProc.processObject._bnhGlobal.gc = (options = undefined) => {
+                  parentGc?.(options);
+                  collectAsyncResources();
+                  vfs.collectGarbage?.();
+                  performancePrimitives.recordGC?.();
+                  if (options?.execution === 'async') return Promise.resolve();
+                };
+              }
               scope.Buffer = Buffer;
               scope.File = File;
               scope.atob = Buffer.atob;

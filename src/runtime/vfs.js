@@ -1942,21 +1942,18 @@ export function createVfs(options = {}) {
     }
   }
 
-  function scheduleFsCallback(callback, crossRealm = false) {
-    const schedule = crossRealm
-      ? (next) => hostSetTimeout(next, 0)
-      : typeof globalThis.queueMicrotask === 'function'
-      ? (next) => globalThis.queueMicrotask(next)
-      : (next) => globalThis.setTimeout(next, 0);
+  function scheduleFsCallback(callback, crossRealm = false, pollLike = false) {
     const resource = new AsyncResource('FSREQCALLBACK');
     const release = taskTracker?.();
-    schedule(() => {
+    const run = () => {
       try { resource.runInAsyncScope(callback); }
       finally {
         resource.emitDestroy();
         release?.();
       }
-    });
+    };
+    if (pollLike && typeof globalThis.queueMicrotask === 'function') globalThis.queueMicrotask(run);
+    else hostSetTimeout(run, 0);
   }
 
   function scheduleReadFile(callback, wrapReusedHandle = false) {
@@ -2045,9 +2042,9 @@ export function createVfs(options = {}) {
     validateEncoding(optionsObject);
     const descriptorRecord = typeof pathValue === 'number' ? descriptor(pathValue) : null;
     if (descriptorRecord?.directory) throw isDirectory(descriptorRecord.path, 'read');
-    if (!descriptorRecord) resolve(pathValue);
+    const resolvedPath = descriptorRecord ? null : resolve(pathValue);
     const readValue = () => {
-      if (!descriptorRecord) return readBytes(resolve(pathValue));
+      if (!descriptorRecord) return readBytes(resolvedPath);
       const source = readBytes(descriptorRecord.path, 'read');
       const value = source.subarray(descriptorRecord.position);
       descriptorRecord.position = source.length;
@@ -2741,6 +2738,41 @@ export function createVfs(options = {}) {
     }
   }
 
+  function invokeStreamOpen(stream) {
+    let resolveOpening;
+    let settled = false;
+    const opening = new Promise((resolve) => { resolveOpening = resolve; });
+    const cleanup = () => {
+      stream.removeListener('open', onOpen);
+      stream.removeListener('error', onError);
+    };
+    const complete = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) stream._fsOpenError = error;
+      resolveOpening();
+    };
+    const onOpen = () => complete(stream.fd === null ? stream._fsOpenError : undefined);
+    const onError = (error) => complete(error);
+    stream.once('open', onOpen);
+    stream.once('error', onError);
+    try {
+      const result = stream.open();
+      if (result?.then) {
+        result.then(() => {
+          if (stream.fd !== null || stream._fsOpenError) complete(stream._fsOpenError);
+        }, (error) => complete(error));
+      } else if (stream.fd !== null || stream._fsOpenError) {
+        complete(stream._fsOpenError);
+      }
+    } catch (error) {
+      complete(error);
+      stream.destroy(error);
+    }
+    return opening;
+  }
+
   function finishStreamIo(stream, error) {
     stream._fsPerformingIO = false;
     const waiters = stream._fsIoWaiters;
@@ -2972,6 +3004,8 @@ export function createVfs(options = {}) {
     validateStreamFd(options);
     const fsApi = options.fs || moduleFs || fs;
     validateStreamPath(pathValue, options);
+    const streamPath = fsApi === fs && pathValue !== null && pathValue !== undefined
+      ? resolve(pathValue) : pathValue;
     validateStreamFunction(fsApi, 'read');
     if (options.fd === undefined || options.fd === null) validateStreamFunction(fsApi, 'open');
     if (options.autoClose !== false) validateStreamFunction(fsApi, 'close');
@@ -3034,7 +3068,7 @@ export function createVfs(options = {}) {
       if (typeof fsApi?.open === 'function' && (options.fs || fsApi.open !== open)) {
         stream._fsOpening = new Promise((resolve) => {
           try {
-            fsApi.open(pathValue, stream.flags, stream.mode, (error, fd) => {
+            fsApi.open(streamPath, stream.flags, stream.mode, (error, fd) => {
               if (error) {
                 stream._fsOpenError = error;
                 stream.destroy(error);
@@ -3057,7 +3091,7 @@ export function createVfs(options = {}) {
         return stream._fsOpening;
       }
       try {
-        const opened = streamDescriptor(pathValue, options, 'r');
+        const opened = streamDescriptor(streamPath, options, 'r');
         stream.fd = opened.fd;
         stream._fsOwned = opened.owned;
         stream.emit('open', stream.fd);
@@ -3073,13 +3107,7 @@ export function createVfs(options = {}) {
       if (stream._fsStarted) return stream._fsOpening;
       if (stream.open && stream.open !== ReadStream.prototype.open) {
         stream._fsStarted = true;
-        try {
-          const result = stream.open();
-          stream._fsOpening = result?.then ? result : Promise.resolve();
-        } catch (error) {
-          stream.destroy(error);
-          stream._fsOpening = Promise.reject(error);
-        }
+        stream._fsOpening = invokeStreamOpen(stream);
         return stream._fsOpening;
       }
       return stream._fsOpenDefault();
@@ -3352,6 +3380,8 @@ export function createVfs(options = {}) {
     validateStreamFd(options);
     const fsApi = options.fs || moduleFs || fs;
     validateStreamPath(pathValue, options);
+    const streamPath = fsApi === fs && pathValue !== null && pathValue !== undefined
+      ? resolve(pathValue) : pathValue;
     if (options.fd === undefined || options.fd === null) validateStreamFunction(fsApi, 'open');
     if (!fsApi || (typeof fsApi.write !== 'function' && typeof fsApi.writev !== 'function')) {
       validateStreamFunction(fsApi, 'write');
@@ -3428,7 +3458,7 @@ export function createVfs(options = {}) {
       if (typeof fsApi?.open === 'function' && (options.fs || fsApi.open !== open)) {
         stream._fsOpening = new Promise((resolve) => {
           try {
-            fsApi.open(pathValue, stream.flags, stream.mode, (error, fd) => {
+            fsApi.open(streamPath, stream.flags, stream.mode, (error, fd) => {
               if (error) {
                 stream._fsOpenError = error;
                 stream.destroy(error);
@@ -3451,7 +3481,7 @@ export function createVfs(options = {}) {
         return stream._fsOpening;
       }
       try {
-        const opened = streamDescriptor(pathValue, options, stream.flags);
+        const opened = streamDescriptor(streamPath, options, stream.flags);
         stream.fd = opened.fd;
         stream._fsOwned = opened.owned;
         stream.emit('open', stream.fd);
@@ -3465,13 +3495,7 @@ export function createVfs(options = {}) {
       if (stream._fsStarted) return stream._fsOpening;
       if (stream.open && stream.open !== WriteStream.prototype.open) {
         stream._fsStarted = true;
-        try {
-          const result = stream.open();
-          stream._fsOpening = result?.then ? result : Promise.resolve();
-        } catch (error) {
-          stream.destroy(error);
-          stream._fsOpening = Promise.reject(error);
-        }
+        stream._fsOpening = invokeStreamOpen(stream);
         return stream._fsOpening;
       }
       return stream._fsOpenDefault();
@@ -3823,7 +3847,7 @@ export function createVfs(options = {}) {
     }
   }
 
-  function asyncFsOperation(callback, operation, crossRealm = false) {
+  function asyncFsOperation(callback, operation, crossRealm = false, pollLike = false) {
     validateCallback(callback);
     const releaseRequest = activeRequestTracker?.('FSReqCallback');
     scheduleFsCallback(() => {
@@ -3853,7 +3877,7 @@ export function createVfs(options = {}) {
         try { callback(error); }
         finally { release(); }
       }
-    }, crossRealm);
+    }, crossRealm, pollLike);
   }
 
   function close(handle, callback) {
@@ -3897,7 +3921,7 @@ export function createVfs(options = {}) {
     const done = typeof optionsValue === 'function' ? optionsValue : callback;
     const options = typeof optionsValue === 'object' && optionsValue !== null ? optionsValue : {};
     if (!isForeignPlatformPath(pathValue)) resolve(pathValue);
-    asyncFsOperation(done, () => statNodePath(pathValue, options));
+    asyncFsOperation(done, () => statNodePath(pathValue, options), false, true);
   }
 
   function statfs(pathValue, optionsValue, callback) {
@@ -3911,7 +3935,7 @@ export function createVfs(options = {}) {
     const done = typeof optionsValue === 'function' ? optionsValue : callback;
     const options = typeof optionsValue === 'object' && optionsValue !== null ? optionsValue : {};
     if (!isForeignPlatformPath(pathValue)) resolve(pathValue);
-    asyncFsOperation(done, () => statNodePath(pathValue, options, 'lstat'));
+    asyncFsOperation(done, () => statNodePath(pathValue, options, 'lstat'), false, true);
   }
 
   function readdir(pathValue, optionsValue, callback) {

@@ -92,6 +92,23 @@ test('adds V8 CallSite output when captureStackTrace ignores prepareStackTrace',
   assert.equal(callSites[0].toString(), 'depd@https://cdn.example/send.js:9:2391');
 });
 
+test('marks Firefox CommonJS export frames for caller-callsite compatibility', () => {
+  function BrowserError() {}
+  BrowserError.captureStackTrace = (target) => {
+    Object.defineProperty(target, 'stack', {
+      configurable: true,
+      value: 'anonymous/</module.exports@/node_modules/example/index.js:6:24',
+    });
+  };
+
+  installErrorStackCompatibility({ Error: BrowserError });
+  const target = {};
+  BrowserError.prepareStackTrace = (_error, callSites) => callSites;
+  BrowserError.captureStackTrace(target);
+  assert.equal(target.stack[0].getTypeName(), 'Object');
+  assert.equal(target.stack[0].getFileName(), '/node_modules/example/index.js');
+});
+
 test('formats a captured stack when no custom formatter is installed', () => {
   function BrowserError() {}
   BrowserError.captureStackTrace = (target) => {

@@ -730,6 +730,64 @@ test.describe('Next.js SWC package selection', () => {
     expect(result.stdout).toContain('VFS_WATCH_OBSERVED:updated');
   });
 
+  test('Next.js Watchpack observes a parent VFS file change', async ({ page }) => {
+    test.setTimeout(120000);
+    await page.goto(serverUrl);
+
+    const result = await page.evaluate(async () => {
+      const { Nacelle } = await import('/index.js');
+      const node = await Nacelle.create({
+        cwd: '/node',
+        globalObject: window,
+        isolation: 'worker',
+        gateway: false,
+      });
+      await node.fs.writeFile('/node/package.json', JSON.stringify({ name: 'next-watchpack-change-test' }));
+      await node.npm.install('next@16.3.3');
+      await node.fs.writeFile('/node/app/page.tsx', 'export default function Page() { return null; }');
+      let readyResolve;
+      const ready = new Promise((resolve) => { readyResolve = resolve; });
+      const child = await node.execute(`
+        const Watchpack = require('next/dist/compiled/watchpack');
+        const watchpack = new Watchpack({ aggregateTimeout: 5 });
+        let initial = true;
+        const timer = setTimeout(() => {
+          console.error('WATCHPACK_CHANGE_TIMEOUT');
+          process.exitCode = 1;
+          watchpack.close();
+        }, 10000);
+        watchpack.on('change', (pathValue) => {
+          if (String(pathValue) !== '/node/app/page.tsx' || initial) return;
+          clearTimeout(timer);
+          process.stdout.write('WATCHPACK_CHANGE_EVENT:' + pathValue);
+          watchpack.close();
+        });
+        watchpack.once('aggregated', () => {
+          if (initial) {
+            initial = false;
+            process.stdout.write('WATCHPACK_CHANGE_READY');
+            return;
+          }
+        });
+        watchpack.watch({ directories: ['/node'], startTime: 0 });
+      `, {
+        onStdout: (chunk) => {
+          if (String(chunk).includes('WATCHPACK_CHANGE_READY')) readyResolve();
+        },
+      });
+      await ready;
+      await node.fs.writeFile('/node/app/page.tsx', 'export default function Page() { return \'updated\'; }');
+      return {
+        exitCode: await child.exit,
+        stdout: await child.stdoutText(),
+        stderr: await child.stderrText(),
+      };
+    });
+
+    expect(result.exitCode, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain('WATCHPACK_CHANGE_EVENT:/node/app/page.tsx');
+  });
+
   test('isolated worker exposes Buffer.byteLength to nested modules', async ({ page }) => {
     await page.goto(serverUrl);
     const result = await page.evaluate(async () => {

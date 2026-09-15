@@ -13,7 +13,7 @@ Object.defineProperties(CallSite.prototype, {
   getColumnNumber: { configurable: true, value() { return this.__bnhColumnNumber; }, writable: true },
   getFunctionName: { configurable: true, value() { return this.__bnhFunctionName || null; }, writable: true },
   getFunction: { configurable: true, value() { return undefined; }, writable: true },
-  getTypeName: { configurable: true, value() { return null; }, writable: true },
+  getTypeName: { configurable: true, value() { return this.__bnhTypeName ?? null; }, writable: true },
   getMethodName: { configurable: true, value() { return null; }, writable: true },
   getEvalOrigin: { configurable: true, value() { return undefined; }, writable: true },
   isToplevel: { configurable: true, value() { return !this.__bnhFunctionName; }, writable: true },
@@ -57,12 +57,18 @@ function createCallSite(line) {
   }
 
   const parsed = parseLocation(location);
+  // Firefox omits the receiver qualification that V8 includes for a
+  // CommonJS export function.  caller-callsite uses that qualification to
+  // locate a usable caller frame; preserve the useful Node contract for the
+  // generated module export frame.
+  const typeName = functionName === 'anonymous/</module.exports' ? 'Object' : null;
   const site = Object.create(CallSite.prototype);
   Object.defineProperties(site, {
     __bnhFileName: { configurable: true, value: parsed.fileName },
     __bnhLineNumber: { configurable: true, value: parsed.lineNumber },
     __bnhColumnNumber: { configurable: true, value: parsed.columnNumber },
     __bnhFunctionName: { configurable: true, value: functionName },
+    __bnhTypeName: { configurable: true, value: typeName },
     __bnhLine: { configurable: true, value: line },
   });
   // @tapjs/stack and source-map-support recognize structured V8 call sites by

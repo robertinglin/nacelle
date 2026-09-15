@@ -178,6 +178,111 @@ test('preserves binary stdout from an ESM child process pipe', async ({ harnessP
   expect(result.stdout).toBe('{"code":0,"bytes":[0,255,1,2,128],"stderr":""}');
 });
 
+test('emits CommonJS child close after asynchronous stdout end', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const { spawn } = require('node:child_process');
+    const child = spawn(process.execPath, ['/node/child.js'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let ended = false;
+    child.stdout.on('data', value => { stdout += value; });
+    child.stdout.on('end', () => { ended = true; });
+    child.stderr.on('data', () => {});
+    child.once('close', code => {
+      process.stdout.write(JSON.stringify({ code, stdout, ended }));
+    });
+  `, {
+    files: {
+      '/node/child.js': `setTimeout(() => process.stdout.write('child-output'), 0);`,
+    },
+  });
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.timedOut, JSON.stringify(result)).toBe(false);
+  expect(result.stderr).toBe('');
+  expect(result.stdout).toBe('{"code":0,"stdout":"child-output","ended":true}');
+});
+
+test('keeps concurrent virtual fs opens and closes timer-fair', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const fs = require('node:fs');
+    const n = 1024;
+    let opens = 0;
+    let callbacks = 0;
+    let closed = 0;
+    let errors = 0;
+    let going = true;
+    const fds = [];
+    for (let i = 0; i < n; i += 1) go();
+    function go() {
+      opens += 1;
+      fs.open('/node/file.txt', 'r', (error, fd) => {
+        callbacks += 1;
+        if (error) { errors += 1; return; }
+        fds.push(fd);
+        if (going) go();
+      });
+    }
+    const finish = () => {
+      if (callbacks !== opens) {
+        setTimeout(finish, 0);
+        return;
+      }
+      const opened = fds.splice(0);
+      let remaining = opened.length;
+      if (!remaining) done();
+      for (const fd of opened) {
+        fs.close(fd, error => {
+          if (!error) closed += 1;
+          remaining -= 1;
+          if (remaining === 0) done();
+        });
+      }
+    };
+    const done = () => {
+      process.stdout.write(JSON.stringify({ opens, callbacks, errors, closed, fds: fds.length }));
+      process.exit(errors || closed !== opens ? 1 : 0);
+    };
+    setTimeout(() => { going = false; finish(); }, 100);
+  `, {
+    files: { '/node/file.txt': 'file' },
+    timeoutMs: 5_000,
+  });
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.timedOut, JSON.stringify(result)).toBe(false);
+  expect(result.stderr).toBe('');
+  expect(result.stdout).toMatch(/^\{"opens":\d+,"callbacks":\d+,"errors":0,"closed":\d+,"fds":0\}$/);
+});
+
+test('completes a high-volume virtual fs write/read cycle', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const directory = '/node/citgm/tmp/diagnostic/graceful-fs';
+    const n = 4097;
+    fs.rmSync(directory, { recursive: true, force: true });
+    fs.mkdirSync(path.join(directory, 'files'), { recursive: true });
+    process.chdir(directory);
+    for (let i = 0; i < n; i += 1) fs.writeFile(path.join('files', 'file-' + i), 'content', 'ascii', () => {});
+    let remaining = n;
+    let errors = 0;
+    let wrong = 0;
+    for (let i = 0; i < n; i += 1) {
+      fs.readFile(path.join('files', 'file-' + i), 'ascii', (error, value) => {
+        if (error) errors += 1;
+        else if (value !== 'content') wrong += 1;
+        remaining -= 1;
+        if (remaining === 0) {
+          process.stdout.write(JSON.stringify({ errors, wrong }));
+          process.exit(errors || wrong ? 1 : 0);
+        }
+      });
+    }
+  `, { timeoutMs: 5_000 });
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.timedOut, JSON.stringify(result)).toBe(false);
+  expect(result.stderr).toBe('');
+  expect(result.stdout).toBe('{"errors":0,"wrong":0}');
+});
+
 test('does not keep the parent alive for an unrefed ESM child', async ({ harnessPage }) => {
   const result = await harnessPage.run(`
     const { spawn } = require('node:child_process');

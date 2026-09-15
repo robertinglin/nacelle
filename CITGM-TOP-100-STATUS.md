@@ -86,49 +86,49 @@ not being reclassified as newly rerun here.
 | 58 | tr46 | PASS | ours | Exact native Node and final Chromium/Firefox CITGM passed after fixing browser-native CORS fallback, package-install `prepublish`, and Web `ReadableStream` input to VFS `fs.writeFile`; repository gates passed. |
 | 59 | find-up | PASS | ours | Exact native Node, Chromium, and Firefox CITGM pass after fixing nested ESM package self-reference resolution, default-parameter cycle-proxy parsing, worker VFS symlink propagation, symlink-aware Git fixture materialization, and live GitHub source-archive `.git/` shape compatibility. Full repository gates passed; see the rank 59 record below. |
 | 60 | webidl-conversions | PASS | none observed; transient runner interruption | Published `webidl-conversions@8.0.1` passes exact native Node CITGM, Chromium CITGM (`citgm-1789419297905`), and Firefox CITGM (`citgm-1789419339461`). The first two Chromium attempts stopped before candidate execution with harness `ERR_INSUFFICIENT_RESOURCES`; both complete logs are preserved and the run passed after isolating temporary files in the workspace. No runtime, nested-dependency, or upstream package/repository failure was observed. Repository-wide gates were skipped under the unchanged triple-CITGM rule. |
-| 61 | path-exists | BLOCKED | nested dependency/toolchain (native-reproduced) | Exact native Node CITGM fails before package assertions because `eslint-plugin-ava` calls removed `util.isDate`; Chromium (`citgm-1789419587466`) and Firefox (`citgm-1789419713966`) both pass the package smoke test. Native proof establishes this as a nested dependency/toolchain blocker, not a browser-only Nacelle defect; complete evidence is in `artifacts/citgm-top-100/rank-061-path-exists/`. |
-| 62 | graceful-fs | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 63 | eslint-scope | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 64 | yargs | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 65 | cross-spawn | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 66 | statuses | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 67 | whatwg-url | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 68 | fast-deep-equal | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 69 | locate-path | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 70 | is-number | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 71 | get-stream | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 72 | yaml | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 73 | path-scurry | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 74 | @babel/parser | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 75 | browserslist | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 76 | @babel/helper-string-parser | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 77 | camelcase | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 78 | yallist | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 79 | @babel/template | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 80 | cookie | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 81 | agent-base | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 82 | safe-buffer | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 83 | qs | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 84 | fill-range | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 85 | path-to-regexp | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 86 | lodash | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 87 | universalify | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 88 | form-data | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 89 | jiti | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 90 | @radix-ui/react-primitive | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 91 | onetime | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 92 | node-releases | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 93 | ajv | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 94 | is-glob | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 95 | escalade | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 96 | update-browserslist-db | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 97 | yocto-queue | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 98 | to-regex-range | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 99 | fast-json-stable-stringify | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
-| 100 | get-intrinsic | PENDING | — | Not attempted; rank 61 is recorded and rank 62 is next. |
+| 61 | path-exists | BLOCKED | nested dependency/toolchain (native-reproduced) | Exact native Node CITGM fails before package assertions because `eslint-plugin-ava` calls removed `util.isDate`; Chromium (`citgm-1789419587466`) and Firefox (`citgm-1789419713966`) both pass the package smoke test. Native proof establishes this as a nested dependency/toolchain blocker, not a browser-only Nacelle defect; complete evidence is in `artifacts/citgm-top-100/rank-061-path-exists/`. Rank 62 is now recorded below. |
+| 62 | graceful-fs | PASS | ours | `graceful-fs@4.2.11` at gitHead `514861c…` passes the exact native package suite (49,434/49,434), native CITGM, Chromium CITGM, and Firefox CITGM after general VFS/runtime fixes. All required repository gates pass; complete evidence is in `artifacts/citgm-top-100/rank-062-graceful-fs/`. |
+| 63 | eslint-scope | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 64 | yargs | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 65 | cross-spawn | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 66 | statuses | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 67 | whatwg-url | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 68 | fast-deep-equal | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 69 | locate-path | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 70 | is-number | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 71 | get-stream | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 72 | yaml | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 73 | path-scurry | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 74 | @babel/parser | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 75 | browserslist | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 76 | @babel/helper-string-parser | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 77 | camelcase | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 78 | yallist | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 79 | @babel/template | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 80 | cookie | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 81 | agent-base | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 82 | safe-buffer | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 83 | qs | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 84 | fill-range | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 85 | path-to-regexp | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 86 | lodash | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 87 | universalify | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 88 | form-data | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 89 | jiti | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 90 | @radix-ui/react-primitive | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 91 | onetime | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 92 | node-releases | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 93 | ajv | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 94 | is-glob | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 95 | escalade | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 96 | update-browserslist-db | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 97 | yocto-queue | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 98 | to-regex-range | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 99 | fast-json-stable-stringify | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 100 | get-intrinsic | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
 
-The pending-row cursor now points to rank 62. Ranks 43–44, 47–49, and 61 are
-recorded as blocked only after native proof; ranks 45–46 and 58–60 are
+The pending-row cursor now points to rank 63. Ranks 43–44, 47–49, and 61 are
+recorded as blocked only after native proof; ranks 45–46 and 58–62 are
 complete, and every failure classification below follows the same
 native-comparison rule.
 
@@ -167,7 +167,7 @@ npm test                                       PASS — npm-test-after-find-up.l
 npm run test:browser:chromium                 PASS — playwright-chromium-after-find-up-final.log (318/318)
 npm run test:browser:firefox                  PASS — playwright-firefox-after-find-up.log (318/318)
 ```
-All rows after rank 60 remain pending until their turn.
+All rows after rank 62 remain pending until their turn.
 
 ## Rank 60 failure record
 
@@ -206,7 +206,54 @@ browser target is green in both engines, but the nested `eslint-plugin-ava`
 failure prevents calling the package fully green; no fake shim or package-
 specific workaround was added. No repository source or test change was made,
 so the repository-wide gates were skipped after the two final browser CITGM
-runs, and the ordered cursor advances to rank 62 after this record is committed.
+runs. The ordered cursor then advanced to rank 62.
+
+## Rank 62 failure record
+
+The exact candidate is `graceful-fs@4.2.11` at gitHead
+`514861c372899df14beb7aaecca4cdbb498d7d11`. The complete native, browser,
+diagnostic, and final gate artifacts are preserved under
+`artifacts/citgm-top-100/rank-062-graceful-fs/`.
+
+| Run / log | Observed failure or behavior | Classification and resolution |
+| --- | --- | --- |
+| `native-package-npm-test.log` | The package's exact native Node suite passed 49,434/49,434 tests, including all 18 Windows rename-polyfill cases. | Native proof that the published package and its test contract are healthy. Browser-only failures were therefore treated as ours until resolved. |
+| `citgm-rerun-chromium/citgm-1789460660817` | The outer Chromium command exited 0, but the nested `nyc` child exited 1: EBUSY/EACCES cases in `windows-rename-polyfill.js` timed out. | Ours. The real tap scheduling/concurrency path exposed a VFS callback-ordering problem; the artifact is preserved as the authoritative failure. |
+| `citgm-rerun-firefox-stat-poll/citgm-1789462321745` | The Windows rename-polyfill target passed, but the nested package run still failed four `caller-callsite` assertions because Firefox-generated CommonJS export frames had no usable receiver type. | Ours. Firefox stack compatibility now marks those generated export frames as `Object`, restoring the caller-callsite contract; the pre-fix artifact remains preserved. |
+| `citgm-rerun-chromium-callsite-stat-poll/citgm-1789463110822` / `citgm-rerun-firefox-callsite-stat-poll/citgm-1789462930728` | Both engines completed the published package through the nested `nyc` child with exit code 0; the Windows rename-polyfill target passed, including EBUSY/EACCES retry cases. | PASS. No nested-dependency or upstream package/repository blocker remained. |
+
+The runtime fix keeps ordinary virtual-filesystem callbacks on the host timer
+queue while scheduling only `stat`/`lstat`'s poll-like callbacks as microtasks.
+That preserves native poll-before-timer ordering for graceful-fs retries without
+starving timers under the package's high-volume tap concurrency. The existing
+per-process `fs` overlays, deferred child `--expose-gc` globals, and child
+stdout/close lifecycle fixes remain part of the general runtime path. The
+Firefox CallSite fallback is likewise general compatibility logic, covered by
+`dev/tests/runtime/runtime/error-stack.mjs`; no package-specific shim was
+added.
+
+Rank 62 is recorded as `PASS` only after the exact native comparison, both
+browser CITGM runs, and all repository-wide gates passed.
+
+## Rank 62 gate evidence
+
+The final build, native comparison, both browser CITGM runs, unit suite, and
+both full Playwright suites were rerun after the source changes:
+
+```text
+npm run build:v22                              PASS — build-final-rerun.log (5 WASM artifacts; Node 22.23.2)
+npm exec --yes --package=citgm@10.0.2 -- citgm graceful-fs
+                                                 PASS — native-citgm-node-final-rerun.log
+native package npm test                         PASS — native-package-npm-test.log (49,434/49,434)
+npm run citgm:browser:chromium -- graceful-fs   PASS — citgm-1789463110822; nested nyc 0
+npm run citgm:browser:firefox -- graceful-fs    PASS — citgm-1789462930728; nested nyc 0
+npm test                                        PASS — npm-test-final-rerun-escalated.log (349/349)
+npm run test:browser:chromium                   PASS — playwright-chromium-final-rerun.log (319/319)
+npm run test:browser:firefox                     PASS — playwright-firefox-final-rerun.log (319/319)
+```
+
+The rank cursor now advances to rank 63; no rank-63 CITGM work is included in
+this record.
 
 ## Rank 6 failure record
 

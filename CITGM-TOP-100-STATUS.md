@@ -655,24 +655,30 @@ Both browser CITGM runs used the published `tslib@2.8.1` candidate and
 successfully completed npm installation. CITGM 10.0.2 then loaded its generic
 package-manager test phase and rejected the candidate before launching any
 tslib test command because its package metadata has no `scripts.test` entry.
-The complete artifacts are preserved under
+The current Node 22 reruns are preserved alongside the earlier evidence under
 `artifacts/citgm-top-100/rank-013-tslib/`.
 
 | Run / log | Observed failure | Classification and resolution |
 | --- | --- | --- |
 | `citgm-1789213425873` / `citgm-chromium-1/` | Install completed, then CITGM reported `Module does not support npm-test!` for `tslib@2.8.1`; no package test command was launched. | Upstream package/repository and CITGM contract blocker. The package tarball has no `scripts.test`; adding a fake test entry would misrepresent upstream coverage, so no harness change is appropriate. |
 | `citgm-1789213473799` / `citgm-firefox-1/` | Firefox reproduced the identical pre-test rejection after successful installation. | Same upstream package/repository and CITGM contract blocker; not a browser runtime or nested dependency failure. |
+| `citgm-1789601720314` / `citgm-chromium-current/` | Current Node 22 Chromium rerun installs `tslib@2.8.1`, then reports the same `Module does not support npm-test!` result before package tests. | Current-source Chromium confirmation of the upstream/CITGM contract blocker. No source or test changes were made. |
+| `citgm-1789601744449` / `citgm-firefox-current/` | Current Node 22 Firefox rerun reproduces the same pre-test rejection after successful installation. | Current-source Firefox confirmation with Chromium parity. No source or test changes were made. |
 
 ## Rank 13 gate evidence
 
 The package-level CITGM result cannot become green without upstream adding a
 supported test command or CITGM adding an explicit package-specific test
-definition. Repository gates for this blocker record remain green:
+definition. The current-source pre-sweep repository gates were already green,
+and this candidate made no source or test changes, so the full Playwright gates
+were not rerun for this blocked candidate:
 
 ```text
-npm test                                                   PASS — 333/333
-npm run test:browser:chromium                             PASS — 266/266
-npm run test:browser:firefox                              PASS — 266/266
+npm run build:v22                                          PASS — 5 WASM artifacts
+npm run check:wasm                                         PASS — 5 artifacts passed export validation
+npm test                                                   PASS — 354/354
+npm run test:browser:chromium                             PASS — 364/364 (pre-sweep baseline)
+npm run test:browser:firefox                              PASS — 364/364 (pre-sweep baseline)
 ```
 
 ## Rank 14 failure record

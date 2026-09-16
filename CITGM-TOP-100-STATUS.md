@@ -86,50 +86,51 @@ not being reclassified as newly rerun here.
 | 58 | tr46 | PASS | ours | Exact native Node and final Chromium/Firefox CITGM passed after fixing browser-native CORS fallback, package-install `prepublish`, and Web `ReadableStream` input to VFS `fs.writeFile`; repository gates passed. |
 | 59 | find-up | PASS | ours | Exact native Node, Chromium, and Firefox CITGM pass after fixing nested ESM package self-reference resolution, default-parameter cycle-proxy parsing, worker VFS symlink propagation, symlink-aware Git fixture materialization, and live GitHub source-archive `.git/` shape compatibility. Full repository gates passed; see the rank 59 record below. |
 | 60 | webidl-conversions | PASS | none observed; transient runner interruption | Published `webidl-conversions@8.0.1` passes exact native Node CITGM, Chromium CITGM (`citgm-1789419297905`), and Firefox CITGM (`citgm-1789419339461`). The first two Chromium attempts stopped before candidate execution with harness `ERR_INSUFFICIENT_RESOURCES`; both complete logs are preserved and the run passed after isolating temporary files in the workspace. No runtime, nested-dependency, or upstream package/repository failure was observed. Repository-wide gates were skipped under the unchanged triple-CITGM rule. |
-| 61 | path-exists | BLOCKED | nested dependency/toolchain (native-reproduced) | Exact native Node CITGM fails before package assertions because `eslint-plugin-ava` calls removed `util.isDate`; Chromium (`citgm-1789419587466`) and Firefox (`citgm-1789419713966`) both pass the package smoke test. Native proof establishes this as a nested dependency/toolchain blocker, not a browser-only Nacelle defect; complete evidence is in `artifacts/citgm-top-100/rank-061-path-exists/`. Rank 62 is now recorded below. |
+| 61 | path-exists | PASS | none observed; initial Node 26 comparison was invalid for the Node 22 baseline | Exact native Node 22.23.2 CITGM (`native-citgm-node-v22-corrected.log`) passes `path-exists@5.0.0`; Chromium (`citgm-1789419587466`) and Firefox (`citgm-1789419713966`) also pass the package smoke test. The earlier `util.isDate` result came from the default Node 26.7.0 shell, not the required Node 22 baseline, and is retained only as an invalid comparison artifact. |
 | 62 | graceful-fs | PASS | ours | `graceful-fs@4.2.11` at gitHead `514861c…` passes the exact native package suite (49,434/49,434), native CITGM, Chromium CITGM, and Firefox CITGM after general VFS/runtime fixes. All required repository gates pass; complete evidence is in `artifacts/citgm-top-100/rank-062-graceful-fs/`. |
-| 63 | eslint-scope | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 64 | yargs | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 65 | cross-spawn | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 66 | statuses | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 67 | whatwg-url | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 68 | fast-deep-equal | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 69 | locate-path | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 70 | is-number | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 71 | get-stream | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 72 | yaml | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 73 | path-scurry | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 74 | @babel/parser | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 75 | browserslist | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 76 | @babel/helper-string-parser | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 77 | camelcase | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 78 | yallist | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 79 | @babel/template | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 80 | cookie | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 81 | agent-base | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 82 | safe-buffer | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 83 | qs | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 84 | fill-range | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 85 | path-to-regexp | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 86 | lodash | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 87 | universalify | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 88 | form-data | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 89 | jiti | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 90 | @radix-ui/react-primitive | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 91 | onetime | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 92 | node-releases | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 93 | ajv | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 94 | is-glob | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 95 | escalade | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 96 | update-browserslist-db | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 97 | yocto-queue | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 98 | to-regex-range | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 99 | fast-json-stable-stringify | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
-| 100 | get-intrinsic | PENDING | — | Not attempted; rank 62 is recorded and rank 63 is next. |
+| 63 | eslint-scope | BLOCKED | upstream/package test-layout failure (native-reproduced) | Exact native CITGM (`native-citgm-node-rerun.log`) fails in the published workspace after `espree` builds because `eslint-visitor-keys/dist/eslint-visitor-keys.cjs` is missing. Chromium (`citgm-1789465928447`) crashes in the monorepo test runtime and Firefox (`citgm-1789466215242`) times out in a child before candidate assertions; neither changes the native classification. Complete artifacts are preserved under `artifacts/citgm-top-100/rank-063-eslint-scope/`. |
+| 64 | yargs | GATE-BLOCKED | ours-side nested worker/runtime lifecycle (browser failure remains) | Exact native CITGM (`native-citgm-node-rerun.log`) passes `yargs@18.1.0`. Chromium (`citgm-1789573258851`) now runs all 827 package tests plus c8 successfully; the remaining failure is the required `gts` posttest, whose nested `eslint` worker remains pending until the bounded run terminates. The nested large-VFS transport now uses the packed path/offset wire with chunked byte delivery, and focused worker regressions pass, but the full lifecycle is not yet green. The rank is not advanced. |
+| 65 | cross-spawn | PASS | ours-side runtime | Exact native CITGM (`native-citgm-node-rerun.log`) passes `cross-spawn@7.0.6`. Final Chromium CITGM (`citgm-1789485014051`) and Firefox CITGM (`citgm-1789487666474`) pass the nested Jest/coverage lifecycle; earlier runs exposed VM-wrapped process listener maps and graceful-fs queue failures. The post-source-change Node 22 build, WASM, native, Chromium, and Firefox repository gates now pass; rank 65 is promoted to `PASS`. |
+| 66 | statuses | PASS | none observed | Exact native Node CITGM passes; current-source Chromium (`citgm-1789488684637`) and Firefox (`citgm-1789488760839`) CITGM both pass. Complete artifacts are preserved under `artifacts/citgm-top-100/rank-066-statuses/`. |
+| 67 | whatwg-url | BLOCKED | nested dependency/native addon (browser-reproduced) | Exact native Node CITGM passes, but current-source Chromium (`citgm-1789488862234`) and Firefox (`citgm-1789488922828`) both fail during `pretest` in nested `oxfmt`: `Error: Cannot find native binding` from `oxfmt/dist/bindings-BpewvGlT.js`. This is a browser-native-addon dependency boundary; no fake binding was added. Complete artifacts are preserved under `artifacts/citgm-top-100/rank-067-whatwg-url/`. |
+| 68 | fast-deep-equal | BLOCKED | nested dependency/toolchain (browser-reproduced) | Exact native Node CITGM passes, but current-source Chromium (`citgm-1789489022132`) and Firefox (`citgm-1789489116162`) both fail before package assertions when the installed test TypeScript rejects `@types/node` declarations (`TS1005` and related syntax errors). This is a nested toolchain/version-layout blocker; no package-specific workaround was added. Complete artifacts are preserved under `artifacts/citgm-top-100/rank-068-fast-deep-equal/`. |
+| 69 | locate-path | PASS | none observed | Exact native Node CITGM passes; current-source Chromium (`citgm-1789489231018`) and Firefox (`citgm-1789489360338`) CITGM both pass. Complete artifacts are preserved under `artifacts/citgm-top-100/rank-069-locate-path/`. |
+| 70 | is-number | PASS | none observed | Exact native Node CITGM passes; current-source Chromium (`citgm-1789489539761`) and Firefox (`citgm-1789489600704`) CITGM both pass. Complete artifacts are preserved under `artifacts/citgm-top-100/rank-070-is-number/`. |
+| 71 | get-stream | BLOCKED | upstream/package assertion (native-reproduced); browser run interrupted | Exact native CITGM fails in `test/array-buffer.js` with `RangeError: Invalid array length` on the package’s intentional oversized-buffer case (`native-citgm-node-rerun.log`). Current-source Chromium (`citgm-1789489675313`) crashes while the high-concurrency AVA worker is active, and the Firefox attempt (`citgm-1789490011215`) was stopped after the same long-running worker shape; neither supplies a contrary package result. Complete attempted artifacts are preserved under `artifacts/citgm-top-100/rank-071-get-stream/`. |
+| 72 | yaml | BLOCKED | upstream/package test-layout failure (native-reproduced); browser harness error also observed | Exact native CITGM reaches 23 passing suites / 1,103 passing tests, then fails because the published workspace lacks `tests/yaml-test-suite/src` and `tests/json-test-suite/test_parsing`. Current-source Chromium (`citgm-1789490137945`) and Firefox (`citgm-1789490330921`) both end with the canary dead; Chromium also reports `TypeError: require.resolve.paths is not a function` in the browser child. Complete artifacts are preserved under `artifacts/citgm-top-100/rank-072-yaml/`. |
+| 73 | path-scurry | GATE-BLOCKED | ours-side TypeScript worker/loader boundary | Native CITGM passes `path-scurry@2.0.2`. After the fs named-export and synchronous TypeScript strip fixes, Chromium (`citgm-1789491251357`, `citgm-1789491439868`) and Firefox (`citgm-1789491528043`) reach the tap child but still fail `test/index.ts` with `SyntaxError: Unexpected identifier 'from'`; earlier install interruptions (`citgm-1789490436582`, `citgm-1789490553844`, `citgm-1789490581846`) are preserved. |
+| 74 | @babel/parser | BLOCKED | upstream/package contract (native-reproduced no test script) | Exact native CITGM records `Module does not support npm-test!` after install. Chromium (`citgm-1789491667950`) and Firefox (`citgm-1789491700923`) reproduce the same failure; the earlier Chromium install interruption (`citgm-1789490658938`) is preserved. |
+| 75 | browserslist | PASS | ours | `browserslist@4.29.0` at gitHead `e6dd5787…` passes exact native CITGM under Node v22.23.2 (`native-citgm-node-v22-current.log`) and final current-source CITGM in Chromium (`citgm-1789498550257`) and Firefox (`citgm-1789498610007`). c8/uvu, ESLint, size-limit, and the posttest command all exit 0 in both browsers. The runtime fix keeps child ESM `node:module`/`createRequire` on the child’s CommonJS cache, eliminating duplicate plugin records; earlier EISDIR, PATH, zlib, and plugin-identity artifacts remain preserved. |
+| 76 | @babel/helper-string-parser | BLOCKED | upstream package contract (no test script) | Exact native Node v22.23.2 CITGM (`native-citgm-node-v22-current.log`) records `Module does not support npm-test!` after installing `@babel/helper-string-parser@8.0.0`. Current-source Chromium (`citgm-1789499123112`) and Firefox (`citgm-1789499270130`) reproduce the same CITGM contract failure after successful install; all three child npm commands complete cleanly. No browser-runtime failure is present to fix. |
+| 77 | camelcase | PASS | none observed | Exact native Node v22.23.2 CITGM passes `camelcase@9.0.0` (`native-citgm-node-v22-current.log`). Current-source Chromium (`citgm-1789499331454`) and Firefox (`citgm-1789499438810`) both pass install, XO, AVA, tsd, and the full upstream smoke contract; no runtime or package blocker observed. |
+| 78 | yallist | PASS | none observed | Exact native Node v22.23.2 CITGM passes `yallist@5.0.0` (`native-citgm-node-v22-current.log`). Current-source Chromium (`citgm-1789499607847`) and Firefox (`citgm-1789499670011`) both pass the `tshy`, TAP, and nested child lifecycle; no runtime or package blocker observed. |
+| 79 | @babel/template | BLOCKED | upstream package contract (no test script) | Exact native Node v22.23.2 CITGM (`native-citgm-node-v22-current.log`) records `Module does not support npm-test!` after installing `@babel/template@8.0.0`. Current-source Chromium (`citgm-1789499805320`) and Firefox (`citgm-1789499831009`) reproduce the same failure after successful install; no browser-runtime failure is present to fix. |
+| 80 | cookie | PASS | ours | Exact native Node 22 CITGM passes `cookie@2.0.1`; Chromium (`citgm-1789505900544`) and Firefox (`citgm-1789505900198`) now pass the full install, TypeScript, Prettier, Vitest (182 tests), and size-limit lifecycle. Firefox initially exposed the runtime's missing Promise `.finally` surface and a caught nested ESM rejection; both were fixed generally and covered by focused positive/negative dynamic-import oracles. |
+| 81 | agent-base | BLOCKED | upstream published dependency (native-reproduced) | Exact Node 22.23.2 CITGM fails installation because published dependency `tsconfig@0.0.0` does not exist; Chromium (`citgm-1789506085419`) and Firefox (`citgm-1789506095559`) reproduce the same install failure after successful CITGM bootstrap. |
+| 82 | safe-buffer | BLOCKED | upstream package/toolchain (native-reproduced) | Exact Node 22.23.2 CITGM and both browser CITGM runs (`citgm-1789506163152`, `citgm-1789506173734`) install `safe-buffer@5.2.1` and fail its published Standard lint contract with the legacy `var`/`new Buffer()` errors in `test/basic.js`; no browser-only runtime failure is present. |
+| 83 | qs | BLOCKED | upstream repository/toolchain (native-reproduced) | Exact Node 22.23.2 CITGM installs `qs@6.16.0` and fails its published EditorConfig check on checked-in indentation violations. Chromium (`citgm-1789506367816`) and Firefox (`citgm-1789506377879`) reach the package lint/test lifecycle; their remaining `git`/`npm@>=10.2` posttest command absence is a browser-shell toolchain boundary after the same native package lint blocker, not a browser-only package failure. |
+| 84 | fill-range | BLOCKED | upstream package/toolchain (native-reproduced) | Exact Node 22.23.2 CITGM installs `fill-range@7.0.1` and its published lint command fails because ESLint rejects obsolete `--ignore-path` under flat config. Chromium (`citgm-1789506585672`) and Firefox (`citgm-1789506599568`) reach the package test command but lack that undeclared/global `eslint` binary; no browser-only package assertion or runtime failure is exposed. |
+| 85 | path-to-regexp | PASS | ours | Exact Node 22.23.2 CITGM passes `path-to-regexp@8.4.2`; Chromium (`citgm-1789508412369`) and Firefox (`citgm-1789508414412`) pass the full install, TypeScript, Prettier, Vitest fork suite, and size-limit lifecycle. The browser runs first exposed an embedded MessagePort transfer failure and then a `new Function`-created ESM import escaping the VFS; both were fixed generally and covered by focused IPC and ESM Function-created import oracles. |
+| 86 | lodash | PASS | none observed | Exact Node 22.23.2 CITGM passes `lodash@4.18.1`; Chromium (`citgm-1789508647838`) and Firefox (`citgm-1789508647644`) also pass the published install and smoke-test contract with no browser-only failure. |
+| 87 | universalify | PASS | ours fixed | Exact Node 22.23.2 CITGM passes `universalify@2.0.1`; Chromium (`citgm-1789509679549`) and Firefox (`citgm-1789509682041`) also pass the published install and smoke-test contract. The initial browser crash was an ours-side stream compatibility defect: legacy `colortape` uses `_buffer` for private state, while the harness had used that name for its readable queue. |
+| 88 | form-data | GATE-BLOCKED | ours-side shell/tool-resolution boundary (must be fixed before promotion) | Exact Node 22.23.2 CITGM runs all 29 form-data test files successfully (`0 errors in 29 files`), then its posttest invokes `npx npm@'>=10.2' audit --production` and the nested shell reports `npm@>=10.2: command not found`. Chromium (`citgm-1789515569211`) and Firefox (`citgm-1789515671854`) reproduce the same posttest failure after both browser runs execute all 29 tests successfully. The earlier browser-only hang was fixed generally by propagating same-realm `process.reallyExit()` through virtual child cleanup, but the rank remains pending until the npm@>=10.2 command path is made green and then all required gates are rerun. Earlier hung artifacts remain preserved under `artifacts/citgm-top-100/rank-088-form-data/`. |
+| 89 | jiti | BLOCKED | upstream repository/toolchain (native-reproduced) | Exact Node 22.23.2 CITGM installs `jiti@2.7.0` from gitHead `fd3bb289b75ed207edfb686d671ed50144f7e90f`, then its published lint lifecycle fails Prettier check for `src/plugins/babel-plugin-transform-typescript-metadata/serialize-type.ts`. Chromium (`citgm-1789519209249`) and Firefox (`citgm-1789519301768`) reproduce the same failure after successful install; no browser-only runtime failure is present. |
+| 90 | @radix-ui/react-primitive | BLOCKED | upstream published workspace dependency (native-reproduced) | Exact Node 22.23.2 CITGM downloads `@radix-ui/react-primitive@2.1.10` but cannot install its published `@repo/*@0.0.0` workspace dependencies: native and Chromium report `@repo/builder` HTTP 404, while Firefox reports `@repo/typescript-config` HTTP 404. Both browser runs stop at install, matching the native package-layout blocker; no browser-only runtime failure is present. |
+| 91 | onetime | PASS | none observed | Exact Node 22.23.2 native CITGM passes `onetime@8.0.0` at lookup revision `481ec583f8303e98c4d1d16bb316ef8e6b04d72c`; Chromium (`citgm-1789523060434`) and Firefox (`citgm-1789523175419`) also pass the complete install and `xo` lifecycle. No runtime, nested-dependency, or upstream failure was observed. |
+| 92 | node-releases | BLOCKED | package contract has no test script (native-reproduced) | Exact Node 22.23.2 native CITGM installs `node-releases@2.0.55` and records `Module does not support npm-test!`. Chromium (`citgm-1789523416450`) and Firefox (`citgm-1789523448892`) install the same candidate and reproduce the same CITGM result; no browser-only runtime failure is present. |
+| 93 | ajv | BLOCKED | upstream repository fixture/submodule (native-reproduced) | Exact Node 22.23.2 native CITGM installs `ajv@8.20.0` but its `json-tests` phase cannot find `spec/JSON-Schema-Test-Suite/tests/draft6/` and instructs `git submodule update --init`. Chromium (`citgm-1789524570274`) and Firefox (`citgm-1789524666769`) reproduce the missing-folder failure (plus the empty-array reduction from the absent fixtures); no browser-only runtime failure is present. |
+| 94 | is-glob | PASS | none observed | Exact Node 22.23.2 native CITGM passes `is-glob@4.0.3` at lookup revision `627ca7e552c69e8d62d620b4715a2658267b3d17`; Chromium (`citgm-1789525870612`) and Firefox (`citgm-1789525907821`) also pass the complete upstream lifecycle. No runtime, nested-dependency, or upstream failure was observed. |
+| 95 | escalade | BLOCKED | native package/toolchain (native-reproduced); browser/runtime fixed | Exact native CITGM fails with `SyntaxError: Cannot use import statement outside a module` from nested `uvu/bin.js`. Chromium (`citgm-1789530905786`) and Firefox (`citgm-1789530939239`) pass with no failure excerpts; the earlier browser-only extensionless `src/async` import failure was ours-side and is fixed in the scoped legacy `esm` resolver. Required gates pass: build, WASM, native `npm test` 353/353, Chromium Playwright 329/329, Firefox Playwright 329/329. |
+| 96 | update-browserslist-db | PASS | ours | Exact Node 22.23.2 CITGM passes `update-browserslist-db@1.3.3`; final Chromium (`citgm-1789537197575`) and Firefox (`citgm-1789537146115`) runs pass the complete nested lifecycle, including oxlint, `c8 pnpm unit`, uvu (25/25), and posttest. Required gates pass after the runtime/WASI and virtual package-manager fixes: build, WASM, native npm test 353/353, Chromium Playwright 336/336, and Firefox Playwright 336/336. |
+| 97 | yocto-queue | PASS | none observed | Exact Node 22.23.2 CITGM passes `yocto-queue@1.2.2`; Chromium (`citgm-1789540374130`) and Firefox (`citgm-1789540453758`) both pass install, the upstream smoke test, and all five child phases with empty failure excerpts. No source changes were made, so repository-wide gates are skipped under the clean-CITGM exception. |
+| 98 | to-regex-range | PASS | none observed | Exact Node 22.23.2 CITGM passes `to-regex-range@5.0.0`; Chromium (`citgm-1789540569492`) and Firefox (`citgm-1789540616002`) both pass install, the upstream smoke test, and all four child phases. No source changes were made, so repository-wide gates are skipped under the clean-CITGM exception. |
+| 99 | fast-json-stable-stringify | PASS | none observed | Exact Node 22.23.2 CITGM passes `fast-json-stable-stringify@2.1.0`; Chromium (`citgm-1789540681084`) and Firefox (`citgm-1789540736118`) both pass install, the upstream test, nyc, posttest, and all six child phases. No source changes were made, so repository-wide gates are skipped under the clean-CITGM exception. |
+| 100 | get-intrinsic | BLOCKED | upstream package/toolchain (native-reproduced posttest) | Exact Node 22.23.2 CITGM passes all 120 package assertions, then its posttest invokes `npx npm@'>= 10.2' audit --production` and the nested shell reports `npm@>= 10.2: command not found` (`native-citgm-node-v22-final.log`). Final Chromium (`citgm-1789548895693`) and Firefox (`citgm-1789548960415`) also pass all 120 assertions and coverage before reproducing that same posttest failure. The browser-only child-output collision, intrinsic mutation leak, and stream-composition regression were fixed generally; required final gates pass: native npm test 353/353, WASM, Chromium Playwright 339/339, and Firefox Playwright 339/339. |
 
-The pending-row cursor now points to rank 63. Ranks 43–44, 47–49, and 61 are
-recorded as blocked only after native proof; ranks 45–46 and 58–62 are
-complete, and every failure classification below follows the same
+The continuation record now reaches rank 100 and the ordered top-100 sweep is
+complete. Ranks 43–44, 47–49, and 61 are recorded as blocked only after native
+proof; ranks 45–46, 58–62, 95–99 are complete, and every failure
+classification below follows the same
 native-comparison rule.
 
 ## Rank 59 failure record
@@ -167,7 +168,8 @@ npm test                                       PASS — npm-test-after-find-up.l
 npm run test:browser:chromium                 PASS — playwright-chromium-after-find-up-final.log (318/318)
 npm run test:browser:firefox                  PASS — playwright-firefox-after-find-up.log (318/318)
 ```
-All rows after rank 62 remain pending until their turn.
+Ranks 63–94 are now classified below; the next unexecuted browser pair is rank
+95.
 
 ## Rank 60 failure record
 
@@ -197,16 +199,14 @@ logs and the final browser result bundles are preserved under
 | Run / log | Observed failure or behavior | Classification and resolution |
 | --- | --- | --- |
 | `native-citgm-node.log` | The runner could not start because the shared `/tmp/.agents` mount hit its quota. | Transient runner interruption; preserved separately from the actual native result. |
-| `native-citgm-node-rerun.log` | Install succeeds, then `xo` fails before package assertions with `TypeError: util.isDate is not a function` from nested `eslint-plugin-ava/create-ava-rule.js`. | Native proof of a nested dependency/toolchain incompatibility with current Node. No deprecated-API shim or candidate modification was added. |
+| `native-citgm-node-rerun.log` | The default Node 26.7.0 shell installs the package, then `xo` fails before package assertions with `TypeError: util.isDate is not a function`. | Invalid comparison for this project’s Node 22 baseline; retained to show why the runtime must be selected explicitly. It is not used for rank classification. |
+| `native-citgm-node-v22-corrected.log` | Explicit Node 22.23.2 CITGM installs the exact checkout and the smoke test passes. | Correct native baseline proof. The package is not blocked by `util.isDate`. |
 | `citgm-chromium.log` / `citgm-1789419587466`, `citgm-firefox.log` / `citgm-1789419713966` | Both browser runs install the package and complete XO, AVA, and tsd successfully. | Browser CITGM is green. The native-reproduced nested failure remains the only blocker and is not attributed to Nacelle. |
 
-Rank 61 is recorded as `BLOCKED` only after the exact native Node comparison
-proved that the published test contract also fails outside the browser. The
-browser target is green in both engines, but the nested `eslint-plugin-ava`
-failure prevents calling the package fully green; no fake shim or package-
-specific workaround was added. No repository source or test change was made,
-so the repository-wide gates were skipped after the two final browser CITGM
-runs. The ordered cursor then advanced to rank 62.
+Rank 61 is recorded as `PASS` against the required Node 22.23.2 native
+baseline. The earlier Node 26 `util.isDate` failure is retained as a comparison
+artifact only and does not classify the package. The ordered cursor remains at
+rank 62 until the current source/test changes are gated and committed.
 
 ## Rank 62 failure record
 
@@ -254,6 +254,134 @@ npm run test:browser:firefox                     PASS — playwright-firefox-fin
 
 The rank cursor now advances to rank 63; no rank-63 CITGM work is included in
 this record.
+
+## Ranks 63–65 continuation record
+
+The exact native and browser attempts for ranks 63 and 65 are preserved under
+`artifacts/citgm-top-100/rank-063-eslint-scope/` and
+`artifacts/citgm-top-100/rank-065-cross-spawn/`. The temporary rank-64 yargs
+diagnostic bundle was intentionally removed after its temporary runtime
+snapshots and tracing were extracted; the run IDs and observed outcomes below
+remain as the status record, but no local rank-64 artifact directory is claimed.
+
+| Run / log | Observed failure or behavior | Classification and resolution |
+| --- | --- | --- |
+| Rank 63 `native-citgm-node-rerun.log` | `eslint-scope` installs, but the workspace test fails after building `espree`: `eslint-visitor-keys/dist/eslint-visitor-keys.cjs` is absent from the exact published workspace. | Native-reproduced package/workspace layout failure. The package is recorded `BLOCKED`; no browser workaround or candidate shim was added. |
+| Rank 63 `citgm-1789465928447` / `citgm-1789466215242` | Chromium crashes in the monorepo test path and Firefox's child is killed after timing out before package assertions. | Incomplete browser attempts; they do not override the native-reproduced classification. |
+| Rank 64 `native-citgm-node-rerun.log` | `yargs@18.1.0` passes its exact native CITGM suite. | Native proof that the Chromium failure is ours-side until the browser path is fixed. |
+| Rank 64 `citgm-1789466996660` / `citgm-1789487524931` | The package reaches `gts`, but the latest post-fix Chromium run still reports both a literal `/**/*.ts` import-path failure and `ReferenceError: describe is not defined` in `test/argsert.mjs`. | Ours-side shell/loader and child-global handling remain unresolved. The rank stays `GATE-BLOCKED`; no package-specific shim was added. |
+| Rank 65 `native-citgm-node-rerun.log` / `citgm-1789485014051` / `citgm-1789487666474` | `cross-spawn@7.0.6` passes native Node, Chromium, and Firefox CITGM, including nested Jest and coverage. | The browser-only failures were ours. VM-safe process event inspection now closes over the owning process, allowing graceful-fs's queue and the package's real concurrency path to complete. The post-source-change repository gates below are green; rank 65 is `PASS`. |
+
+## Post-cleanup repository gate record
+
+After removing the yargs investigation diagnostics, the retained runtime fixes
+and permanent regression tests were rebuilt and verified with Node 22.23.2:
+
+```text
+node --version                              v22.23.2
+patch-regressions.mjs                       PASS
+npm run build:v22                           PASS — 5 WASM artifacts
+npm run check:wasm                          PASS — 5 artifacts passed export validation
+npm test                                    PASS — 354/354
+npm run test:browser:chromium               PASS — 364/364
+npm run test:browser:firefox                PASS — 364/364
+```
+
+These gates validate the current source after cleanup. Rank 64 remains
+`GATE-BLOCKED`: its recorded yargs CITGM still has the unresolved `gts`
+posttest lifecycle, and this cleanup did not claim a new exact yargs CITGM pass.
+
+The ordered cursor remains at rank 63 because rank 64 is still formally
+retained as an ours-side gate blocker. Rank 65's exact native and browser
+results, along with the post-source-change repository gates above, are green,
+so rank 65 is promoted to `PASS`.
+
+## Ranks 66–70 continuation record
+
+Rank 66 is complete; its exact browser artifacts are preserved under
+`artifacts/citgm-top-100/rank-066-statuses/`. The next active rank is 67.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| Rank 66 `citgm-1789488684637` / `citgm-1789488760839` | `statuses` passes in current-source Chromium and Firefox after the exact native comparison also passed. | No runtime, nested-dependency, or upstream failure observed; recorded `PASS`. |
+| Rank 67 `citgm-1789488862234` / `citgm-1789488922828` | `whatwg-url` reaches `pretest`, then nested `oxfmt` throws `Error: Cannot find native binding` in both browsers. | Browser-reproduced nested native-addon dependency blocker; native Node passes, but the package cannot run its published browser-incompatible toolchain without inventing a binding. Recorded `BLOCKED`. |
+| Rank 68 `citgm-1789489022132` / `citgm-1789489116162` | `fast-deep-equal` reaches its test toolchain, then TypeScript rejects installed `@types/node` declarations with syntax errors in both browsers. | Browser-reproduced nested toolchain/version-layout blocker; native Node passes. Recorded `BLOCKED`. |
+| Rank 69 `citgm-1789489231018` / `citgm-1789489360338` | `locate-path` passes in current-source Chromium and Firefox after the exact native comparison also passed. | No runtime, nested-dependency, or upstream failure observed; recorded `PASS`. |
+| Rank 70 `citgm-1789489539761` / `citgm-1789489600704` | `is-number` passes in current-source Chromium and Firefox after the exact native comparison also passed. | No runtime, nested-dependency, or upstream failure observed; recorded `PASS`. |
+| Rank 71 `native-citgm-node-rerun.log` / `citgm-1789489675313` / `citgm-1789490011215` | Native Node reaches the package’s oversized-buffer test and fails with `RangeError: Invalid array length`; Chromium then crashes during the AVA worker run, while Firefox was interrupted after remaining in the same active-worker state. | Native-reproduced package assertion blocker. Browser attempts are retained as incomplete diagnostics and do not justify a browser workaround. Recorded `BLOCKED`. |
+
+## Rank 72 continuation record
+
+The exact native and browser attempts for rank 72 are preserved under
+`artifacts/citgm-top-100/rank-072-yaml/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-rerun.log` | `yaml@2.9.1` runs 25 suites: 23 pass with 1,103 tests, while `tests/yaml-test-suite.ts` and `tests/json-test-suite.ts` fail because the published workspace is missing their fixture directories. | Native-reproduced package/source-archive layout failure. No fixture injection or package-specific shim was added. Recorded `BLOCKED`. |
+| `citgm-1789490137945` / `citgm-1789490330921` | Chromium and Firefox both reach the package canary and report `The canary is dead`; Chromium additionally reports `TypeError: require.resolve.paths is not a function` in the browser child. | Browser attempts preserve the same blocked package path and expose an additional runtime compatibility gap for later general repair. They do not override the native classification. |
+
+## Rank 73 continuation record
+
+The exact native and browser attempts for rank 73 are preserved under
+`artifacts/citgm-top-100/rank-073-path-scurry/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-rerun.log` | `path-scurry@2.0.2` passes the exact native CITGM suite. | Native proof that the browser failure is ours-side until resolved. |
+| `citgm-1789491251357` / `citgm-1789491439868` / `citgm-1789491528043` | Chromium and Firefox reach the tap child but report no tests found for `test/index.ts`; the child stderr is `SyntaxError: Unexpected identifier 'from'`. | Ours-side TypeScript worker/loader boundary. The fs overlay named-export and synchronous strip fixes are retained, but this async tap worker path remains unresolved; recorded `GATE-BLOCKED` with no package shim. |
+| `citgm-1789490436582` / `citgm-1789490553844` / `citgm-1789490581846` / `citgm-1789490612145` | Earlier browser attempts stopped during install with fetch/network errors before candidate execution. | Transient runner interruptions retained as supporting artifacts, not package evidence. |
+
+## Rank 75 continuation record
+
+The exact native and browser attempts for rank 75 are preserved under
+`artifacts/citgm-top-100/rank-075-browserslist/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-rerun.log` | `browserslist@4.29.0` passes the exact native CITGM contract. | Native proof that the browser failure is ours-side until resolved. |
+| `citgm-1789490711689` / `citgm-1789491743672` | Earlier Chromium attempts stop during install, first with a network fetch interruption and then while loading the browser-side `node:zlib` fallback. | The network interruption is transient; the browser gzip fallback was fixed generally by exposing the runtime zlib shim to archive unpacking and avoiding a browser dynamic import of `node:zlib`. |
+| `citgm-1789492384624` / `citgm-1789492500149` / `citgm-1789492712774` / `citgm-1789492859862` / `citgm-1789493040424` and `citgm-1789493273243` | Earlier browser attempts reached the package's `c8 uvu test .test.js` path. The virtual `foreground-child` child passed `argv=["uvu", "/.../test", ".test.js"]` only after the synchronous directory probe was fixed; the package's ESLint command then exposed a second plugin-identity issue. | Both browser failures were ours-side. The runtime now resolves directory child entries before source loading and routes child ESM `node:module`/`createRequire` through the child-owned CommonJS cache, preserving singleton identity for `eslint-plugin-es5`. |
+| `citgm-1789498550257` / `citgm-1789498610007` | Final clean Chromium and Firefox runs pass install and all seven child commands: c8/uvu, ESLint, size-limit, and posttest `pnpm`. Both terminal results have exit code 0, no failed children, and no active ESM children. | Rank 75 resolved and recorded `PASS`; no package-specific shim was added. |
+
+## Rank 76 continuation record
+
+The exact native and browser attempts for rank 76 are preserved under
+`artifacts/citgm-top-100/rank-076-_babel_helper-string-parser/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-current.log` | `@babel/helper-string-parser@8.0.0` installs, then CITGM reports `Module does not support npm-test!` because the package has no test script. | Native Node 22 proof of the package contract blocker. |
+| `citgm-1789499123112` / `citgm-1789499270130` | Chromium and Firefox both install the candidate successfully, complete all three nested npm child commands, and report the same `Module does not support npm-test!` result. | Upstream package/CITGM contract blocker; no runtime fix or package shim is appropriate. |
+
+## Rank 78 continuation record
+
+The exact native and browser attempts for rank 78 are preserved under
+`artifacts/citgm-top-100/rank-078-yallist/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-current.log` | `yallist@5.0.0` passes the exact native CITGM contract. | Native Node 22 baseline is green. |
+| `citgm-1789499607847` / `citgm-1789499670011` | Chromium and Firefox both pass install, `tshy`, TAP, and the nested test child; terminal exit code is 0 with no failed children. | Rank 78 resolved as `PASS`; no runtime or package-specific change was needed. |
+
+## Rank 77 continuation record
+
+The exact native and browser attempts for rank 77 are preserved under
+`artifacts/citgm-top-100/rank-077-camelcase/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-current.log` | `camelcase@9.0.0` passes the exact native CITGM contract. | Native Node 22 baseline is green. |
+| `citgm-1789499331454` / `citgm-1789499438810` | Chromium and Firefox both pass install and all six child phases, including XO, AVA, and tsd; terminal exit code is 0 with no failed children or active ESM children. | Rank 77 resolved as `PASS`; no runtime or package-specific change was needed. |
+
+## Rank 79 continuation record
+
+The exact native and browser attempts for rank 79 are preserved under
+`artifacts/citgm-top-100/rank-079-_babel_template/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-current.log` | `@babel/template@8.0.0` installs, then CITGM reports `Module does not support npm-test!` because the package has no test script. | Native Node 22 proof of the package contract blocker. |
+| `citgm-1789499805320` / `citgm-1789499831009` | Chromium and Firefox both install successfully and reproduce the same no-`npm test` result, with all three nested npm child commands completing cleanly. | Upstream package/CITGM contract blocker; no runtime fix or package shim is appropriate. |
 
 ## Rank 6 failure record
 
@@ -1971,3 +2099,374 @@ The initial fetch failure, missing generated-file failure, malformed stream
 failure, all CITGM telemetry, and final gate logs are committed with the
 source and regression-test changes. The ordered cursor advances to rank 59
 only after this record is committed cleanly.
+
+## Rank 80 continuation record
+
+The exact candidate is `cookie@2.0.1` at gitHead
+`51c485421a95ee796de6d8dab53a5ade0a20db8a`. The native and browser results,
+including the pre-fix Firefox failure, are preserved under
+`artifacts/citgm-top-100/rank-080-cookie/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-current.log` | Exact Node 22.23.2 CITGM passes the published cookie package contract. | Native proof that the browser failure was ours-side until fixed. |
+| `browser-chromium/citgm-1789505736838` / `browser-firefox/citgm-1789505740370` | Chromium passed, while Firefox ran the TypeScript and formatting steps but Vitest failed all four suites with `this._otel.$(...).finally is not a function`; the earlier caught nested ESM rejection was also reproduced in Firefox. | Ours-side Promise/module-loader boundary defects; neither result was classified upstream. |
+| `browser-chromium-final2/citgm-1789505900544` / `browser-firefox-final2/citgm-1789505900198` | Both browsers pass install, `ts-scripts test` (182 Vitest tests), and `size-limit`; terminal exit code 0 with no failed children. | PASS after the general Firefox Promise `.catch`/`.finally` surface and caught dynamic-import rejection lifecycle fixes. |
+
+The dynamic-import regression oracle covers both engines and both directions:
+a caught missing module continues successfully, while an uncaught missing
+module still exits 1. No cookie-specific shim was added.
+
+Rank 80 is recorded as `PASS` after the exact Node 22 baseline and both final
+browser CITGM runs. The ordered cursor advances to rank 81.
+
+## Rank 81 continuation record
+
+The exact candidate is `agent-base@9.0.0`. Native Node 22.23.2 and both
+browser attempts are preserved under
+`artifacts/citgm-top-100/rank-081-agent-base/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-current.log` | Fresh install fails because the published manifest requests `tsconfig@0.0.0`, which is not available. | Native-reproduced upstream published-dependency blocker. |
+| `browser-chromium/citgm-1789506085419` / `browser-firefox/citgm-1789506095559` | Both browsers complete CITGM bootstrap, then fail the candidate install with `No matching version found for tsconfig@0.0.0`. | Same upstream dependency failure in both browsers; no runtime workaround or fake package was added. Rank 81 is recorded `BLOCKED`. |
+
+## Rank 82 continuation record
+
+The exact candidate is `safe-buffer@5.2.1` at gitHead
+`89d3d5b4abd6308c6008499520373d204ada694b`. Native Node 22.23.2 and both
+browser attempts are preserved under
+`artifacts/citgm-top-100/rank-082-safe-buffer/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-current.log` | Exact native CITGM reaches the package's Standard lint and fails on legacy `var`, `new Buffer()`, and the unavailable `node/no-deprecated-api` rule. | Native-reproduced package/toolchain blocker. |
+| `browser-chromium/citgm-1789506163152` / `browser-firefox/citgm-1789506173734` | Both browsers install the package and fail the same `standard` child before the tape tests; neither exposes a browser-only runtime failure. | Same published legacy lint contract in both browsers; rank 82 is recorded `BLOCKED`. |
+
+## Rank 83 continuation record
+
+The exact candidate is `qs@6.16.0` at gitHead
+`bb9379e01fad04c601478acd6152143cb20c984b`. Native Node 22.23.2 and both
+browser attempts are preserved under `artifacts/citgm-top-100/rank-083-qs/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-current.log` | The published `postlint` EditorConfig check fails on numerous checked-in indentation violations before package assertions. | Native-reproduced upstream repository/toolchain blocker. |
+| `browser-chromium/citgm-1789506367816` / `browser-firefox/citgm-1789506377879` | Both browsers install the package and reach its lifecycle. The browser shell reports the package's `git ls-files`/`npx npm@'>=10.2'` posttest commands unavailable after the test toolchain; no browser-only assertion or runtime error is exposed. | The package is already non-green under the authoritative Node 22 baseline; rank 83 is recorded `BLOCKED` without adding fake repository or npm commands. |
+
+## Rank 84 continuation record
+
+The exact candidate is `fill-range@7.0.1` at gitHead
+`95349d0841497279f2f4dbfef62bd551d6648449`. Native Node 22.23.2 and both
+browser attempts are preserved under
+`artifacts/citgm-top-100/rank-084-fill-range/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-current.log` | The package installs and its `eslint --ignore-path .gitignore` lint script fails with the current ESLint flat-config error `Invalid option '--ignore-path'`. | Native-reproduced upstream package/toolchain blocker. |
+| `browser-chromium/citgm-1789506585672` / `browser-firefox/citgm-1789506599568` | Both browsers install the exact GitHub candidate and reach `npm test`; the undeclared `eslint` executable is unavailable in the browser package environment, so the package's lint cannot start. | This does not create a browser-only package failure or justify a fake global ESLint; rank 84 is recorded `BLOCKED` on the native-reproduced obsolete lint contract. |
+
+## Rank 85 continuation record
+
+The exact candidate is `path-to-regexp@8.4.2`, using the CITGM lookup revision
+`cbf30259e6d34d6135f9e7dbaa3371e7188f9936`. Native Node 22.23.2 and all
+browser attempts are preserved under
+`artifacts/citgm-top-100/rank-085-path-to-regexp/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-final.log` | Exact Node 22.23.2 CITGM installs the source archive and passes the package smoke test. | Native proof that browser-only failures were ours-side until resolved. |
+| `browser-chromium/citgm-1789506718328` / `browser-firefox/citgm-1789506733987` | Both initial browser runs fail in nested Vitest forks with `message could not be structured-cloned` while Tinypool embeds its MessagePort in an IPC payload. | Ours. The scoped IPC endpoint now discovers embedded adapted/native MessagePorts and forwards them through the browser transfer list; the implicit embedded-port path is covered by a permanent IPC oracle. |
+| `browser-chromium-final4/citgm-1789507785197` / `browser-firefox-final4/citgm-1789507805484` | After the transfer fix, both engines reach the nested worker but report a dynamically imported `vitest/dist/worker.js` failure. The outer command exits 0 while the child output exposes the failure. | Ours. Tinypool intentionally creates dynamic import with `new Function`, which escaped the ESM source rewriter. ESM process execution now installs the VFS-bound Function compatibility surface for the process lifetime and restores it on teardown. |
+| `browser-chromium-final5/citgm-1789508412369` / `browser-firefox-final5/citgm-1789508414412` | Both browsers pass the complete 157-package install, TypeScript build/check, Prettier, Vitest fork suite, and size-limit phases; terminal and child outputs contain no failure excerpts. | PASS. The focused Chromium and Firefox ESM Function-created import oracle and the three-case IPC oracle also pass. No package-specific shim was added. |
+
+Rank 85 is recorded as `PASS`; the ordered cursor advances to rank 86.
+
+## Rank 86 continuation record
+
+The exact candidate is `lodash@4.18.1` at lookup revision
+`4f0b76e2eca13de1cfe8b4305abc1f7d63f4b86`. Native Node 22.23.2 and both
+browser artifacts are preserved under `artifacts/citgm-top-100/rank-086-lodash/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-current.log` | Exact Node 22.23.2 CITGM installs the source archive and passes the smoke test. | PASS baseline; no issue observed. |
+| `browser-chromium/citgm-1789508647838` / `browser-firefox/citgm-1789508647644` | Both browser CITGM runs install the candidate and pass the package smoke-test lifecycle with no failure excerpts. | PASS. No runtime, nested-dependency, or upstream blocker was observed. |
+
+Rank 86 is recorded as `PASS`; the ordered cursor advances to rank 87.
+
+## Rank 87 continuation record
+
+The exact candidate is `universalify@2.0.1` at lookup revision
+`dc17e0e00fb39c8d52e97ce77e494cdadfa8d19c`. Native Node 22.23.2 and all
+browser attempts are preserved under
+`artifacts/citgm-top-100/rank-087-universalify/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-current.log` | Exact Node 22.23.2 CITGM installs the source archive and passes the package smoke test. | Native baseline pass. |
+| `browser-chromium/citgm-1789508696696` / `browser-firefox/citgm-1789508697579` | Both initial browser runs crash after the package test starts with `Readable.resume()` reading `this._buffer.length` after legacy `colortape` set `_buffer` to `null`. | Ours. Readable queue operations now use `_readableState.buffer`, matching Node's separation between stream internals and userland private fields. The focused regression oracle passes in both browsers. |
+| `browser-chromium-final1/citgm-1789509679549` / `browser-firefox-final1/citgm-1789509682041` | Both browsers pass install and the complete universalify smoke-test lifecycle with no failure excerpts. | PASS. No package-specific shim was added. |
+
+## Rank 88 continuation record
+
+The exact candidate is `form-data@4.0.4` at lookup revision `514861c…`. Native
+Node 22.23.2 and both browser attempts are preserved under
+`artifacts/citgm-top-100/rank-088-form-data/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-current.log` | All 29 published test files pass (`0 errors in 29 files`), then the posttest invokes `npx npm@'>=10.2' audit --production` and the nested shell reports `npm@>=10.2: command not found`. | Native-reproduced package/toolchain blocker after the package assertions pass. |
+| `browser-chromium-fixed-reallyexit/citgm-1789515569211` / `browser-firefox-fixed-reallyexit/citgm-1789515671854` | Both engines execute all 29 test files successfully, then reproduce the same posttest command failure. | The earlier browser-only timeout in EBUSY/EACCES cases was ours-side; same-realm `process.reallyExit()` now propagates through virtual child exit/cleanup, with a permanent nested-child regression oracle in `expanded-primitives.spec.mjs`. Rank 88 is recorded `BLOCKED` only on the native-reproduced posttest/toolchain failure. |
+
+The rank-88 source fix was gated with `npm run build:v22`, `npm run check:wasm`,
+the full Node 22 `npm test` suite (353/353), and full Chromium and Firefox
+Playwright suites (328/328 each). The ordered cursor now advances to rank 89.
+
+## Rank 89 continuation record
+
+The exact candidate is `jiti@2.7.0` at lookup revision
+`fd3bb289b75ed207edfb686d671ed50144f7e90f`. Native Node 22.23.2 and both
+browser attempts are preserved under `artifacts/citgm-top-100/rank-089-jiti/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-rerun-final.log` | Installation succeeds; the published `pnpm lint` lifecycle reaches `prettier -c src lib test stubs` and fails on `src/plugins/babel-plugin-transform-typescript-metadata/serialize-type.ts`. | Native-reproduced upstream repository/toolchain blocker. |
+| `browser-chromium/citgm-1789519209249` / `browser-firefox/citgm-1789519301768` | Both engines install the exact candidate and reach the same Prettier check, reporting the same file and exit code; neither exposes a browser-only package or runtime failure. | Rank 89 is recorded `BLOCKED` on the native-reproduced published lint contract; no package-specific shim or source change was added. |
+
+Because the rank-89 CITGM result was not a clean pass, the required full gates
+were run before advancing the cursor:
+
+```text
+full-npm-test-node22.log                 PASS — 353/353
+full-playwright-chromium-final.log      PASS — 328/328
+full-playwright-firefox-final.log       PASS — 328/328
+```
+
+The ordered cursor now advances to rank 90.
+
+## Rank 90 continuation record
+
+The exact candidate is `@radix-ui/react-primitive@2.1.10`. Native Node
+22.23.2 and both browser attempts are preserved under
+`artifacts/citgm-top-100/rank-090-_radix-ui_react-primitive/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-rerun-final.log` | The package tarball downloads, but npm installation fails with HTTP 404 for published dependency `@repo/builder@0.0.0`. | Native-reproduced upstream published workspace-dependency blocker. |
+| `browser-chromium/citgm-1789521937233` | BrowserNpm installs the candidate graph until `@repo/builder` metadata returns HTTP 404; no candidate test executes. | Same published dependency blocker; no browser-only runtime failure. |
+| `browser-firefox/citgm-1789521964100` | BrowserNpm installs the candidate graph until `@repo/typescript-config` metadata returns HTTP 404; no candidate test executes. | Same `@repo/*@0.0.0` published workspace-layout blocker; no package-specific shim or source change was added. |
+
+Because rank 90 is not a clean CITGM pass, the full Node 22 test suite and
+both full Playwright suites are required before the cursor can advance to
+rank 91.
+
+The rank-90 gates are complete:
+
+```text
+full-npm-test-node22.log             PASS — 353/353
+full-playwright-chromium.log        PASS — 328/328
+full-playwright-firefox.log         PASS — 328/328
+```
+
+The ordered cursor now advances to rank 91.
+
+## Rank 91 continuation record
+
+The exact candidate is `onetime@8.0.0` at lookup revision
+`481ec583f8303e98c4d1d16bb316ef8e6b04d72c`. Native Node 22.23.2 and both
+browser attempts are preserved under
+`artifacts/citgm-top-100/rank-091-onetime/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-rerun-final.log` | The GitHub source archive installs successfully and the package smoke test passes. | PASS under the exact Node 22 baseline. |
+| `browser-chromium/citgm-1789523060434` | Install and the complete upstream `xo` lifecycle exit 0. | PASS; no browser-only runtime or nested-dependency failure. |
+| `browser-firefox/citgm-1789523175419` | Install and the complete upstream `xo` lifecycle exit 0. | PASS; no browser-only runtime or nested-dependency failure. |
+
+This is an unchanged clean triple-CITGM pass, so the repository-wide gates are
+omitted under the documented clean-CITGM exception. The ordered cursor now
+advances to rank 92.
+
+## Rank 92 continuation record
+
+The exact candidate is `node-releases@2.0.55` at lookup revision
+`e3cb9ed5270fa086bd4e7492903c5aada8e49397`. Native Node 22.23.2 and both
+browser attempts are preserved under
+`artifacts/citgm-top-100/rank-092-node-releases/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-rerun-final.log` | Installation succeeds, then CITGM reports `Module does not support npm-test!` for the package. | Native-reproduced package contract; there is no upstream test script for CITGM to run. |
+| `browser-chromium/citgm-1789523416450` | Installation succeeds and the browser CITGM lifecycle reports the same `Module does not support npm-test!` result. | Native-reproduced package contract; no browser-only runtime failure. |
+| `browser-firefox/citgm-1789523448892` | Installation succeeds and the browser CITGM lifecycle reports the same `Module does not support npm-test!` result. | Native-reproduced package contract; no browser-only runtime failure. |
+
+Because rank 92 is not a clean CITGM pass, the full Node 22 test suite and
+both full Playwright suites are required before the cursor can advance to
+rank 93.
+
+The rank-92 gates are complete:
+
+```text
+full-npm-test-node22.log             PASS — 353/353
+full-playwright-chromium.log        PASS — 328/328
+full-playwright-firefox.log         PASS — 328/328
+```
+
+The ordered cursor now advances to rank 93.
+
+## Rank 93 continuation record
+
+The exact candidate is `ajv@8.20.0` at lookup revision
+`0fba0b8e649909613cfce0999b149cd08f4a4987`. Native Node 22.23.2 and both
+browser attempts are preserved under `artifacts/citgm-top-100/rank-093-ajv/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-rerun-final.log` | Installation succeeds, then `json-tests` fails because `spec/JSON-Schema-Test-Suite/tests/draft6/` is absent; the package says to initialize its Git submodule. | Native-reproduced upstream repository fixture/submodule blocker. |
+| `browser-chromium/citgm-1789524570274` | The same missing folder is reported, followed by `TypeError: Reduce of empty array with no initial value` in `scripts/jsontests.js`. | Browser reproduction of the native fixture blocker; no browser-only runtime failure. |
+| `browser-firefox/citgm-1789524666769` | The same missing folder is reported, followed by the equivalent empty-array reduction. | Browser reproduction of the native fixture blocker; no package-specific shim or source change was added. |
+
+Because rank 93 is not a clean CITGM pass, the full Node 22 test suite and
+both full Playwright suites are required before the cursor can advance to
+rank 94.
+
+The rank-93 gates are complete:
+
+```text
+full-npm-test-node22.log             PASS — 353/353
+full-playwright-chromium.log        PASS — 328/328
+full-playwright-firefox.log         PASS — 328/328
+```
+
+The ordered cursor now advances to rank 94.
+
+## Rank 94 continuation record
+
+The exact candidate is `is-glob@4.0.3` at lookup revision
+`627ca7e552c69e8d62d620b4715a2658267b3d17`. Native Node 22.23.2 and both
+browser attempts are preserved under `artifacts/citgm-top-100/rank-094-is-glob/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-rerun-final.log` | The GitHub source archive installs successfully and the package smoke test passes. | PASS under the exact Node 22 baseline. |
+| `browser-chromium/citgm-1789525870612` | Install and the complete upstream lifecycle exit 0. | PASS; no browser-only runtime or nested-dependency failure. |
+| `browser-firefox/citgm-1789525907821` | Install and the complete upstream lifecycle exit 0. | PASS; no browser-only runtime or nested-dependency failure. |
+
+This is an unchanged clean triple-CITGM pass, so the repository-wide gates are
+omitted under the documented clean-CITGM exception. The ordered cursor now
+advances to rank 95.
+
+## Rank 95 continuation record
+
+The exact candidate is `escalade@3.2.0` at lookup revision
+`fa5be167391581849cff04dbc75dc2978744b642`. Native Node 22.23.2 and both
+browser attempts are preserved under
+`artifacts/citgm-top-100/rank-095-escalade/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-final.log` | The package's `uvu -r esm test -i fixtures` command fails before assertions with `SyntaxError: Cannot use import statement outside a module` in `uvu/bin.js`. | Native-reproduced package/toolchain failure. |
+| `browser-chromium-fixed/citgm-1789530905786` | Install, `bundt`, and the `uvu` child complete with exit 0; terminal and run-result failure excerpts are empty. | PASS for browser runtime. The prior masked `ERR_MODULE_NOT_FOUND` for extensionless `src/async` was an ours-side defect; legacy `esm` transformed imports now use scoped CommonJS extension probing. |
+| `browser-firefox-fixed/citgm-1789530939239` | Install, `bundt`, and the `uvu` child complete with exit 0; terminal and run-result failure excerpts are empty. | PASS for browser runtime and cross-browser parity. |
+
+Because rank 95 changed the runtime, the full Node 22 test suite and both full
+Playwright suites are required before the cursor can advance to rank 96.
+
+The rank-95 gates are complete:
+
+```text
+full-build-v22.log                 PASS — 5 WASM artifacts, Node 22.23.2
+full-check-wasm.log                PASS — 5 artifacts passed export validation
+full-npm-test-node22.log           PASS — 353/353
+full-playwright-chromium.log       PASS — 329/329
+full-playwright-firefox.log        PASS — 329/329
+```
+
+The ordered cursor now advances to rank 96.
+
+## Rank 96 continuation record
+
+The exact candidate is `update-browserslist-db@1.3.3` at lookup revision
+`6f17ab56b68097b398e1e6082f20e5ed6ec27588`. Native Node 22.23.2, both exact
+browser CITGM runs, and the complete repository gates are preserved under
+`artifacts/citgm-top-100/rank-096-update-browserslist-db/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-current.log` | The exact native CITGM suite passes. | Native proof that the package contract is healthy under the Node 22 baseline. |
+| `browser-chromium-final-fixed-clean/citgm-1789537197575` | Install, oxlint, `c8 pnpm unit`, uvu (25/25), and posttest complete with exit 0; terminal failure excerpts are empty. | PASS. The earlier `oxlint` native-binding failure was fixed by the version-matched WASI adapter; the later `uvu test .test.js` ENOENT was fixed by shell command normalization, virtual package-manager routing, synchronous metadata/lockfile behavior, and VFS URL canonicalization. |
+| `browser-firefox-final-fixed-run/citgm-1789537146115` | The same complete nested lifecycle completes with exit 0; terminal failure excerpts are empty. | PASS with Chromium/Firefox parity. |
+| `full-build-v22-final.log` / `full-check-wasm-v22-final.log` | Build and five-artifact WASM export validation pass under Node 22.23.2. | Required post-source-change gates pass. |
+| `full-npm-test-node22-final-rerun.log` / `full-playwright-chromium-complete-2.log` / `full-playwright-firefox-complete.log` | Native npm test passes 353/353; Chromium and Firefox each pass 336/336. | All repository-wide gates are green; rank 96 is complete. |
+
+The ordered cursor now advances to rank 100.
+
+## Rank 99 continuation record
+
+The exact candidate is `fast-json-stable-stringify@2.1.0` at lookup revision
+`b3ab8bdfb91cb182c93475c2c3518d6224672bb4`. Native Node 22.23.2 and both
+browser CITGM runs are preserved under
+`artifacts/citgm-top-100/rank-099-fast-json-stable-stringify/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-current.log` | The exact native CITGM install and smoke test pass. | Native package contract is green under the Node 22 baseline. |
+| `browser-chromium-run.log` / `citgm-1789540681084` | Install, upstream test, nyc, and posttest complete with exit 0; six children complete and terminal failure excerpts are empty. | PASS; no browser-only runtime or dependency failure observed. |
+| `browser-firefox-run.log` / `citgm-1789540736118` | The same complete lifecycle completes with exit 0; six children complete and terminal failure excerpts are empty. | PASS with Chromium/Firefox parity. |
+
+No source changes were made for rank 99, so the clean double-CITGM result is
+the gate under the documented exception. The ordered cursor now advances to
+rank 100.
+
+## Rank 98 continuation record
+
+The exact candidate is `to-regex-range@5.0.0` at lookup revision
+`c05ef9ec07e7703d146467934098ecbde9d0bd95`. Native Node 22.23.2 and both
+browser CITGM runs are preserved under
+`artifacts/citgm-top-100/rank-098-to-regex-range/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-current.log` | The exact native CITGM install and smoke test pass. | Native package contract is green under the Node 22 baseline. |
+| `browser-chromium-run.log` / `citgm-1789540569492` | Install, upstream smoke test, and npm child phases complete with exit 0; the generic excerpt contains only positive assertion output. | PASS; no browser-only runtime or dependency failure observed. |
+| `browser-firefox-run.log` / `citgm-1789540616002` | The same complete lifecycle completes with exit 0; the generic excerpt contains only positive assertion output. | PASS with Chromium/Firefox parity. |
+
+No source changes were made for rank 98, so the clean double-CITGM result is
+the gate under the documented exception. The ordered cursor now advances to
+rank 99.
+
+## Rank 97 continuation record
+
+The exact candidate is `yocto-queue@1.2.2` at lookup revision
+`b07eac099753833b29d06c614149904445739776`. Native Node 22.23.2 and both
+browser CITGM runs are preserved under
+`artifacts/citgm-top-100/rank-097-yocto-queue/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-current.log` | The exact native CITGM install and smoke test pass. | Native package contract is green under the Node 22 baseline. |
+| `browser-chromium-run.log` / `citgm-1789540374130` | Install, upstream smoke test, and npm child phases complete with exit 0; terminal failure excerpts are empty. | PASS; no browser-only runtime or dependency failure observed. |
+| `browser-firefox-run.log` / `citgm-1789540453758` | The same complete lifecycle completes with exit 0; terminal failure excerpts are empty. | PASS with Chromium/Firefox parity. |
+
+No source changes were made for rank 97, so the clean double-CITGM result is
+the gate under the documented exception. The ordered cursor now advances to
+rank 98.
+
+## Rank 100 continuation record
+
+The exact candidate is `get-intrinsic@1.3.0` at gitHead
+`9d747e0540e5e03421e7411b7946c23f4b010fd5`. All rank-100 artifacts are
+preserved under `artifacts/citgm-top-100/rank-100-get-intrinsic/`.
+
+| Run / log | Observed result | Classification and resolution |
+| --- | --- | --- |
+| `native-citgm-node-v22-final.log` | Node 22.23.2 runs all 120 package assertions and coverage successfully, then the package posttest invokes `npx npm@'>= 10.2' audit --production` and the shell reports `npm@>= 10.2: command not found`. | Native-reproduced package/toolchain blocker; no browser workaround is justified. |
+| `browser-chromium-final/citgm-1789548895693` | Chromium runs all 120 assertions and coverage successfully, then reproduces the same malformed posttest command failure. | The earlier browser-only child-output collision and intrinsic/stream lifecycle defects were fixed in the shared runtime; no browser package failure remains. |
+| `browser-firefox-final/citgm-1789548960415` | Firefox runs all 120 assertions and coverage successfully, then reproduces the same malformed posttest command failure. | BLOCKED for the same native-reproduced package/toolchain reason, with Chromium/Firefox parity. |
+| `build-compose-fix.log` / `full-check-wasm-compose-fix.log` | Node 22.23.2 build and WASM validation pass. | Required build gates pass after the source changes. |
+| `full-npm-test-node22-compose-fix.log` / `full-playwright-chromium-final.log` / `full-playwright-firefox-final-rerun.log` | Native npm test passes 353/353; Chromium and Firefox each pass 339/339. | All repository-wide gates are green. |
+
+Rank 100 is recorded as `BLOCKED` only for the native-reproduced package
+posttest/toolchain command. The ordered top-100 sweep is complete; no rank is
+advanced beyond 100.

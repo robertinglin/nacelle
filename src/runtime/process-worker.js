@@ -828,7 +828,8 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         // The runtime entry boundary must drain its VFS bridge before the
         // terminal control frame closes the parent-side connection. A direct
         // process-worker caller without a VFS bridge can terminate here.
-        if (!deferExitUntilCleanup) finish('exit', exitCode);
+        if (deferExitUntilCleanup) return;
+        finish('exit', exitCode);
         throw processExitSignal;
       },
     });
@@ -955,8 +956,14 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     runtimeStateTimer = typeof setInterval === 'function'
       ? setInterval(sendRuntimeState, 100)
       : undefined;
-    const initialVfs = message.vfs && message.workerData !== undefined
-      ? { ...message.vfs, workerData: message.workerData }
+    const initialVfs = message.vfs && (message.workerData !== undefined || message.workerDataSyncBuffers !== undefined)
+      ? {
+          ...message.vfs,
+          ...(message.workerData !== undefined ? { workerData: message.workerData } : {}),
+          ...(message.workerDataSyncBuffers !== undefined
+            ? { workerDataSyncBuffers: message.workerDataSyncBuffers }
+            : {}),
+        }
       : message.vfs;
     const vfsPromise = message.vfsDeferred
       ? new Promise((resolve) => { deferredVfsResolver = resolve; })

@@ -4725,7 +4725,16 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
         }));
         return false;
       }
-      if (!this._started) schedule(scope, () => this._runInAsyncScope(() => this._dispatch()));
+      // The browser fetch fallback snapshots its request body when it is
+      // dispatched. A Node stream may deliver several writes before its
+      // caller ends the request (for example, form-data pipes multipart
+      // boundaries and file contents separately), so starting on the first
+      // write would silently truncate the body at the first chunk. Explicit
+      // flushHeaders() still starts a header-only request; ordinary streamed
+      // requests wait for end(), when the complete body is available.
+      if (!this._started && this.finished) {
+        schedule(scope, () => this._runInAsyncScope(() => this._dispatch()));
+      }
       if (callback) schedule(scope, () => this._runInAsyncScope(() => callback()));
       return true;
     }

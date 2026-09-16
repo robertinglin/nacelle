@@ -1,7 +1,8 @@
 import { posix } from './path.js';
-import { fileURLToPath } from './vfs.js';
+import { fileURLToPath as vfsFileURLToPath } from './vfs.js';
 import { unsupportedNativeAddon } from './errors.js';
 import { loadWasmAddon, isWasmModuleBytes } from './addon-napi.js';
+import { observablePromise } from './async-hooks.js';
 
 const RESERVED_EXPORT_NAMES = new Set([
   'await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default',
@@ -20,6 +21,16 @@ const GENERATED_OBJECT_IMPORTERS = new WeakMap();
 
 function normalize(value) {
   return posix.normalize(value).replace(/^\.\//, '');
+}
+
+// WHATWG file URLs can legally contain redundant leading slashes. Native
+// POSIX file access treats `file:////node/x` as the same path as
+// `file:///node/x`, but Firefox preserves the extra slash when it hands the
+// URL to the browser-side loader. Canonicalize it at the module boundary so
+// virtual paths remain addressable in every browser engine.
+function fileURLToPath(value) {
+  const pathname = vfsFileURLToPath(value);
+  return pathname.startsWith('//') ? `/${pathname.replace(/^\/+/, '')}` : pathname;
 }
 
 function isValidExportName(value) {
@@ -838,6 +849,7 @@ export function createModuleLoader({
     const error = new Error(message);
     error.code = code;
     error.name = `Error [${code}]`;
+    error.stack = `${error.name}: ${message}\n${error.stack}`;
     return error;
   };
 
@@ -1790,8 +1802,21 @@ export function createModuleLoader({
       || /(?:^|[;\n])\s*import\s+(?:process\b|\*\s+as\s+process\b|[^;\n]*\bas\s+process\b|\{[^}\n]*\bprocess\b[^}\n]*\})/m.test(masked);
   };
 
+  const hasTopLevelGlobalThisBinding = (source) => {
+    const masked = maskJavaScriptLiterals(source);
+    return /(?:^|[;\n])\s*(?:export\s+)?(?:const|let|var|function|class)\s+(?:globalThis\b|[({[][^;\n}]*\bglobalThis\b)/m.test(masked)
+      || /(?:^|[;\n])\s*import\s+(?:globalThis\b|\*\s+as\s+globalThis\b|[^;\n]*\bas\s+globalThis\b|\{[^}\n]*\bglobalThis\b[^}\n]*\})/m.test(masked);
+  };
+
+  const hasTopLevelBinding = (source, name) => {
+    const masked = maskJavaScriptLiterals(source);
+    const escaped = String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(?:^|[;\\n])\\s*(?:export\\s+)?(?:const|let|var|function|class)\\s+(?:${escaped}\\b|[({[][^;\\n}]*\\b${escaped}\\b)`, 'm').test(masked)
+      || new RegExp(`(?:^|[;\\n])\\s*import\\s+[^;\\n]*\\b${escaped}\\b`, 'm').test(masked);
+  };
+
   const bindProcess = (source, processOverride) => {
-    if (!processOverride || hasTopLevelProcessBinding(source)) return source;
+    if (!processOverride) return source;
     // A package can intentionally replace the global process object while it
     // loads a fresh module (tap's t.intercept(global, 'process', ...) does
     // this for Minipass's stdio tests). The owner override is normally needed
@@ -1805,10 +1830,44 @@ export function createModuleLoader({
       && !currentProcess[RUNTIME_PROCESS_MARKER]
       ? currentProcess
       : processOverride;
-    const token = register(() => {
-      return boundProcess;
-    });
-    return `const process = globalThis[${quote(registryName)}][${quote(token)}]();\n${source}`;
+    let bound = source;
+    if (!hasTopLevelProcessBinding(source)) {
+      const token = register(() => {
+        return boundProcess;
+      });
+      bound = `const process = globalThis[${quote(registryName)}][${quote(token)}]();\n${bound}`;
+    }
+    // Browser ESM evaluates against the host realm's globalThis, while Node
+    // exposes the owning virtual process's global object to both ESM and
+    // CommonJS. Shadow the lexical binding so a process's ESM graph shares
+    // the same overlay and does not leak writes into a sibling process.
+    const masked = maskJavaScriptLiterals(source);
+    const hasGlobalBinding = /(?:^|[;\n])\s*(?:const|let|var|function|class)\s+global\b/m.test(masked);
+    if (!hasTopLevelGlobalThisBinding(source)) {
+      const globalToken = register(() => processOverride?._bnhGlobal || globalObject);
+      const globalAlias = '__bnhGuestGlobalThis';
+      const executable = maskJavaScriptLiterals(bound);
+      const matches = [...executable.matchAll(/\bglobalThis\b/g)];
+      for (let index = matches.length - 1; index >= 0; index -= 1) {
+        const match = matches[index];
+        bound = `${bound.slice(0, match.index)}${globalAlias}${bound.slice(match.index + match[0].length)}`;
+      }
+      // Native browser ESM callbacks can run after the synchronous scope
+      // overlay has been restored. Bind the Node-global console and timer
+      // functions lexically so deferred module code keeps using its owning
+      // virtual process instead of whichever sibling currently owns scope.
+      const guestGlobals = [
+        'console',
+        'setTimeout', 'clearTimeout',
+        'setInterval', 'clearInterval',
+        'setImmediate', 'clearImmediate',
+        'queueMicrotask',
+      ].filter((name) => !hasTopLevelBinding(source, name))
+        .map((name) => `const ${name} = ${globalAlias}.${name};`)
+        .join('\n');
+      bound = `const ${globalAlias} = globalThis[${quote(registryName)}][${quote(globalToken)}]();\n${hasGlobalBinding ? '' : `const global = ${globalAlias};\n`}${guestGlobals ? `${guestGlobals}\n` : ''}${bound}`;
+    }
+    return bound;
   };
 
   function rewriteImports(source, importer, processOverride) {
@@ -1884,12 +1943,28 @@ export function createModuleLoader({
           processOverride,
           importer,
         );
+        const dynamicImportRejections = globalObject[Symbol.for('bnh.dynamic-import-rejections')];
+        const dynamicImportRecord = { raw: result, tracked: null, exposed: null };
+        if (result && typeof result.then === 'function') {
+          try {
+            result.then(undefined, () => {});
+            result.then(undefined, (error) => {
+              dynamicImportRejections?.set?.(error, dynamicImportRecord);
+            });
+          } catch { /* best effort */ }
+        }
         const trackedResult = Promise.resolve(result);
         processOverride?._bnhTrackEsmImport?.(trackedResult, {
           waitForZeroTimer: isBuiltinSpecifier(dynamicSpecifier)
             || String(dynamicSpecifier).startsWith('node:'),
         });
-        return trackedResult;
+        const isFirefox = /Firefox\//.test(String(globalObject.navigator?.userAgent || ''));
+        const exposedResult = isFirefox
+          ? observablePromise(trackedResult, { forceThenable: true })
+          : trackedResult;
+        dynamicImportRecord.tracked = trackedResult;
+        dynamicImportRecord.exposed = exposedResult;
+        return exposedResult;
       });
       rewritten = rewriteDynamicImports(rewritten, `globalThis[${quote(registryName)}][${quote(token)}](`);
     }
@@ -2409,15 +2484,41 @@ export function createModuleLoader({
           release?.();
           throw error;
         }
+        // Firefox can report a rejection from a nested ESM dynamic import
+        // before the caller's await/catch continuation has reached the
+        // promise returned by this registry token. Preserve the rejection
+        // for the tracked result, but attach the forwarding branch now so a
+        // rejection that user code does catch is not misclassified as
+        // unhandled by the browser.
+        const dynamicImportRejections = globalObject[Symbol.for('bnh.dynamic-import-rejections')];
+        const dynamicImportRecord = {
+          raw: result,
+          tracked: null,
+          exposed: null,
+        };
+        if (result && typeof result.then === 'function') {
+          try {
+            result.then(undefined, () => {});
+            result.then(undefined, (error) => {
+              dynamicImportRejections?.set?.(error, dynamicImportRecord);
+            });
+          } catch { /* best effort */ }
+        }
         const trackedResult = Promise.resolve(result).then(
           (value) => { release?.(); return value; },
           (error) => { release?.(); throw error; },
         );
+        const isFirefox = /Firefox\//.test(String(globalObject.navigator?.userAgent || ''));
+        const exposedResult = isFirefox
+          ? observablePromise(trackedResult, { forceThenable: true })
+          : trackedResult;
+        dynamicImportRecord.tracked = trackedResult;
+        dynamicImportRecord.exposed = exposedResult;
         processOverride?._bnhTrackEsmImport?.(trackedResult, {
           waitForZeroTimer: isBuiltinSpecifier(dynamicSpecifier)
             || String(dynamicSpecifier).startsWith('node:'),
         });
-        return trackedResult;
+        return exposedResult;
       });
       rewritten = rewriteDynamicImports(rewritten, `globalThis[${quote(registryName)}][${quote(token)}](`);
     }
@@ -2484,7 +2585,8 @@ export function createModuleLoader({
       const loadedFormat = hasEsmSyntax(loadedText) ? 'module' : loaded.format;
       if (loadedFormat === 'module') {
         const moduleText = stripHashbang(loadedText);
-        return `${bindProcess(await rewriteImportsAsync(moduleText, loadedResolved, processOverride, ancestors), processOverride)}\n//# sourceURL=${loadedResolved}`;
+        const rewritten = bindProcess(await rewriteImportsAsync(moduleText, loadedResolved, processOverride, ancestors), processOverride);
+        return `${rewritten}\n//# sourceURL=${loadedResolved}`;
       }
       return cjsModuleSource(loadedResolved, loadedText, processOverride);
     }
@@ -2670,7 +2772,15 @@ export function createModuleLoader({
   };
 
   const importModule = async (specifier, importer, globals, options, processOverride, dynamicLaneKey = null) => {
-    const resolvedResult = await runResolveHooksAsync(specifier, importer, ['node', 'import'], processOverride);
+    const resolvedPromise = runResolveHooksAsync(specifier, importer, ['node', 'import'], processOverride);
+    // Firefox's native ESM evaluator can miss the rejection handler that an
+    // async function's `await` installs on a cross-realm promise. Observe the
+    // internal resolver promise explicitly; the await below still propagates
+    // the same error to the dynamic-import caller.
+    if (resolvedPromise && typeof resolvedPromise.catch === 'function') {
+      resolvedPromise.catch(() => {});
+    }
+    const resolvedResult = await resolvedPromise;
     const resolved = hookURLToSpecifier(resolvedResult.url, importer);
     if (resolved.startsWith('data:')) return importData(resolved, options, processOverride);
     if (resolved.startsWith('http:') || resolved.startsWith('https:')) {

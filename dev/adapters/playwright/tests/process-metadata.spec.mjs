@@ -8,6 +8,7 @@ test.describe('browser Node process metadata', () => {
     const result = await harnessPage.run(`
       (() => {
         const assert = require('node:assert');
+        const fs = require('node:fs');
 
         assert.ok(process.config && typeof process.config === 'object');
         assert.ok(process.config.variables && typeof process.config.variables === 'object');
@@ -28,6 +29,9 @@ test.describe('browser Node process metadata', () => {
 
         // These values identify the browser runtime and must not report a host Node executable.
         assert.strictEqual(process.execPath, '/browser/node');
+        const executable = fs.statSync(process.execPath);
+        assert.ok(executable.isFile());
+        assert.ok((executable.mode & 0o111) !== 0);
         assert.strictEqual(process.pid, 1);
         assert.strictEqual(process.ppid, 0);
       })();

@@ -28,6 +28,42 @@ test.describe('browser-native node:vm builtin', () => {
     await expectPass(expect, result);
   });
 
+  test('exposes own intrinsic globals to legacy child module loaders', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      (async () => {
+        const child = spawn(process.execPath, ['/node/inspect-global.cjs'], { stdio: ['ignore', 'pipe', 'pipe'] });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (chunk) => { stdout += chunk; });
+        child.stderr.on('data', (chunk) => { stderr += chunk; });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, stderr);
+        assert.deepStrictEqual(JSON.parse(stdout), {
+          globalFunction: 'function',
+          returnedGlobalFunction: 'function',
+          vmScript: 'function',
+        });
+      })().catch((error) => { console.error(error); process.exitCode = 1; });
+    `, {
+      files: {
+        '/node/inspect-global.cjs': [
+          "const vm = require('node:vm');",
+          "const descriptor = Object.getOwnPropertyDescriptor(global, 'Function');",
+          "const loader = new vm.Script(\"const __global__ = this; (function() { return Object.getOwnPropertyDescriptor(__global__, 'Function'); })\").runInNewContext({ global });",
+          "const returnedDescriptor = loader();",
+          "process.stdout.write(JSON.stringify({ globalFunction: typeof descriptor?.value, returnedGlobalFunction: typeof returnedDescriptor?.value, vmScript: typeof vm.Script }));",
+        ].join('\n'),
+      },
+      timeoutMs: 10_000,
+    });
+    await expectPass(expect, result);
+  });
+
   test('uses a distinct browser realm for context constructors and Web Crypto inputs', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       (async () => {

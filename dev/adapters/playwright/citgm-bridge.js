@@ -779,7 +779,7 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
 
   const registry = String(env.npm_config_registry || DEFAULT_REGISTRY).replace(/\/+$/, '');
   const runEnv = {
-    PATH: '/node/node_modules/.bin',
+    PATH: '/browser:/node/node_modules/.bin',
     // Keep the synthetic CITGM workspace out of a dot-prefixed directory.
     // Upstream packages such as send inspect every path component when
     // applying dotfile rules; placing the checkout under `.citgm` makes

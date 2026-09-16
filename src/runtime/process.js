@@ -184,7 +184,7 @@ export function prepareWorkerVfs(vfs, scope, { eager = false, nested = false } =
   // more than one SharedArrayBuffer backing store. Do not allocate a chunk
   // array merely to repack those immutable shared files; that path is what
   // exhausts Chromium's ArrayBuffer budget during large test suites.
-  const directNested = nestedWorker && allShared;
+  const directNested = nestedWorker && allShared && sharedBackings.size === 1;
   const mixedShared = nestedWorker
     && !allShared
     && !directNested
@@ -237,7 +237,12 @@ export function prepareWorkerVfs(vfs, scope, { eager = false, nested = false } =
     : backing
       ? new Uint8Array(backing, record.offset, record.source.byteLength)
       : record.source;
-  const packedWire = (Boolean(backing) || directShared) && !mixedShared && !directNested;
+  // Chunked nested payloads use the same packed path/offset wire format as a
+  // single backing buffer. The chunks are only the transport representation
+  // of that backing buffer; sending the original per-file map as well would
+  // clone the complete package a second time and make the chunk path moot.
+  const packedWire = (Boolean(backing) || directShared || directNested || chunked)
+    && !mixedShared;
   const markerFor = (record) => ({
     [packedVfsFile]: true,
     offset: record.offset,
@@ -1210,7 +1215,11 @@ export function createBrowserProcess(options = {}) {
     }
     if (frame.type === 'child-disconnect') { emitDisconnect(); ipc?.close(); return; }
     if (frame.type === 'signal-result') return;
-    if (frame.type === 'runtime-state') { child.runtimeState = frame.runtimeState || null; return; }
+    if (frame.type === 'runtime-state') {
+      child.runtimeState = frame.runtimeState || null;
+      events.emit('runtime-state', child.runtimeState);
+      return;
+    }
     if (frame.type === 'child-output') {
       if (frame.record && typeof frame.record === 'object') {
         childOutputs.push(frame.record);
@@ -1370,6 +1379,9 @@ export function createBrowserProcess(options = {}) {
     // coordination cells. Keep it at the process-init boundary instead of
     // making it travel only as a nested VFS descriptor field.
     if (options.workerData !== undefined) initialData.workerData = options.workerData;
+    if (options.workerDataSyncBuffers !== undefined) {
+      initialData.workerDataSyncBuffers = options.workerDataSyncBuffers;
+    }
     const preparedVfs = options.vfs === undefined ? null : prepareWorkerVfs(options.vfs, scope, {
       eager: options.vfsEager === true,
       nested: options.vfsNested === true,

@@ -115,6 +115,30 @@ test.describe('browser primitive output adapters', () => {
     expect(chunks).toEqual(['browser stream']);
   });
 
+  test('keeps readable buffering separate from legacy private _buffer fields', async () => {
+    let reads = 0;
+    const readable = new Readable({
+      read() {
+        if (reads++ === 0) {
+          this.push('legacy stream');
+          this.push(null);
+        }
+      },
+    });
+    // Older stream transforms are allowed to use _buffer for their own
+    // bookkeeping. Node keeps its readable queue in _readableState.buffer.
+    readable._buffer = null;
+    const chunks = [];
+    const ended = new Promise((resolve, reject) => {
+      readable.on('data', (chunk) => chunks.push(new TextDecoder().decode(chunk)));
+      readable.once('end', resolve);
+      readable.once('error', reject);
+    });
+
+    await ended;
+    expect(chunks).toEqual(['legacy stream']);
+  });
+
   test('pulls paused readable streams and emits readable before end once', async () => {
     const chunks = [];
     const events = [];

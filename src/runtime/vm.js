@@ -11,6 +11,13 @@ const VM_CONSTANTS = Object.freeze(Object.assign(Object.create(null), {
 const GLOBAL_SHADOWS = Object.freeze(['process', 'Buffer']);
 const CONTEXT_REALMS = new WeakMap();
 const REGEXP_PROTOTYPES = new WeakSet();
+const CONTEXT_GLOBALS = new WeakMap();
+// A vm.Context can outlive the synchronous call that created it. Keep the
+// loader-capable virtual process that owned the context so deferred script
+// evaluations (for example Jest's transformed modules) continue to resolve
+// core modules against that process rather than the ambient runtime process.
+const CONTEXT_PROCESSES = new WeakMap();
+const RUNTIME_PROCESS_MARKER = Symbol.for('bnh.runtime-process');
 let nextScriptDynamicImportId = 1;
 const TYPED_ARRAY_NAMES = Object.freeze([
   'Int8Array',
@@ -25,6 +32,21 @@ const TYPED_ARRAY_NAMES = Object.freeze([
   'BigInt64Array',
   'BigUint64Array',
 ]);
+const REALM_INTRINSIC_NAMES = Object.freeze([
+  'Array', 'ArrayBuffer', 'BigInt', 'BigInt64Array', 'BigUint64Array',
+  'Boolean', 'DataView', 'Date', 'Error', 'EvalError', 'FinalizationRegistry',
+  'Float32Array', 'Float64Array', 'Function', 'Int8Array', 'Int16Array',
+  'Int32Array', 'Intl', 'JSON', 'Map', 'Math', 'Number', 'Object', 'Promise',
+  'Proxy', 'RangeError', 'ReferenceError', 'Reflect', 'RegExp', 'Set',
+  'SharedArrayBuffer', 'String', 'Symbol', 'SyntaxError', 'TypeError',
+  'URIError', 'Uint8Array', 'Uint8ClampedArray', 'Uint16Array', 'Uint32Array',
+  'WeakMap', 'WeakRef', 'WeakSet', 'WebAssembly',
+]);
+
+function isLoaderProcess(value) {
+  return Boolean(value?.[RUNTIME_PROCESS_MARKER]
+    && typeof value?.__bnhModuleImport === 'function');
+}
 
 function inspectModuleValue(value) {
   if (value === undefined) return 'undefined';
@@ -48,12 +70,13 @@ function inspectModule(module, name, depth) {
 function createContextEvaluator(scope) {
   const FunctionConstructor = scope.Function || Function;
   return FunctionConstructor('context', 'source', 'scope', `
+    const globalObject = this;
     const sandbox = new Proxy(context, {
       has(target, property) {
         return property !== Symbol.unscopables && property !== 'eval' && property !== 'source';
       },
       get(target, property, receiver) {
-        if (property === 'globalThis') return receiver;
+        if (property === 'globalThis') return globalObject;
         if (Reflect.has(target, property)) return Reflect.get(target, property, receiver);
         return scope[property];
       },
@@ -70,6 +93,22 @@ function createContextEvaluator(scope) {
 function contextObject(value) {
   if (value === null || typeof value !== 'object') throw vmInvalidArgType('object', 'object', value);
   return value;
+}
+
+function createContextGlobal(context, scope) {
+  return new Proxy(context, {
+    get(target, property, receiver) {
+      if (property === 'globalThis') return receiver;
+      if (Reflect.has(target, property)) return Reflect.get(target, property, receiver);
+      return scope[property];
+    },
+    set(target, property, value) {
+      return Reflect.set(target, property, value, target);
+    },
+    has(target, property) {
+      return Reflect.has(target, property) || property in scope;
+    },
+  });
 }
 
 function markContext(context) {
@@ -106,6 +145,45 @@ function createBrowserRealm(scope) {
     nativeKeys: new Set(Reflect.ownKeys(realm)),
     managedKeys: new Set(),
   };
+}
+
+function ensureRealmOwnIntrinsics(realm) {
+  try {
+    const install = realm.Function('names', `
+      for (const name of names) {
+        if (Object.getOwnPropertyDescriptor(globalThis, name)) continue;
+        const value = globalThis[name];
+        if (value === undefined) continue;
+        try {
+          Object.defineProperty(globalThis, name, {
+            configurable: true,
+            enumerable: false,
+            value,
+            writable: true,
+          });
+        } catch {}
+      }
+    `);
+    install(REALM_INTRINSIC_NAMES);
+  } catch {
+    // Fall back to the host-side WindowProxy operation below.
+  }
+  for (const name of REALM_INTRINSIC_NAMES) {
+    if (Reflect.getOwnPropertyDescriptor(realm, name)) continue;
+    let value;
+    try { value = realm[name]; } catch { continue; }
+    if (value === undefined) continue;
+    try {
+      Reflect.defineProperty(realm, name, {
+        configurable: true,
+        enumerable: false,
+        value,
+        writable: true,
+      });
+    } catch {
+      // Browser globals can be immutable in a host-specific WindowProxy.
+    }
+  }
 }
 
 function isNativeBuffer(value, arrayBuffer, sharedArrayBuffer) {
@@ -178,6 +256,15 @@ function installSyntheticRealm(scope, context) {
   }
 }
 
+function installSyntheticIntrinsics(scope, context) {
+  for (const name of REALM_INTRINSIC_NAMES) {
+    if (Object.prototype.hasOwnProperty.call(context, name)) continue;
+    const descriptor = Object.getOwnPropertyDescriptor(scope, name);
+    if (!descriptor) continue;
+    try { Object.defineProperty(context, name, descriptor); } catch { /* best effort */ }
+  }
+}
+
 function copyContextToRealm(context, realm, managedKeys) {
   for (const key of managedKeys) {
     if (key === 'globalThis' || key in context) continue;
@@ -197,13 +284,29 @@ function copyContextToRealm(context, realm, managedKeys) {
 }
 
 function copyRealmToContext(context, realm, nativeKeys, managedKeys) {
-  for (const key of Reflect.ownKeys(realm)) {
-    if (key === 'globalThis' || (nativeKeys.has(key) && !managedKeys.has(key))) continue;
-    const descriptor = Reflect.getOwnPropertyDescriptor(realm, key);
+  // WindowProxy enumeration is not fully consistent across browser engines
+  // for expandos installed by code that received the realm global directly.
+  // These are the Node globals most commonly installed by vm consumers;
+  // include them explicitly so a browser's incomplete own-key view cannot
+  // discard a legitimate mutation on the next evaluation.
+  const keys = new Set(Reflect.ownKeys(realm));
+  for (const key of ['global', 'process', 'Buffer']) keys.add(key);
+  for (const key of keys) {
+    // A sandbox may intentionally seed a name with `undefined` to prevent
+    // host leakage (notably `Buffer`). If a caller then installs a value on
+    // the global object returned by `runInContext('this', context)`, that
+    // own sandbox property is the caller's mutable state and must win over
+    // the iframe's native-key filter.
+    if (key === 'globalThis'
+      || (nativeKeys.has(key) && !managedKeys.has(key)
+        && !Object.prototype.hasOwnProperty.call(context, key))) continue;
+    const descriptor = Reflect.getOwnPropertyDescriptor(realm, key)
+      || { configurable: true, enumerable: true, value: realm[key], writable: true };
     if (!descriptor) continue;
     managedKeys.add(key);
     try {
       Object.defineProperty(context, key, descriptor);
+      if (context[key] !== realm[key]) Reflect.set(context, key, realm[key]);
     } catch {
       try { context[key] = realm[key]; } catch { /* preserve the realm result */ }
     }
@@ -766,8 +869,20 @@ export function createVmModule(scope = globalThis) {
     if (microtaskMode !== undefined) validateOneOf(microtaskMode, 'options.microtaskMode', ['afterEvaluate', undefined]);
     if (!context[CONTEXT_MARKER]) {
       markContext(context);
+      CONTEXT_GLOBALS.set(context, createContextGlobal(context, scope));
+      const ownerProcess = scope.__bnhActiveProcess || scope.process;
+      if (isLoaderProcess(ownerProcess)) {
+        CONTEXT_PROCESSES.set(context, ownerProcess);
+      }
       const realm = createBrowserRealm(scope);
-      if (!realm) installSyntheticRealm(scope, context);
+      if (realm) ensureRealmOwnIntrinsics(realm.global);
+      if (!realm) {
+        installSyntheticRealm(scope, context);
+        // A worker process has no DOM from which to create an iframe realm.
+        // Materialize the standard globals on its context so the synthetic
+        // global retains Node's own-property contract after evaluation.
+        installSyntheticIntrinsics(scope, context);
+      }
       if (realm) installRegexErrorCompatibility(realm.global);
       // Worker contexts do not have a separate browser realm, so make sure
       // their owning global has the V8 stack contract before evaluation. A
@@ -920,17 +1035,20 @@ export function createVmModule(scope = globalThis) {
         ? rewriteScriptDynamicImports(this.code, dynamicImportBinding)
         : this.code;
       const sourceWithFilename = `${source}\n//# sourceURL=${this.options.filename}`;
+      const evaluatedSource = sourceWithFilename;
       if (runOptions.timeout > 0 && isObviouslyUnbounded(source)) throw timedOutScriptError(runOptions.timeout);
       const context = contextifiedObject;
       const candidateProcess = context.process || scope.process;
       // VM sandboxes commonly provide a process-shaped test object. Dynamic
       // import still belongs to the runtime process that owns the VM context,
       // so use that owner when the sandbox object is not loader-capable.
-      const activeProcess = typeof candidateProcess?.__bnhModuleImport === 'function'
+      const activeProcess = isLoaderProcess(candidateProcess)
         ? candidateProcess
-        : scope.__bnhActiveProcess || scope.process;
+        : CONTEXT_PROCESSES.get(context)
+          || scope.__bnhActiveProcess
+          || scope.process;
       const previousFunction = context.Function;
-      if (typeof activeProcess?.__bnhModuleImport === 'function') {
+      if (isLoaderProcess(activeProcess)) {
         Object.defineProperty(context, 'Function', {
           configurable: true,
           enumerable: false,
@@ -945,10 +1063,10 @@ export function createVmModule(scope = globalThis) {
               .then((module) => module?.namespace || module);
           }
           const candidateProcess = context.process || scope.process;
-          const activeProcess = typeof candidateProcess?.__bnhModuleImport === 'function'
+          const activeProcess = isLoaderProcess(candidateProcess)
             ? candidateProcess
             : scope.__bnhActiveProcess || scope.process;
-          if (typeof activeProcess?.__bnhModuleImport === 'function') {
+          if (isLoaderProcess(activeProcess)) {
             const filename = this.options.filename;
             const importer = typeof filename === 'string' && filename.startsWith('/')
               ? filename
@@ -974,13 +1092,30 @@ export function createVmModule(scope = globalThis) {
       }
       const realm = CONTEXT_REALMS.get(context);
       const previousFilename = scope.__bnhVmFilename;
+      const previousActiveProcess = scope.__bnhActiveProcess;
+      const previousVmContext = scope.__bnhActiveVmContext;
       scope.__bnhVmFilename = this.options.filename;
+      Object.defineProperty(scope, '__bnhActiveVmContext', {
+        configurable: true,
+        enumerable: false,
+        value: realm?.global || context,
+        writable: true,
+      });
+      if (isLoaderProcess(activeProcess)) {
+        scope.__bnhActiveProcess = activeProcess;
+      }
       try {
         if (!realm) {
           const globalProperties = captureOwnPropertyDescriptors(scope);
           try {
             try {
-              return normalizeContextError(evaluate(context, sourceWithFilename, scope));
+              // The evaluator is a host Function. Bind its receiver to the
+              // context so top-level `this` has Node vm's context-global
+              // identity; without this, `vm.runInContext('this', context)`
+              // returns the worker global and Jest's subsequent global
+              // installation never reaches the sandbox.
+              const contextGlobal = CONTEXT_GLOBALS.get(context) || context;
+              return normalizeContextError(evaluate.call(contextGlobal, context, evaluatedSource, scope));
             } catch (error) {
               throw normalizeContextError(error);
             }
@@ -988,16 +1123,32 @@ export function createVmModule(scope = globalThis) {
             copySyntheticGlobalAssignments(context, scope, globalProperties);
           }
         }
+        // `vm.runInContext('this', context)` returns the browser realm global
+        // object. Node callers commonly mutate that returned object before
+        // the next evaluation (Jest installs `global`, `process`, and
+        // `Buffer` this way), so import those mutations before applying the
+        // context's managed properties. Otherwise the next copy pass treats
+        // the caller-installed globals as stale iframe properties and
+        // deletes them.
+        ensureRealmOwnIntrinsics(realm.global);
+        copyRealmToContext(context, realm.global, realm.nativeKeys, realm.managedKeys);
         copyContextToRealm(context, realm.global, realm.managedKeys);
         try {
-          return normalizeContextError(realm.evaluate(sourceWithFilename));
+          return normalizeContextError(realm.evaluate(evaluatedSource));
         } catch (error) {
           throw normalizeContextError(error);
         }
       } finally {
         if (previousFilename === undefined) delete scope.__bnhVmFilename;
         else scope.__bnhVmFilename = previousFilename;
-        if (realm) copyRealmToContext(context, realm.global, realm.nativeKeys, realm.managedKeys);
+        if (previousActiveProcess === undefined) delete scope.__bnhActiveProcess;
+        else scope.__bnhActiveProcess = previousActiveProcess;
+        if (previousVmContext === undefined) delete scope.__bnhActiveVmContext;
+        else scope.__bnhActiveVmContext = previousVmContext;
+        if (realm) {
+          ensureRealmOwnIntrinsics(realm.global);
+          copyRealmToContext(context, realm.global, realm.nativeKeys, realm.managedKeys);
+        }
         if (previousFunction === undefined) delete context.Function;
         else context.Function = previousFunction;
       }
@@ -1023,7 +1174,7 @@ export function createVmModule(scope = globalThis) {
               .then((module) => module?.namespace || module);
           }
           const activeProcess = scope.process;
-          if (typeof activeProcess?.__bnhModuleImport === 'function') {
+          if (isLoaderProcess(activeProcess)) {
             const filename = this.options.filename;
             const importer = typeof filename === 'string' && filename.startsWith('/')
               ? filename
@@ -1049,7 +1200,7 @@ export function createVmModule(scope = globalThis) {
       }
       const activeProcess = scope.process;
       const previousFunction = scope.Function;
-      if (typeof activeProcess?.__bnhModuleImport === 'function') {
+      if (isLoaderProcess(activeProcess)) {
         scope.Function = createVmFunctionConstructor(FunctionConstructor, activeProcess, this.options.filename);
       }
       try {

@@ -81,6 +81,16 @@ function cloneMessage(value, transferList, scope) {
   }
 }
 
+function containsReference(value, target, seen = new WeakSet()) {
+  if (value === target || (target?.raw && value?.raw === target.raw)) return true;
+  if (!value || typeof value !== 'object' || seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.some((item) => containsReference(item, target, seen));
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  return Object.values(value).some((item) => containsReference(item, target, seen));
+}
+
 function makeInMemoryIpcPair(scope, { preserveReferences = false } = {}) {
   let left;
   let right;
@@ -118,7 +128,13 @@ function makeInMemoryIpcPair(scope, { preserveReferences = false } = {}) {
         }
         let message;
         try {
-          message = cloneMessage(value, transferList, scope);
+          // The in-memory fallback intentionally preserves live browser
+          // handles. Tinypool's child-process startup embeds its transferred
+          // MessagePort in the payload as well as passing it as sendHandle;
+          // cloning that adapter would fail before the child can receive it.
+          const preservesHandle = preserveReferences && handle
+            && containsReference(value, handle);
+          message = preservesHandle ? value : cloneMessage(value, transferList, scope);
         } catch (error) {
           if (callback) {
             queueMicrotask(() => callback(error));
@@ -426,9 +442,13 @@ function createInMemoryProcess(options) {
   };
 
   transition('starting');
-  const nativeTimers = options.scope?.__BNH_NATIVE_TIMERS__;
-  const scheduleStart = nativeTimers?.setTimeout
-    ? (callback) => nativeTimers.setTimeout(callback, 0)
+  // Same-realm children must get their entry turn before a parent package can
+  // starve the host timer queue with its own async lifecycle work. Callers
+  // attach spawn/exit listeners synchronously after createVirtualProcess(), so
+  // a microtask preserves the observable spawn ordering without depending on
+  // a timer turn that may be delayed indefinitely.
+  const scheduleStart = typeof options.scope?.queueMicrotask === 'function'
+    ? (callback) => options.scope.queueMicrotask(callback)
     : (callback) => Promise.resolve().then(callback);
   scheduleStart(() => {
     if (terminal) return;

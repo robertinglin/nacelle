@@ -53,6 +53,496 @@ test.describe('browser runtime bridge and core primitives', () => {
     expect(result.stderr).toContain('browser stderr');
   });
 
+  test('keeps observable Promise catch callbacks on the child console', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { createHook } = require('node:async_hooks');
+      const hook = createHook({ init() {} }).enable();
+      const captured = [];
+      const originalError = console.error;
+      console.error = (...values) => captured.push(values.join(' '));
+      Promise.reject(new Error('promise catch failure')).catch(() => console.error('caught'))
+        .then(() => setImmediate(() => {
+          try {
+            assert.deepStrictEqual(captured, ['caught']);
+            process.stdout.write('observable promise catch completed');
+          } catch (error) {
+            originalError(error);
+            process.exitCode = 1;
+          } finally {
+            console.error = originalError;
+            hook.disable();
+          }
+        }));
+    `);
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('observable promise catch completed');
+  });
+
+  test('preserves yargs-style async rejection output through util.format', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      (async () => {
+        const child = spawn(process.execPath, ['/node/yargs-style-runner.js'], { cwd: '/node' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', chunk => { output += chunk; });
+        child.stderr.on('data', chunk => { errorOutput += chunk; });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.deepStrictEqual(JSON.parse(output), ['usage', 'Error: foo error']);
+        process.stdout.write('yargs-style rejection capture completed');
+      })().catch(error => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/yargs-style-runner.js': `
+          (async () => {
+            const assert = require('node:assert/strict');
+            const { runCommand } = await import('./yargs-style-command.mjs');
+            const { format } = require('node:util');
+            const captured = [];
+            const originalError = console.error;
+            const checkOutput = (callback) => {
+              console.error = (...values) => captured.push({
+                formatted: format(...values),
+                joined: values.join(' '),
+              });
+              const result = callback();
+              if (typeof result?.then === 'function') {
+                return result
+                  .then(() => {
+                    console.error = originalError;
+                    return { captured };
+                  })
+                  .catch(() => {
+                    console.error = originalError;
+                    return { captured };
+                  });
+              }
+              console.error = originalError;
+              return { captured };
+            };
+            const observed = await checkOutput(() => runCommand());
+            assert.deepStrictEqual(observed.captured.slice(0, 1).map(value => value.formatted), ['usage']);
+            assert.strictEqual(observed.captured.length, 2);
+            assert.ok(observed.captured[1].formatted.includes('Error: foo error'));
+            assert.ok(observed.captured[1].joined.includes('Error: foo error'));
+            process.stdout.write(JSON.stringify(observed.captured.map(value => value.formatted.split('\\n', 1)[0])));
+          })().catch(error => {
+            console.error(error);
+            process.exitCode = 1;
+          });
+        `,
+        '/node/yargs-style-command.mjs': `
+          import { reportFailure } from './yargs-style-usage.mjs';
+          const isPromise = value => value && typeof value.then === 'function';
+          const maybeAsyncResult = (getResult, resultHandler) => {
+            const result = typeof getResult === 'function' ? getResult() : getResult;
+            return isPromise(result) ? result.then(resultHandler) : resultHandler(result);
+          };
+          export function runCommand() {
+            const parserResult = Promise.resolve({ parsed: true });
+            const innerArgv = maybeAsyncResult(parserResult, result => {
+              const handlerResult = Promise.reject(Error('foo error'));
+              return isPromise(handlerResult)
+                ? handlerResult.then(() => result)
+                : result;
+            });
+            innerArgv.catch(error => {
+              try { reportFailure(error); } catch {}
+            });
+            return innerArgv;
+          }
+        `,
+        '/node/yargs-style-usage.mjs': `
+          export function reportFailure(error) {
+            console.error('usage');
+            console.error(error);
+          }
+        `,
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('yargs-style rejection capture completed');
+  });
+
+  test('isolates syntax errors from asynchronous node -e children', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      const child = spawn(process.execPath, ['-e', 'const ='], { stdio: 'ignore' });
+      child.once('error', error => { console.error(error); process.exitCode = 1; });
+      child.once('close', code => {
+        try {
+          assert.strictEqual(code, 1);
+          process.stdout.write('node eval child isolation completed');
+        } catch (error) {
+          console.error(error);
+          process.exitCode = 1;
+        }
+      });
+    `);
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('node eval child isolation completed');
+  });
+
+  test('completes inherited-stdio shebang children after their nested child closes', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      (async () => {
+        const child = spawn(process.execPath, ['/node/inherited-stdio-parent.js'], {
+          cwd: '/node',
+          stdio: 'pipe',
+        });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', chunk => { output += chunk; });
+        child.stderr.on('data', chunk => { errorOutput += chunk; });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 7, JSON.stringify({ code, output, errorOutput }));
+        process.stdout.write('inherited stdio close completed');
+      })().catch(error => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/inherited-stdio-parent.js': [
+          '#!/usr/bin/env node',
+          "process.stdout.write('parent ran');",
+          "const { spawn } = require('node:child_process');",
+          "const child = spawn(process.execPath, ['-e', \"process.stdout.write('nested inherited child closed')\"], { stdio: 'inherit' });",
+          'child.once(\'close\', code => process.exit(7));',
+        ].join(String.fromCharCode(10)),
+      },
+    });
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('inherited stdio close completed');
+  });
+
+  test('keeps async CommonJS children alive while awaiting nested inherited-stdio children', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      const child = spawn(process.execPath, ['/node/async-parent.js'], {
+        cwd: '/node',
+        stdio: 'pipe',
+      });
+      let output = '';
+      let errorOutput = '';
+      child.stdout.on('data', chunk => { output += chunk; });
+      child.stderr.on('data', chunk => { errorOutput += chunk; });
+      child.once('error', error => { console.error(error); process.exitCode = 1; });
+      child.once('close', code => {
+        try {
+          assert.strictEqual(code, 0, errorOutput);
+          assert.strictEqual(output, 'async parent before\\nasync nested child\\nasync parent after\\n');
+          process.stdout.write('async CommonJS nested child completed');
+        } catch (error) {
+          console.error(error);
+          process.exitCode = 1;
+        }
+      });
+    `, {
+      files: {
+        '/node/async-parent.js': [
+          '#!/usr/bin/env node',
+          "const { spawn } = require('node:child_process');",
+          'async function run() {',
+          "  process.stdout.write('async parent before\\n');",
+          "  const child = spawn(process.execPath, ['/node/async-nested.js'], { stdio: 'inherit' });",
+          '  const code = await new Promise((resolve, reject) => {',
+          "    child.once('error', reject);",
+          "    child.once('close', resolve);",
+          '  });',
+          '  if (code !== 0) throw new Error(`nested child exited ${code}`);',
+          "  process.stdout.write('async parent after\\n');",
+          '}',
+          'run().catch(error => { console.error(error); process.exitCode = 1; });',
+        ].join('\n'),
+        '/node/async-nested.js': [
+          'async function run() {',
+          "  await new Promise(resolve => setTimeout(resolve, 1));",
+          "  process.stdout.write('async nested child\\n');",
+          '}',
+          'run();',
+        ].join('\n'),
+      },
+    });
+    await expectPass(expect, result);
+  });
+
+  test('routes async CommonJS npm lifecycle shebangs through the child boundary', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      const child = spawn('/node/node_modules/.bin/npm', ['run', 'check'], {
+        cwd: '/node',
+        stdio: 'pipe',
+      });
+      let output = '';
+      let errorOutput = '';
+      child.stdout.on('data', chunk => { output += chunk; });
+      child.stderr.on('data', chunk => { errorOutput += chunk; });
+      child.once('error', error => { console.error(error); process.exitCode = 1; });
+      child.once('close', code => {
+        try {
+          assert.strictEqual(code, 0, errorOutput);
+          assert.strictEqual(output, 'npm async parent before\\nnpm async nested child\\nnpm async parent after\\n');
+          process.stdout.write('async npm lifecycle completed');
+        } catch (error) {
+          console.error(error);
+          process.exitCode = 1;
+        }
+      });
+    `, {
+      files: {
+        '/node/package.json': JSON.stringify({
+          name: 'async-npm-lifecycle-fixture',
+          version: '1.0.0',
+          scripts: { check: 'tool' },
+        }),
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\\n',
+        '/node/node_modules/.bin/tool': [
+          '#!/usr/bin/env node',
+          "const { spawn } = require('node:child_process');",
+          'async function run() {',
+          "  process.stdout.write('npm async parent before\\n');",
+          "  const child = spawn(process.execPath, ['/node/npm-async-nested.js'], { stdio: 'inherit' });",
+          '  const code = await new Promise((resolve, reject) => {',
+          "    child.once('error', reject);",
+          "    child.once('close', resolve);",
+          '  });',
+          '  if (code !== 0) throw new Error(`nested child exited ${code}`);',
+          "  process.stdout.write('npm async parent after\\n');",
+          '}',
+          'run().catch(error => { console.error(error); process.exitCode = 1; });',
+        ].join('\n'),
+        '/node/npm-async-nested.js': [
+          'async function run() {',
+          "  await new Promise(resolve => setTimeout(resolve, 1));",
+          "  process.stdout.write('npm async nested child\\n');",
+          '}',
+          'run();',
+        ].join('\n'),
+      },
+    });
+    await expectPass(expect, result);
+  });
+
+  test('releases sequential async CommonJS child workers before the next child starts', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      const runChild = (entry) => new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [entry], { cwd: '/node', stdio: 'pipe' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', chunk => { output += chunk; });
+        child.stderr.on('data', chunk => { errorOutput += chunk; });
+        child.once('error', reject);
+        child.once('close', code => resolve({ code, output, errorOutput }));
+      });
+      (async () => {
+        const first = await runChild('/node/async-first.js');
+        const second = await runChild('/node/async-second.js');
+        assert.strictEqual(first.code, 0, first.errorOutput);
+        assert.strictEqual(second.code, 0, second.errorOutput);
+        assert.strictEqual(first.output + second.output, 'async first\\nasync second\\n');
+        process.stdout.write('sequential async children completed');
+      })().catch(error => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/async-first.js': [
+          'async function run() {',
+          "  await new Promise(resolve => setTimeout(resolve, 1));",
+          "  process.stdout.write('async first\\n');",
+          '}',
+          'run();',
+        ].join('\n'),
+        '/node/async-second.js': [
+          'async function run() {',
+          "  await new Promise(resolve => setTimeout(resolve, 1));",
+          "  process.stdout.write('async second\\n');",
+          '}',
+          'run();',
+        ].join('\n'),
+      },
+    });
+    await expectPass(expect, result);
+  });
+
+  test('completes an execa-style inherited-stdio async CommonJS launcher', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      const child = spawn(process.execPath, ['/node/async-gts.js'], {
+        cwd: '/node',
+        stdio: 'pipe',
+      });
+      let output = '';
+      let errorOutput = '';
+      child.stdout.on('data', chunk => { output += chunk; });
+      child.stderr.on('data', chunk => { errorOutput += chunk; });
+      child.once('error', error => { console.error(error); process.exitCode = 1; });
+      child.once('close', code => {
+        try {
+          assert.strictEqual(code, 0, errorOutput);
+          assert.strictEqual(output, 'gts before\\ngts tool\\ngts after\\n');
+          process.stdout.write('execa-style launcher completed');
+        } catch (error) {
+          console.error(error);
+          process.exitCode = 1;
+        }
+      });
+    `, {
+      env: { PATH: '/node/node_modules/.bin:/node' },
+      files: {
+        '/node/async-gts.js': [
+          "const execa = require('execa');",
+          'async function run() {',
+          "  process.stdout.write('gts before\\n');",
+          "  await execa('eslint', ['**/*.ts'], { stdio: 'inherit' });",
+          "  process.stdout.write('gts after\\n');",
+          '}',
+          'run().catch(error => { console.error(error); process.exitCode = 1; });',
+        ].join('\n'),
+        '/node/node_modules/execa/package.json': JSON.stringify({ main: 'index.js' }),
+        '/node/node_modules/execa/index.js': [
+          "const { spawn } = require('node:child_process');",
+          'module.exports = (file, args, options) => new Promise((resolve, reject) => {',
+          '  const child = spawn(file, args, options);',
+          '  child.once(\'error\', reject);',
+          '  child.once(\'close\', code => code === 0 ? resolve({ exitCode: code }) : reject(new Error(`exit ${code}`)));',
+          '});',
+        ].join('\n'),
+        '/node/node_modules/.bin/eslint': [
+          '#!/usr/bin/env node',
+          'async function run() {',
+          "  await new Promise(resolve => setTimeout(resolve, 1));",
+          "  process.stdout.write('gts tool\\n');",
+          '}',
+          'run();',
+        ].join('\n'),
+      },
+    });
+    await expectPass(expect, result);
+  });
+
+  test('isolates async CommonJS code behind an npm .bin symlink', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const fs = require('node:fs');
+      const { spawn } = require('node:child_process');
+      fs.symlinkSync('../gts-target.js', '/node/node_modules/.bin/gts');
+      const child = spawn('/node/node_modules/.bin/gts', [], { cwd: '/node', stdio: 'pipe' });
+      let output = '';
+      let errorOutput = '';
+      child.stdout.on('data', chunk => { output += chunk; });
+      child.stderr.on('data', chunk => { errorOutput += chunk; });
+      child.once('error', error => { console.error(error); process.exitCode = 1; });
+      child.once('close', code => {
+        try {
+          assert.strictEqual(code, 0, errorOutput);
+          assert.strictEqual(output, 'bin target before\\nbin target tool\\nbin target after\\n');
+          process.stdout.write('async .bin symlink completed');
+        } catch (error) {
+          console.error(error);
+          process.exitCode = 1;
+        }
+      });
+    `, {
+      env: { PATH: '/node/node_modules/.bin:/node' },
+      files: {
+        '/node/node_modules/.bin/.keep': '',
+        '/node/node_modules/.bin/eslint': [
+          '#!/usr/bin/env node',
+          'async function run() {',
+          "  process.stdout.write('bin target tool\\n');",
+          '}',
+          'run();',
+        ].join('\n'),
+        '/node/node_modules/execa/package.json': JSON.stringify({ main: 'index.js' }),
+        '/node/node_modules/execa/index.js': [
+          "const { spawn } = require('node:child_process');",
+          'module.exports = (file, args, options) => new Promise((resolve, reject) => {',
+          '  const child = spawn(file, args, options);',
+          '  child.once(\'error\', reject);',
+          '  child.once(\'close\', code => code === 0 ? resolve() : reject(new Error(`exit ${code}`)));',
+          '});',
+        ].join('\n'),
+        '/node/node_modules/gts-target.js': [
+          '#!/usr/bin/env node',
+          "const execa = require('execa');",
+          'async function run() {',
+          "  process.stdout.write('bin target before\\n');",
+          "  await execa('eslint', [], { stdio: 'inherit' });",
+          "  process.stdout.write('bin target after\\n');",
+          '}',
+          'run().catch(error => { console.error(error); process.exitCode = 1; });',
+        ].join('\n'),
+      },
+    });
+    await expectPass(expect, result);
+  });
+
+  test('completes nested filesystem walks scheduled by setImmediate', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const fs = require('node:fs');
+      const { spawn } = require('node:child_process');
+      const child = spawn(process.execPath, ['/node/walk-child.js'], {
+        cwd: '/node',
+        stdio: 'pipe',
+      });
+      let output = '';
+      let errorOutput = '';
+      child.stdout.on('data', chunk => { output += chunk; });
+      child.stderr.on('data', chunk => { errorOutput += chunk; });
+      child.once('error', error => { console.error(error); process.exitCode = 1; });
+      child.once('close', code => {
+        try {
+          assert.strictEqual(code, 0, errorOutput);
+          assert.strictEqual(output, 'walk complete\\n');
+          process.stdout.write('nested walk completed');
+        } catch (error) {
+          console.error(error);
+          process.exitCode = 1;
+        }
+      });
+    `, {
+      files: {
+        '/node/walk-child.js': [
+          "const fs = require('node:fs');",
+          'async function run() {',
+          "  await new Promise(resolve => setImmediate(resolve));",
+          "  const entries = await new Promise((resolve, reject) => fs.readdir('/node', { withFileTypes: true }, (error, value) => error ? reject(error) : resolve(value)));",
+          "  await new Promise(resolve => setImmediate(resolve));",
+          "  process.stdout.write(entries.some(entry => entry.name === 'walk-child.js') ? 'walk complete\\n' : 'walk missing\\n');",
+          '}',
+          'run();',
+        ].join('\n'),
+      },
+    });
+    await expectPass(expect, result);
+  });
+
   test('provides max-listener controls on process stdio streams', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert/strict');
@@ -342,6 +832,31 @@ test.describe('browser runtime bridge and core primitives', () => {
     expect(result.stdout).toContain('legacy stream harness exit completed');
   });
 
+  test('keeps the readable queue independent from a legacy _buffer field', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { Readable } = require('node:stream');
+      let reads = 0;
+      const readable = new Readable({
+        read() {
+          if (reads++ === 0) {
+            this.push('legacy readable');
+            this.push(null);
+          }
+        },
+      });
+      readable._buffer = null;
+      const chunks = [];
+      readable.on('data', (chunk) => chunks.push(chunk.toString()));
+      readable.once('end', () => {
+        assert.deepStrictEqual(chunks, ['legacy readable']);
+        console.log('legacy readable queue completed');
+      });
+    `);
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('legacy readable queue completed');
+  });
+
   test('does not keep the parent alive for detached unref children', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const { spawn } = require('node:child_process');
@@ -536,6 +1051,510 @@ test.describe('browser runtime bridge and core primitives', () => {
     });
 
     await expectPass(expect, result);
+  });
+
+  test('exposes the complete Buffer global to CommonJS child dependencies', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      (async () => {
+        const child = spawn(process.execPath, ['/node/runner.js'], { cwd: '/node' });
+        let output = '';
+        child.stdout.on('data', (chunk) => { output += chunk; });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0);
+        assert.deepStrictEqual(JSON.parse(output), {
+          globalBuffer: 'function',
+          globalAlloc: 'function',
+          builtinBuffer: 'function',
+          builtinAlloc: 'function',
+        });
+        const vm = require('node:vm');
+        const context = vm.createContext();
+        const vmGlobal = vm.runInContext('this', context);
+        vmGlobal.global = vmGlobal;
+        vmGlobal.Buffer = global.Buffer;
+        const globals = {
+          directBuffer: typeof Buffer,
+          directAlloc: typeof Buffer?.alloc,
+          globalBuffer: typeof global.Buffer,
+          globalAlloc: typeof global.Buffer?.alloc,
+          globalThisBuffer: typeof globalThis.Buffer,
+          globalThisAlloc: typeof globalThis.Buffer?.alloc,
+          sameGlobal: global === globalThis,
+          vmBuffer: typeof vmGlobal.Buffer,
+          vmAlloc: typeof vmGlobal.Buffer?.alloc,
+        };
+        if (globals.globalBuffer !== 'function' || globals.vmBuffer !== 'function') {
+          process.stdout.write(JSON.stringify(globals));
+          process.exitCode = 1;
+          return;
+        }
+        try {
+          assert.strictEqual(vm.runInContext('typeof Buffer?.alloc', context), 'function');
+        } catch (error) {
+          process.stdout.write(JSON.stringify({
+            ...globals,
+            contextBuffer: typeof context.Buffer,
+            contextAlloc: typeof context.Buffer?.alloc,
+            vmAfter: typeof vmGlobal.Buffer,
+            vmEval: vmGlobal.eval('typeof Buffer'),
+            vmEvalAlloc: vmGlobal.eval('typeof Buffer?.alloc'),
+            vmEvalGlobal: vmGlobal.eval('typeof globalThis.Buffer'),
+            vmRun: vm.runInContext('typeof Buffer', context),
+            vmRunAlloc: vm.runInContext('typeof Buffer?.alloc', context),
+            error: String(error),
+          }));
+          process.exitCode = 1;
+          return;
+        }
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/runner.js': [
+          'const report = require("./package");',
+          'process.stdout.write(JSON.stringify(report));',
+        ].join('\n'),
+        '/node/package/index.js': [
+          'const builtin = require("node:buffer");',
+          'module.exports = {',
+          '  globalBuffer: typeof Buffer,',
+          '  globalAlloc: typeof Buffer.alloc,',
+          '  builtinBuffer: typeof builtin.Buffer,',
+          '  builtinAlloc: typeof builtin.Buffer.alloc,',
+          '};',
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('shares the Node global identity between CommonJS and ESM children', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      (async () => {
+        const child = spawn(process.execPath, ['/node/identity-runner.js']);
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk; });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk; });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.deepStrictEqual(JSON.parse(output), {
+          sameGlobal: true,
+          esmMarker: true,
+        });
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/identity-runner.js': [
+          "globalThis.__bnhIdentityMarker = true;",
+          "import('/node/identity-esm.mjs').then(({ esmSameGlobal }) => { process.stdout.write(JSON.stringify({ sameGlobal: esmSameGlobal, esmMarker: globalThis.__bnhIdentityMarker === true })); }).catch((error) => { console.error(error); process.exitCode = 1; });",
+        ].join('\n'),
+        '/node/identity-esm.mjs': 'export const esmSameGlobal = global === globalThis; if (!esmSameGlobal) throw new Error(\'global identity diverged\');',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('exposes process-bound fs overlays as ESM named exports', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert/strict');
+        const { unwatchFile, watchFile } = await import('node:fs');
+        assert.strictEqual(typeof watchFile, 'function');
+        assert.strictEqual(typeof unwatchFile, 'function');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `);
+
+    await expectPass(expect, result);
+  });
+
+  test('keeps recursive fs directory traversal in Node order', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert/strict');
+        const { readdirSync: requiredReaddirSync } = require('node:fs');
+        const { readdirSync: importedReaddirSync } = await import('node:fs');
+        const expected = ['a.js', 'nested', 'z.js', 'nested/b.js'];
+        assert.deepStrictEqual(requiredReaddirSync('/node/tree', { recursive: true }), expected);
+        assert.deepStrictEqual(importedReaddirSync('/node/tree', { recursive: true }), expected);
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/tree/a.js': '',
+        '/node/tree/nested/b.js': '',
+        '/node/tree/z.js': '',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('loads ESM command modules through synchronous createRequire', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const command = require('/node/remote.mjs');
+      assert.deepStrictEqual({ command: command.command, desc: command.desc, handler: typeof command.handler }, {
+        command: 'remote <command>',
+        desc: 'Manage set of tracked repos',
+        handler: 'function',
+      });
+    `, {
+      files: {
+        '/node/remote.mjs': [
+          "export const command = 'remote <command>'",
+          "export const desc = 'Manage set of tracked repos'",
+          'export const builder = {',
+          "  dir: { default: '.' }",
+          '}',
+          'export function handler() {}',
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('preserves the ESM createRequire importer when it loads another ESM module', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const shim = require('/node/shim.mjs');
+      assert.deepStrictEqual(shim.loadRemote(), {
+        command: 'remote <command>',
+        handler: 'function',
+      });
+    `, {
+      files: {
+        '/node/shim.mjs': [
+          "import { createRequire } from 'node:module';",
+          'const require = createRequire(import.meta.url);',
+          'export function loadRemote() {',
+          "  const remote = require('./remote.mjs');",
+          "  return { command: remote.command, handler: typeof remote.handler };",
+          '}',
+        ].join('\n'),
+        '/node/remote.mjs': [
+          "export const command = 'remote <command>';",
+          'export function handler() {}',
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('keeps native ESM process and Error identities through deferred callbacks', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      (async () => {
+        const module = await import('/node/deferred-identity.mjs');
+        const observed = [];
+        const originalExit = process.exit;
+        process.exit = code => observed.push(code);
+        try {
+          module.invoke();
+        } finally {
+          process.exit = originalExit;
+        }
+        assert.deepStrictEqual(observed, [0]);
+        assert.strictEqual(module.errorText(), 'Error: foo error');
+        process.stdout.write('deferred ESM identity completed');
+      })().catch(error => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/deferred-identity.mjs': [
+          'export function invoke() { process.exit(0); }',
+          "export function errorText() { return String(Error('foo error')); }",
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('preserves the native ESM createRequire importer across a deferred load', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      (async () => {
+        const shim = await import('/node/shim.mjs');
+        assert.deepStrictEqual(shim.loadRemote(), {
+          command: 'remote <command>',
+          handler: 'function',
+        });
+      })().catch(error => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/shim.mjs': [
+          "import { createRequire } from 'node:module';",
+          'const require = createRequire(import.meta.url);',
+          'export function loadRemote() {',
+          "  const remote = require('./remote.mjs');",
+          "  return { command: remote.command, handler: typeof remote.handler };",
+          '}',
+        ].join('\n'),
+        '/node/remote.mjs': [
+          "export const command = 'remote <command>';",
+          'export function handler() {}',
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('maps native ESM caller callsites back to VFS filenames', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      (async () => {
+        const { runEntry } = await import('/node/entry.mjs');
+        const callerFile = runEntry();
+        assert.strictEqual(callerFile, '/node/entry.mjs');
+      })().catch(error => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/caller.mjs': [
+          'export default function getCallerFile(position = 2) {',
+          '  const oldPrepareStackTrace = Error.prepareStackTrace;',
+          '  Error.prepareStackTrace = (_, stack) => stack;',
+          '  const stack = new Error().stack;',
+          '  Error.prepareStackTrace = oldPrepareStackTrace;',
+          '  return stack?.[position]?.getFileName();',
+          '}',
+        ].join('\n'),
+        '/node/shim.mjs': [
+          "import getCallerFile from './caller.mjs';",
+          'export default {',
+          '  getCallerFile: () => getCallerFile(3),',
+          '};',
+        ].join('\n'),
+        '/node/factory.mjs': [
+          "import shim from './shim.mjs';",
+          'export function run() { return shim.getCallerFile(); }',
+        ].join('\n'),
+        '/node/entry.mjs': [
+          "import { run } from './factory.mjs';",
+          'export function runEntry() { return run(); }',
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('maps CJS get-caller-file through the native ESM command-dir call path', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      (async () => {
+        const { runEntry } = await import('/node/entry.mjs');
+        assert.strictEqual(runEntry(), '/node/entry.mjs');
+      })().catch(error => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/node_modules/get-caller-file/package.json': JSON.stringify({ main: 'index.js' }),
+        '/node/node_modules/get-caller-file/index.js': [
+          'module.exports = function getCallerFile(position = 2) {',
+          '  const oldPrepareStackTrace = Error.prepareStackTrace;',
+          '  Error.prepareStackTrace = (_, stack) => stack;',
+          '  const stack = new Error().stack;',
+          '  Error.prepareStackTrace = oldPrepareStackTrace;',
+          '  return stack?.[position]?.getFileName();',
+          '};',
+        ].join('\n'),
+        '/node/shim.mjs': [
+          "import getCallerFile from 'get-caller-file';",
+          "import { fileURLToPath } from 'node:url';",
+          'export default {',
+          '  getCallerFile: () => {',
+          '    const callerFile = getCallerFile(3);',
+          "    return callerFile?.match(/^file:\\/\\//) ? fileURLToPath(callerFile) : callerFile;",
+          '  },',
+          '};',
+        ].join('\n'),
+        '/node/factory.mjs': [
+          "import shim from './shim.mjs';",
+          'export function run() { return shim.getCallerFile(); }',
+        ].join('\n'),
+        '/node/entry.mjs': [
+          "import { run } from './factory.mjs';",
+          'export function runEntry() { return run(); }',
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('preserves CommonJS identity across import and require', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert/strict');
+        const imported = await import('/node/package/plugin.cjs');
+        const required = require('/node/package/plugin.cjs');
+        assert.strictEqual(imported.default, required);
+        assert.strictEqual(imported.default.marker, required.marker);
+        process.stdout.write('CommonJS identity preserved\\n');
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/package/plugin.cjs': 'module.exports = { marker: {} };',
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('CommonJS identity preserved');
+  });
+
+  test('preserves CommonJS identity across child import and require', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      (async () => {
+        const child = spawn(process.execPath, ['/node/runner.js'], { cwd: '/node' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk; });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk; });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(output, 'child CommonJS identity preserved\\n');
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/runner.js': [
+          '(async () => {',
+          '  const required = require("./package/plugin.cjs");',
+          '  const imported = await import("./package/plugin.cjs");',
+          '  if (imported.default !== required) process.exitCode = 1;',
+          '  process.stdout.write(imported.default === required ? "child CommonJS identity preserved\\n" : "child CommonJS identity lost\\n");',
+          '})().catch((error) => { console.error(error); process.exitCode = 1; });',
+        ].join('\n'),
+        '/node/package/plugin.cjs': 'module.exports = { marker: {} };',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('strips TypeScript from child entrypoints before CommonJS compilation', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      (async () => {
+        const child = spawn(process.execPath, ['/node/entry.ts'], { cwd: '/node' });
+        let output = '';
+        child.stdout.on('data', (chunk) => { output += chunk; });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0);
+        assert.strictEqual(output, 'typescript child\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/entry.ts': 'const message: string = "typescript child"; process.stdout.write(message + "\\n");',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('resolves PATH commands in nested child-process launches', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      (async () => {
+        const child = spawn('/node/project/node_modules/.bin/c8', ['test', '.test.js'], {
+          cwd: '/node/project',
+          env: { PATH: '/node/project/node_modules/.bin' },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk; });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk; });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        const parsed = JSON.parse(output);
+        assert.match(parsed.c8[1], /node_modules\\/.bin\\/c8$/);
+        assert.deepStrictEqual(parsed.c8.slice(-2), ['test', '.test.js']);
+        assert.deepStrictEqual(parsed.uvu.slice(-2), ['test', '.test.js']);
+        assert.match(parsed.uvu[1], /node_modules\\/.bin\\/uvu$/);
+        process.stdout.write('nested PATH child completed\\n');
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/project/node_modules/.bin/c8': [
+          '#!/usr/bin/env node',
+          "const { spawn } = require('node:child_process');",
+          "const child = spawn('uvu', process.argv.slice(2), { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });",
+          "let stdout = ''; let stderr = '';",
+          "child.stdout.on('data', (chunk) => { stdout += chunk; });",
+          "child.stderr.on('data', (chunk) => { stderr += chunk; });",
+          "child.once('error', (error) => { console.error(error); process.exitCode = 1; });",
+          "child.once('close', (code) => { if (code !== 0) { process.exitCode = code; return; } process.stdout.write(JSON.stringify({ c8: process.argv, uvu: JSON.parse(stdout) })); });",
+        ].join('\n'),
+        '/node/project/node_modules/.bin/uvu': [
+          '#!/usr/bin/env node',
+          'process.stdout.write(JSON.stringify(process.argv));',
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('nested PATH child completed');
   });
 
   test('exposes synchronous Node KeyObjects for browser crypto callers', async ({ harnessPage }) => {
@@ -898,6 +1917,29 @@ test.describe('browser runtime bridge and core primitives', () => {
     expect(result.exitCode).toBe(17);
   });
 
+  test('routes process.nextTick exceptions through the owning process emitter', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const seen = [];
+        const originalEmit = process.emit;
+        process.emit = (name, error) => {
+          if (name === 'uncaughtException') {
+            seen.push({ name, message: error.message });
+            return true;
+          }
+          return originalEmit.call(process, name, error);
+        };
+        process.nextTick(() => { throw new Error('next-tick boom'); });
+        await new Promise(resolve => setTimeout(resolve, 0));
+        process.emit = originalEmit;
+        process.stdout.write(JSON.stringify(seen));
+      })();
+    `);
+
+    await expectPass(expect, result);
+    expect(result.stdout).toBe('[{"name":"uncaughtException","message":"next-tick boom"}]');
+  });
+
   test('does not keep a process alive for an unresolved Promise continuation', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       new Promise(() => {}).then(() => process.stdout.write('unreachable\\n'));
@@ -1011,6 +2053,36 @@ test.describe('browser runtime bridge and core primitives', () => {
       },
       isolation: 'worker',
     });
+
+    await expectPass(expect, result);
+  });
+
+  test('splits shell-enabled spawn command strings into the program and argv', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('node -e "process.stdout.write(\\'shell spawn passed\\' + String.fromCharCode(10))"', {
+          cwd: '/node',
+          shell: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(output, 'shell spawn passed\\n');
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `);
 
     await expectPass(expect, result);
   });
@@ -1327,6 +2399,201 @@ test.describe('browser runtime bridge and core primitives', () => {
     });
 
     await expectPass(expect, result);
+  });
+
+  test('routes a direct pnpm child through the virtual package-manager lifecycle', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('pnpm', ['clean'], {
+          cwd: '/node/.citgm/tmp/package-under-test',
+          env: { PATH: '/node/.citgm/tmp/package-under-test/node_modules/.bin:/node/node_modules/.bin' },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(output, 'direct pnpm child ran\\n');
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/.citgm/tmp/package-under-test/package.json': JSON.stringify({
+          name: 'direct-pnpm-fixture',
+          version: '1.0.0',
+          scripts: { clean: "node -e \"process.stdout.write('direct pnpm child ran\\\\n')\"" },
+        }),
+        '/node/.citgm/tmp/package-under-test/node_modules/.bin/pnpm': '#!/usr/bin/env node\\n',
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('serves synchronous npm show metadata from the active virtual install', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { execSync } = require('node:child_process');
+      process.chdir('/node/.citgm/tmp/package-under-test');
+      const metadata = JSON.parse(execSync('npm show caniuse-lite --json', {
+        env: {
+          PATH: '/node/node_modules/.bin',
+        },
+      }).toString());
+      assert.deepStrictEqual(metadata, { name: 'caniuse-lite', version: '1.0.0' });
+      process.stdout.write('synchronous npm metadata ran');
+    `, {
+      files: {
+        '/node/.citgm/tmp/package-under-test/node_modules/caniuse-lite/package.json': JSON.stringify({
+          name: 'caniuse-lite',
+          version: '1.0.0',
+        }),
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\n',
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('synchronous npm metadata ran');
+  });
+
+  test('materializes a synchronous pnpm lockfile in the active virtual cwd', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { execSync } = require('node:child_process');
+      const fs = require('node:fs');
+      process.chdir('/node/.citgm/tmp/package-under-test');
+      execSync('pnpm install --lockfile-only', {
+        env: {
+          PATH: '/node/node_modules/.bin',
+        },
+      });
+      assert.strictEqual(fs.existsSync('/node/.citgm/tmp/package-under-test/pnpm-lock.yaml'), true);
+      process.stdout.write(fs.readFileSync('/node/.citgm/tmp/package-under-test/pnpm-lock.yaml', 'utf8'));
+    `, {
+      files: {
+        '/node/.citgm/tmp/package-under-test/package.json': JSON.stringify({
+          name: 'pnpm-lock-fixture',
+          version: '1.0.0',
+          devDependencies: { 'caniuse-lite': '^1.0.0' },
+        }),
+        '/node/node_modules/.bin/pnpm': '#!/usr/bin/env node\n',
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('caniuse-lite');
+  });
+
+  test('updates a synchronous npm lockfile through the active virtual cwd', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { execSync } = require('node:child_process');
+      const fs = require('node:fs');
+      process.chdir('/node/.citgm/tmp/package-under-test');
+      fs.writeFileSync('/node/.citgm/tmp/package-under-test/package-lock.json', JSON.stringify({
+        name: 'npm-lock-fixture',
+        lockfileVersion: 2,
+        dependencies: {},
+        packages: {},
+      }));
+      execSync('npm install caniuse-lite', {
+        env: {
+          PATH: '/node/node_modules/.bin',
+        },
+      });
+      const lock = JSON.parse(fs.readFileSync('/node/.citgm/tmp/package-under-test/package-lock.json', 'utf8'));
+      assert.strictEqual(lock.dependencies['caniuse-lite'].version, '1.0.0');
+      process.stdout.write('synchronous npm lockfile ran');
+    `, {
+      files: {
+        '/node/.citgm/tmp/package-under-test/package.json': JSON.stringify({
+          name: 'npm-lock-fixture',
+          version: '1.0.0',
+        }),
+        '/node/.citgm/tmp/package-under-test/node_modules/caniuse-lite/package.json': JSON.stringify({
+          name: 'caniuse-lite',
+          version: '1.0.0',
+        }),
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\n',
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('synchronous npm lockfile ran');
+  });
+
+  test('keeps synchronous npm lockfile updates across sequential virtual cwds', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { execSync } = require('node:child_process');
+      const fs = require('node:fs');
+      const dirs = [
+        '/node/.citgm/tmp/package-under-test/first',
+        '/node/.citgm/tmp/package-under-test/second',
+      ];
+      for (const directory of dirs) {
+        fs.mkdirSync(directory, { recursive: true });
+        fs.writeFileSync(directory + '/package.json', JSON.stringify({
+          name: 'npm-sequential-fixture',
+          version: '1.0.0',
+        }));
+        fs.writeFileSync(directory + '/package-lock.json', JSON.stringify({
+          name: 'npm-sequential-fixture',
+          lockfileVersion: 2,
+          dependencies: {},
+          packages: {},
+        }));
+        process.chdir(directory);
+        execSync('npm install caniuse-lite', {
+          env: { PATH: '/node/node_modules/.bin' },
+        });
+        const lock = JSON.parse(fs.readFileSync(directory + '/package-lock.json', 'utf8'));
+        assert.strictEqual(lock.dependencies['caniuse-lite'].version, '1.0.0');
+      }
+      process.stdout.write('sequential synchronous npm lockfile ran');
+    `, {
+      files: {
+        '/node/.citgm/tmp/package-under-test/node_modules/caniuse-lite/package.json': JSON.stringify({
+          name: 'caniuse-lite',
+          version: '1.0.0',
+        }),
+        '/node/node_modules/.bin/npm': '#!/usr/bin/env node\\n',
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('sequential synchronous npm lockfile ran');
+  });
+
+  test('canonicalizes redundant leading slashes in file URL imports', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      (async () => {
+        const module = await import('file:////node/.citgm/tmp/package-under-test/redundant-slash.mjs');
+        assert.strictEqual(module.value, 'canonical file URL');
+        process.stdout.write('redundant file URL ran');
+      })().catch((error) => {
+        console.error(error.stack || error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/.citgm/tmp/package-under-test/redundant-slash.mjs': "export const value = 'canonical file URL';\n",
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('redundant file URL ran');
   });
 
   test('returns file Dirents from fs promises glob with withFileTypes', async ({ harnessPage }) => {
@@ -1699,6 +2966,115 @@ test.describe('browser runtime bridge and core primitives', () => {
     `);
     await expectPass(expect, result);
     expect(result.stdout).toContain('callsite contract completed');
+  });
+
+  test('preserves callsites-style Error.prepareStackTrace wrappers', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      function callsites() {
+        const previousPrepare = Error.prepareStackTrace;
+        Error.prepareStackTrace = (_error, callSites) => callSites;
+        try { return new Error().stack.slice(1); }
+        finally { Error.prepareStackTrace = previousPrepare; }
+      }
+      const callSites = callsites();
+      assert.ok(Array.isArray(callSites) && callSites.length > 0);
+      const callSite = callSites[0];
+      assert.strictEqual(typeof callSite.getFileName(), 'string');
+      assert.strictEqual(typeof callSite.getLineNumber(), 'number');
+      assert.strictEqual(typeof callSite.toString(), 'string');
+      process.stdout.write('callsites wrapper completed');
+    `);
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('callsites wrapper completed');
+  });
+
+  test('preserves messages in captured Error stacks for ESM children', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert/strict');
+        const { spawn } = require('node:child_process');
+        const child = spawn(process.execPath, ['/node/app/error-stack.mjs'], {
+          stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (chunk) => { stdout += chunk; });
+        child.stderr.on('data', (chunk) => { stderr += chunk; });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, stderr);
+        const parsed = JSON.parse(stdout);
+        assert.match(parsed.stack, /stack message/);
+        assert.match(parsed.stack, /YError/);
+        process.stdout.write('ESM error stack message completed');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/app/error-stack.mjs': `
+          class YError extends Error {
+            name = 'YError';
+            constructor(message) {
+              super(message);
+              if (Error.captureStackTrace) Error.captureStackTrace(this, YError);
+            }
+          }
+          console.log(JSON.stringify({ stack: new YError('stack message').stack }));
+        `,
+      },
+    });
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('ESM error stack message completed');
+  });
+
+  test('returns virtual filenames from structured ESM callsites', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert/strict');
+        const { spawn } = require('node:child_process');
+        const child = spawn(process.execPath, ['/node/app/caller-entry.mjs'], {
+          stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (chunk) => { stdout += chunk; });
+        child.stderr.on('data', (chunk) => { stderr += chunk; });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, stderr);
+        const files = JSON.parse(stdout);
+        assert.ok(files.some((file) => file.endsWith('/caller-entry.mjs')));
+        assert.ok(files.some((file) => file.endsWith('/caller-helper.mjs')));
+        process.stdout.write('ESM callsite filenames completed');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/app/caller-helper.mjs': `
+          export function collectCallsites() {
+            const previous = Error.prepareStackTrace;
+            Error.prepareStackTrace = (_error, sites) => sites;
+            try { return new Error().stack.map((site) => site.getFileName()); }
+            finally { Error.prepareStackTrace = previous; }
+          }
+        `,
+        '/node/app/caller-entry.mjs': `
+          import { collectCallsites } from './caller-helper.mjs';
+          console.log(JSON.stringify(collectCallsites()));
+        `,
+      },
+    });
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('ESM callsite filenames completed');
   });
 
   test('inherits the package cwd for asynchronous nested npm scripts', async ({ harnessPage }) => {
@@ -2245,6 +3621,101 @@ test.describe('browser runtime bridge and core primitives', () => {
     `, {
       files: {
         '/node/stream-child.js': "process.stdout.write('piped child output\\n');",
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('preserves encoded child stdout through close', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn(process.execPath, ['/node/encoded-child.js']);
+        let output = '';
+        child.stdout.setEncoding('utf8');
+        child.stdout.on('data', (chunk) => { output += chunk; });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0);
+        assert.strictEqual(output, '{"args":["encoded"]}\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/encoded-child.js': "console.log(JSON.stringify({ args: ['encoded'] }));",
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('preserves output from a relative shebang child through close', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('./relative-child.js', ['relative'], { cwd: '/node' });
+        let output = '';
+        child.stdout.setEncoding('utf8');
+        child.stdout.on('data', (chunk) => { output += chunk; });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0);
+        assert.strictEqual(output, '{"args":["relative"]}\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/relative-child.js': "#!/usr/bin/env node\nconsole.log(JSON.stringify({ args: process.argv.slice(2) }));",
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
+  test('preserves relative shebang output when the child requires an ESM helper', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn('./bin.js', ['esm-helper'], { cwd: '/node/test/fixtures' });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.setEncoding('utf8');
+        child.stderr.setEncoding('utf8');
+        child.stdout.on('data', (chunk) => { output += chunk; });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk; });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.strictEqual(output, '{"args":["esm-helper"]}\\n');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/test/fixtures/bin.js': [
+          '#!/usr/bin/env node',
+          "const { hideBin } = require('../../helpers/helpers.mjs');",
+          'console.log(JSON.stringify({ args: hideBin(process.argv).slice(2) }));',
+        ].join('\n'),
+        '/node/helpers/helpers.mjs': 'export function hideBin(argv) { return argv; }',
       },
     });
 
@@ -3701,6 +5172,97 @@ test.describe('browser runtime bridge and core primitives', () => {
     });
     expect(outcome.code).toBe(0);
     expect(forwarded).toEqual(['returned child output\n']);
+  });
+
+  test('keeps user process fields from colliding with child output diagnostics', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      process.__bnhChildOutputs = { ownedByUserCode: true };
+      const child = spawn(process.execPath, ['/node/output-child.js'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      const code = await new Promise((resolve, reject) => {
+        child.once('error', reject);
+        child.once('close', resolve);
+      });
+      assert.strictEqual(code, 0, stderr);
+      assert.strictEqual(stdout, 'child output survived\\n');
+      process.stdout.write('child output diagnostics isolated');
+      })().catch((error) => { console.error(error); process.exitCode = 1; });
+    `, {
+      files: {
+        '/node/output-child.js': "process.stdout.write('child output survived\\n');",
+      },
+    });
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('child output diagnostics isolated');
+  });
+
+  test('keeps process streams usable when Array.prototype.push is replaced', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (() => {
+      const assert = require('node:assert/strict');
+      const originalPush = Array.prototype.push;
+      try {
+        Array.prototype.push = null;
+        process.stderr.write('stderr survived replaced push\\n');
+      } finally {
+        Array.prototype.push = originalPush;
+      }
+      assert.strictEqual(typeof Array.prototype.push, 'function');
+      process.stdout.write('stream push intrinsic isolated');
+      })();
+    `);
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('stream push intrinsic isolated');
+  });
+
+  test('restores intrinsic mutations made by same-realm child processes', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert/strict');
+        const { spawn } = require('node:child_process');
+        const child = spawn(process.execPath, ['/node/mutate-intrinsics.js'], {
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (chunk) => { stdout += chunk; });
+        child.stderr.on('data', (chunk) => { stderr += chunk; });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, stderr);
+        assert.strictEqual(stdout, 'child mutated intrinsics\\n');
+        assert.strictEqual(typeof Array.prototype.push, 'function');
+        assert.strictEqual(typeof Math.pow, 'function');
+        assert.strictEqual(typeof JSON.parse, 'function');
+        const values = [];
+        values.push(42);
+        assert.deepStrictEqual(values, [42]);
+        assert.deepStrictEqual(JSON.parse('{"ok":true}'), { ok: true });
+        process.stdout.write('child intrinsic mutations isolated');
+      })().catch((error) => { console.error(error); process.exitCode = 1; });
+    `, {
+      files: {
+        '/node/mutate-intrinsics.js': `
+          delete Array.prototype.push;
+          delete Math.pow;
+          delete JSON.parse;
+          process.stdout.write('child mutated intrinsics\\n');
+          process.exit(0);
+        `,
+      },
+    });
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('child intrinsic mutations isolated');
   });
 
   test('preserves enumerable EventEmitter methods for legacy multi-inheritance', async ({ harnessPage }) => {

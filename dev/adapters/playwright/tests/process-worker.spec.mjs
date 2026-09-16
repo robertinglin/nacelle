@@ -347,6 +347,36 @@ test.describe('browser-native worker process boundary', () => {
     expect(result).toEqual({ retainedBackings: true, hasChunkPayload: false });
   });
 
+  test('packs large regular VFS data before chunking a nested worker payload', async ({ page }) => {
+    await openRuntime(page);
+    const result = await page.evaluate(async () => {
+      const { prepareWorkerVfs } = await import('/runtime/process.js');
+      const files = {};
+      for (let index = 0; index < 17; index += 1) {
+        files[`/node/file-${index}.js`] = new Uint8Array(1024 * 1024);
+      }
+      const prepared = prepareWorkerVfs({ files }, globalThis, { nested: true });
+      const wireSymbol = Object.getOwnPropertySymbols(prepared)
+        .find((value) => String(value).includes('workerVfsWire'));
+      const wire = prepared[wireSymbol];
+      const symbols = Object.getOwnPropertySymbols(prepared).map(String);
+      return {
+        packed: wire?.vfsPacked === true,
+        chunked: wire?.vfsChunked === true,
+        wireFileCount: Object.keys(wire?.files || {}).length,
+        hasPathTable: typeof wire?.vfsFilePaths === 'string' || wire?.vfsPathChunked === true,
+        hasChunkPayload: symbols.some((value) => value.includes('workerVfsChunks')),
+      };
+    });
+    expect(result).toEqual({
+      packed: true,
+      chunked: true,
+      wireFileCount: 0,
+      hasPathTable: true,
+      hasChunkPayload: true,
+    });
+  });
+
   test('starts a worker with a large packed VFS payload', async ({ page }) => {
     await openRuntime(page);
     const result = await page.evaluate(async () => {

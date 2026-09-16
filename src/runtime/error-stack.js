@@ -87,6 +87,35 @@ function parseCallSites(stack) {
     .filter(Boolean);
 }
 
+function virtualPathForBlob(value) {
+  const blobURL = String(value || '').split('#', 1)[0];
+  const candidates = [blobURL];
+  const shorthand = blobURL.match(/^blob:(https?):\/([^/].*)$/);
+  if (shorthand) candidates.push(`blob:${shorthand[1]}://${shorthand[2]}`);
+  const paths = globalThis.__BNH_BLOB_VIRTUAL_PATHS__;
+  for (const candidate of candidates) {
+    const virtualPath = paths?.get?.(candidate);
+    if (typeof virtualPath === 'string') return virtualPath;
+  }
+  return undefined;
+}
+
+function restoreCapturedErrorHeader(target, stack) {
+  if (typeof stack !== 'string') return stack;
+  if (target?.name === undefined && target?.message === undefined) return stack;
+  const lines = stack.split(/\r?\n/);
+  if (!lines.length) return stack;
+  const name = target?.name || 'Error';
+  const message = target?.message ? `: ${target.message}` : '';
+  const header = `${name}${message}`;
+  // Chromium's native Error.captureStackTrace uses the target's prototype
+  // rather than its own name/message when it materializes a string stack.
+  // Node derives the first line from the target object, which is observable
+  // for subclasses such as yargs' YError.
+  if (lines[0] !== header) lines[0] = header;
+  return lines.join('\n');
+}
+
 const nativeCallSiteMethods = [
   'getFunctionName',
   'getScriptNameOrSourceURL',
@@ -142,6 +171,20 @@ function normalizeNativeCallSite(site) {
   if (!site || typeof site !== 'object' || typeof site.getFileName !== 'function') return site;
   let fileName;
   try { fileName = site.getFileName(); } catch { return site; }
+  const virtualFileName = typeof fileName === 'string' && fileName.startsWith('blob:')
+    ? virtualPathForBlob(fileName)
+    : undefined;
+  if (virtualFileName) {
+    // Native Chromium ESM callsites expose the generated Blob URL. The
+    // runtime records the VFS path that generated each Blob; expose that
+    // path through the Node CallSite methods used by get-caller-file and
+    // source-map consumers.
+    return wrapNativeCallSite(site, {
+      getFileName: () => virtualFileName,
+      getScriptNameOrSourceURL: () => virtualFileName,
+      toString: () => `${virtualFileName}:${site.getLineNumber?.() || 1}:${site.getColumnNumber?.() || 1}`,
+    });
+  }
   if (typeof fileName === 'string' && fileName) {
     const complete = nativeCallSiteMethods.every((methodName) => {
       try { return typeof site[methodName] === 'function'; } catch { return false; }
@@ -347,6 +390,7 @@ function installStructuredCaptureFallback(ErrorConstructor) {
       // @tapjs/stack call Array.prototype methods on the result.
       capturedStack = retryStack === undefined ? [] : retryStack;
     }
+    capturedStack = restoreCapturedErrorHeader(target, capturedStack);
     if (Array.isArray(capturedStack)) {
       if (capturedStack.some((site) => site && typeof site === 'object'
         && typeof site.getFileName !== 'function'

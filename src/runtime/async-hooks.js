@@ -25,6 +25,9 @@ const promiseResolveSymbol = Symbol('promiseResolve');
 export const ownerSymbol = Symbol('owner');
 let hookDispatchDepth = 0;
 let activeHookSnapshot = null;
+const arrayPop = Function.call.bind(Array.prototype.pop);
+const arrayPush = Function.call.bind(Array.prototype.push);
+const arrayShift = Function.call.bind(Array.prototype.shift);
 
 function currentProcess() {
   return globalThis.__bnhActiveProcess || globalThis.process;
@@ -382,17 +385,25 @@ function promiseTarget(promise) {
   return promiseTargets.get(promise) || promise;
 }
 
-export function observablePromise(promise) {
+export function observablePromise(promise, options = {}) {
   if (promiseTargets.has(promise)) return promise;
   // A Proxy around a native Promise is still recognized as a branded Promise
   // by V8, which lets `await` bypass the observable `.then` property. Proxy an
   // ordinary promise-shaped object instead; it remains `instanceof Promise`
   // through the shared prototype, but `await` must invoke its `then` method.
-  const target = Object.create(originalPromiseConstructor.prototype);
-  Object.defineProperty(target, 'constructor', {
-    configurable: true,
-    value: globalThis.Promise,
-  });
+  // Firefox can still recognize that prototype-shaped object as a native
+  // promise while evaluating a browser ESM module after the guest globals
+  // have been restored. A forced thenable deliberately has no Promise
+  // prototype, so native ESM must use the forwarding method below.
+  const target = options.forceThenable
+    ? Object.create(null)
+    : Object.create(originalPromiseConstructor.prototype);
+  if (!options.forceThenable) {
+    Object.defineProperty(target, 'constructor', {
+      configurable: true,
+      value: globalThis.Promise,
+    });
+  }
   Object.defineProperty(target, Symbol.toStringTag, {
     configurable: true,
     value: 'Promise',
@@ -402,7 +413,7 @@ export function observablePromise(promise) {
         if (property === 'then') {
           const context = contexts.get(executionId);
           const pending = promiseAwaitContexts.get(observable) || [];
-          pending.push({
+          arrayPush(pending, {
           context: context ? new Map(context) : undefined,
           generation: asyncContextGeneration,
           });
@@ -413,11 +424,35 @@ export function observablePromise(promise) {
           // brand check would reject the proxy before it reaches the tracked
           // underlying promise.
           return (onFulfilled, onRejected) => {
+            if (typeof onRejected === 'function') markPromiseHandled(observable);
             const patchedThen = globalThis.Promise?.prototype?.then;
             if (typeof patchedThen === 'function' && patchedThen !== originalThen) {
               return patchedThen.call(observable, onFulfilled, onRejected);
             }
             return originalThen.call(promise, onFulfilled, onRejected);
+          };
+        }
+        if (property === 'catch') {
+          return (onRejected) => {
+            const patchedThen = globalThis.Promise?.prototype?.then;
+            if (typeof patchedThen === 'function' && patchedThen !== originalThen) {
+              return patchedThen.call(observable, undefined, onRejected);
+            }
+            return originalThen.call(promise, undefined, onRejected);
+          };
+        }
+        if (property === 'finally') {
+          return (onFinally) => {
+            const callback = typeof onFinally === 'function' ? onFinally : () => onFinally;
+            const fulfill = (value) => originalResolve.call(originalPromiseConstructor, callback()).then(() => value);
+            const reject = (reason) => originalResolve.call(originalPromiseConstructor, callback()).then(() => {
+              throw reason;
+            });
+            const patchedThen = globalThis.Promise?.prototype?.then;
+            if (typeof patchedThen === 'function' && patchedThen !== originalThen) {
+              return patchedThen.call(observable, fulfill, reject);
+            }
+            return originalThen.call(promise, fulfill, reject);
           };
         }
         return Reflect.get(currentTarget, property, receiver);
@@ -432,7 +467,20 @@ function withResourceProcess(asyncId, callback) {
   if (resourceProcess === undefined) return callback();
   const previousActiveProcess = globalThis.__bnhActiveProcess;
   const previousProcess = globalThis.process;
+  const previousConsole = globalThis.console;
+  const previousGlobal = globalThis.global;
+  const previousTimers = {
+    setTimeout: globalThis.setTimeout,
+    clearTimeout: globalThis.clearTimeout,
+    setInterval: globalThis.setInterval,
+    clearInterval: globalThis.clearInterval,
+    setImmediate: globalThis.setImmediate,
+    clearImmediate: globalThis.clearImmediate,
+    queueMicrotask: globalThis.queueMicrotask,
+  };
   let installedProcess = false;
+  let installedConsole = false;
+  let installedGlobal = false;
   // Async resources are created while this callback is active. Keep the
   // logical owner paired with the process context; otherwise a same-realm
   // child callback can create a Promise recorded for the parent and lose the
@@ -450,9 +498,44 @@ function withResourceProcess(asyncId, callback) {
       // marker above remains sufficient for runtime-owned surfaces there.
     }
   }
+  // Promise reactions and other observed async resources do not pass
+  // through the timer facade, so the timer callback's scope bridge cannot
+  // install the child's remaining globals for them. Keep CommonJS callbacks
+  // (which resolve bare `console`, `setTimeout`, and `global` dynamically)
+  // on the resource owner's overlay for the duration of the callback too.
+  if (resourceProcess?._bnhConsole && resourceProcess._bnhConsole !== previousConsole) {
+    try {
+      globalThis.console = resourceProcess._bnhConsole;
+      installedConsole = globalThis.console === resourceProcess._bnhConsole;
+    } catch {
+      // Host globals may be immutable; the private process marker still
+      // preserves ownership for runtime-owned surfaces.
+    }
+  }
+  if (resourceProcess?._bnhGlobal && resourceProcess._bnhGlobal !== previousGlobal) {
+    try {
+      globalThis.global = resourceProcess._bnhGlobal;
+      installedGlobal = globalThis.global === resourceProcess._bnhGlobal;
+    } catch {
+      // Best effort for browser hosts with an immutable global alias.
+    }
+  }
+  const timerContext = resourceProcess?._bnhTimerContext;
+  if (timerContext) {
+    try { Object.assign(globalThis, timerContext); } catch { /* best effort */ }
+  }
   try {
     return callback();
   } finally {
+    if (timerContext) {
+      try { Object.assign(globalThis, previousTimers); } catch { /* best effort */ }
+    }
+    if (installedGlobal) {
+      try { globalThis.global = previousGlobal; } catch { /* best effort */ }
+    }
+    if (installedConsole) {
+      try { globalThis.console = previousConsole; } catch { /* best effort */ }
+    }
     if (installedProcess) {
       try { globalThis.process = previousProcess; } catch { /* immutable host alias */ }
     }
@@ -757,13 +840,16 @@ function installPromiseHooks() {
   promisePatchInstalled = true;
   Promise.prototype.then = function patchedThen(onFulfilled, onRejected) {
     const sourcePromise = promiseTarget(this);
-    if (typeof onRejected === 'function') {
-      markPromiseHandled(this);
-    }
+    // Attaching any reaction consumes the source promise's rejection in Node;
+    // a rejection that propagates through a missing `onRejected` handler is
+    // reported on the promise returned by `then()`. Tracking only explicit
+    // rejection callbacks reports the source too early for chains such as
+    // yargs's handlerResult.then(...).catch(...).
+    markPromiseHandled(this);
     const knownAsyncId = promiseIds.get(this) ?? promiseIds.get(sourcePromise);
     const pendingAwaitContexts = promiseAwaitContexts.get(this)
       || promiseAwaitContexts.get(sourcePromise);
-    const awaitContext = pendingAwaitContexts?.shift();
+    const awaitContext = pendingAwaitContexts && arrayShift(pendingAwaitContexts);
     if (pendingAwaitContexts?.length === 0) {
       promiseAwaitContexts.delete(this);
       promiseAwaitContexts.delete(sourcePromise);
@@ -782,9 +868,8 @@ function installPromiseHooks() {
     };
     const reject = (...args) => {
       observeProcessExit(result, args[0]);
-      return typeof onRejected === 'function'
-        ? runInScope(asyncId, onRejected, this, args, false, result)
-        : (() => { throw args[0]; })();
+      if (typeof onRejected !== 'function') throw args[0];
+      return runInScope(asyncId, onRejected, this, args, false, result);
     };
     let result;
     result = originalThen.call(sourcePromise, fulfill, reject);
@@ -815,6 +900,13 @@ function installPromiseHooks() {
     return inheritedContext && globalThis.__BNH_FIREFOX_PROMISE_BOUNDARY__ !== true
       ? observablePromise(result)
       : result;
+  };
+  // Native Promise.prototype.catch() does not call the replaceable `then`
+  // property, so it would bypass the context bridge for an unwrapped native
+  // promise returned by an async ESM module. Route it through the patched
+  // method just as observablePromise.catch() does.
+  Promise.prototype.catch = function patchedCatch(onRejected) {
+    return Promise.prototype.then.call(this, undefined, onRejected);
   };
   Promise.resolve = function patchedResolve(value) {
     if (promiseTargets.has(value) && this === globalThis.Promise) return value;
@@ -989,11 +1081,11 @@ function internalEmitBefore(asyncId, triggerAsyncId) {
   }
   const previous = executionId;
   executionId = asyncId;
-  internalAsyncScopes.push({ asyncId, previous });
+  arrayPush(internalAsyncScopes, { asyncId, previous });
   try {
     emit('before', asyncId);
   } catch (error) {
-    internalAsyncScopes.pop();
+    arrayPop(internalAsyncScopes);
     executionId = previous;
     throw error;
   }
@@ -1004,7 +1096,7 @@ function internalEmitAfter(asyncId) {
   const scope = internalAsyncScopes.at(-1);
   if (record?.destroyed || !scope || scope.asyncId !== asyncId) throw internalAsyncHookError();
   emit('after', asyncId);
-  internalAsyncScopes.pop();
+  arrayPop(internalAsyncScopes);
   executionId = scope.previous;
 }
 

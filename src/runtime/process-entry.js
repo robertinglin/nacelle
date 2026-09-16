@@ -229,7 +229,6 @@ export async function runProcessEntry(context) {
     runId: context.process.runId,
     capabilities: descriptor.capabilities,
     proxy: descriptor.proxy,
-    vfsBackend: descriptor.vfsBackend,
     virtualNetwork: remoteVirtualNetwork
       ? { shared: true, network: remoteVirtualNetwork.network }
       : descriptor.virtualNetwork,
@@ -285,6 +284,7 @@ export async function runProcessEntry(context) {
         threadId: descriptor.threadId,
         threadName: descriptor.threadName,
         workerData: descriptor.workerData,
+        workerDataSyncBuffers: descriptor.workerDataSyncBuffers,
         environmentData: descriptor.environmentData,
         resourceLimits: descriptor.resourceLimits,
       },

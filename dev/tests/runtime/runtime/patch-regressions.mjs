@@ -22,7 +22,9 @@ async function run(source, files = {}) {
     const stderr = await child.stderrText();
     assert.equal(code, 0, stderr || stdout);
     return { stdout, stderr, node };
-  } finally { host.clearTimeout(timer); }
+  } finally {
+    host.clearTimeout(timer);
+  }
 }
 
 const valueFiles = { '/node/value.cjs': 'module.exports = 42;' };
@@ -99,6 +101,18 @@ test('EventEmitter listener bookkeeping bypasses subclass emit overrides', async
   assert.equal(stdout, 'ok\n');
 });
 
+test('EventEmitter prototype constructors remain callable for legacy process clones', async () => {
+  const { stdout } = await run(`
+    const { EventEmitter } = require('node:events');
+    const emitter = new EventEmitter();
+    const clone = Object.create(Object.getPrototypeOf(emitter));
+    Object.getPrototypeOf(emitter).constructor.call(clone);
+    clone.on('ready', () => {});
+    console.log('ok');
+  `);
+  assert.equal(stdout, 'ok\n');
+});
+
 test('async filesystem callbacks retain the owning child working directory', async () => {
   const { stdout } = await run(`
     const fs = require('fs');
@@ -166,6 +180,39 @@ test('process-bound fs preserves stream and promisifier behavior', async () => {
       console.log('ok');
     })().catch((error) => { throw error; });
   `, { '/node/work/present.txt': 'stream-ok' });
+  assert.equal(stdout, 'ok\n');
+});
+
+test('util.format preserves error stacks across the guest boundary', async () => {
+  const { stdout } = await run(`
+    const { format } = require('util');
+    const error = new Error('formatted error');
+    if (!format(error).includes('formatted error')) throw new Error(format(error));
+    console.log('ok');
+  `);
+  assert.equal(stdout, 'ok\n');
+});
+
+test('process-bound fs preserves symbol accessor overlays across require copies', async () => {
+  const { stdout } = await run(`
+    const fs = require('fs');
+    const sameFs = require('fs');
+    if (fs !== sameFs) throw new Error('require(fs) did not preserve object identity');
+    const queueKey = Symbol.for('graceful-fs.queue');
+    const queue = [];
+    Object.defineProperty(fs, queueKey, { get: () => queue });
+    if (fs[queueKey] !== queue || sameFs[queueKey] !== queue) {
+      throw new Error('symbol accessor overlay was not shared');
+    }
+    const clone = { __proto__: Object.getPrototypeOf(fs) };
+    Object.getOwnPropertyNames(fs).forEach((name) => {
+      Object.defineProperty(clone, name, Object.getOwnPropertyDescriptor(fs, name));
+    });
+    if (clone[queueKey] !== queue) throw new Error('string-only fs clone lost queue');
+    queue.push('item');
+    if (sameFs[queueKey].shift() !== 'item') throw new Error('shared queue was not mutable');
+    console.log('ok');
+  `);
   assert.equal(stdout, 'ok\n');
 });
 

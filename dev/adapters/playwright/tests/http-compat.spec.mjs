@@ -74,6 +74,51 @@ test.describe('browser-native http compatibility', () => {
     `);
   });
 
+  test('drains concurrent streamed request bodies and resumable responses', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'concurrent-streamed-http', `
+      const assert = require('node:assert');
+      const http = require('node:http');
+      const { Readable } = require('node:stream');
+
+      const server = http.createServer((request, response) => {
+        let body = '';
+        request.setEncoding('utf8');
+        request.on('data', (chunk) => { body += chunk; });
+        request.once('end', () => response.end(String(body.length)));
+      });
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+
+      try {
+        const port = server.address().port;
+        const lengths = await Promise.all(Array.from({ length: 10 }, (_, index) => (
+          new Promise((resolve, reject) => {
+            const request = http.request({
+              hostname: 'localhost',
+              port,
+              method: 'POST',
+              path: '/',
+            }, (response) => {
+              let output = '';
+              response.setEncoding('utf8');
+              response.on('data', (chunk) => { output += chunk; });
+              response.once('end', () => resolve(Number(output)));
+              response.once('error', reject);
+              response.resume();
+            });
+            request.once('error', reject);
+            Readable.from(['part-' + index, '-tail']).pipe(request);
+          })
+        )));
+        assert.deepStrictEqual(lengths, [11, 11, 11, 11, 11, 11, 11, 11, 11, 11]);
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    `);
+  });
+
   test('flushes implicit headers before a final body on raw net sockets', async ({ harnessPage }) => {
     await runContract(expect, harnessPage, 'raw-net-http-end', `
       const assert = require('node:assert');

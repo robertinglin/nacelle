@@ -11,8 +11,9 @@ function normalizePath(value, platform = 'posix') {
     else if (part !== '..' || !absolute) output.push(part);
   }
   const result = output.join(separator);
-  if (absolute) return `${drive}${separator}${result}`;
-  return result || '.';
+  const trailingSeparator = source.endsWith(separator) && result !== '';
+  if (absolute) return `${drive}${separator}${result}${trailingSeparator ? separator : ''}`;
+  return `${result || '.'}${trailingSeparator ? separator : ''}`;
 }
 
 function relativePath(from, to, platform) {

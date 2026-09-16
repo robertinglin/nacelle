@@ -202,6 +202,44 @@ test('bash exposes common file, process, and text commands', async () => {
   assert.equal(await node.fs.readFile('/node/work/tee.txt'), 'tee\n');
 });
 
+test('find supports case-insensitive file predicates used by Jest crawlers', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/project/src/index.JS': 'module.exports = 1;\n',
+      '/node/project/README.md': '# fixture\n',
+    },
+  });
+  const child = await node.bash("find /node/project -type f -iname '*.js'");
+  assert.equal(await child.exit, 0, await child.stderrText());
+  assert.equal(await child.stdoutText(), '/node/project/src/index.JS\n');
+});
+
+test('spawned find keeps directory roots out of crawler output', async () => {
+  const node = await Nacelle.create({
+    gateway: false,
+    files: {
+      '/node/project/src/index.js': 'module.exports = 1;\n',
+      '/node/project/package.json': '{"name":"fixture"}\n',
+      '/node/entry.cjs': `
+        const { spawn } = require('node:child_process');
+        const find = spawn('find', ['/node/project', '-type', 'f', '(', '-iname', '*.js', '-o', '-iname', '*.json', ')']);
+        let output = '';
+        find.stdout.on('data', value => { output += value; });
+        find.on('close', code => {
+          if (code !== 0) throw new Error('find exited with ' + code);
+          process.stdout.write(output);
+        });
+      `,
+    },
+  });
+  const child = await node.run({
+    entry: '/node/entry.cjs',
+  });
+  assert.equal(await child.exit, 0, await child.stderrText());
+  assert.equal(await child.stdoutText(), '/node/project/package.json\n/node/project/src/index.js\n');
+});
+
 test('child processes can realpath their configured temporary directory', async () => {
   const node = await Nacelle.create({
     gateway: false,

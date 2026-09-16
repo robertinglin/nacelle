@@ -848,6 +848,10 @@ export function createVfs(options = {}) {
 
   function access(path, operation, write = false) {
     const mount = findMount(path);
+    if (path === VIRTUAL_EXECUTABLE_PATH) {
+      if (write) throw denied(path, operation);
+      return { path: '/', mode: 'read-only' };
+    }
     // The virtual root is the read-only parent of every granted mount. Node
     // tooling legitimately walks through it while looking for optional
     // metadata (for example cosmiconfig probing /package.json). Treat reads
@@ -1435,13 +1439,18 @@ export function createVfs(options = {}) {
   function recursiveDirectoryEntries(pathValue) {
     const root = resolvePath(pathValue);
     const result = [];
-    const visit = (parent) => {
+    // Node returns each directory's immediate entries before descending into
+    // the queued child directories. This breadth-first order is observable
+    // through fs.readdirSync(..., { recursive: true }) and is used by tools
+    // that discover command files from a recursive directory listing.
+    const pending = [root];
+    for (let index = 0; index < pending.length; index += 1) {
+      const parent = pending[index];
       for (const entry of directoryEntries(parent)) {
         result.push(entry);
-        if (entry.isDirectory()) visit(normalizePath(`${parent}/${entry.name}`, '/'));
+        if (entry.isDirectory()) pending.push(normalizePath(`${parent}/${entry.name}`, '/'));
       }
-    };
-    visit(root);
+    }
     return result;
   }
 
@@ -1530,9 +1539,15 @@ export function createVfs(options = {}) {
 
   function statPath(path, optionsValue) {
     path = resolvePath(path);
-    access(path, 'stat');
     const bigint = optionsValue?.bigint === true;
     const attributes = () => ({ ...metadataFor(path), bigint });
+    if (path === VIRTUAL_EXECUTABLE_PATH) {
+      return new Stats('file', virtualExecutableBytes().byteLength, {
+        ...attributes(),
+        mode: 0o755,
+      });
+    }
+    access(path, 'stat');
     if (files.has(path)) return new Stats('file', files.get(path).byteLength, attributes());
     if (directories.has(path)) return new Stats('directory', 0, attributes());
     if (virtualSocketExists(path)) return new Stats('socket', 0, { ...attributes(), mode: 0o777 });
@@ -1575,9 +1590,15 @@ export function createVfs(options = {}) {
 
   function lstatPath(path, optionsValue) {
     path = resolvePath(path, false);
-    access(path, 'lstat');
     const bigint = optionsValue?.bigint === true;
     const attributes = () => ({ ...metadataFor(path), bigint });
+    if (path === VIRTUAL_EXECUTABLE_PATH) {
+      return new Stats('file', virtualExecutableBytes().byteLength, {
+        ...attributes(),
+        mode: 0o755,
+      });
+    }
+    access(path, 'lstat');
     if (symlinks.has(path)) return new Stats('symlink', textEncoder.encode(symlinks.get(path)).byteLength, attributes());
     if (files.has(path)) return new Stats('file', files.get(path).byteLength, attributes());
     if (directories.has(path)) return new Stats('directory', 0, attributes());

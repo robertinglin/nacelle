@@ -139,8 +139,8 @@ function inspectString(value, options) {
 
 function inspectEnumerableProperties(value, options, state) {
   const keys = Reflect.ownKeys(value)
-    .filter((key) => Object.prototype.propertyIsEnumerable.call(value, key))
-    .sort((a, b) => String(a).localeCompare(String(b)));
+    .filter((key) => Object.prototype.propertyIsEnumerable.call(value, key));
+  if (options.sorted === true) keys.sort((a, b) => String(a).localeCompare(String(b)));
   if (keys.length === 0) return '';
   const compactEntries = keys.map((key) => `${propertyLabel(key)}: ${inspect(value[key], options, state)}`);
   const compact = `{ ${compactEntries.join(', ')} }`;
@@ -239,8 +239,8 @@ function inspect(value, options = {}, state = { seen: new Map(), nextReference: 
       return `[${label}${value.message ? `: ${value.message}` : ''}] {\n${propertyText}\n}`;
     }
     const keys = Reflect.ownKeys(value)
-      .filter((key) => Object.prototype.propertyIsEnumerable.call(value, key))
-      .sort((a, b) => String(a).localeCompare(String(b)));
+      .filter((key) => Object.prototype.propertyIsEnumerable.call(value, key));
+    if (options.sorted === true) keys.sort((a, b) => String(a).localeCompare(String(b)));
     if (keys.length === 0) return value.stack || `[${label}${value.message ? `: ${value.message}` : ''}]`;
     const entries = keys.map((key) => {
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
@@ -325,8 +325,10 @@ function inspect(value, options = {}, state = { seen: new Map(), nextReference: 
     return `Set(${value.size}) {\n${entries.join(',\n')}\n}`;
   }
 
-  const keys = Reflect.ownKeys(value)
-    .sort((a, b) => typeof a === 'symbol' ? -1 : typeof b === 'symbol' ? 1 : String(a).localeCompare(String(b)));
+  const keys = Reflect.ownKeys(value);
+  if (options.sorted === true) {
+    keys.sort((a, b) => typeof a === 'symbol' ? -1 : typeof b === 'symbol' ? 1 : String(a).localeCompare(String(b)));
+  }
   if (keys.length === 0) return '{}';
   const compactEntries = keys.map((key) => {
     const descriptor = Object.getOwnPropertyDescriptor(value, key);

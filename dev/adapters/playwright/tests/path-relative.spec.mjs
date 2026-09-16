@@ -24,6 +24,20 @@ test.describe('browser runtime node:path relative', () => {
     await expectPass(expect, result);
   });
 
+  test('preserves trailing separators while normalizing POSIX paths', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (() => {
+        const assert = require('node:assert');
+        const path = require('node:path');
+        assert.strictEqual(path.posix.normalize('/tmp/awesome/../'), '/tmp/');
+        assert.strictEqual(path.posix.normalize('/tmp/awesome/b/../'), '/tmp/awesome/');
+        assert.strictEqual(path.posix.normalize('relative/'), 'relative/');
+      })();
+    `);
+
+    await expectPass(expect, result);
+  });
+
   test('computes equal and nested Windows paths', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       (() => {

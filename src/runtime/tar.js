@@ -224,8 +224,17 @@ export async function decompressGzipBytes(tarGzBytes, globalObject = globalThis)
     try {
       return await decompress(bytes, 'gzip', globalObject);
     } catch {
-      // If DecompressionStream fails, fallback to Node zlib if present
-      if (typeof process !== 'undefined' && process.versions?.node) {
+      // BrowserNpm runs inside the virtual Node runtime. Its process object
+      // intentionally advertises a Node version, but a browser cannot
+      // dynamically import the host-only `node:zlib` specifier. Prefer the
+      // runtime's browser-safe zlib implementation before considering the
+      // real host Node fallback.
+      const zlibShim = globalObject?.__BNH_ZLIB_SHIM__;
+      if (typeof zlibShim?.gunzipSync === 'function') {
+        return new Uint8Array(zlibShim.gunzipSync(bytes));
+      }
+      if (typeof process !== 'undefined' && process.versions?.node
+        && globalObject === globalThis && process.release?.name === 'node') {
         const { gunzipSync } = await import('node:zlib');
         return new Uint8Array(gunzipSync(bytes));
       }
@@ -313,7 +322,12 @@ export async function packTarGz(entries, globalObject = globalThis) {
   try {
     return await compress(tarBytes, 'gzip', globalObject);
   } catch {
-    if (typeof process !== 'undefined' && process.versions?.node) {
+    const zlibShim = globalObject?.__BNH_ZLIB_SHIM__;
+    if (typeof zlibShim?.gzipSync === 'function') {
+      return new Uint8Array(zlibShim.gzipSync(tarBytes));
+    }
+    if (typeof process !== 'undefined' && process.versions?.node
+      && globalObject === globalThis && process.release?.name === 'node') {
       const { gzipSync } = await import('node:zlib');
       return new Uint8Array(gzipSync(tarBytes));
     }

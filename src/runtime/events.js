@@ -16,6 +16,9 @@ const captureRejectionSymbol = Symbol.for('nodejs.rejection');
 const errorMonitor = Symbol('events.errorMonitor');
 const kEventTargetListeners = Symbol.for('nodejs.eventTargetListeners');
 let EventEmitterAsyncResource;
+const arrayPush = Function.call.bind(Array.prototype.push);
+const arrayShift = Function.call.bind(Array.prototype.shift);
+const arraySplice = Function.call.bind(Array.prototype.splice);
 
 function installEventTargetListenerTracking() {
   const EventTarget = globalThis.EventTarget;
@@ -68,14 +71,14 @@ class ListenerList extends Array {
   }
 
   add(listener) {
-    this.push(listener);
+    arrayPush(this, listener);
     return this;
   }
 
   delete(listener) {
     const index = this.lastIndexOf(listener);
     if (index < 0) return false;
-    this.splice(index, 1);
+    arraySplice(this, index, 1);
     return true;
   }
 
@@ -328,7 +331,7 @@ export class BrowserEventEmitter {
     while (index >= 0 && listeners[index] !== listener && listeners[index].listener !== listener) index -= 1;
     if (index >= 0) {
       const removed = listeners[index];
-      listeners.splice(index, 1);
+      arraySplice(listeners, index, 1);
       const onceListeners = this._onceListeners.get(removed.listener ? removed.listener : listener);
       if (onceListeners) {
         onceListeners.delete(removed);
@@ -446,7 +449,12 @@ export class BrowserEventEmitter {
 
   listeners(name) {
     ensureState(this);
-    const listeners = this._listeners.get(name);
+    let listeners;
+    try {
+      listeners = this._listeners.get(name);
+    } catch (error) {
+      throw error;
+    }
     if (!listeners || listeners.size === 0) return [];
     return [...listeners].map((listener) => listener.listener || listener);
   }
@@ -647,6 +655,17 @@ export function EventEmitter(...args) {
 }
 
 EventEmitter.prototype = BrowserEventEmitter.prototype;
+// Legacy libraries such as Jest 24 clone process by walking its prototype
+// chain and invoking each prototype constructor with `.call()`. The native
+// EventEmitter prototype exposes this callable constructor; leaving the
+// implementation class here makes that compatibility pattern throw before
+// the library can run its actual tests.
+Object.defineProperty(EventEmitter.prototype, 'constructor', {
+  configurable: true,
+  enumerable: false,
+  writable: true,
+  value: EventEmitter,
+});
 EventEmitter.prototype._events = undefined;
 EventEmitter.prototype._eventsCount = 0;
 EventEmitter.prototype._maxListeners = undefined;
@@ -824,10 +843,10 @@ EventEmitter.on = function on(emitter, name, options = {}) {
     emitter.off?.('error', onError);
   };
   const settle = (value, done = false) => {
-    const waiter = waiters.shift();
+    const waiter = arrayShift(waiters);
     if (waiter) waiter({ value, done });
     else {
-      queue.push(value);
+      arrayPush(queue, value);
       if (queue.length >= highWaterMark) emitter.pause?.();
     }
   };
@@ -836,13 +855,13 @@ EventEmitter.on = function on(emitter, name, options = {}) {
     if (finished) return;
     finished = true;
     cleanup();
-    while (waiters.length) waiters.shift()({ value: undefined, done: true });
+    while (waiters.length) arrayShift(waiters)({ value: undefined, done: true });
   };
   const onError = (error) => {
     if (finished) return;
     finished = true;
     cleanup();
-    while (waiters.length) waiters.shift()({ value: Promise.reject(error), done: false });
+    while (waiters.length) arrayShift(waiters)({ value: Promise.reject(error), done: false });
   };
   emitter.on?.(name, onEvent);
   for (const closeName of options.close || []) emitter.on?.(closeName, onClose);
@@ -850,12 +869,12 @@ EventEmitter.on = function on(emitter, name, options = {}) {
   const iterator = {
     next() {
       if (queue.length) {
-        const value = queue.shift();
+        const value = arrayShift(queue);
         if (queue.length < highWaterMark) emitter.resume?.();
         return Promise.resolve({ value, done: false });
       }
       if (finished) return Promise.resolve({ value: undefined, done: true });
-      return new Promise((resolve) => waiters.push(resolve));
+      return new Promise((resolve) => arrayPush(waiters, resolve));
     },
     return() { onClose(); return Promise.resolve({ value: undefined, done: true }); },
     [Symbol.asyncIterator]() { return this; },

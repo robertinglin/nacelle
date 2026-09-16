@@ -92,10 +92,11 @@ function workerMessagingError(code, message) {
   return error;
 }
 
-function canStructuredClone(value, scope) {
+function canStructuredClone(value, scope, transferList = undefined) {
   if (typeof scope.structuredClone !== 'function') return;
   try {
-    scope.structuredClone(value);
+    if (transferList === undefined) scope.structuredClone(value);
+    else scope.structuredClone(value, { transfer: transferList });
   } catch (error) {
     throw serializationError(error);
   }
@@ -141,6 +142,33 @@ function replaceTransferredValues(value, replacements, seen = new WeakMap()) {
   return copy;
 }
 
+function collectEmbeddedPorts(value, scope, replacements, transfers, seen = new WeakSet()) {
+  if (!value || typeof value !== 'object' || seen.has(value)) return;
+  if (value.__bnhReceiveMessage && value.raw && typeof value.raw.postMessage === 'function') {
+    const raw = value.raw;
+    if (!replacements.has(value)) {
+      replacements.set(value, raw);
+      if (!transfers.includes(raw)) transfers.push(raw);
+    }
+    return;
+  }
+  if (typeof scope.MessagePort === 'function' && value instanceof scope.MessagePort) {
+    if (!replacements.has(value)) {
+      replacements.set(value, value);
+      if (!transfers.includes(value)) transfers.push(value);
+    }
+    return;
+  }
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) collectEmbeddedPorts(item, scope, replacements, transfers, seen);
+    return;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return;
+  for (const item of Object.values(value)) collectEmbeddedPorts(item, scope, replacements, transfers, seen);
+}
+
 function transferArguments(value, transferList) {
   if (transferList === undefined) return [replaceTransferredValues(value, new Map())];
   const list = Array.isArray(transferList) ? transferList : [transferList];
@@ -178,6 +206,102 @@ function detachedPortError() {
     name: 'DataCloneError',
     code: 25,
   });
+}
+
+const synchronousMailboxHeaderWords = 4;
+const synchronousMailboxSlots = 16;
+const synchronousMailboxPayloadOffset = synchronousMailboxHeaderWords * Int32Array.BYTES_PER_ELEMENT;
+
+function synchronousMailboxCodec(value, scope, encode) {
+  const replacer = (_key, nested) => {
+    if (nested === undefined) return { __bnhUndefined: true };
+    if (typeof nested === 'bigint') return { __bnhBigInt: String(nested) };
+    if (typeof nested === 'number') {
+      if (Number.isNaN(nested)) return { __bnhNumber: 'NaN' };
+      if (nested === Infinity) return { __bnhNumber: 'Infinity' };
+      if (nested === -Infinity) return { __bnhNumber: '-Infinity' };
+    }
+    if (nested instanceof Error) {
+      return {
+        __bnhError: true,
+        name: nested.name,
+        message: nested.message,
+        stack: nested.stack,
+        ...Object.fromEntries(Object.entries(nested)),
+      };
+    }
+    return nested;
+  };
+  const reviver = (_key, nested) => {
+    if (nested?.__bnhUndefined === true) return undefined;
+    if (nested?.__bnhBigInt !== undefined) return BigInt(nested.__bnhBigInt);
+    if (nested?.__bnhNumber === 'NaN') return NaN;
+    if (nested?.__bnhNumber === 'Infinity') return Infinity;
+    if (nested?.__bnhNumber === '-Infinity') return -Infinity;
+    if (nested?.__bnhError === true) {
+      const error = new Error(nested.message || '');
+      error.name = nested.name || 'Error';
+      if (nested.stack) error.stack = nested.stack;
+      for (const [key, item] of Object.entries(nested)) {
+        if (!['__bnhError', 'name', 'message', 'stack'].includes(key)) error[key] = item;
+      }
+      return error;
+    }
+    return nested;
+  };
+  if (encode) {
+    const text = JSON.stringify({ value }, replacer);
+    if (text === undefined) return null;
+    const Encoder = scope?.TextEncoder || globalThis.TextEncoder;
+    return typeof Encoder === 'function' ? new Encoder().encode(text) : null;
+  }
+  const Decoder = scope?.TextDecoder || globalThis.TextDecoder;
+  if (typeof Decoder !== 'function') return undefined;
+  try {
+    return JSON.parse(new Decoder().decode(value), reviver).value;
+  } catch {
+    return undefined;
+  }
+}
+
+function synchronousMailboxRecord(mailbox) {
+  if (!mailbox || typeof mailbox.byteLength !== 'number' || mailbox.byteLength <= synchronousMailboxPayloadOffset) return null;
+  try {
+    return {
+      header: new Int32Array(mailbox, 0, synchronousMailboxHeaderWords),
+      payload: new Uint8Array(mailbox, synchronousMailboxPayloadOffset),
+      slotSize: Math.floor((mailbox.byteLength - synchronousMailboxPayloadOffset) / synchronousMailboxSlots),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeSynchronousMailbox(mailbox, value, scope) {
+  const record = synchronousMailboxRecord(mailbox);
+  const encoded = synchronousMailboxCodec(value, scope, true);
+  if (!record || !encoded || encoded.byteLength + 4 > record.slotSize) return false;
+  const sequence = Atomics.load(record.header, 0) + 1;
+  if (sequence - Atomics.load(record.header, 1) > synchronousMailboxSlots) return false;
+  const slot = new Uint8Array(record.payload.buffer, record.payload.byteOffset + ((sequence - 1) % synchronousMailboxSlots) * record.slotSize, record.slotSize);
+  new DataView(slot.buffer, slot.byteOffset, 4).setUint32(0, encoded.byteLength, true);
+  slot.set(encoded, 4);
+  Atomics.store(record.header, 0, sequence);
+  return true;
+}
+
+function readSynchronousMailbox(mailbox, scope) {
+  const record = synchronousMailboxRecord(mailbox);
+  if (!record) return { available: false, value: undefined };
+  const sequence = Atomics.load(record.header, 1) + 1;
+  if (sequence > Atomics.load(record.header, 0)) return { available: false, value: undefined };
+  const slot = new Uint8Array(record.payload.buffer, record.payload.byteOffset + ((sequence - 1) % synchronousMailboxSlots) * record.slotSize, record.slotSize);
+  const length = new DataView(slot.buffer, slot.byteOffset, 4).getUint32(0, true);
+  const bytes = new Uint8Array(length);
+  bytes.set(slot.subarray(4, 4 + length));
+  const value = synchronousMailboxCodec(bytes, scope, false);
+  Atomics.store(record.header, 1, sequence);
+  return { available: true, value };
 }
 
 function normalizePortTransferList(input) {
@@ -498,7 +622,11 @@ function unsupportedHandleError() {
 }
 
 /** Adapt a browser MessagePort to the event and transfer-list shape used by Node shims. */
-export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePortClass } = {}) {
+export function adaptMessagePort(nativePort, {
+  MessagePortClass = nodeMessagePortClass,
+  synchronousMailbox = undefined,
+  scope = globalThis,
+} = {}) {
   if (!nativePort) throw new TypeError('a native MessagePort is required');
   const events = new BrowserEventEmitter();
   let assignedOnMessage = null;
@@ -512,6 +640,22 @@ export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePor
   const closeCallbacks = [];
   let peerPort = null;
   let peerCloseRequested = false;
+  let syncMailbox;
+  let syncMailboxRead = false;
+  let syncMailboxWrite = false;
+  let syncNativeSuppressions = 0;
+  const setSynchronousMailbox = (value) => {
+    if (value && typeof value === 'object' && Object.hasOwn(value, 'buffer')) {
+      syncMailbox = value.buffer;
+      syncMailboxRead = value.read !== false;
+      syncMailboxWrite = value.write !== false;
+    } else {
+      syncMailbox = value;
+      syncMailboxRead = Boolean(value);
+      syncMailboxWrite = Boolean(value);
+    }
+  };
+  setSynchronousMailbox(synchronousMailbox);
   const queuedMessages = [];
   const deferredMessages = [];
   const eventTargetListeners = new Map();
@@ -541,6 +685,19 @@ export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePor
   const onMessage = (event) => {
     if (closed) return;
     const queued = queuedMessages.shift();
+    if (!queued && syncMailboxRead) {
+      if (syncNativeSuppressions > 0) {
+        syncNativeSuppressions -= 1;
+        return;
+      }
+      const synchronous = readSynchronousMailbox(syncMailbox, scope);
+      if (synchronous.available) {
+        const data = synchronous.value;
+        if (events.listenerCount('message') === 0 && !assignedOnMessage) deferredMessages.push({ data });
+        else deliverMessage(data);
+        return;
+      }
+    }
     const data = adaptReceivedMessage(
       queued?.useNative ? event?.data : queued ? queued.value : event?.data,
       nativePort,
@@ -675,6 +832,7 @@ export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePor
         runInCapturedScope(messageScope, () => {});
         throw error;
       }
+      if (syncMailboxWrite) writeSynchronousMailbox(syncMailbox, message, scope);
       // Native delivery is asynchronous. Publish the peer queue only after
       // cloning succeeds, or a failed send leaves a phantom pending message.
       notifyPeerMessage?.(hasTransfer ? undefined : message, hasTransfer, messageScope);
@@ -716,13 +874,25 @@ export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePor
         queuedMessages.push({ value, useNative, consumed: false, scope });
       },
     },
+    __bnhGetPeerPort: {
+      value: () => peerPort,
+    },
     __bnhReceiveMessage: {
       value: () => {
         const queued = queuedMessages.find((entry) => !entry.consumed && !entry.useNative);
-        if (!queued) return undefined;
+        if (!queued) {
+          const synchronous = syncMailboxRead
+            ? readSynchronousMailbox(syncMailbox, scope)
+            : { available: false, value: undefined };
+          if (!synchronous.available) return undefined;
+          syncNativeSuppressions += 1;
+          return synchronous.value;
+        }
         queued.consumed = true;
+        if (pendingMessages > 0) pendingMessages -= 1;
         runInCapturedScope(queued.scope, () => {});
         queued.scope = undefined;
+        if (closing && pendingMessages === 0) closeLocally();
         return queued.value;
       },
     },
@@ -734,6 +904,9 @@ export function adaptMessagePort(nativePort, { MessagePortClass = nodeMessagePor
     },
     __bnhSetPeerPort: {
       value: (value) => { peerPort = value; },
+    },
+    __bnhSetSynchronousMailbox: {
+      value: setSynchronousMailbox,
     },
     onmessage: {
       get: () => assignedOnMessage,
@@ -890,8 +1063,35 @@ export function createScopedIpcEndpoint(nativePort, {
       }
       let handle;
       if (transferList !== undefined && !Array.isArray(transferList)) {
-        handle = { id: exposeHandle(transferList), kind: 'virtual' };
-        transferList = undefined;
+        // ChildProcess.send(message, sendHandle) uses the handle both as the
+        // second argument and, for Tinypool startup, as a field inside the
+        // message. A browser MessagePort adapter cannot be structured-cloned;
+        // forward its native port in the actual transfer list and replace the
+        // adapter embedded in the payload before the browser clone step.
+        const rawHandle = transferList?.raw;
+        if (rawHandle && typeof rawHandle.postMessage === 'function') {
+          value = replaceTransferredValues(value, new Map([
+            [transferList, rawHandle],
+            [rawHandle, rawHandle],
+          ]));
+          transferList = [rawHandle];
+        } else {
+          handle = { id: exposeHandle(transferList), kind: 'virtual' };
+          transferList = undefined;
+        }
+      }
+      if (transferList === undefined) {
+        // Tinypool's child-process transport embeds its MessagePort in the
+        // startup payload and relies on Node's advanced serializer to carry
+        // it without a separate sendHandle argument. Discover the equivalent
+        // browser-native transfers before the structured-clone preflight.
+        const replacements = new Map();
+        const embeddedTransfers = [];
+        collectEmbeddedPorts(value, scope, replacements, embeddedTransfers);
+        if (embeddedTransfers.length) {
+          value = replaceTransferredValues(value, replacements);
+          transferList = embeddedTransfers;
+        }
       }
       if (closed) {
         const error = closedError();
@@ -901,6 +1101,9 @@ export function createScopedIpcEndpoint(nativePort, {
         }
         throw error;
       }
+      // The browser's actual postMessage call validates transferables. A
+      // structuredClone preflight with a transfer list would detach the
+      // buffer/port before the real send, changing ownership semantics.
       if (!transferList) canStructuredClone(value, scope);
       const frame = {
         channel: 'bnh-user-ipc',

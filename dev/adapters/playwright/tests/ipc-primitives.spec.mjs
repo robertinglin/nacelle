@@ -83,4 +83,22 @@ test.describe('browser-native MessageChannel IPC', () => {
     expect(result.received).toEqual({ ok: true });
     expect(result.connected).toBe(true);
   });
+
+  test('forwards a transferred MessagePort embedded in an IPC payload', async ({ page }) => {
+    await page.goto(browserRuntimeURL, { waitUntil: 'domcontentloaded' });
+    const result = await page.evaluate(async () => {
+      const { createMessageChannel, createScopedIpcEndpoint } = await import('/runtime/messaging.js');
+      const channel = createMessageChannel(globalThis);
+      const parent = createScopedIpcEndpoint(channel.port1, { runId: 'run-3', childId: 'child-3', direction: 'parent' });
+      const child = createScopedIpcEndpoint(channel.port2, { runId: 'run-3', childId: 'child-3', direction: 'child' });
+      const transferred = createMessageChannel(globalThis);
+      const received = new Promise((resolve) => child.once('message', resolve));
+      parent.send({ port: transferred.port2 });
+      const message = await received;
+      const observed = new Promise((resolve) => message.port.once('message', (value) => resolve(value)));
+      transferred.port1.postMessage({ transferred: true });
+      return await observed;
+    });
+    expect(result).toEqual({ transferred: true });
+  });
 });

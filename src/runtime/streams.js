@@ -2,6 +2,15 @@ import { EventEmitter } from './events.js';
 import { resolveEncodingOps } from './buffer.js';
 import { captureAsyncScope, runInCapturedScope } from './async-hooks.js';
 
+// Stream internals must remain usable when userland deliberately replaces an
+// Array prototype method while probing language intrinsics. Capture the
+// mutators before package code runs and invoke them without a property lookup.
+const arrayPop = Function.call.bind(Array.prototype.pop);
+const arrayPush = Function.call.bind(Array.prototype.push);
+const arrayShift = Function.call.bind(Array.prototype.shift);
+const arraySplice = Function.call.bind(Array.prototype.splice);
+const arrayUnshift = Function.call.bind(Array.prototype.unshift);
+
 // end() callbacks fire from the finish microtask, which — like the write
 // pump — carries whatever context happened to complete the final write.
 function scopedEndCallback(callback) {
@@ -616,7 +625,7 @@ function mapValues(source, fn, options) {
           if (initialPrefetch && initialPrefetched < 3) initialPrefetched += 1;
           const result = Promise.resolve(mapped);
           result.then(afterItemProcessed, onItemError);
-          queue.push(result);
+          arrayPush(queue, result);
           wake(next);
           next = null;
           const limit = activeLimit();
@@ -624,13 +633,13 @@ function mapValues(source, fn, options) {
             await new Promise((resolve) => { resume = resolve; });
           }
         }
-        queue.push(COMBINATOR_EOF);
+        arrayPush(queue, COMBINATOR_EOF);
         wake(next);
         next = null;
       } catch (error) {
         const failure = Promise.reject(error);
         failure.then(afterItemProcessed, onItemError);
-        queue.push(failure);
+        arrayPush(queue, failure);
         wake(next);
         next = null;
       } finally {
@@ -647,7 +656,7 @@ function mapValues(source, fn, options) {
           if (result === COMBINATOR_EOF) return;
           const value = await result;
           if (signal.aborted) throw abortError(signal);
-          queue.shift();
+          arrayShift(queue);
           if (value !== COMBINATOR_EMPTY) yield value;
           const limit = activeLimit();
           if (resume && !done && active < limit && queue.length < limit) {
@@ -924,7 +933,7 @@ export class Readable extends EventEmitter {
       return false;
     }
     if (this.readableObjectMode) {
-      this._buffer.push(chunk);
+      arrayPush(this._readableState.buffer, chunk);
       this._bufferedBytes += 1;
       this._readableState.length = this._bufferedBytes;
       if (this._flowing) this._scheduleFlowDrain();
@@ -953,7 +962,7 @@ export class Readable extends EventEmitter {
     }
     if (typeof chunk === 'string' && this._preserveStrings) {
       if (chunk.length === 0) return this._bufferedBytes < this.readableHighWaterMark;
-      this._buffer.push(chunk);
+      arrayPush(this._readableState.buffer, chunk);
       this._bufferedBytes += chunk.length;
       this._readableState.length = this._bufferedBytes;
       if (this._flowing) this._scheduleFlowDrain();
@@ -966,7 +975,7 @@ export class Readable extends EventEmitter {
     const bytes = toBytes(chunk);
     // Empty chunks cannot be consumed by read(), so queuing them stalls the flow drain.
     if (bytes.byteLength === 0) return this._bufferedBytes < this.readableHighWaterMark;
-    this._buffer.push(bytes);
+    arrayPush(this._readableState.buffer, bytes);
     this._bufferedBytes += bytes.byteLength;
     this._readableState.length = this._bufferedBytes;
     if (this._flowing) this._scheduleFlowDrain();
@@ -995,7 +1004,7 @@ export class Readable extends EventEmitter {
   }
 
   read(size = undefined) {
-    if (!this._buffer.length) {
+    if (!this._readableState.buffer.length) {
       if (this.listenerCount('readable') && !this._ended && !this._destroyed) {
         this._readableState.needReadable = true;
       }
@@ -1004,7 +1013,7 @@ export class Readable extends EventEmitter {
     }
     let chunk;
     if (this.readableObjectMode) {
-      chunk = this._buffer.shift();
+      chunk = arrayShift(this._readableState.buffer);
       this._bufferedBytes -= 1;
     } else {
       chunk = readableFromList(size, this._readableState);
@@ -1040,7 +1049,7 @@ export class Readable extends EventEmitter {
       }
       if (this._decoder && typeof value !== 'string') value = this._decoder.decode(value, { stream: true });
     }
-    this._buffer.unshift(value);
+    arrayUnshift(this._readableState.buffer, value);
     this._bufferedBytes += this.readableObjectMode
       ? 1
       : typeof value === 'string' ? value.length : value.byteLength;
@@ -1102,7 +1111,7 @@ export class Readable extends EventEmitter {
     queueMicrotask(() => {
       this._readableScheduled = false;
       if (this._flowing || this._destroyed || this._endEmitted) return;
-      if (this._buffer.length || this._ended) {
+      if (this._readableState.buffer.length || this._ended) {
         this._readableState.needReadable = false;
         this._readableDispatching = true;
         try {
@@ -1136,7 +1145,7 @@ export class Readable extends EventEmitter {
     const drain = () => {
       this._flowDrainScheduled = false;
       if (!this._flowing || (this._destroyed && !this._error)) return;
-      while (this._flowing && this._buffer.length) {
+      while (this._flowing && this._readableState.buffer.length) {
         const chunk = this.read();
         this.emit('data', chunk);
       }
@@ -1163,7 +1172,7 @@ export class Readable extends EventEmitter {
         this._resumePending = false;
         this.emit('resume');
       }
-      while (this._flowing && this._buffer.length) {
+      while (this._flowing && this._readableState.buffer.length) {
         const chunk = this.read();
         this.emit('data', chunk);
       }
@@ -1255,7 +1264,7 @@ export class Readable extends EventEmitter {
     };
     this._pipes.set(destination, { onData, onEnd, onDrain, onUnpipe });
     if (this._readableState.pipes.length === 1) this._readableState.multiAwaitDrain = true;
-    this._readableState.pipes.push(destination);
+    arrayPush(this._readableState.pipes, destination);
     this.on('data', onData);
     this.on('end', onEnd);
     destination.on?.('drain', onDrain);
@@ -1276,7 +1285,7 @@ export class Readable extends EventEmitter {
         const wasBlocked = this._blockedPipes.delete(destination);
         this._pipes.delete(destination);
         const pipeIndex = this._readableState.pipes.indexOf(destination);
-        if (pipeIndex >= 0) this._readableState.pipes.splice(pipeIndex, 1);
+        if (pipeIndex >= 0) arraySplice(this._readableState.pipes, pipeIndex, 1);
         this._readableState.multiAwaitDrain = this._readableState.pipes.length > 1;
         if (this._pipes.size === 0) this.pause();
         destination.emit?.('unpipe', this);
@@ -1300,7 +1309,7 @@ export class Readable extends EventEmitter {
     this._readableState.destroyed = true;
     this._readableState.errored = error || null;
     if (!error || !this._flowing) {
-      this._buffer.length = 0;
+      this._readableState.buffer.length = 0;
       this._bufferedBytes = 0;
       this._readableState.length = 0;
     }
@@ -1337,11 +1346,11 @@ export class Readable extends EventEmitter {
   }
 
   _maybeEmitEnd() {
-    if (!this._ended || this._buffer.length || this._endEmitted || this._destroyed || this._endScheduled) return;
+    if (!this._ended || this._readableState.buffer.length || this._endEmitted || this._destroyed || this._endScheduled) return;
     this._endScheduled = true;
     queueMicrotask(() => {
       this._endScheduled = false;
-      if (!this._ended || this._buffer.length || this._endEmitted || this._destroyed) return;
+      if (!this._ended || this._readableState.buffer.length || this._endEmitted || this._destroyed) return;
       this._endEmitted = true;
       this._readableState.endEmitted = true;
       this.readable = false;
@@ -1382,7 +1391,7 @@ export class Readable extends EventEmitter {
       stream.once('end', onEnd);
       try {
         while (true) {
-          if (stream._buffer.length) {
+          if (stream._readableState.buffer.length) {
             yield stream.read();
             continue;
           }
@@ -1392,7 +1401,7 @@ export class Readable extends EventEmitter {
             return;
           }
           stream._readOnce();
-          if (stream._buffer.length || stream._error || stream._ended || stream._destroyed) continue;
+          if (stream._readableState.buffer.length || stream._error || stream._ended || stream._destroyed) continue;
           await new Promise((resolve) => { stream._resolvePending = resolve; });
           stream._resolvePending = null;
         }
@@ -1574,7 +1583,7 @@ export class Readable extends EventEmitter {
 
   async toArray() {
     const result = [];
-    for await (const value of this) result.push(value);
+    for await (const value of this) arrayPush(result, value);
     return result;
   }
 }
@@ -1893,7 +1902,7 @@ function readableFromList(n, state) {
           break;
         }
         remaining -= size;
-        buffer.shift();
+        arrayShift(buffer);
       }
     }
     if (Number.isFinite(state.length)) state.length = Math.max(0, state.length - count);
@@ -2252,7 +2261,7 @@ class WritableImpl extends EventEmitter {
       // write run detached from their AsyncLocalStorage store.
       scope: captureAsyncScope(),
     };
-    this._queue.push(request);
+    arrayPush(this._queue, request);
     this._pendingBytes += size;
     this._writableState.length = this._pendingBytes;
     if (this._pendingBytes >= this.writableHighWaterMark) {
@@ -2281,7 +2290,7 @@ class WritableImpl extends EventEmitter {
         this.destroy(error);
         return this;
       }
-      this._endCallbacks.push(scopedEndCallback(callback));
+      arrayPush(this._endCallbacks, scopedEndCallback(callback));
       return this;
     }
     if (this._ended || this._destroyed) {
@@ -2296,7 +2305,7 @@ class WritableImpl extends EventEmitter {
     if (chunk !== undefined && chunk !== null) this.write(chunk, encoding);
     this._ending = true;
     this._writableState.ending = true;
-    this._endCallbacks.push(scopedEndCallback(callback));
+    arrayPush(this._endCallbacks, scopedEndCallback(callback));
     this._finishIfReady();
     return this;
   }
@@ -2321,8 +2330,8 @@ class WritableImpl extends EventEmitter {
     this._writableState.writable = false;
     this._writableState.errored = error || null;
     const reason = error || streamError('ERR_STREAM_DESTROYED', 'stream destroyed');
-    const pending = this._queue.splice(0);
-    if (this._current && !this._current.settled) pending.unshift(this._current);
+    const pending = arraySplice(this._queue, 0);
+    if (this._current && !this._current.settled) arrayUnshift(pending, this._current);
     this._current = null;
     this._pendingBytes = 0;
     this._writableState.length = 0;
@@ -2366,11 +2375,11 @@ class WritableImpl extends EventEmitter {
       this._finishIfReady();
       return;
     }
-    const request = this._queue.shift();
+    const request = arrayShift(this._queue);
     this._current = request;
     const writev = this._owner?._writev || this._writev;
     if (typeof writev === 'function' && this._queue.length) {
-      const requests = [request, ...this._queue.splice(0)];
+      const requests = [request, ...arraySplice(this._queue, 0)];
       const done = (error) => {
         this._writableState.writing = false;
         this._writableState.writecb = nop;
@@ -3322,7 +3331,7 @@ export class OutputCollector extends EventEmitter {
     };
     this._streamBytes[stream] += retained.byteLength;
     if (this.capture) {
-      this._records.push(record);
+      arrayPush(this._records, record);
       this._bytes[stream] = appendBytes(this._bytes[stream], retained);
     }
     this._totalBytes += retained.byteLength;
@@ -3438,7 +3447,7 @@ export function compose(...stages) {
   for (const stage of stages) {
     if (isNodeStream(stage)) {
       stage.on('error', onStageError);
-      stageErrors.push(stage);
+      arrayPush(stageErrors, stage);
     }
   }
 
@@ -3515,7 +3524,7 @@ export const promises = {
 };
 
 export function pipeline(...streams) {
-  const callback = typeof streams.at(-1) === 'function' ? streams.pop() : () => {};
+  const callback = typeof streams.at(-1) === 'function' ? arrayPop(streams) : () => {};
   streams = streams.map((stream) => {
     if (isNodeStream(stream) || typeof stream?.pipe === 'function' || typeof stream?.write === 'function') return stream;
     if (typeof stream === 'function') return Duplex.from(stream);

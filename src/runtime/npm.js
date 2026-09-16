@@ -69,7 +69,7 @@ const BROWSER_PACKAGE_ALTERNATIVES = Object.freeze({
 // package so Rolldown's synchronous WebContainer fallback can copy it into
 // its temporary install directory. The oxlint artifact is an unofficial
 // browser build of the upstream engine because oxlint does not publish a WASI
-// binding package.
+// binding package. Keep this table aligned with the supported oxlint releases.
 const BROWSER_OXLINT_WASI_BUILDS = Object.freeze({
   '1.81.0': Object.freeze({
     wasmRuntime: '=1.2.3',
@@ -77,6 +77,11 @@ const BROWSER_OXLINT_WASI_BUILDS = Object.freeze({
     emnapiRuntime: '=2.0.0-alpha.3',
   }),
   '1.82.0': Object.freeze({
+    wasmRuntime: '=1.2.3',
+    emnapiCore: '=2.0.0-alpha.3',
+    emnapiRuntime: '=2.0.0-alpha.3',
+  }),
+  '1.83.0': Object.freeze({
     wasmRuntime: '=1.2.3',
     emnapiCore: '=2.0.0-alpha.3',
     emnapiRuntime: '=2.0.0-alpha.3',

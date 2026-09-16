@@ -1,6 +1,7 @@
 import { ensureOutputStream, Stream } from './streams.js';
 import { AsyncResource } from './async-hooks.js';
 import { inspect as runtimeInspect } from './assert.js';
+import { formatError } from './errors.js';
 
 export const kWeakHandler = Symbol.for('nodejs.internal.event_target.weakHandler');
 
@@ -1975,6 +1976,14 @@ function inspectConsole(value, options = {}, state = { seen: new WeakSet(), dept
   }
   if (typeof value === 'bigint' || typeof value === 'boolean' || typeof value === 'symbol') return String(value);
   if (typeof value === 'function') return `[Function${value.name ? `: ${value.name}` : ' (anonymous)'}]`;
+  // util.format(error) returns the error stack, including for errors created
+  // in a different guest realm. Use the cross-realm Error tag rather than
+  // relying only on instanceof against the host Error constructor.
+  let errorTag;
+  try { errorTag = Object.prototype.toString.call(value); } catch { errorTag = ''; }
+  if (value instanceof Error || errorTag === '[object Error]') {
+    return formatError(value);
+  }
   if (state.seen.has(value)) return '[Circular]';
   if (options.depth !== null && state.depth >= (options.depth ?? 2)) {
     if (Array.isArray(value)) return '[Array]';

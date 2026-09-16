@@ -33,6 +33,37 @@ test('unrefed worker parent ports allow natural worker exit', async ({ harnessPa
   await expectPass(expect, result);
 });
 
+test('forwards legacy reallyExit from a nested child runner', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const assert = require('node:assert/strict');
+    const { spawn } = require('node:child_process');
+    (async () => {
+      const child = spawn(process.execPath, ['/node/legacy-runner.cjs'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let output = '';
+      child.stdout.on('data', (chunk) => { output += chunk; });
+      const code = await new Promise((resolve, reject) => {
+        child.once('error', reject);
+        child.once('close', resolve);
+      });
+      assert.strictEqual(code, 7);
+      assert.strictEqual(output, 'legacy-runner-complete\\n');
+    })().catch((error) => { console.error(error); process.exitCode = 1; });
+  `, {
+    files: {
+      '/node/legacy-runner.cjs': [
+        "const { spawn } = require('node:child_process');",
+        "const child = spawn(process.execPath, ['/node/legacy-child.cjs'], { stdio: ['ignore', 'pipe', 'pipe'] });",
+        "child.once('exit', (code) => { process.exitCode = code; process.stdout.write('legacy-runner-complete\\n'); process.reallyExit(); });",
+      ].join('\n'),
+      '/node/legacy-child.cjs': "setTimeout(() => process.exit(7), 0);",
+    },
+    timeoutMs: 10_000,
+  });
+  await expectPass(expect, result);
+});
+
 test('file worker with unref can satisfy a synchronous Atomics waiter', async ({ harnessPage }) => {
   const result = await harnessPage.run(`
     const assert = require('node:assert/strict');
@@ -85,6 +116,179 @@ test('file worker with unref can satisfy a synchronous Atomics waiter', async ({
       ].join('\n'),
       '/node/package.json': '{}',
       '/node/citgm/tmp/f7215f77/ansi-regex/package.json': '{}',
+    },
+    timeoutMs: 10_000,
+  });
+  await expectPass(expect, result);
+});
+
+test('preserves transferred workerData ports through an ESM child', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    import assert from 'node:assert/strict';
+    import { MessageChannel, Worker, receiveMessageOnPort } from 'node:worker_threads';
+
+    const { port1, port2 } = new MessageChannel();
+    const syncBuffer = new SharedArrayBuffer(4);
+    const cells = new Int32Array(syncBuffer);
+    const worker = new Worker('/node/worker-data-port.cjs', {
+      workerData: { port: port2, syncBuffer },
+      transferList: [port2],
+    });
+    worker.postMessage({ id: 7 });
+    assert.strictEqual(Atomics.wait(cells, 0, 0, 5000), 'ok');
+    assert.deepStrictEqual(receiveMessageOnPort(port1), {
+      message: { id: 7, value: 'worker-data' },
+    });
+    await worker.terminate();
+  `, {
+    entryPath: '/node/esm-worker-parent.mjs',
+    files: {
+      '/node/package.json': '{"type":"module"}',
+      '/node/worker-data-port.cjs': [
+        "const { parentPort, workerData } = require('node:worker_threads');",
+        "parentPort.on('message', ({ id }) => {",
+        "  workerData.port.postMessage({ id, value: 'worker-data' });",
+        "  Atomics.store(new Int32Array(workerData.syncBuffer), 0, 1);",
+        "  Atomics.notify(new Int32Array(workerData.syncBuffer), 0);",
+        '});',
+      ].join('\n'),
+    },
+  });
+  await expectPass(expect, result);
+});
+
+test('supports a synchronous CommonJS worker that dynamically imports an ESM package', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const assert = require('node:assert/strict');
+    const { MessageChannel, Worker, receiveMessageOnPort } = require('node:worker_threads');
+
+    const { port1, port2 } = new MessageChannel();
+    const syncBuffer = new SharedArrayBuffer(4);
+    const cells = new Int32Array(syncBuffer);
+    const worker = new Worker('/node/project/node_modules/sync-worker/worker.cjs', {
+      workerData: { workerPort: port2, sharedBufferView: cells },
+      transferList: [port2],
+    });
+    worker.postMessage({ id: 11 });
+    assert.strictEqual(Atomics.wait(cells, 0, 0, 5000), 'ok');
+    assert.deepStrictEqual(receiveMessageOnPort(port1), {
+      message: { id: 11, result: 'esm-package-result' },
+    });
+    worker.terminate();
+  `, {
+    files: {
+      '/node/project/node_modules/sync-worker/package.json': '{}',
+      '/node/project/node_modules/sync-worker/worker.cjs': [
+        "const { parentPort, workerData } = require('node:worker_threads');",
+        "parentPort.on('message', async ({ id }) => {",
+        "  const imported = await import('esm-package');",
+        "  workerData.workerPort.postMessage({ id, result: imported.default });",
+        "  Atomics.add(workerData.sharedBufferView, 0, 1);",
+        "  Atomics.notify(workerData.sharedBufferView, 0);",
+        '});',
+      ].join('\n'),
+      '/node/project/node_modules/esm-package/package.json': JSON.stringify({
+        type: 'module',
+        exports: {
+          '.': {
+            import: { default: './index.js' },
+            require: { default: './index.cjs' },
+          },
+        },
+      }),
+      '/node/project/node_modules/esm-package/index.js': "export default 'esm-package-result';",
+      '/node/project/node_modules/esm-package/index.cjs': "module.exports = 'cjs-package-result';",
+    },
+  });
+  await expectPass(expect, result);
+});
+
+test('keeps ESM Function-created dynamic imports inside the VFS loader', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    import assert from 'node:assert/strict';
+    const load = new Function('specifier', 'return import(specifier)');
+    const imported = await load('function-import-package');
+    assert.strictEqual(imported.default, 'function-import-result');
+  `, {
+    entryPath: '/node/project/entry.mjs',
+    files: {
+      '/node/project/package.json': '{"type":"module"}',
+      '/node/project/node_modules/function-import-package/package.json': JSON.stringify({
+        type: 'module',
+        exports: './index.js',
+      }),
+      '/node/project/node_modules/function-import-package/index.js': "export default 'function-import-result';",
+    },
+  });
+  await expectPass(expect, result);
+});
+
+test('does not report a caught failed dynamic import as unhandled', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const assert = require('node:assert/strict');
+    (async () => {
+      try {
+        await import('file:///node/project/missing-package-entry');
+      } catch (error) {
+        assert.strictEqual(error.code, 'ERR_MODULE_NOT_FOUND');
+      }
+      const imported = await import('fallback-package');
+      assert.strictEqual(imported.default, 'fallback-package-result');
+      const nested = await import('./esm-fallback-loader.mjs');
+      assert.strictEqual(nested.default, 'fallback-package-result');
+    })().catch((error) => { console.error(error); process.exitCode = 1; });
+  `, {
+    entryPath: '/node/project/entry.cjs',
+    files: {
+      '/node/project/node_modules/fallback-package/package.json': JSON.stringify({
+        type: 'module',
+        exports: './index.js',
+      }),
+      '/node/project/node_modules/fallback-package/index.js': "export default 'fallback-package-result';",
+      '/node/project/esm-fallback-loader.mjs': [
+        "async function importPlugin(name) {",
+        "  try { return await import('file:///node/project/' + name); }",
+        "  catch { return import('fallback-package'); }",
+        "}",
+        "const loaded = await importPlugin('missing-package-entry');",
+        "export default loaded.default;",
+      ].join('\n'),
+    },
+  });
+  await expectPass(expect, result);
+});
+
+test('reports an uncaught failed dynamic import as unhandled', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    (async () => {
+      await import('file:///node/project/missing-package-entry');
+    })();
+  `);
+  expect(result.timedOut).toBe(false);
+  expect(result.exitCode).toBe(1);
+});
+
+test('binds fs to an ESM worker process', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const assert = require('node:assert/strict');
+    const { Worker } = require('node:worker_threads');
+    (async () => {
+      const worker = new Worker('/node/esm-fs-worker.mjs');
+      const value = await new Promise((resolve, reject) => {
+        worker.once('message', resolve);
+        worker.once('error', reject);
+      });
+      assert.strictEqual(value, 'esm-fs-worker');
+      await worker.terminate();
+    })().catch((error) => { console.error(error); process.exitCode = 1; });
+  `, {
+    files: {
+      '/node/marker.txt': 'esm-fs-worker',
+      '/node/esm-fs-worker.mjs': [
+        "import { readFileSync } from 'node:fs';",
+        "import { parentPort } from 'node:worker_threads';",
+        "parentPort.postMessage(readFileSync('/node/marker.txt', 'utf8'));",
+      ].join('\n'),
     },
     timeoutMs: 10_000,
   });

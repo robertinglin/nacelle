@@ -367,24 +367,28 @@ function runPrintenv(args, context) {
   return result(code, stdout);
 }
 
-function shellGlobRegExp(pattern) {
+function shellGlobRegExp(pattern, ignoreCase = false) {
   const escaped = String(pattern).replace(/[.+^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`^${escaped.replaceAll('*', '.*').replaceAll('?', '.')}\$`);
+  return new RegExp(`^${escaped.replaceAll('*', '.*').replaceAll('?', '.')}\$`, ignoreCase ? 'i' : '');
 }
 
 async function runFind(args, context) {
   let index = 0;
   const root = args[0] && !args[0].startsWith('-') ? args[index++] : '.';
-  let namePattern = null;
+  const nameMatchers = [];
   let type = null;
   let maxDepth = Infinity;
   let execAction = null;
   while (index < args.length) {
     const option = args[index++];
-    if (option === '-name') namePattern = args[index++];
+    if (option === '-name' || option === '-iname') {
+      const pattern = args[index++];
+      if (pattern === undefined) return commandError('find', `${option} requires an argument`);
+      nameMatchers.push(shellGlobRegExp(pattern, option === '-iname'));
+    }
     else if (option === '-type') type = args[index++];
     else if (option === '-maxdepth') maxDepth = Number(args[index++]);
-    else if (option === '-print' || option === '--') continue;
+    else if (option === '-print' || option === '--' || option === '(' || option === ')' || option === '-o') continue;
     else if (option === '-exec') {
       const command = [];
       while (index < args.length && args[index] !== ';') command.push(args[index++]);
@@ -396,14 +400,14 @@ async function runFind(args, context) {
   if (maxDepth !== Infinity && (!Number.isInteger(maxDepth) || maxDepth < 0)) {
     return commandError('find', 'invalid maxdepth');
   }
-  const matcher = namePattern === null ? null : shellGlobRegExp(namePattern);
   const matches = [];
   const visit = async (pathname, display, depth) => {
     let stats;
     try { stats = await context.fs.stat(pathname); }
     catch { return; }
     const kind = stats.isDirectory() ? 'd' : 'f';
-    if ((!type || type === kind) && (!matcher || matcher.test(display.split('/').at(-1)))) matches.push(display);
+    if ((!type || type === kind)
+      && (!nameMatchers.length || nameMatchers.some((matcher) => matcher.test(display.split('/').at(-1))))) matches.push(display);
     if (!stats.isDirectory() || depth >= maxDepth) return;
     const entries = await context.fs.readdir(pathname);
     for (const entry of [...new Set(entries)].sort()) {

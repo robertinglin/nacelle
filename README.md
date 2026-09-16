@@ -264,17 +264,57 @@ npm run citgm:browser:chromium -- express
 npm run citgm:browser:firefox -- express
 ```
 
-For the ordered compatibility sweep, run the exact native Node CITGM path and
-both browser CITGM paths for each rank. If the candidate and runtime are
-unchanged and all three CITGM runs pass, those CITGM results are the gate:
-skip the repository-wide unit and full Playwright suites, commit the CITGM
-artifacts, and advance. Any runtime or test change requires the build,
-`npm test`, and full Chromium and Firefox Playwright suites before advancing.
-Classify a failure as an upstream package/repository blocker only after the
-same package, git revision, and failing path also fail under native Node;
-browser-only failures remain runtime/harness failures until that comparison is
-complete. Preserve the failure logs and state whether the cause is ours, a
-nested dependency, or an upstream package/repository problem.
+#### CITGM agent workflow and gates
+
+Use Node 22.23.2 for every native CITGM, browser CITGM, build, and test
+command. Find the first table row marked `BLOCKED` or `GATE-BLOCKED` in
+[`CITGM-TOP-100-STATUS.md`](CITGM-TOP-100-STATUS.md), and work forward in rank
+order. The current first blocked rank is rank 13, `tslib`.
+
+Each CITGM candidate must be checked against the same published package and
+git revision in all three environments:
+
+```bash
+PATH=/home/bee/.local/share/mise/installs/node/22.23.2/bin:$PATH \
+  npm exec --yes --package=citgm@10.0.2 -- citgm <package>
+PATH=/home/bee/.local/share/mise/installs/node/22.23.2/bin:$PATH \
+  npm run citgm:browser:chromium -- <package>
+PATH=/home/bee/.local/share/mise/installs/node/22.23.2/bin:$PATH \
+  npm run citgm:browser:firefox -- <package>
+```
+
+The full repository Playwright suites are separate from the two browser CITGM
+runs. Follow these rules exactly:
+
+1. Always commit the completed CITGM run's artifacts, logs, and truthful status
+   update before moving on, whether the candidate passed, failed, or was
+   classified as blocked.
+2. If the candidate passes without any source or test changes, the native and
+   two browser CITGM results are the gate. Do not run the full Chromium and
+   Firefox Playwright suites for that candidate; commit the artifacts and
+   advance.
+3. If any source or test changes are made, stop before running a different
+   CITGM candidate. Rebuild and run the complete repository gate set first:
+
+   ```bash
+   npm run build:v22
+   npm run check:wasm
+   npm test
+   npm run test:browser:chromium
+   npm run test:browser:firefox
+   ```
+
+   Only after every gate passes may the next CITGM candidate start. Commit the
+   fix, permanent regression tests, gate logs, and CITGM artifacts before
+   advancing.
+
+Treat a browser-only failure as an ours-side runtime or harness failure until
+the same package, git revision, and failing path have been reproduced under
+native Node 22. A package may be recorded as an upstream or dependency blocker
+only when that external oracle supports the classification. Preserve complete
+logs and explain the classification in the status record. Temporary tracing,
+diagnostic hooks, and scratch directories must be removed before the final
+commit; retain only general runtime fixes and permanent regression tests.
 
 If no matching artifact exists, the runner falls back to direct browser registry
 fetches. Arguments after the module are forwarded to CITGM. The runner currently

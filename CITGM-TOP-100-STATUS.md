@@ -2266,20 +2266,24 @@ browser attempts are preserved under
 
 ## Rank 88 continuation record
 
-The exact candidate is `form-data@4.0.4` at lookup revision `514861c…`. Native
-Node 22.23.2 and both browser attempts are preserved under
+The exact candidate is `form-data@4.0.6` at gitHead
+`64190db548c0179e37206858e39f27cf513e9435`. Native Node 22.23.2 and both
+browser attempts are preserved under
 `artifacts/citgm-top-100/rank-088-form-data/`.
 
 | Run / log | Observed result | Classification and resolution |
 | --- | --- | --- |
 | `native-citgm-node-v22-current.log` | All 29 published test files pass (`0 errors in 29 files`), then the posttest invokes `npx npm@'>=10.2' audit --production` and the nested shell reports `npm@>=10.2: command not found`. | Native-reproduced package/toolchain blocker after the package assertions pass. |
-| `browser-chromium-fixed-reallyexit/citgm-1789515569211` / `browser-firefox-fixed-reallyexit/citgm-1789515671854` | Both engines execute all 29 test files successfully, then reproduce the same posttest command failure. | The earlier browser-only timeout in EBUSY/EACCES cases was ours-side; same-realm `process.reallyExit()` now propagates through virtual child exit/cleanup, with a permanent nested-child regression oracle in `expanded-primitives.spec.mjs`. Rank 88 is recorded `BLOCKED` only on the native-reproduced posttest/toolchain failure. |
+| `browser-chromium-fixed-reallyexit/citgm-1789515569211` / `browser-firefox-fixed-reallyexit/citgm-1789515671854` | The historical `form-data@4.0.4` browser runs execute all 29 files and reach the posttest failure. | This evidence predates the current `4.0.6` candidate and is not a pass for the current package. |
 | `native-citgm-node22-current-rerun.log` | Current native Node 22.23.2 run reaches all 29 files, then fails only at the published `npx npm@'>=10.2' audit --production` posttest command. | Confirms the external posttest blocker independently of the browser runtime. |
 | `citgm-chromium-node22-current/citgm-1789629587979` / retry `citgm-chromium-node22-current2/citgm-1789630113179` / `citgm-firefox-node22-current/citgm-1789629765878` | Current source reproduces a pending `node`/`istanbul` inner child at `test-custom-headers-object`; the virtual server records the POST with status 200, but the child never completes and the browser bridge reports `TimeoutError` after 5000 ms. | Retained as an ours-side gate blocker. A temporary lifecycle-threshold-8 experiment (`citgm-chromium-node22-threshold8/citgm-1789629960145`) is also preserved and made no difference; the source was restored to the proven two-turn threshold and no temporary diagnostics were retained. |
+| `citgm-chromium-node22-close-fix/citgm-1789632015339` / `citgm-chromium-node22-close-fix2/citgm-1789632136986` / `citgm-chromium-node22-close-fix3/citgm-1789632220224` | Three temporary raw-socket close-tracking variants make no difference: the current candidate still times out at the same `node`/`istanbul` child. | No source fix is proven; all experimental runtime edits and diagnostic specs were removed. |
+| `citgm-chromium-node22-dispatch-diag/citgm-1789632478347` | Temporary lifecycle markers show raw request dispatch returns, but no response-finish event is observed before the timeout. | Narrows the failure to the full suite/lifecycle interaction, not a generally reproducible isolated request regression; diagnostics were removed. |
 
-The rank-88 source fix was gated with `npm run build:v22`, `npm run check:wasm`,
-the full Node 22 `npm test` suite (353/353), and full Chromium and Firefox
-Playwright suites (328/328 each). The ordered cursor now advances to rank 89.
+The current rank-88 candidate remains `GATE-BLOCKED`: its native package
+assertions pass but the published posttest is unsupported, and the current
+Chromium/Firefox runs still hang in the package's full test lifecycle. No
+package-specific runtime fix or temporary diagnostic was retained.
 
 ## Rank 89 continuation record
 

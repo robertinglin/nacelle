@@ -2367,6 +2367,7 @@ browser attempts are preserved under
 | `native-citgm-node-v22-rerun-final.log` | Installation succeeds, then CITGM reports `Module does not support npm-test!` for the package. | Native-reproduced package contract; there is no upstream test script for CITGM to run. |
 | `browser-chromium/citgm-1789523416450` | Installation succeeds and the browser CITGM lifecycle reports the same `Module does not support npm-test!` result. | Native-reproduced package contract; no browser-only runtime failure. |
 | `browser-firefox/citgm-1789523448892` | Installation succeeds and the browser CITGM lifecycle reports the same `Module does not support npm-test!` result. | Native-reproduced package contract; no browser-only runtime failure. |
+| `native-citgm-node22-current-rerun.log` / `citgm-chromium-node22-current/citgm-1789630710259` / `citgm-firefox-node22-current/citgm-1789630734780` | Current Node 22.23.2, Chromium, and Firefox runs all install `node-releases@2.0.55` and fail the same CITGM `Module does not support npm-test!` contract. | Fresh three-oracle confirmation; no browser-only failure and no source or test changes. |
 
 Because rank 92 is not a clean CITGM pass, the full Node 22 test suite and
 both full Playwright suites are required before the cursor can advance to

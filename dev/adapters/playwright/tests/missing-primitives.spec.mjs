@@ -164,6 +164,37 @@ test.describe('browser runtime missing primitive contracts', () => {
     `);
   });
 
+  test('completes parallel callback fs realpath operations exactly once', async ({ harnessPage }) => {
+    await expectContract(expect, harnessPage, 'fs.realpath callback lifecycle', `
+      const assert = require('node:assert');
+      const fs = require('node:fs');
+      const fsp = require('node:fs/promises');
+      const path = require('node:path');
+      const root = path.join('.bnh-missing-primitives', String(process.pid));
+      const files = Array.from({ length: 128 }, (_, index) => path.join(root, 'realpath-' + index + '.txt'));
+      await fsp.mkdir(root, { recursive: true });
+      await Promise.all(files.map((file, index) => fsp.writeFile(file, String(index), 'utf8')));
+      const cache = Object.create(null);
+      const resolved = [];
+      await new Promise((resolve, reject) => {
+        let remaining = files.length;
+        for (const file of files) {
+          fs.realpath(file, cache, (error, realPath) => {
+            if (error) {
+              reject(error);
+              return;
+            }
+            resolved.push(realPath);
+            remaining -= 1;
+            if (remaining === 0) setTimeout(resolve, 20);
+          });
+        }
+      });
+      assert.deepStrictEqual([...resolved].sort(), files.map((file) => path.resolve(file)).sort());
+      assert.strictEqual(resolved.length, files.length);
+    `);
+  });
+
   test('truncates mounted virtual files with fs truncate', async ({ harnessPage }) => {
     await expectContract(expect, harnessPage, 'fs.truncate', `
       const assert = require('node:assert');

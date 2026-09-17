@@ -4000,7 +4000,7 @@ export function createVfs(options = {}) {
   function realpath(pathValue, optionsValue, callback) {
     const done = typeof optionsValue === 'function' ? optionsValue : callback;
     resolve(pathValue);
-    asyncFsOperation(done, () => realpathPath(resolve(pathValue)));
+    asyncFsOperation(done, () => realpathPath(resolve(pathValue)), false, true);
   }
 
   function realpathNative(pathValue, optionsValue, callback) {

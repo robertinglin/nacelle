@@ -64,7 +64,7 @@ not being reclassified as newly rerun here.
 | 36 | esbuild | BLOCKED | upstream package/repository (monorepo package layout) | Published `esbuild@0.28.2` at gitHead `609683d892977362a0f99026cb74b96263d728a9` fails current Node 22.23.2 native CITGM (`native-citgm-node-v22-current.log`) and Chromium/Firefox CITGM (`citgm-1789609208211`, `citgm-1789609207212`) because the downloaded monorepo root has no `package.json`. The published npm package is under `npm/esbuild`, so this remains a proven upstream/CITGM project-layout failure, not a browser-runtime failure. No fake package root or shim was added. |
 | 37 | isexe | PASS | ours | Published `isexe@4.0.0` passes exact CITGM in Chromium (`citgm-1789321276490`) and Firefox (`citgm-1789321334839`). The runtime fixed wildcard `1.x.x` semver resolution, portable decoding of cross-realm/SharedArrayBuffer-backed loader source, and awaiting asynchronous `@tapjs/mock` module source. Matching native Node 22 CITGM passes the exact package, so the browser failures were ours; no upstream or nested-dependency classification applies. Required final gates passed: build; `npm test` 343/343; Chromium Playwright 289/289; Firefox Playwright 289/289. |
 | 38 | js-yaml | PASS | ours | Published `js-yaml@5.4.2` at gitHead `494400bd45cad078123cfc057e674a9a0a8d9983` passes exact CITGM in Chromium (`citgm-1789326034170`) and Firefox (`citgm-1789326085784`). Every failure was reproduced against the exact package under native Node and was a browser-runtime defect: official `@rollup/wasm-node` selection, Node-style WASI worker `self` assignment, virtual Git fixture support, quoted `node --test` glob expansion, synchronous and asynchronous TypeScript stripping, and package self-reference export resolution. Required final gates passed after the fixes: `npm test` 345/345; Chromium Playwright 290/290; Firefox Playwright 290/290. Complete failure and success artifacts are preserved under `artifacts/citgm-top-100/rank-038-js-yaml/`. |
-| 39 | resolve | BLOCKED | upstream package/repository (native-reproduced posttest) | Exact browser and native CITGM reach the passing package tests, then the published posttest invokes unavailable `npm@>= 10.2`; see the rank 39 record below. |
+| 39 | resolve | BLOCKED | upstream package/repository (native-reproduced posttest) | Current Node 22.23.2 native CITGM and both browser CITGM runs reach the passing resolver and multirepo tests, then the published posttest invokes unavailable `npm@>= 10.2`; see the rank 39 record below. |
 | 40 | mime-types | PASS | none observed | Exact native, Chromium, and Firefox CITGM pass unchanged; repository-wide gates were skipped under the double-CITGM rule. |
 | 41 | nanoid | PASS | ours | Exact native Node CITGM passed before browser diagnosis; final Chromium `citgm-1789352834860` and Firefox `citgm-1789352865027` pass after shared runtime fixes and browser regressions. Required post-change gates pass at 345/345, 307/307, and 307/307. |
 | 42 | yargs-parser | PASS | none observed | Exact native, Chromium, and Firefox CITGM pass unchanged; repository-wide gates were skipped under the double-CITGM rule. |
@@ -1405,7 +1405,7 @@ artifacts are preserved under `artifacts/citgm-top-100/rank-039-resolve/`.
 | `citgm-trace-stream-chromium.stdout.log` | The legacy `tape` child printed all tests as passing but exited 1 because `fs.writeSync` referenced an unimported `resolveEncodingOps`. | Ours. The missing buffer operation import was restored; the legacy stream exit oracle now passes. |
 | `citgm-fixed4-chromium.stdout.log` / `citgm-fixed5-chromium.stdout.log` | The nested multirepo `npm install` path first rejected install scripts, then recursively re-entered Lerna's `postinstall`. | Ours. Browser-shell npm install routing and package-owned lifecycle execution now match the native boundary, with a lifecycle recursion guard. |
 | `citgm-1789331594801` / `focused-event-emitter*.log` | `config-chain@1.1.13` copied `Object.keys(EventEmitter.prototype)` and then failed on `this.emit`, followed by private `_ensureState` and `checkListenerLimit` dependencies. | Ours. EventEmitter's enumerable Node-compatible methods now use module-local state helpers, and the published config-chain inheritance shape passes in Chromium and Firefox. |
-| `citgm-1789331867255` (Chromium) / `citgm-1789331975003` (Firefox) | The resolver's 695 package assertions, nested symlink pretests, and Lerna multirepo test all pass. The package posttest then runs `npx npm@'>= 10.2' audit --production` and reports `npm@>= 10.2: command not found`. | Blocked by the published package test script/toolchain. Exact native Node v26 reproduces the same posttest command failure after its 812 passing assertions and successful multirepo test (`native-citgm-node-v26.log`). No browser-only shim or fake npm package was added. This is not a nested dependency failure and is not classified as ours. |
+| `citgm-1789609286347` (Chromium) / `citgm-1789609288426` (Firefox) | Under the current Node 22 browser runs, the resolver package assertions, nested symlink pretests, and Lerna multirepo test all pass. The package posttest then runs `npx npm@'>= 10.2' audit --production` and reports `npm@: command not found`; the child exits 127. | Blocked by the published package test script/toolchain. Exact native Node 22.23.2 reproduces the same posttest command failure after the package tests and multirepo test pass (`native-citgm-node-v22-current.log`). No browser-only shim or fake npm package was added. This is not a nested dependency failure and is not classified as ours. |
 
 Rank 39 is recorded as `BLOCKED` for the native-reproduced upstream/package
 posttest failure. All browser-specific failures were fixed before that
@@ -1424,6 +1424,17 @@ npm run build                              PASS — build-final2.log
 npm test                                   PASS — 345/345, npm-test-final2.log
 npm run test:browser:chromium              PASS — 296/296, playwright-chromium-final2.log
 npm run test:browser:firefox                PASS — 296/296, playwright-firefox-final2.log
+```
+
+The current Node 22.23.2 rerun made no repository changes, so the unchanged
+candidate gate was the exact native and browser CITGM result; the full
+repository Playwright suites were not rerun:
+
+```text
+Node v22.23.2 exact native CITGM — resolve                                      FAIL — native-citgm-node-v22-current.log (posttest npm@ command)
+NACELLE_CITGM_ARTIFACT_DIR=artifacts/citgm-top-100/rank-039-resolve/citgm-chromium-node22 npm run citgm:browser:chromium -- resolve  FAIL — citgm-1789609286347 (same posttest command)
+NACELLE_CITGM_ARTIFACT_DIR=artifacts/citgm-top-100/rank-039-resolve/citgm-firefox-node22 npm run citgm:browser:firefox -- resolve   FAIL — citgm-1789609288426 (same posttest command)
+npm run build / npm test / full Playwright suites                               NOT RUN — no new repository changes
 ```
 
 ## Rank 40 status

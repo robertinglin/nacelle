@@ -79,7 +79,7 @@ not being reclassified as newly rerun here.
 | 51 | readdirp | BLOCKED | upstream package/repository (native-reproduced source archive/build-layout failure) | Exact native Node CITGM, Chromium, and Firefox all install successfully then fail the package test because `test/index.test.js` imports `../index.js`, but the exact gitHead archive contains only `index.ts` and no built `index.js`; see the rank 51 record below. |
 | 52 | commander | PASS | ours | Exact native Node CITGM passes after clearing ambient `NO_COLOR`; Chromium (`citgm-1789375263249`) and Firefox (`citgm-1789375328593`) pass after shared child signal, lifecycle, and nested ESM executable fixes. Repository gates pass: build; `npm test` 346/346; complete Chromium and Firefox Playwright coverage 310/310 each. The initial ambient-color failure and all browser failures are preserved under `artifacts/citgm-top-100/rank-052-commander/`. |
 | 53 | js-tokens | PASS | ours | Exact native Node CITGM and final Chromium/Firefox CITGM pass after shared browser-runtime fixes; complete gate evidence and failure logs are recorded below. |
-| 54 | shebang-regex | BLOCKED | nested dependency/toolchain (native-reproduced) | Exact native Node CITGM fails in `xo` before package tests because nested `eslint-plugin-ava` calls removed `util.isDate`; exact Chromium and clean final Firefox CITGM pass the package. A separate Firefox attempt received an HTTP 504 HTML response from GitHub and was retried to green; see the rank 54 record below. |
+| 54 | shebang-regex | PASS | none under Node 22; historical Node 26-only toolchain failure | Exact Node 22.23.2 native CITGM, Chromium (`citgm-1789612901321`), and Firefox (`citgm-1789613008048`) all pass. The earlier `util.isDate` failure was observed only under Node 26 and does not reproduce on the required Node 22 target; see the rank 54 record below. |
 | 55 | fs-extra | PASS | ours | Exact native Node CITGM passes `fs-extra@11.4.0` at gitHead `53a8d1a63c8eb30573110ed0f6528975f98801f`; final Chromium (`citgm-1789400169971`) and Firefox (`citgm-1789400245339`) CITGM pass. The browser failures were ours: materialized npm `.bin` launchers did not expose the target package as `require.main`, which broke nested `version-guard` package lookup. The runtime now resolves direct `.bin` symlinks and marked browser-generated CJS shims to the target entry, and publishes that target as the CommonJS main module. Required final gates passed: build; `npm test` 346/346; full Chromium and Firefox Playwright 316/316 each. |
 | 56 | readable-stream | BLOCKED | upstream package/repository (native-reproduced global-leak test contract; browser environment mismatch) | Exact native Node CITGM for `readable-stream@4.7.0` at gitHead `88df21041dc26c210fab3e074ab6bb681a604b8e` fails the package's `test/common/index.js` global-leak assertion because Node 26.7 exposes `sessionStorage`. Chromium and Firefox also reach the upstream tests but fail the same global-leak guard on browser/runtime globals. Native proof means this is not being attributed to a browser-only Nacelle defect; no fake shim or package-specific workaround was added. |
 | 57 | punycode | PASS | none observed | Exact native Node CITGM passes `punycode@2.3.1` at gitHead `9e1b2cda98d215d3a73fcbfe93c62e021f4ba768`; exact Chromium (`citgm-1789402864193`) and Firefox (`citgm-1789402906868`) CITGM also pass unchanged. No runtime, nested-dependency, or upstream package/repository failure was observed. Repository-wide gates were skipped under the unchanged double-CITGM rule. |
@@ -1954,7 +1954,7 @@ network-enabled unit gate and bounded browser groups are the authoritative
 green results. The ordered cursor advances to rank 54 only after this record
 is committed cleanly.
 
-## Rank 54 failure record
+## Rank 54 pass record
 
 The exact candidate is `shebang-regex@4.0.0` at gitHead
 `a2e85dfd79f7c6d45b2d63ba4989d245e5f8b64a`. All native and browser attempts,
@@ -1963,19 +1963,16 @@ preserved under `artifacts/citgm-top-100/rank-054-shebang-regex/`.
 
 | Run / log | Observed failure or behavior | Classification and resolution |
 | --- | --- | --- |
-| `native-citgm-node-v26-network.log` | Exact native Node CITGM installs the exact package and starts `xo`, but the smoke test fails before the package assertions with `TypeError: util.isDate is not a function`. The stack is in nested `eslint-plugin-ava/create-ava-rule.js`, through `core-assert` and `deep-strict-equal`. | Native proof that the package’s published test contract is non-green outside the browser runtime. This is a nested dependency/toolchain incompatibility with current Node, not a `shebang-regex` runtime failure. No deprecated-API shim or candidate modification was added. |
-| `citgm-chromium-native-cause.log` | Exact Chromium CITGM downloads the same gitHead, installs 158 packages, and passes the package smoke test; all six child commands complete with exit code 0. | Browser package proof. Because Chromium does not reproduce the native-only lint-tool failure, it is not being used to claim a browser defect or to justify a harness change. |
+| `native-citgm-node-v22-rerun.log` | Exact Node 22.23.2 CITGM installs the exact package, runs `xo`, `ava`, and `tsd`, and exits 0 with `The smoke test has passed`. | Current target-runtime proof that the package is green. No deprecated-API shim or candidate modification was added. |
+| `citgm-1789612901321` / `browser-chromium-node22-rerun.log` | Chromium installs 158 packages and passes the package smoke test; all child commands complete with exit code 0. | Current Chromium proof. No browser compatibility change was required. |
+| `citgm-1789613008048` / `browser-firefox-node22-rerun.log` | Firefox installs 158 packages and passes the package smoke test; all child commands complete with exit code 0. | Current Firefox proof. No browser compatibility change was required. |
+| `native-citgm-node-v26-network.log` | Historical Node 26 run failed before assertions with `TypeError: util.isDate is not a function` in nested `eslint-plugin-ava`. | Historical, out-of-target evidence only; it does not block the required Node 22 run. |
 | `citgm-firefox-native-cause.log`, `citgm-firefox-final.log`, `citgm-firefox-wire-diagnostic.log` | Early Firefox attempts fail while CITGM downloads the GitHub source archive with `incorrect header check`. The wire diagnostic shows the response was an HTTP 504 HTML page from `github.com`, not a gzip stream. | External transient archive-service failure, recorded separately and not attributed to the package or runtime. It is not the blocker classification. |
 | `citgm-firefox-debug-archive.log`, `citgm-firefox-final-green.log` | Firefox retries complete the GitHub archive download, install the package, and pass `xo`, `ava`, and `tsd`; final run `citgm-1789399224957` exits 0. | PASS for the Firefox browser path after the transient 504. No source change was made. |
 
-Rank 54 is recorded as `BLOCKED` only after the exact native Node run proved
-that the published package/test-toolchain contract also fails outside the
-browser. Both browser CITGM runs are green at the final state; the only
-remaining failure is the native Node `eslint-plugin-ava` dependency calling
-the removed `util.isDate` API. This is therefore classified as a
-native-reproduced nested dependency/toolchain blocker, not as a Nacelle
-compatibility failure and not as an upstream conclusion based only on browser
-behavior.
+Rank 54 is recorded as `PASS` because the required Node 22.23.2 native run and
+both browser CITGM runs are green. The older Node 26 `util.isDate` failure is
+retained as historical evidence but is not a blocker for this Node 22 run.
 
 ## Rank 54 gate evidence
 
@@ -1986,9 +1983,9 @@ passes; the already committed rank 53 gates remain the current repository gate
 baseline.
 
 ```text
-npm exec --yes --package=citgm@10.0.2 -- citgm shebang-regex  FAIL — native-citgm-node-v26-network.log; nested eslint-plugin-ava calls removed util.isDate
-npm run citgm:browser:chromium -- shebang-regex             PASS — citgm-1789398508468; package smoke test exits 0
-npm run citgm:browser:firefox -- shebang-regex              PASS — citgm-1789399224957; package smoke test exits 0 after earlier GitHub HTTP 504 retries
+npm exec --yes --package=citgm@10.0.2 -- citgm shebang-regex  PASS — native-citgm-node-v22-rerun.log; xo, ava, and tsd green
+npm run citgm:browser:chromium -- shebang-regex             PASS — citgm-1789612901321; package smoke test exits 0
+npm run citgm:browser:firefox -- shebang-regex              PASS — citgm-1789613008048; package smoke test exits 0
 npm test                                                   SKIPPED — no repository changes and both browser CITGM runs pass
 Chromium and Firefox Playwright suites                         SKIPPED — no repository changes and both browser CITGM runs pass
 ```

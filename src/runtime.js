@@ -12291,11 +12291,11 @@ export function createRuntime({
           // that brokered boundary avoids sharing the parent's native module
           // evaluator while still allowing arbitrarily deep tool chains such
           // as gts -> eslint to make progress.
-          const nestedSameRealm = !workerBoundaryAvailable && (
-            options.nestedSameRealm === true
-            || nestedOwnerProcess?.__bnhEsmNested === true
-            || (browserWorkerRealm && !options.ipc && !options.syncBuffer)
-          );
+          const nestedSameRealm = options.nestedSameRealm === true
+            || (nestedOwnerProcess?.__bnhEsmNested === true
+              && !options.ipc
+              && !options.syncBuffer)
+            || (!workerBoundaryAvailable && browserWorkerRealm && !options.ipc && !options.syncBuffer);
           const workerIsolation = !nestedSameRealm && Boolean(
             options.workerIsolation === true
             || options.ipc

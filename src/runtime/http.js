@@ -4923,14 +4923,14 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
         }
       }
 
-      // Resolve browser-local HTTP servers before asking the default agent to
-      // create a TCP socket. The browser DNS layer cannot resolve a virtual
+      // Resolve browser-local HTTP servers before asking an agent or proxy to
+      // create a connection. The browser DNS layer cannot resolve a virtual
       // listener's address (notably bracketed IPv6 literals), and opening the
-      // socket first also bypasses the in-memory HTTP dispatch path. Custom
-      // agents and configured proxies retain their normal connection path;
-      // the shared BrowserAgent is the compatibility layer's default agent.
-      if (!this._proxy
-        && (this._options.__bnhDefaultAgent
+      // socket first also bypasses the in-memory HTTP dispatch path. A local
+      // virtual binding is authoritative even when the embedding browser has
+      // a configured proxy capability; explicit custom agents still own
+      // requests when they create their own socket.
+      if ((this._options.__bnhDefaultAgent
           || this._agent instanceof BrowserAgent
           || this._agent?._bnhBrowserAgent)
         && this._virtualNetwork?.dispatch) {

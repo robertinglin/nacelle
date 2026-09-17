@@ -4909,18 +4909,16 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       }
 
       let environmentProxyConfig = null;
-      if (!this._proxy) {
-        try {
-          environmentProxyConfig = proxyConfigFor(
-            this._url,
-            this._options,
-            { ...this._proxyEnv, ...this._ownerProcess?.env },
-            scope,
-          );
-        } catch (error) {
-          this.destroy(error);
-          return;
-        }
+      try {
+        environmentProxyConfig = proxyConfigFor(
+          this._url,
+          this._options,
+          { ...this._proxyEnv, ...this._ownerProcess?.env },
+          scope,
+        );
+      } catch (error) {
+        this.destroy(error);
+        return;
       }
 
       // Resolve browser-local HTTP servers before asking an agent or proxy to
@@ -4930,7 +4928,8 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       // virtual binding is authoritative even when the embedding browser has
       // a configured proxy capability; explicit custom agents still own
       // requests when they create their own socket.
-      if ((this._options.__bnhDefaultAgent
+      if (!proxySupports(this._proxy, 'request') && !environmentProxyConfig
+        && (this._options.__bnhDefaultAgent
           || this._agent instanceof BrowserAgent
           || this._agent?._bnhBrowserAgent)
         && this._virtualNetwork?.dispatch) {

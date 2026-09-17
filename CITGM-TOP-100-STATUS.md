@@ -2347,6 +2347,28 @@ before the package test lifecycle. The timeout is shared across engines, so the
 callback-boundary fix is retained as a proven runtime fix while form-data
 remains blocked by the separate virtual child-install lifecycle.
 
+## Post-form-data callback-boundary repository gate record
+
+After the callback-boundary and proxy-aware local-dispatch fixes, the required
+Node 22.23.2 repository gates were rerun before advancing to another CITGM
+candidate. Complete logs are preserved under
+`artifacts/citgm-top-100/rank-088-form-data/gates-after-callback-boundary/`.
+
+```text
+npm run build:v22                    PASS — 5 WASM artifacts, Node 22.23.2
+npm run check:wasm                   PASS — 5 artifacts passed export validation
+serialized patch regressions         PASS — 4/4
+npm test                              PASS — 359/359
+full Chromium Playwright             PASS — 374/374
+full Firefox Playwright              PASS — 374/374
+```
+
+The first full Firefox attempt had one transient Next.js startup failure; an
+isolated rerun passed, and the authoritative full Firefox rerun passed all
+374 tests. The repository gates are therefore green for the retained source
+changes, while rank 88 itself remains blocked by the candidate's published
+posttest and virtual child-install lifecycle.
+
 ## Rank 89 continuation record
 
 The exact candidate is `jiti@2.7.0` at lookup revision

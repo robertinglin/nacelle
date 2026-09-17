@@ -1101,6 +1101,14 @@ export class BrowserNpm {
 
     const dependencyLocation = (name, range, currentNodeModulesDir, currentPackageDir) => {
       const resolutionRange = parseNpmAlias(range)?.range || range;
+      // A lockfile records the install location chosen by npm, not just the
+      // version selected for a dependency. When a package has a nested lock
+      // entry, prefer that location before concurrent peer resolution can
+      // claim the compatible project-level slot for the same package.
+      if (currentPackageDir) {
+        const nestedNodeModulesDir = `${currentPackageDir}/node_modules`;
+        if (lockPackageEntry(nestedNodeModulesDir, name, resolutionRange)) return nestedNodeModulesDir;
+      }
       let directory = currentNodeModulesDir;
       let conflict = false;
       while (directory) {

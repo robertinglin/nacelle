@@ -679,6 +679,63 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     }
   });
 
+  test('honors lockfile nested dependency placement when a compatible peer is also queued', async () => {
+    const encoder = new TextEncoder();
+    const vfs = createVfs({
+      mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }],
+    });
+    const packageLock = {
+      name: 'lock-placement-fixture',
+      version: '1.0.0',
+      lockfileVersion: 3,
+      packages: {
+        '': {
+          name: 'lock-placement-fixture',
+          version: '1.0.0',
+          dependencies: { gts: '1.0.0', 'prettier-plugin': '1.0.0' },
+        },
+        'node_modules/gts': {
+          version: '1.0.0',
+          resolved: 'https://registry.test/gts-1.0.0.tgz',
+          dependencies: { prettier: '3.2.5' },
+        },
+        'node_modules/gts/node_modules/prettier': {
+          version: '3.2.5',
+          resolved: 'https://registry.test/prettier-3.2.5.tgz',
+        },
+        'node_modules/prettier-plugin': {
+          version: '1.0.0',
+          resolved: 'https://registry.test/prettier-plugin-1.0.0.tgz',
+          peerDependencies: { prettier: '>=3.0.0' },
+        },
+        'node_modules/prettier': {
+          version: '3.9.1',
+          resolved: 'https://registry.test/prettier-3.9.1.tgz',
+        },
+      },
+    };
+    vfs.fs.writeFileSync('/node/package-lock.json', JSON.stringify(packageLock));
+    const archives = new Map();
+    const addArchive = async (name, version, manifest) => {
+      const archive = await packTarGz([{
+        path: 'package/package.json',
+        data: encoder.encode(JSON.stringify({ name, version, ...manifest })),
+      }]);
+      archives.set(`${name}@${version}`, archive);
+    };
+    await addArchive('gts', '1.0.0', { dependencies: { prettier: '3.2.5' } });
+    await addArchive('prettier-plugin', '1.0.0', { peerDependencies: { prettier: '>=3.0.0' } });
+    await addArchive('prettier', '3.2.5', {});
+    await addArchive('prettier', '3.9.1', {});
+    const cache = new Map([...archives].map(([key, archive]) => [`pkg-tarball:${key}`, archive]));
+    const npm = new BrowserNpm({ vfs, cache, registry: 'https://registry.test', proxyUrl: null });
+
+    await npm.install(['gts@1.0.0', 'prettier-plugin@1.0.0'], { cwd: '/node', concurrency: 8 });
+
+    expect(JSON.parse(vfs.readSource('/node/node_modules/prettier/package.json')).version).toBe('3.9.1');
+    expect(JSON.parse(vfs.readSource('/node/node_modules/gts/node_modules/prettier/package.json')).version).toBe('3.2.5');
+  });
+
   test('BrowserNpmCache saves, retrieves, and clears metadata and tarballs', async () => {
     const { BrowserNpmCache } = await import('../runtime/npm.js');
     const cache = new BrowserNpmCache({ dbName: 'test_bnh_npm_cache' });

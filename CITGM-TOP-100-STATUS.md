@@ -69,7 +69,7 @@ not being reclassified as newly rerun here.
 | 41 | nanoid | PASS | ours | Exact native Node CITGM passed before browser diagnosis; final Chromium `citgm-1789352834860` and Firefox `citgm-1789352865027` pass after shared runtime fixes and browser regressions. Required post-change gates pass at 345/345, 307/307, and 307/307. |
 | 42 | yargs-parser | PASS | none observed | Exact native, Chromium, and Firefox CITGM pass unchanged; repository-wide gates were skipped under the double-CITGM rule. |
 | 43 | source-map | BLOCKED | upstream package/repository (native-reproduced archive/submodule failure) | Current Node 22.23.2 native, Chromium, and Firefox CITGM all fail because the source archive lacks the `source-map-tests` submodule data required by the package test script; see the rank 43 record below. |
-| 44 | string_decoder | BLOCKED | upstream package/repository (native-reproduced stale global validation), with ours-side Firefox intrinsic fix | Exact native Node, Chromium, and Firefox CITGM reach the same stale `test/common/index.js` global-leak assertion after the Firefox typed-array intrinsic defect was fixed; see the rank 44 record below. |
+| 44 | string_decoder | BLOCKED | upstream package/repository (native-reproduced stale global validation), with ours-side child-global isolation fix | Exact native Node 22.23.2 still fails the stale `test/common/index.js` global-leak assertion, while final Chromium (`citgm-1789611637400`) and Firefox (`citgm-1789611640568`) both pass after the general same-realm child-global cleanup fix and permanent regression oracle; see the rank 44 record below. |
 | 45 | color-convert | PASS | none observed | Published `color-convert@3.1.3` at gitHead `5c106a633b5cd2de554d9c287ad31f9eeca7a271` passes exact CITGM unchanged in native Node v26, Chromium (`citgm-1789360293028`), and Firefox (`citgm-1789360434124`). No runtime, nested dependency, or upstream package/repository failure was observed. Repository-wide gates were skipped under the unchanged double-CITGM rule. Complete artifacts are preserved under `artifacts/citgm-top-100/rank-045-color-convert/`. |
 | 46 | estraverse | PASS | ours | Published `estraverse@5.3.0` at gitHead `ec3f900528eac270a51f7b079edeae086e7ebce4` passes exact CITGM in Chromium (`citgm-1789361477311`) and Firefox (`citgm-1789361533463`) after general runtime fixes for the legacy `process.binding('natives')` registry and prototype-based Node CallSites. Native Node passed before browser diagnosis. Required final gates passed: build; `npm test` 345/345; Chromium Playwright 310/310; Firefox Playwright 310/310. Complete artifacts are preserved under `artifacts/citgm-top-100/rank-046-estraverse/`. |
 | 47 | https-proxy-agent | BLOCKED | upstream package/repository (native-reproduced invalid published devDependency) | Published `https-proxy-agent@9.1.0` fails exact native Node, Chromium, and Firefox CITGM during install because its published manifest declares nonexistent `tsconfig@0.0.0`; see the rank 47 record below. |
@@ -1560,17 +1560,18 @@ preserved under `artifacts/citgm-top-100/rank-044-string-decoder/`.
 
 | Run / log | Observed failure | Classification and resolution |
 | --- | --- | --- |
-| `native-citgm-node-v26.log` | The package's own `test/common/index.js` exit handler fails its global-leak check with `Unexpected global(s) found: queueMicrotask, structuredClone, atob, btoa, performance, fetch, crypto, navigator, sessionStorage` under Node v26.7.0. | Native proof: the final package blocker reproduces under exact Node before any browser runtime is involved. This is an upstream package/repository test-harness contract that predates the current Node global surface. No package test bypass or fake Node-global result was added. |
-| `citgm-1789358624681` / `citgm-chromium-run.log` | Chromium reaches the same upstream global-leak exit handler; the browser-backed process exposes additional browser/runtime globals that the stale `knownGlobals` list does not allow. | The initial browser-only Firefox intrinsic issue was separate and fixed below. The remaining failure matches native Node's global validation failure and is not classified as ours. |
-| `citgm-1789358660347` / `citgm-firefox-run.log` | Firefox initially fails in the nested `typed-array-buffer@1.0.3` dependency because `get-intrinsic` cannot derive `%TypedArray%` through the wrapped guest `Uint8Array`. | Ours, exposed by the nested dependency. Replaced the Firefox class wrapper with a `Reflect.construct` forwarding constructor, retained the native static surface, and added the typed-array intrinsic oracle. |
-| `citgm-1789359054680` / `citgm-firefox-rerun-1.log` | After the intrinsic fix, Firefox reaches the same `test/common/index.js` global-leak assertion as native Node; no `typed-array-buffer` exception remains. | The ours-side nested-dependency defect is fixed. The remaining package result is the native-reproduced upstream test-harness blocker. |
-| `citgm-1789359019829` / `citgm-chromium-rerun-1.log` | After the intrinsic fix, Chromium still reaches the same global-leak assertion. | Same native-reproduced upstream blocker; no browser-specific runtime defect remains in this package run. |
+| `native-citgm-node-v22-fixed.log` | The package's own `test/common/index.js` exit handler fails its global-leak check with `Unexpected global(s) found: queueMicrotask, structuredClone, atob, btoa, performance, fetch, navigator, crypto` under Node v22.23.2. | Native proof: the final package blocker reproduces under exact Node before any browser runtime is involved. This is an upstream package/repository test-harness contract that predates the current Node global surface. No package test bypass or fake Node-global result was added. |
+| `citgm-1789609594613` / `browser-chromium-node22.log` | Before the runtime fix, Chromium failed in the nested `babel-polyfill@6.26.0` sentinel with `only one instance of babel-polyfill is allowed`, proving same-realm child-global state leaked between sequential children. | Ours. The permanent regression `isolates global sentinels between same-realm child processes` reproduced the leak in both engines. |
+| `citgm-1789609598102` / `browser-firefox-node22.log` | Before the runtime fix, Firefox failed with the same nested `babel-polyfill` sentinel leak. | Ours, fixed generally by releasing the mirrored same-realm child-global overlay through a per-process `WeakMap` closure before child close. |
+| `citgm-1789611637400` / `browser-chromium-node22-fixed.log` | Final Chromium CITGM passes install, the upstream test suite, and posttest; no failure excerpts remain. | PASS for the browser contract after the general runtime fix. |
+| `citgm-1789611640568` / `browser-firefox-node22-fixed.log` | Final Firefox CITGM passes install, the upstream test suite, and posttest; no failure excerpts remain. | PASS for the browser contract after the same general runtime fix. |
 
-Rank 44 is recorded as `BLOCKED` only after the exact native Node v26 run
-reproduced the final failing assertion. The repository change is retained
-because it fixes a real Firefox cross-realm intrinsic defect exposed by the
-nested `typed-array-buffer` dependency, but that fix cannot make the published
-`string_decoder` test harness green without masking its global validation.
+Rank 44 remains `BLOCKED` only because the exact Node 22.23.2 native run
+reproduces the package's stale global validation. Both browser CITGM runs are
+green after the general child-global isolation fix; the fix is retained because
+it closes a real same-realm process boundary defect exposed by
+`babel-polyfill`, and the permanent regression prevents its return. No package
+test bypass or fake Node-global result was added.
 
 ## Rank 44 gate evidence
 
@@ -1578,13 +1579,14 @@ The package required a runtime and regression-oracle change, so all repository-
 wide gates ran after the final CITGM reruns and before committing:
 
 ```text
-npm exec --yes --package=citgm@10.0.2 -- citgm string_decoder  FAIL — native-citgm-node-v26.log; stale global-leak assertion
-npm run citgm:browser:chromium -- string_decoder             FAIL — citgm-1789359019829; same native-reproduced assertion after ours fix
-npm run citgm:browser:firefox -- string_decoder              FAIL — citgm-1789359054680; same native-reproduced assertion after ours fix
-npm run build -- --node-version=v22                          PASS — build-gate.log; 5 WASM artifacts; Node 22.23.2
-npm test                                                     PASS — npm-test-gate.log; 345/345
-npm run test:browser:chromium                               PASS — playwright-chromium-gate.log; 308/308
-npm run test:browser:firefox                                 PASS — playwright-firefox-gate.log; 308/308
+npm exec --yes --package=citgm@10.0.2 -- citgm string_decoder  FAIL — native-citgm-node-v22-fixed.log; stale global-leak assertion
+npm run citgm:browser:chromium -- string_decoder             PASS — citgm-1789611637400; final browser artifact bundle
+npm run citgm:browser:firefox -- string_decoder              PASS — citgm-1789611640568; final browser artifact bundle
+npm run build:v22                                             PASS — gates-node22-child-global-fix.log; 5 WASM artifacts; Node 22.23.2
+npm run check:wasm                                           PASS — gates-node22-child-global-fix.log; 5 artifacts validated
+npm test                                                     PASS — gates-node22-child-global-fix.log; 354/354
+npm run test:browser:chromium                               PASS — gates-node22-child-global-fix.log; 366/366
+npm run test:browser:firefox                                 PASS — gates-node22-child-global-fix.log; 366/366
 ```
 
 The rank-44 runtime fix, regression oracle, failure logs, and gate logs are

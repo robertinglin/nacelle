@@ -768,6 +768,51 @@ test.describe('browser runtime bridge and core primitives', () => {
     expect(result.stdout).toContain('child trailing-slash symlink resolution completed');
   });
 
+  test('isolates global sentinels between same-realm child processes', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      (async () => {
+        const assert = require('node:assert/strict');
+        const { spawn } = require('node:child_process');
+        const runChild = () => new Promise((resolve, reject) => {
+          const child = spawn(process.execPath, ['/node/app/global-sentinel.js'], {
+            cwd: '/node/app',
+            stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+          });
+          let stdout = '';
+          let stderr = '';
+          child.stdout.on('data', (chunk) => { stdout += chunk; });
+          child.stderr.on('data', (chunk) => { stderr += chunk; });
+          child.once('error', reject);
+          child.once('close', (code) => resolve({ code, stdout, stderr }));
+        });
+        const first = await runChild();
+        const leakedDescriptor = Object.getOwnPropertyDescriptor(globalThis, '__bnhChildGlobalSentinel');
+        assert.equal(Object.hasOwn(globalThis, '__bnhChildGlobalSentinel'), false, JSON.stringify(leakedDescriptor));
+        const second = await runChild();
+        assert.equal(first.code, 0, first.stderr);
+        assert.equal(second.code, 0, second.stderr);
+        assert.equal(first.stdout, 'isolated sentinel child completed');
+        assert.equal(second.stdout, 'isolated sentinel child completed');
+        console.log('same-realm child global isolation completed');
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/app/global-sentinel.js': `
+          'use strict';
+          if (global.__bnhChildGlobalSentinel) throw new Error('child global leaked');
+          global.__bnhChildGlobalSentinel = true;
+          process.stdout.write('isolated sentinel child completed');
+        `,
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('same-realm child global isolation completed');
+  });
+
   test('keeps a passing legacy stream harness at exit code zero', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       (async () => {

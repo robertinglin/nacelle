@@ -2731,6 +2731,8 @@ function runCommonJSWrapper(source, sourceURL, commonJsValues, moduleWrapper = n
   }
 }
 
+const executionGlobalReleases = new WeakMap();
+
 function createExecutionGlobal(scope, ownerProcess = null) {
   const target = Object.create(null);
   const mirrored = new Map();
@@ -2830,6 +2832,12 @@ function createExecutionGlobal(scope, ownerProcess = null) {
     getPrototypeOf: () => Object.prototype,
   });
   if (ownerProcess) {
+    executionGlobalReleases.set(ownerProcess, restore);
+    Object.defineProperty(ownerProcess, '__bnhReleaseGlobalOverlay', {
+      configurable: true,
+      enumerable: false,
+      value: restore,
+    });
     Object.defineProperty(proxy, '__bnhReleaseGlobalOverlay', {
       configurable: true,
       enumerable: false,
@@ -9454,6 +9462,12 @@ export function createRuntime({
               timeoutHandle = null;
             }
             if (abortListener) options.signal.removeEventListener('abort', abortListener);
+            // Release same-realm child globals before exposing the parent
+            // ChildProcess close event. The process exit hook normally does
+            // this as well, but the wrapper can be bypassed by a child
+            // implementation that replaces `_markExited`; close must never
+            // make a child's global writes visible to its next sibling.
+            childProcess?._bnhReleaseGlobalProcess?.();
             childProcess?._markExited?.();
             childProcess = null;
             if (prepared.executionArgv.some((value) => String(value) === '--no-warnings')) {
@@ -11393,7 +11407,7 @@ export function createRuntime({
             }
             const releaseGlobalProcess = () => {
               if (scope.process === childProc.processObject) setScopeProcess(previousState.process);
-              childProc.processObject._bnhReleaseGlobalOverlay?.();
+              executionGlobalReleases.get(childProc.processObject)?.();
             };
             const releaseGlobalTimers = () => {
               const childTimerContext = childProc.processObject._bnhTimerContext;
@@ -12095,7 +12109,9 @@ export function createRuntime({
             const childPending = Boolean(options.asyncLifecycle && !childProc.processObject._bnhIsExited?.())
               || hasPendingTimers || hasPendingTasks
               || childProc.processObject._bnhHasPendingAbortWorker?.() || false;
-            if (!childPending) childProc.processObject._bnhReleaseGlobalOverlay?.();
+            if (!childPending) {
+              executionGlobalReleases.get(childProc.processObject)?.();
+            }
           return {
               pid: childProc.processObject.pid,
               stdout: stdoutValue,

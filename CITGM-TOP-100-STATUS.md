@@ -1136,16 +1136,22 @@ Complete artifacts for both exact browser attempts are preserved under
 | --- | --- | --- |
 | `citgm-1789300473401` | Install, XO, and AVA (3 tests) passed, but the package's pinned `tsd@^0.14.0` emitted 2,791 declaration errors while parsing fresh `@types/node`, `undici-types`, `@types/readable-stream`, and its bundled TypeScript. | Upstream package/repository. The package's 2021-era test toolchain is incompatible with the declarations selected by a fresh install; this fails before a meaningful package type-test result and is not a browser-runtime defect. |
 | `citgm-1789300587441` | Firefox reproduced the same 2,791-error tsd failure; the nested diagnostic path then raised `this.isNative is not a function` while formatting the failure. | Upstream package/repository, with a nested test-tool diagnostic error. The secondary diagnostic exception does not change the primary blocker; no fake shim or package-specific workaround was added. |
+| `native-citgm-node-v22-current.log` | Current Node 22.23.2 native CITGM reproduces the pinned `tsd@^0.14.0` declaration failure after installation. | Current native confirmation of the upstream package/toolchain blocker. |
+| `citgm-1789604014973` / `citgm-chromium-current/` | Current Chromium passes the three package tests, then fails in the same stale `tsd` declaration phase. | Current-source Chromium confirmation; no browser-only runtime failure is present. |
+| `citgm-1789604570650` / `citgm-firefox-current/` | Current Firefox passes the three package tests, then reproduces the same stale `tsd` declaration failure. | Current-source Firefox confirmation with Chromium parity. |
 
 ## Rank 30 gate evidence
 
 ```text
-NACELLE_CITGM_ARTIFACT_DIR=artifacts/citgm-top-100/rank-030-escape-string-regexp npm run citgm:browser:chromium -- escape-string-regexp  FAIL — citgm-1789300473401 (upstream tsd toolchain)
-NACELLE_CITGM_ARTIFACT_DIR=artifacts/citgm-top-100/rank-030-escape-string-regexp npm run citgm:browser:firefox -- escape-string-regexp   FAIL — citgm-1789300587441 (same upstream tsd toolchain; nested diagnostic error)
-npm run build / npm test / full Playwright suites                  NOT RUN — blocked upstream before a green package result; no repository changes were made
+npm exec --yes --package=citgm@10.0.2 -- citgm escape-string-regexp    FAIL — native-citgm-node-v22-current.log (upstream tsd toolchain)
+NACELLE_CITGM_ARTIFACT_DIR=artifacts/citgm-top-100/rank-030-escape-string-regexp npm run citgm:browser:chromium -- escape-string-regexp  FAIL — citgm-1789604014973 (upstream tsd toolchain)
+NACELLE_CITGM_ARTIFACT_DIR=artifacts/citgm-top-100/rank-030-escape-string-regexp npm run citgm:browser:firefox -- escape-string-regexp   FAIL — citgm-1789604570650 (upstream tsd toolchain)
+npm run build / npm test / full Playwright suites                  NOT RUN — no source or test changes; current pre-sweep gates remain green
 ```
 
-Rank 30 is recorded as `BLOCKED` and the ordered cursor advances to rank 31.
+Rank 30 is recorded as `BLOCKED` and the ordered cursor advances to rank 31;
+the run artifacts and status update are committed without a runtime workaround
+or repository-wide Playwright rerun.
 
 ## Rank 31 failure record
 

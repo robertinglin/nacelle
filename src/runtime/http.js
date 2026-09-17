@@ -4930,7 +4930,9 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       // agents and configured proxies retain their normal connection path;
       // the shared BrowserAgent is the compatibility layer's default agent.
       if (!this._proxy
-        && (this._agent instanceof BrowserAgent || this._agent?._bnhBrowserAgent)
+        && (this._options.__bnhDefaultAgent
+          || this._agent instanceof BrowserAgent
+          || this._agent?._bnhBrowserAgent)
         && this._virtualNetwork?.dispatch) {
         let virtualInit;
         try {
@@ -5343,6 +5345,7 @@ function createProtocolModule(protocol, ClientRequest, Server, Agent, scope, Buf
     const clientRequest = new ClientRequest(url, {
       ...requestOptions,
       agent: requestOptions.agent === undefined ? protocolModule.globalAgent : requestOptions.agent,
+      __bnhDefaultAgent: requestOptions.agent === undefined,
     });
     clientRequest._recordNetworkLifecycle('client-request-created', {
       agent: clientRequest._agent?.constructor?.name || null,

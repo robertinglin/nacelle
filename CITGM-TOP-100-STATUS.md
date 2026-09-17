@@ -321,6 +321,24 @@ npm run test:browser:firefox                PASS — 371/371
 This checkpoint validates the README workflow change and the current retained
 runtime/regression-test changes before the next blocked CITGM candidate.
 
+## Post-fast-deep-equal workflow gate record
+
+After the rank 68 `fast-deep-equal` browser pass and its README/status update,
+the complete repository gate set was rerun with Node 22.23.2:
+
+```text
+node --version                              v22.23.2
+serialized patch regressions                PASS — 103 tests
+npm run build:v22                           PASS — 5 WASM artifacts
+npm run check:wasm                          PASS — 5 artifacts passed export validation
+npm test                                    PASS — 359/359
+npm run test:browser:chromium               PASS — 371/371
+npm run test:browser:firefox                PASS — 371/371
+```
+
+This checkpoint is the required post-change repository verification before
+continuing from the first remaining blocked candidate.
+
 The ordered cursor remains at rank 63 because rank 64 is still formally
 retained as an ours-side gate blocker. Rank 65's exact native and browser
 results, along with the post-source-change repository gates above, are green,

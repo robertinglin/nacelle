@@ -961,18 +961,23 @@ Complete artifacts for every attempt are preserved under
 | `citgm-1789288391205` | Install, XO, and AVA (1 test) passed, but `tsd` emitted 2,789 errors in transitive `@types/node`, `undici-types`, and bundled TypeScript declarations. | Upstream package/repository. The 2021 package pins an obsolete `tsd@^0.14.0`/XO toolchain while fresh dependency resolution supplies declarations that require newer TypeScript/lib support. The exact native package test is independently broken before `tsd`, so this is not a browser-runtime defect. |
 | `citgm-1789288596679` | Firefox reached the same `tsd` declaration failure; while formatting the diagnostic output, the nested `source-map-support` path also raised `this.isNative is not a function`. | Upstream/nested test-tool diagnostic path. This occurs after the already-invalid `tsd` phase and does not change the package classification; no package-specific browser workaround was added. |
 | `/tmp/bnh-has-flag-native.PUlHCN/native-upstream-test.log` | The exact published tarball was installed natively and `npm test` failed in XO with `TypeError: util.isDate is not a function` from `eslint-plugin-ava`/`core-assert`, before AVA or tsd. | Confirms the blocker is the upstream package’s obsolete test toolchain under Node 22. No fake shim was added. |
+| `native-citgm-node-v22-current.log` | Current Node 22.23.2 native CITGM installs `has-flag@5.0.1`; XO fails on the obsolete `util.isDate` call before the package’s AVA/tsd phases. | Current native confirmation of the upstream package/toolchain blocker. |
+| `citgm-1789603208129` / `citgm-chromium-current/` | Current Chromium passes install, XO, and the one AVA test, then `tsd` reports the same large stale declaration failure. | Current-source Chromium confirmation; no browser-only runtime failure is present. |
+| `citgm-1789603779400` / `citgm-firefox-current/` | Current Firefox reaches the same `tsd` declaration failure after the one AVA test passes. | Current-source Firefox confirmation with Chromium parity. |
 
 ## Rank 24 gate evidence
 
 ```text
-NACELLE_CITGM_ARTIFACT_DIR=artifacts/citgm-top-100/rank-024-has-flag npm run citgm:browser:chromium -- has-flag  FAIL — citgm-1789288391205 (upstream tsd toolchain)
-NACELLE_CITGM_ARTIFACT_DIR=artifacts/citgm-top-100/rank-024-has-flag npm run citgm:browser:firefox -- has-flag   FAIL — citgm-1789288596679 (upstream tsd toolchain; nested diagnostic error)
-npm run build / npm test / full Playwright suites                  NOT RUN — blocked upstream before a green package result
+npm exec --yes --package=citgm@10.0.2 -- citgm has-flag           FAIL — native-citgm-node-v22-current.log (upstream XO toolchain)
+NACELLE_CITGM_ARTIFACT_DIR=artifacts/citgm-top-100/rank-024-has-flag npm run citgm:browser:chromium -- has-flag  FAIL — citgm-1789603208129 (upstream tsd toolchain)
+NACELLE_CITGM_ARTIFACT_DIR=artifacts/citgm-top-100/rank-024-has-flag npm run citgm:browser:firefox -- has-flag   FAIL — citgm-1789603779400 (upstream tsd toolchain)
+npm run build / npm test / full Playwright suites                  NOT RUN — no source or test changes; current pre-sweep gates remain green
 ```
 
 Rank 24 is recorded as `BLOCKED` and the ordered cursor advances to rank 25;
-no repository changes were made for this package, so no repository-wide gate
-or commit of a runtime workaround is warranted.
+no repository changes were made for this package, so the run artifacts and
+status update are committed without a runtime workaround or repository-wide
+Playwright rerun.
 
 ## Rank 25 failure record
 

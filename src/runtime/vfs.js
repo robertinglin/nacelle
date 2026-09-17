@@ -3897,26 +3897,27 @@ export function createVfs(options = {}) {
         released = true;
         releaseRequest?.();
       };
-      try {
-        const result = operation();
-        const complete = (value) => {
-          try {
-            if (value === undefined) callback(null);
-            else callback(null, value);
-          } finally {
-            release();
-          }
-        };
-        const fail = (error) => {
-          try { callback(error); }
-          finally { release(); }
-        };
-        if (result && typeof result.then === 'function') result.then(complete, fail);
-        else complete(result);
-      } catch (error) {
+      const complete = (value) => {
+        try {
+          if (value === undefined) callback(null);
+          else callback(null, value);
+        } finally {
+          release();
+        }
+      };
+      const fail = (error) => {
         try { callback(error); }
         finally { release(); }
+      };
+      let result;
+      try {
+        result = operation();
+      } catch (error) {
+        fail(error);
+        return;
       }
+      if (result && typeof result.then === 'function') result.then(complete, fail);
+      else complete(result);
     }, crossRealm, pollLike);
   }
 

@@ -195,6 +195,27 @@ test.describe('browser runtime missing primitive contracts', () => {
     `);
   });
 
+  test('does not re-enter callback when an async fs callback throws', async ({ harnessPage }) => {
+    const result = await harnessPage.run(commonjsSource('async fs callback error boundary', `
+      const assert = require('node:assert');
+      const fs = require('node:fs');
+      const fsp = require('node:fs/promises');
+      const path = require('node:path');
+      const file = path.join('.bnh-missing-primitives', String(process.pid), 'callback-throw.txt');
+      await fsp.mkdir(path.dirname(file), { recursive: true });
+      await fsp.writeFile(file, 'callback', 'utf8');
+      let callbackCount = 0;
+      fs.realpath(file, (error) => {
+        assert.ifError(error);
+        callbackCount += 1;
+        if (callbackCount === 1) throw new Error('async fs callback sentinel');
+        throw new Error('duplicate callback sentinel');
+      });
+    `));
+    expect(result.exitCode).toBe(1);
+    expect(result.runResult?.error?.message).toBe('async fs callback sentinel');
+  });
+
   test('truncates mounted virtual files with fs truncate', async ({ harnessPage }) => {
     await expectContract(expect, harnessPage, 'fs.truncate', `
       const assert = require('node:assert');

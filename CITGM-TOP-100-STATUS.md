@@ -1832,9 +1832,9 @@ all native, browser, and repository-gate logs are preserved under
 
 | Run / log | Observed failure or behavior | Classification and resolution |
 | --- | --- | --- |
-| `native-citgm-node-v26.log` | Exact native Node CITGM installs `readdirp@5.1.1`, then its `node test/index.test.js` command fails before assertions with `ERR_MODULE_NOT_FOUND: Cannot find module '/tmp/.../readdirp/index.js' imported from .../test/index.test.js`. | Native proof that this is not a browser-runtime failure. The exact source archive omits the generated `index.js` even though `package.json` declares `main`/`exports` as `./index.js`; this is an upstream repository/archive build-layout failure. No generated file was injected into the candidate and no test shim was added. |
-| `citgm-chromium-run.log` | Chromium installs 158 packages and reaches the exact test command; it fails with the same missing `readdirp/index.js` import. | Confirms the native-reproduced package-layout failure in Chromium. No separate browser defect was observed. |
-| `citgm-firefox-run.log` | Firefox installs 157 packages and reaches the exact test command; it fails with the same missing `readdirp/index.js` import. | Confirms the native-reproduced package-layout failure in Firefox. No separate browser defect was observed. |
+| `native-citgm-node-v22-rerun.log` | Exact Node 22.23.2 CITGM installs `readdirp@5.1.1`, then its `node test/index.test.js` command fails before assertions with `ERR_MODULE_NOT_FOUND: Cannot find module '/tmp/.../readdirp/index.js' imported from .../test/index.test.js`. | Current native proof that this is not a browser-runtime failure. The exact source archive omits the generated `index.js` even though `package.json` declares `main`/`exports` as `./index.js`; this is an upstream repository/archive build-layout failure. No generated file was injected into the candidate and no test shim was added. |
+| `citgm-1789612783407` / `browser-chromium-node22-rerun.log` | Chromium installs 158 packages and reaches the exact test command; it fails with the same missing `readdirp/index.js` import. | Current confirmation of the native-reproduced package-layout failure in Chromium. No separate browser defect was observed. |
+| `citgm-1789612810763` / `browser-firefox-node22-rerun.log` | Firefox installs 158 packages and reaches the exact test command; it fails with the same missing `readdirp/index.js` import. | Current confirmation of the native-reproduced package-layout failure in Firefox. No separate browser defect was observed. |
 | `published-package.json`, `source-archive-entrypoints.txt` | The manifest declares `files: ["index.js", "index.d.ts"]`, `main: "./index.js"`, `exports: {".": "./index.js"}`, and test `node test/index.test.js`; the exact git archive contains `index.ts`, `package.json`, and `test/index.test.js`, but no `index.js`. | Direct evidence of the upstream package/source-archive mismatch. The package must publish/build the generated entrypoint or the archive/test contract must be corrected upstream. |
 
 Rank 51 is recorded as `BLOCKED` only after the exact native Node run proved
@@ -1848,9 +1848,9 @@ The package remained non-green, so the repository-wide gates were run before
 committing the blocked record:
 
 ```text
-npm exec --yes --package=citgm@10.0.2 -- citgm readdirp  FAIL — native-citgm-node-v26.log; test imports missing index.js from exact git archive
-npm run citgm:browser:chromium -- readdirp             FAIL — citgm-1789370427867; same missing index.js package-layout failure
-npm run citgm:browser:firefox -- readdirp              FAIL — citgm-1789370458458; same missing index.js package-layout failure
+npm exec --yes --package=citgm@10.0.2 -- citgm readdirp  FAIL — native-citgm-node-v22-rerun.log; test imports missing index.js from exact git archive
+npm run citgm:browser:chromium -- readdirp             FAIL — citgm-1789612783407; same missing index.js package-layout failure
+npm run citgm:browser:firefox -- readdirp              FAIL — citgm-1789612810763; same missing index.js package-layout failure
 npm test                                              PASS — npm-test-gate.log; 346/346
 npm run test:browser:chromium                        PASS — playwright-chromium-gate.log; 310/310
 npm run test:browser:firefox                         PASS — playwright-firefox-gate.log; 310/310

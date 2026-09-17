@@ -1,0 +1,14 @@
+info: starting            | yargs               
+info: lookup              | yargs               
+info: lookup-notfound     | yargs               
+info: lookup-githead      | https://github.com/yargs/yargs/archive/8878a894111e3fe7c98d84af546c0f34fa017492.tar.gz
+info: yargs npm:          | Downloading project: https://github.com/yargs/yargs/archive/8878a894111e3fe7c98d84af546c0f34fa017492.tar.gz
+info: yargs npm:          | Project downloaded 8878a894111e3fe7c98d84af546c0f34fa017492.tar.gz
+info: yargs npm:          | npm install started 
+info: yargs npm:          | npm install successfully completed
+info: yargs npm:          | test suite started  
+info: passing module(s)   |                     
+info: module name:        | yargs               
+info: version:            | 18.1.0              
+info: done                | The smoke test has passed.
+info: duration            | test duration: 134924ms

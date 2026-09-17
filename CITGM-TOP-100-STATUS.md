@@ -81,7 +81,7 @@ not being reclassified as newly rerun here.
 | 53 | js-tokens | PASS | ours | Exact native Node CITGM and final Chromium/Firefox CITGM pass after shared browser-runtime fixes; complete gate evidence and failure logs are recorded below. |
 | 54 | shebang-regex | PASS | none under Node 22; historical Node 26-only toolchain failure | Exact Node 22.23.2 native CITGM, Chromium (`citgm-1789612901321`), and Firefox (`citgm-1789613008048`) all pass. The earlier `util.isDate` failure was observed only under Node 26 and does not reproduce on the required Node 22 target; see the rank 54 record below. |
 | 55 | fs-extra | PASS | ours | Exact native Node CITGM passes `fs-extra@11.4.0` at gitHead `53a8d1a63c8eb30573110ed0f6528975f98801f`; final Chromium (`citgm-1789400169971`) and Firefox (`citgm-1789400245339`) CITGM pass. The browser failures were ours: materialized npm `.bin` launchers did not expose the target package as `require.main`, which broke nested `version-guard` package lookup. The runtime now resolves direct `.bin` symlinks and marked browser-generated CJS shims to the target entry, and publishes that target as the CommonJS main module. Required final gates passed: build; `npm test` 346/346; full Chromium and Firefox Playwright 316/316 each. |
-| 56 | readable-stream | BLOCKED | upstream package/repository (native-reproduced global-leak test contract; browser environment mismatch) | Exact native Node CITGM for `readable-stream@4.7.0` at gitHead `88df21041dc26c210fab3e074ab6bb681a604b8e` fails the package's `test/common/index.js` global-leak assertion because Node 26.7 exposes `sessionStorage`. Chromium and Firefox also reach the upstream tests but fail the same global-leak guard on browser/runtime globals. Native proof means this is not being attributed to a browser-only Nacelle defect; no fake shim or package-specific workaround was added. |
+| 56 | readable-stream | PASS | none observed under Node 22 | Exact native Node 22.23.2 CITGM (`native-citgm-node-v22-rerun.log`) and exact Chromium (`citgm-1789613237858`) and Firefox (`citgm-1789613386132`) CITGM all pass `readable-stream@4.7.0` at gitHead `88df21041dc26c210fab3e074ab6bb681a604b8e`. The earlier Node 26 `sessionStorage` global-leak result was not reproducible on the required Node 22 baseline; no runtime or package workaround was needed. |
 | 57 | punycode | PASS | none observed | Exact native Node CITGM passes `punycode@2.3.1` at gitHead `9e1b2cda98d215d3a73fcbfe93c62e021f4ba768`; exact Chromium (`citgm-1789402864193`) and Firefox (`citgm-1789402906868`) CITGM also pass unchanged. No runtime, nested-dependency, or upstream package/repository failure was observed. Repository-wide gates were skipped under the unchanged double-CITGM rule. |
 | 58 | tr46 | PASS | ours | Exact native Node and final Chromium/Firefox CITGM passed after fixing browser-native CORS fallback, package-install `prepublish`, and Web `ReadableStream` input to VFS `fs.writeFile`; repository gates passed. |
 | 59 | find-up | PASS | ours | Exact native Node, Chromium, and Firefox CITGM pass after fixing nested ESM package self-reference resolution, default-parameter cycle-proxy parsing, worker VFS symlink propagation, symlink-aware Git fixture materialization, and live GitHub source-archive `.git/` shape compatibility. Full repository gates passed; see the rank 59 record below. |
@@ -2036,43 +2036,41 @@ The final source, oracle tests, hard status record, and all rank-55 CITGM and
 gate artifacts are ready to commit. The ordered cursor advances to rank 56
 only after that commit is clean.
 
-## Rank 56 failure record
+## Rank 56 pass record
 
 The exact candidate is `readable-stream@4.7.0` at gitHead
-`88df21041dc26c210fab3e074ab6bb681a604b8e`. The native and browser attempts
-are preserved under `artifacts/citgm-top-100/rank-056-readable-stream/`.
+`88df21041dc26c210fab3e074ab6bb681a604b8e`. The Node 22 native and browser
+attempts are preserved under `artifacts/citgm-top-100/rank-056-readable-stream/`.
 
 | Run / log | Observed failure or behavior | Classification and resolution |
 | --- | --- | --- |
-| `native-citgm-node-v26-network.log` | Exact native Node CITGM downloads the exact gitHead archive, installs 661 packages, and starts the package's TAP suite. The child tests fail at `test/common/index.js:352` with `AssertionError: Unexpected global(s) found: sessionStorage`. | Native proof that the published package/test contract is non-green outside the browser under the required Node 26 environment. This establishes the blocker before considering browser behavior. No package source or runtime shim was added. |
-| `citgm-chromium.log` | Chromium installs 158 packages and reaches the upstream `tap` test command. The same global-leak guard fails because the browser execution environment exposes DOM globals and browser-runtime globals such as `process`, `require`, `WebAssembly`, and Nacelle internals. | Browser environment mismatch observed in addition to the native failure. It is not being used as a browser-only upstream conclusion, and no broad global-object emulation or fake shim was justified for a package whose exact native test already fails. |
-| `citgm-firefox.log` | Firefox installs 158 packages and reaches the same upstream `tap` test command. Its global-leak assertion rejects browser globals including `postMessage`, `close`, `requestAnimationFrame`, `Uint8Array`, `WebAssembly`, and Nacelle internals. | Independent browser confirmation of the package test harness's assumptions. The native `sessionStorage` failure is the decisive cross-environment proof; this remains an upstream/package-test-contract blocker, not an unverified browser-only attribution. |
+| `native-citgm-node-v22-rerun.log` | Exact native Node 22.23.2 CITGM downloads the exact gitHead archive, installs 158 packages, and reports `The smoke test has passed`. | PASS under the required Node 22 baseline. The earlier Node 26 `sessionStorage` result is retained as historical comparison evidence only. |
+| `browser-chromium-node22-rerun.log` / `citgm-1789613237858` | Chromium installs 158 packages and completes the upstream TAP test command with exit code 0. | PASS. No runtime, nested-dependency, or upstream package failure was observed. |
+| `browser-firefox-node22-rerun.log` / `citgm-1789613386132` | Firefox installs 158 packages and completes the same upstream TAP test command with exit code 0. | PASS with Chromium parity. No Firefox-only or upstream failure remained. |
 
-Rank 56 is recorded as `BLOCKED` only after the exact native Node run proved
-that the package itself fails outside the browser. Both browsers independently
-reach the package tests and fail their global-leak guard as well. The package
-test harness assumes a narrower global environment than Node 26.7 and the
-browser runtime provide; no fake `sessionStorage` or browser-global shim was
-added.
+Rank 56 is recorded as `PASS`: the exact Node 22 native run and both browser
+runs pass without repository source or regression-test changes. The earlier
+Node 26 `sessionStorage` global-leak result was an invalid comparison for this
+Node 22 continuation and did not require a runtime change.
 
 ## Rank 56 gate evidence
 
-No repository source or regression-test change was made for rank 56. The
-repository-wide gates were not run because the exact native and both browser
-CITGM runs are non-green and there is no candidate runtime fix to verify. The
-native proof and both browser results are the authoritative blocker evidence.
+No repository source or regression-test change was made for rank 56. Under the
+unchanged clean-CITGM rule, the repository-wide build, unit, WASM, and full
+Playwright suites were skipped; the exact Node 22 native and both browser CITGM
+runs are the required gate for this pass.
 
 ```text
-npm exec --yes --package=citgm@10.0.2 -- citgm readable-stream  FAIL — native-citgm-node-v26-network.log; unexpected global sessionStorage
-npm run citgm:browser:chromium -- readable-stream              FAIL — citgm-1789402583005; upstream global-leak guard rejects browser/runtime globals
-npm run citgm:browser:firefox -- readable-stream               FAIL — citgm-1789402697855; upstream global-leak guard rejects browser/runtime globals
-npm test                                                        SKIPPED — no repository changes; package is blocked by its native test contract
-Chromium and Firefox Playwright suites                              SKIPPED — no repository changes; package is blocked by its native test contract
+npm exec --yes --package=citgm@10.0.2 -- citgm readable-stream  PASS — native-citgm-node-v22-rerun.log; smoke test passed
+npm run citgm:browser:chromium -- readable-stream              PASS — citgm-1789613237858; upstream test suite exits 0
+npm run citgm:browser:firefox -- readable-stream               PASS — citgm-1789613386132; upstream test suite exits 0
+npm test                                                        SKIPPED — unchanged triple-CITGM pass
+Chromium and Firefox Playwright suites                       SKIPPED — unchanged triple-CITGM pass
 ```
 
-The native proof, both browser failures, and their complete logs are ready to
-commit. The ordered cursor advances to rank 57 only after this blocker record
-is committed cleanly.
+The native proof, both browser passes, and their complete logs are ready to
+commit. The ordered cursor advances to rank 57 after this pass record is
+committed cleanly.
 
 ## Rank 57 pass record
 

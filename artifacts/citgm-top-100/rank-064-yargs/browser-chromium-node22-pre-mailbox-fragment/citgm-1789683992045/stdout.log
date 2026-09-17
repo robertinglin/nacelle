@@ -1,0 +1,1055 @@
+info: starting            | yargs               
+info: lookup              | yargs               
+info: lookup-notfound     | yargs               
+info: lookup-githead      | https://github.com/yargs/yargs/archive/8878a894111e3fe7c98d84af546c0f34fa017492.tar.gz
+info: yargs npm:          | Downloading project: https://github.com/yargs/yargs/archive/8878a894111e3fe7c98d84af546c0f34fa017492.tar.gz
+info: yargs npm:          | Project downloaded 8878a894111e3fe7c98d84af546c0f34fa017492.tar.gz
+info: yargs npm:          | npm install started 
+info: yargs npm:          | npm install successfully completed
+info: yargs npm:          | test suite started  
+error: yargs npm:          | npm-test Timed Out  
+error: failure             | Test Timed Out      
+error: failing module(s)   |                     
+error: module name:        | yargs               
+error: version:            | 18.1.0              
+error: error:              | Test Timed Out      
+error: error:              | undefined                                                                                            
+error:                     | %s%s                                                                                                 
+error:                     | ✔ %s should expose yargs-parser as Parser                                                            
+error:                     | %s%s    Argsert                                                                                      
+error:                     | ✔ %s does not warn if optional argument is not provided                                              
+error:                     | ✔ %s warn if wrong type is provided for optional argument                                            
+error:                     | ✔ %s does not warn if optional argument is valid                                                     
+error:                     | ✔ %s warns if required argument is not provided                                                      
+error:                     | ✔ %s warns if required argument is of wrong type                                                     
+error:                     | ✔ %s supports a combination of required and optional arguments                                       
+error:                     | ✔ %s warns if too many arguments are provided                                                        
+error:                     | ✔ %s warn with argument position if wrong type is provided for argument                              
+error:                     | ✔ %s warn with generic argument position if wrong type is provided for seventh or greater argument   
+error:                     | ✔ %s configures function to accept 0 parameters, if only arguments object is provided                
+error:                     | ✔ %s allows for any type if * is provided                                                            
+error:                     | ✔ %s should ignore trailing undefined values                                                         
+error:                     | ✔ %s should not ignore undefined values that are not trailing                                        
+error:                     | ✔ %s supports null as special type                                                                   
+error:                     | ✔ %s should throw on warnings, when under test                                                       
+error:                     |                                                                                                      
+error:                     | %s%s    Command                                                                                      
+error:                     | ✔ %s preserves top-level envPrefix                                                                   
+error:                     | ✔ %s respects order of positional arguments when matching commands                                   
+error:                     | ✔ %s handles positional arguments if command is invoked using .parse()                               
+error:                     | ✔ %s invokes command handler repeatedly if parse() is called multiple times                          
+error:                     | ✔ %s allows command handler to be invoked repeatedly when help is enabled                            
+error:                     | ✔ %s does not require builder function to return                                                     
+error:                     | ✔ %s allows builder function to parse argv without returning                                         
+error:                     | ✔ %s allows builder function to return parsed argv                                                   
+error:                     | ✔ %s ignores extra spaces in command string                                                          
+error:                     | ✔ %s executes a command via alias                                                                    
+error:                     | ✔ %s should kick along [demand] configuration to commands                                            
+error:                     | ✔ %s should support numeric commands                                                                 
+error:                     | ✔ %s should not execute command if it is preceded by another positional argument                     
+error:                     | ✔ %s should allow positional arguments for inner commands in strict mode, when no handler is provided
+error:                     | ✔ %s does not coerce number from positional with leading "+"                                         
+error:                     | ✔ %s allows an array of commands to be provided                                                      
+error:                     | ✔ %s allows async exception in handler to be caught                                                  
+error:                     | ✔ %s reports error if error occurs parsing positional                                                
+error:                     | %s%s      positional arguments                                                                       
+error:                     | ✔ %s parses command string and populates optional and required positional arguments                  
+error:                     | ✔ %s populates inner argv with positional arguments                                                  
+error:                     | ✔ %s populates outer argv with positional arguments when unknown-options-as-args is not set          
+error:                     | ✔ %s populates outer argv with positional arguments when unknown-options-as-args is set              
+error:                     | ✔ %s populates argv with camel-case variants of arguments when possible                              
+error:                     | ✔ %s populates argv with camel-case variants of variadic args when possible                          
+error:                     | ✔ %s populates subcommand's inner argv with positional arguments                                     
+error:                     | ✔ %s ignores positional args for aliases                                                             
+error:                     | ✔ %s does not overwrite existing values in argv for keys that are not positional                     
+error:                     | ✔ %s does not load config twice when command executed                                                
+error:                     | ✔ %s handles -- in conjunction with positional arguments                                             
+error:                     | ✔ %s continues to support populate-- for commands, post #1457                                        
+error:                     | ✔ %s does not overwrite options in argv if variadic                                                  
+error:                     | ✔ %s does not overwrite options in argv if variadic and when using default command                   
+error:                     | ✔ %s does not combine positional default and provided values                                         
+error:                     | ✔ %s does not combine config values and provided values                                              
+error:                     | ✔ %s does not overwrite options in argv if variadic and preserves falsy values                       
+error:                     | %s%s      variadic                                                                                   
+error:                     | ✔ %s allows required arguments to be variadic                                                        
+error:                     | ✔ %s allows optional arguments to be variadic                                                        
+error:                     | ✔ %s fails if required arguments are missing                                                         
+error:                     | ✔ %s does not fail if zero optional arguments are provided                                           
+error:                     | ✔ %s only allows the last argument to be variadic                                                    
+error:                     | ✔ %s allows camel-case, variadic arguments, and strict mode to be combined                           
+error:                     | %s%s      missing positional arguments                                                               
+error:                     | ✔ %s fails if a required argument is missing                                                         
+error:                     | ✔ %s does not fail if optional argument is missing                                                   
+error:                     | %s%s      API                                                                                        
+error:                     | ✔ %s accepts string, string as first 2 arguments                                                     
+error:                     | ✔ %s accepts array, string as first 2 arguments                                                      
+error:                     | ✔ %s accepts string, boolean as first 2 arguments                                                    
+error:                     | ✔ %s accepts array, boolean as first 2 arguments                                                     
+error:                     | ✔ %s accepts function as 3rd argument                                                                
+error:                     | ✔ %s accepts options object as 3rd argument                                                          
+error:                     | ✔ %s accepts module (with builder function and handler function) as 3rd argument                     
+error:                     | ✔ %s accepts module (with builder object and handler function) as 3rd argument                       
+error:                     | ✔ %s accepts module (describe key, builder function) as 1st argument                                 
+error:                     | ✔ %s accepts module (description key, builder function) as 1st argument                              
+error:                     | ✔ %s accepts module (desc key, builder function) as 1st argument                                     
+error:                     | ✔ %s accepts module (false describe, builder function) as 1st argument                               
+error:                     | ✔ %s accepts module (missing describe, builder function) as 1st argument                             
+error:                     | ✔ %s accepts module (describe key, builder object) as 1st argument                                   
+error:                     | ✔ %s accepts module (missing handler function) as 1st argument                                       
+error:                     | ✔ %s accepts module (with command array) as 1st argument                                             
+error:                     | ✔ %s accepts module (with command string and aliases array) as 1st argument                          
+error:                     | ✔ %s accepts module (with command array and aliases array) as 1st argument                           
+error:                     | ✔ %s accepts module (with command string and aliases string) as 1st argument                         
+error:                     | ✔ %s accepts deprecated as 5th argument                                                              
+error:                     | %s%s      help command                                                                               
+error:                     | ✔ %s displays command help appropriately                                                             
+error:                     | %s%s      positional aliases                                                                         
+error:                     | ✔ %s allows an alias to be defined for a required positional argument                                
+error:                     | ✔ %s allows an alias to be defined for an optional positional argument                               
+error:                     | ✔ %s allows several aliases to be defined for a required positional argument                         
+error:                     | ✔ %s allows several aliases to be defined for an optional positional argument                        
+error:                     | ✔ %s allows variadic and positional arguments to be combined                                         
+error:                     | %s%s      global parsing hints                                                                       
+error:                     | %s%s        config                                                                                   
+error:                     | ✔ %s does not load config for command if global is false                                             
+error:                     | ✔ %s loads config for command by default                                                             
+error:                     | %s%s        validation                                                                               
+error:                     | ✔ %s resets implies logic for command if global is false                                             
+error:                     | ✔ %s applies conflicts logic for command by default                                                  
+error:                     | ✔ %s resets conflicts logic for command if global is false                                           
+error:                     | ✔ %s applies custom checks globally by default                                                       
+error:                     | ✔ %s resets custom check if global is false                                                          
+error:                     | ✔ %s allows each builder to specify own middleware                                                   
+error:                     | ✔ %s applies demandOption globally                                                                   
+error:                     | %s%s        strict                                                                                   
+error:                     | ✔ %s defaults to false when not called                                                               
+error:                     | ✔ %s can be enabled just for a command                                                               
+error:                     | ✔ %s applies strict globally by default                                                              
+error:                     | ✔ %s does not fail strict check due to positional command arguments                                  
+error:                     | ✔ %s does not fail strict check due to positional command arguments in nested commands               
+error:                     | ✔ %s allows a command to override global`                                                            
+error:                     | ✔ %s does not fire command if validation fails                                                       
+error:                     | %s%s        types                                                                                    
+error:                     | ✔ %s applies array type globally                                                                     
+error:                     | ✔ %s allows global setting to be disabled for array type                                             
+error:                     | ✔ %s applies choices type globally                                                                   
+error:                     | %s%s        aliases                                                                                  
+error:                     | ✔ %s defaults to applying aliases globally                                                           
+error:                     | ✔ %s allows global application of alias to be disabled                                               
+error:                     | %s%s        coerce                                                                                   
+error:                     | ✔ %s defaults to applying coerce rules globally                                                      
+error:                     | ✔ %s should bubble errors thrown by coerce function inside commands                                  
+error:                     | ✔ %s should not be applied multiple times for nested commands                                        
+error:                     | ✔ %s should not run or set new properties on argv when related argument is not passed                
+error:                     | ✔ %s should not add aliases to argv if strip-aliased config is true                                  
+error:                     | %s%s        defaults                                                                                 
+error:                     | ✔ %s applies defaults globally                                                                       
+error:                     | %s%s        describe                                                                                 
+error:                     | ✔ %s flags an option as global if a description is set                                               
+error:                     | %s%s        help                                                                                     
+error:                     | ✔ %s applies help globally                                                                           
+error:                     | %s%s        version                                                                                  
+error:                     | ✔ %s applies version globally                                                                        
+error:                     | %s%s        groups                                                                                   
+error:                     | ✔ %s should apply custom option groups globally                                                      
+error:                     | %s%s      default commands                                                                           
+error:                     | ✔ %s executes default command if no positional arguments given                                       
+error:                     | ✔ %s executes default command if undefined positional arguments and only command                     
+error:                     | ✔ %s executes default command if defined positional arguments and only command                       
+error:                     | ✔ %s allows $0 as an alias for a default command                                                     
+error:                     | ✔ %s does not execute default command if another command is provided                                 
+error:                     | ✔ %s allows default command to be set as alias                                                       
+error:                     | ✔ %s allows command to be run when alias is default command                                          
+error:                     | ✔ %s the last default command set should take precedence                                             
+error:                     | %s%s        strict                                                                                   
+error:                     | ✔ %s executes default command when strict mode is enabled                                            
+error:                     | ✔ %s allows default command aliases, when strict mode is enabled                                     
+error:                     | %s%s      deprecated command                                                                         
+error:                     | %s%s        using arg                                                                                
+error:                     | ✔ %s shows deprecated notice with boolean                                                            
+error:                     | ✔ %s shows deprecated notice with string                                                             
+error:                     | %s%s        using module                                                                             
+error:                     | ✔ %s shows deprecated notice with boolean                                                            
+error:                     | ✔ %s shows deprecated notice with string                                                             
+error:                     | %s%s      usage                                                                                      
+error:                     | ✔ %s allows you to configure a default command                                                       
+error:                     | ✔ %s throws exception if default command does not have leading $0                                    
+error:                     | %s%s      async                                                                                      
+error:                     | ✔ %s fails when the promise returned by the command handler rejects                                  
+error:                     | ✔ %s returns promise that resolves arguments once handler succeeds                                   
+error:                     | ✔ %s returns promise that can be caught, when fail(false)                                            
+error:                     | ✔ %s displays error and appropriate help message when handler fails                                  
+error:                     | %s%s      async builder                                                                              
+error:                     | ✔ %s allows positionals to be configured asynchronously                                              
+error:                     | ✔ %s does not print to stdout when parse callback is provided                                        
+error:                     | ✔ %s allows command to be defined in async builder                                                   
+error:                     | ✔ %s (%dms) allows deeply nested command to be defined in async builder 42                           
+error:                     | %s%s        helpOrVersionSet                                                                         
+error:                     | ✔ %s --help                                                                                          
+error:                     | %s%s      builder                                                                                    
+error:                     | %s%s        helpOrVersionSet                                                                         
+error:                     | ✔ %s --version                                                                                       
+error:                     | ✔ %s --help                                                                                          
+error:                     | ✔ %s help                                                                                            
+error:                     | ✔ %s cmd                                                                                             
+error:                     | %s%s      commandDir                                                                                 
+error:                     | ✔ %s supports absolute dirs                                                                          
+error:                     | ✔ %s supports relative dirs                                                                          
+error:                     | ✔ %s supports nested subcommands                                                                     
+error:                     | ✔ %s supports a "recurse" boolean option                                                             
+error:                     | ✔ %s supports a "visit" function option                                                              
+error: error:              | ✔ %s detects and ignores cyclic dir references                                                                         
+error:                     | ✔ %s derives 'command' string from filename when not exported                                                          
+error:                     | ✔ %s files can be excluded with a callback                                                                             
+error:                     | ✔ %s files can be excluded with a regex                                                                                
+error:                     | ✔ %s files can be included with a regex                                                                                
+error:                     | ✔ %s files can be included with a callback                                                                             
+error:                     | ✔ %s allows commands files to be written as ESM modules                                                                
+error:                     | ✔ %s allows ESM modules commands to be extensible using visit option                                                   
+error:                     |                                                                                                                        
+error:                     | %s%s    Completion                                                                                                     
+error:                     | %s%s      default completion behavior                                                                                  
+error:                     | %s%s        calling yargs(--get-yargs-completions, …)                                                                  
+error:                     | ✔ %s avoids repeating already included commands                                                                        
+error:                     | ✔ %s avoids repeating already included options                                                                         
+error:                     | ✔ %s avoids repeating options whose aliases are already included                                                       
+error:                     | ✔ %s completes short options with a single dash when the user did not already enter two dashes                         
+error:                     | ✔ %s completes short options with two dashes when the user already entered two dashes                                  
+error:                     | ✔ %s completes single digit options with two dashes                                                                    
+error:                     | ✔ %s completes with no- prefix flags defaulting to true when boolean-negation is set                                   
+error:                     | ✔ %s avoids repeating flags whose negated counterparts are already included                                            
+error:                     | ✔ %s ignores no- prefix flags when boolean-negation is not set                                                         
+error:                     | ✔ %s includes flags that have default                                                                                  
+error:                     | ✔ %s completes options for the correct command                                                                         
+error:                     | ✔ %s ignores positionals for the correct command                                                                       
+error:                     | ✔ %s does not complete hidden commands                                                                                 
+error:                     | ✔ %s does not include positional arguments                                                                             
+error:                     | ✔ %s works if command has no options                                                                                   
+error:                     | ✔ %s returns arguments as completion suggestion, if next contains '-'                                                  
+error:                     | ✔ %s completes choices if previous option requires a choice                                                            
+error:                     | ✔ %s completes choices if previous option requires a choice and space has been entered                                 
+error:                     | ✔ %s completes choices if previous option requires a choice and a partial choice has been entered                      
+error:                     | ✔ %s completes choices if previous option or one of its aliases requires a choice                                      
+error:                     | ✔ %s completes choices if previous option or one of its aliases requires a choice and space has been entered           
+error:                     | ✔ %s completes choices if previous option or one of its aliases requires a choice and a partial choice has been entered
+error:                     | ✔ %s completes choices for first positional                                                                            
+error:                     | ✔ %s options choices should not be display with positional choices                                                     
+error:                     | ✔ %s completes choices for positional with prefix                                                                      
+error:                     | ✔ %s completes choices for second positional after option                                                              
+error:                     | ✔ %s completes choices for nested command                                                                              
+error:                     | ✔ %s works if positional has no choices                                                                                
+error:                     | %s%s        calling yargs(./completion, --get-yargs-completions, …)                                                    
+error:                     | ✔ %s avoids repeating already included commands                                                                        
+error:                     | ✔ %s avoids repeating already included options                                                                         
+error:                     | ✔ %s avoids repeating options whose aliases are already included                                                       
+error:                     | ✔ %s completes short options with a single dash when the user did not already enter two dashes                         
+error:                     | ✔ %s completes short options with two dashes when the user already entered two dashes                                  
+error:                     | ✔ %s completes single digit options with two dashes                                                                    
+error:                     | ✔ %s completes with no- prefix flags defaulting to true when boolean-negation is set                                   
+error:                     | ✔ %s avoids repeating flags whose negated counterparts are already included                                            
+error:                     | ✔ %s ignores no- prefix flags when boolean-negation is not set                                                         
+error:                     | ✔ %s includes flags that have default                                                                                  
+error:                     | ✔ %s completes options for the correct command                                                                         
+error:                     | ✔ %s ignores positionals for the correct command                                                                       
+error:                     | ✔ %s does not complete hidden commands                                                                                 
+error:                     | ✔ %s does not include positional arguments                                                                             
+error:                     | ✔ %s works if command has no options                                                                                   
+error:                     | ✔ %s returns arguments as completion suggestion, if next contains '-'                                                  
+error:                     | ✔ %s completes choices if previous option requires a choice                                                            
+error:                     | ✔ %s completes choices if previous option requires a choice and space has been entered                                 
+error:                     | ✔ %s completes choices if previous option requires a choice and a partial choice has been entered                      
+error:                     | ✔ %s completes choices if previous option or one of its aliases requires a choice                                      
+error:                     | ✔ %s completes choices if previous option or one of its aliases requires a choice and space has been entered           
+error:                     | ✔ %s completes choices if previous option or one of its aliases requires a choice and a partial choice has been entered
+error:                     | ✔ %s completes choices for first positional                                                                            
+error:                     | ✔ %s options choices should not be display with positional choices                                                     
+error:                     | ✔ %s completes choices for positional with prefix                                                                      
+error:                     | ✔ %s completes choices for second positional after option                                                              
+error:                     | ✔ %s completes choices for nested command                                                                              
+error:                     | ✔ %s works if positional has no choices                                                                                
+error:                     | %s%s      generateCompletionScript()                                                                                   
+error:                     | ✔ %s replaces completion command variable with custom completion command in script                                     
+error:                     | ✔ %s if $0 has a .js extension, a ./ prefix is added                                                                   
+error:                     | ✔ %s allows $0 and cmd to be set                                                                                       
+error:                     | %s%s      completion()                                                                                                 
+error:                     | ✔ %s shows completion script if command registered with completion(cmd) is called                                      
+error:                     | ✔ %s allows a custom function to be registered for completion                                                          
+error:                     | ✔ %s passes current arg for completion and the parsed arguments thus far to custom function                            
+error:                     | ✔ %s allows the custom completion function to use the default completion w/o filter                                    
+error:                     | ✔ %s allows custom completion to be combined with default completion, using filter                                     
+error:                     | ✔ %s allows calling callback instead of default completion function                                                    
+error:                     | ✔ %s if a promise is returned, completions can be asynchronous                                                         
+error:                     | ✔ %s if a promise is returned, errors are handled                                                                      
+error:                     | ✔ %s if a callback parameter is provided, completions can be asynchronous                                              
+error:                     | %s%s      bash                                                                                                         
+error:                     | ✔ %s returns a list of commands as completion suggestions                                                              
+error:                     | ✔ %s avoids interruption from command recommendations                                                                  
+error:                     | ✔ %s avoids interruption from default command                                                                          
+error:                     | ✔ %s completes options for a command                                                                                   
+error:                     | ✔ %s does not complete hidden options for command                                                                      
+error:                     | ✔ %s does not apply validation when --get-yargs-completions is passed in                                               
+error:                     | %s%s        generateCompletionScript()                                                                                 
+error:                     | ✔ %s replaces application variable with $0 in script                                                                   
+error:                     | %s%s        getCompletion()                                                                                            
+error:                     | ✔ %s returns default completion to callback                                                                            
+error:                     | ✔ %s returns default completion to callback for options                                                                
+error:                     | %s%s      zsh                                                                                                          
+error:                     | ✔ %s returns a list of commands as completion suggestions                                                              
+error:                     | ✔ %s avoids interruption from command recommendations                                                                  
+error:                     | ✔ %s avoids interruption from default command                                                                          
+error:                     | ✔ %s completes options for a command                                                                                   
+error:                     | ✔ %s completes options and aliases with the same description                                                           
+error:                     | ✔ %s completes options with line break                                                                                 
+error:                     | ✔ %s replaces application variable with $0 in script                                                                   
+error:                     | ✔ %s does not apply validation when --get-yargs-completions is passed in                                               
+error:                     | ✔ %s completes with no- prefix flags defaulting to true when boolean-negation is set                                   
+error:                     | %s%s        getCompletion()                                                                                            
+error:                     | ✔ %s returns default completion to callback                                                                            
+error:                     | %s%s      async                                                                                                        
+error:                     | %s%s        getCompletion                                                                                              
+error:                     | ✔ %s allows completions to be awaited                                                                                  
+error:                     | %s%s        completion                                                                                                 
+error:                     | ✔ %s does not apply validation if async completion command provided                                                    
+error:                     | %s%s      parser-configuration                                                                                         
+error:                     | ✔ %s should support strip-dashed                                                                                       
+error:                     | ✔ %s should support camel-case-expansion strip-aliased                                                                 
+error:                     |                                                                                                                        
+error:                     | %s%s    applyExtends                                                                                                   
+error:                     | ✔ %s loads a JSON file if one is referenced by "extends" key                                                           
+error:                     | ✔ %s does not allow prototype pollution via __proto__                                                                  
+error:                     |                                                                                                                        
+error:                     | %s%s    integration tests                                                                                              
+error:                     | ✔ %s (%dms) should run as a shell script with no arguments 168                                                         
+error:                     | ✔ %s (%dms) should run as a shell script with arguments 138                                                            
+error:                     | ✔ %s (%dms) should run as a node script with no arguments 131                                                          
+error:                     | ✔ %s (%dms) should run as a node script with arguments 130                                                             
+error:                     | []                                                                                                                     
+error:                     | ✔ %s (%dms) allows --help to be completed without returning help message 131                                           
+error:                     | never get here                                                                                                         
+error:                     | ✔ %s (%dms) flushes all output when --help is executed 479                                                             
+error:                     | ✔ %s (%dms) correctly fills positional command args with preceding option 133                                          
+error:                     | ✔ %s (%dms) correctly fills positional command args with = assignment in preceding option 159                          
+error:                     | %s%s      path returned by "which"                                                                                     
+error:                     | ✔ %s (%dms) should match the actual path to the script file 156                                                        
+error:                     | ✔ %s (%dms) should match the actual path to the script file, with arguments 155                                        
+error:                     | %s%s      load root package.json                                                                                       
+error:                     | %s%s        version #                                                                                                  
+error:                     | { _: [], version: true, $0: 'normal-bin.js' }                                                                          
+error:                     | ✔ %s (%dms) defaults to appropriate version # when yargs is installed normally 176                                     
+error:                     | { _: [], version: true, $0: 'symlink-bin.js' }                                                                         
+error:                     | ✔ %s (%dms) defaults to appropriate version # when yargs is symlinked 158                                              
+error:                     | %s%s        parser settings                                                                                            
+error:                     | ✔ %s (%dms) reads parser config settings when yargs is installed normally 159                                          
+error:                     | ✔ %s (%dms) reads parser config settings when yargs is installed as a symlink 156                                      
+error:                     | ✔ %s (%dms) reads parser config settings when somebody obscures require.main 153                                       
+error:                     | ✔ %s (%dms) reads parser config settings when entry file has no extension 150                                          
+error:                     |                                                                                                                        
+error:                     | %s%s    isPromise                                                                                                      
+error:                     | ✔ %s returns `false` on non promise value                                                                              
+error:                     | ✔ %s returns `true` on es6 promise                                                                                     
+error:                     | ✔ %s returns `true` on some other thenable                                                                             
+error:                     | ✔ %s returns `false` if some falsy value is passed                                                                     
+error:                     | ✔ %s returns `false` if passed object has no `then` property                                                           
+error:                     | ✔ %s returns `false` if `then` is not a function                                                                       
+error:                     |                                                                                                                        
+error:                     | %s%s    middleware                                                                                                     
+error:                     | ✔ %s runs the middleware before reaching the handler                                                                   
+error:                     | ✔ %s runs all middleware before reaching the handler                                                                   
+error:                     | ✔ %s should be able to register middleware regardless of when middleware is called                                     
+error:                     | ✔ %s doesn't modify globalMiddleware array when executing middleware                                                   
+error:                     | ✔ %s allows middleware to be added in builder                                                                          
+error:                     | ✔ %s passes yargs object to middleware                                                                                 
+error:                     | ✔ %s applies aliases before middleware is called                                                                       
+error:                     | ✔ %s should run even if no command is matched                                                                          
+error:                     | ✔ %s throws error if middleware not function                                                                           
+error:                     | %s%s      applyBeforeValidation=true                                                                                   
+error:                     | ✔ %s runs before validation                                                                                            
+error:                     | ✔ %s resolves async middleware, before applying validation                                                             
+error:                     | ✔ %s still throws error when async middleware is used                                                                  
+error: error:              | ✔ %s does not cause an unexpected error when async middleware and strict are both used                             
+error:                     | ✔ %s runs before validation, when middleware is added in builder                                                   
+error:                     | ✔ %s applies aliases before middleware is called, for global middleware                                            
+error:                     | ✔ %s applies aliases before middleware is called, when middleware is added in builder                              
+error:                     | %s%s      async                                                                                                    
+error:                     | ✔ %s fails when the promise returned by the middleware rejects                                                     
+error:                     | ✔ %s it allows middleware rejection to be caught                                                                   
+error:                     | ✔ %s it awaits middleware before awaiting handler, when applyBeforeValidation is "false"                           
+error:                     | ✔ %s calls the command handler when all middleware promises resolve                                                
+error:                     | ✔ %s calls an async middleware only once for nested subcommands                                                    
+error:                     | %s%s        $0                                                                                                     
+error:                     | ✔ %s applies global middleware when no commands are provided, with implied $0                                      
+error:                     | ✔ %s (%dms) applies middleware before performing validation, with implied $0 102                                   
+error:                     | ✔ %s (%dms) applies middleware before performing validation, with explicit $0 103                                  
+error:                     | %s%s      synchronous $0                                                                                           
+error:                     | ✔ %s applies global middleware when no commands are provided                                                       
+error:                     | ✔ %s applies global middleware when default command is provided, with explicit $0                                  
+error:                     | ✔ %s applies middleware before performing validation, with implicit $0                                             
+error:                     | %s%s      async check                                                                                              
+error:                     | ✔ %s applies aliases prior to calling check                                                                        
+error:                     | %s%s        success                                                                                                
+error:                     | ✔ %s returns promise if check is async                                                                             
+error:                     | ✔ %s returns promise if check and middleware is async                                                              
+error:                     | ✔ %s allows async check to be used with command                                                                    
+error:                     | ✔ %s allows async check to be used with command and middleware                                                     
+error:                     | %s%s        failure                                                                                                
+error:                     | ✔ %s allows failed check to be caught                                                                              
+error:                     | ✔ %s allows error to be caught before calling command                                                              
+error:                     | ✔ %s allows error to be caught before calling command and middleware                                               
+error:                     | %s%s      async coerce                                                                                             
+error:                     | ✔ %s allows two commands to register different coerce methods                                                      
+error:                     | ✔ %s coerce is applied to argument and aliases                                                                     
+error:                     | ✔ %s applies coerce before validation                                                                              
+error:                     | ✔ %s allows error to be caught                                                                                     
+error:                     |                                                                                                                    
+error:                     | %s%s    ObjFilter                                                                                                  
+error:                     | ✔ %s returns a new reference to the original object if no filter function is given                                 
+error:                     |                                                                                                                    
+error:                     | %s%s    parseCommand                                                                                               
+error:                     | ✔ %s should throw if no command is specified                                                                       
+error:                     |                                                                                                                    
+error:                     | %s%s    usage tests                                                                                                
+error:                     | ✔ %s should return valid values when check passes                                                                  
+error:                     | ✔ %s should display missing arguments when check fails with a thrown exception                                     
+error:                     | ✔ %s should display missing arguments when check fails with a return value                                         
+error:                     | ✔ %s should return a valid result when check condition passes                                                      
+error:                     | ✔ %s should display a failed message when check condition fails                                                    
+error:                     | ✔ %s should return a valid result when demanding a count of non-hyphenated values                                  
+error:                     | ✔ %s should return a failure message when not enough non-hyphenated arguments are found after a demand count       
+error:                     | ✔ %s should return a custom failure message when not enough non-hyphenated arguments are found after a demand count
+error:                     | ✔ %s should return a valid result when setting defaults for singles                                                
+error:                     | ✔ %s should return a valid result when default is set for an alias                                                 
+error:                     | ✔ %s should print a single line when failing and default is set for an alias                                       
+error:                     | ✔ %s should allow you to set default values for a hash of options                                                  
+error:                     | ✔ %s should display example on fail                                                                                
+error:                     | ✔ %s should display examples on fail when passing multiple examples at once                                        
+error:                     | ✔ %s should not print usage string if help() is called without arguments                                           
+error:                     | ✔ %s should add --help as an option for printing usage text if help() is called without arguments                  
+error:                     | ✔ %s should allow setting the same description for several keys                                                    
+error:                     | ✔ %s allows setting help and version with aliases and custom description                                           
+error:                     | ✔ %s allows multiple option calls to not clobber description                                                       
+error:                     | %s%s      demand options                                                                                           
+error:                     | ✔ %s should show an error along with a custom message on demand fail                                               
+error:                     | ✔ %s should return valid values when demand passes                                                                 
+error:                     | ✔ %s should not show a custom message if msg is null                                                               
+error:                     | %s%s        using .demand()                                                                                        
+error:                     | ✔ %s should show an error along with the missing arguments on demand fail                                          
+error:                     | ✔ %s missing argument message given if one command, but an argument not on the list is provided                    
+error:                     | ✔ %s missing command message if all the required arguments exist, but not enough commands are provided             
+error:                     | ✔ %s no failure occurs if the required arguments and the required number of commands are provided                  
+error:                     | ✔ %s missing command message if all the required arguments exist, but not enough commands are provided             
+error:                     | %s%s          using .require()                                                                                     
+error:                     | ✔ %s should show an error along with the missing arguments on demand fail                                          
+error:                     | ✔ %s missing argument message given if one command and an argument not on the list are provided                    
+error:                     | %s%s        min/max demanded count                                                                                 
+error:                     | ✔ %s does not output an error if '_' count is within the min/max range                                             
+error:                     | ✔ %s outputs an error if '_' count is above max                                                                    
+error:                     | ✔ %s outputs an error if '_' count is below min                                                                    
+error:                     | ✔ %s allows a customer error message to be provided                                                                
+error:                     | ✔ %s shouldn't interpret the second argument as a max when it is an array                                          
+error:                     | %s%s      deprecate options                                                                                        
+error:                     | %s%s        using .option(x, {deprecate: [boolean|string]})                                                        
+error:                     | ✔ %s {deprecated: true} should show [deprecated]                                                                   
+error:                     | ✔ %s {deprecated: string} should show [deprecated: string]                                                         
+error:                     | ✔ %s {deprecated: boolean} in sub-command                                                                          
+error:                     | ✔ %s {deprecated: string} in sub-command                                                                           
+error:                     | %s%s        using .deprecateOption(x, [string])                                                                    
+error:                     | ✔ %s .deprecateOption(x) should show [deprecated]                                                                  
+error:                     | ✔ %s .deprecateOption(x, string) should show [deprecated: string]                                                  
+error:                     | ✔ %s .deprecateOption(x) in a sub-command                                                                          
+error:                     | ✔ %s .deprecateOption(x, string) in a sub-command                                                                  
+error:                     | %s%s      when exitProcess is false                                                                                
+error:                     | %s%s        when check fails with a thrown exception                                                               
+error:                     | ✔ %s should display missing arguments once                                                                         
+error:                     | %s%s        fail()                                                                                                 
+error:                     | ✔ %s is called with the original error message as the first parameter                                              
+error:                     | ✔ %s is invoked with yargs instance as third argument                                                              
+error:                     | ✔ %s allows "false" to be provided to prevent exit/output                                                          
+error:                     | ✔ %s does not allow "true" as argument                                                                             
+error:                     | %s%s          when check() throws error                                                                            
+error:                     | ✔ %s fail() is called with the original error object as the second parameter                                       
+error:                     | %s%s          when command() throws error                                                                          
+error:                     | ✔ %s fail() is called with the original error object as the second parameter                                       
+error:                     | %s%s      required arguments                                                                                       
+error:                     | ✔ %s still requires argument if 'type' hints are given                                                             
+error:                     | %s%s        with options object                                                                                    
+error:                     | ✔ %s should show a failure message if a required option is missing                                                 
+error:                     | ✔ %s should show a failure message if more than one required option is missing                                     
+error:                     | %s%s        with requiresArg method                                                                                
+error:                     | ✔ %s should show a failure message if a required option is missing                                                 
+error:                     | %s%s      with strict() option set                                                                                 
+error:                     | ✔ %s should fail given an option argument that is not demanded                                                     
+error:                     | ✔ %s should fail given an option argument without a corresponding description                                      
+error:                     | ✔ %s should wrap whitespace in quotes if provided as an unknown argument                                           
+error:                     | ✔ %s should fail given multiple option arguments without corresponding descriptions                                
+error:                     | ✔ %s should pass given option arguments with corresponding descriptions                                            
+error:                     | %s%s        with hyphens in options                                                                                
+error:                     | ✔ %s fails when an invalid argument is provided                                                                    
+error:                     | ✔ %s accepts valid options                                                                                         
+error:                     | ✔ %s works with aliases                                                                                            
+error:                     | ✔ %s accepts mixed options with values                                                                             
+error:                     | %s%s      demand option with boolean flag                                                                          
+error:                     | ✔ %s should not report missing required arguments when given an alias                                              
+error:                     | %s%s        with demand option                                                                                     
+error:                     | ✔ %s should report missing required arguments                                                                      
+error:                     | %s%s        with required option                                                                                   
+error:                     | ✔ %s should report missing required arguments                                                                      
+error:                     | %s%s      help option                                                                                              
+error:                     | ✔ %s should display usage                                                                                          
+error:                     | ✔ %s should not show both dashed and camelCase aliases                                                             
+error:                     | ✔ %s should use 2 dashes for general 1-digit usage                                                                 
+error:                     | ✔ %s should use single dashes for 1-digit boolean key usage                                                        
+error:                     | ✔ %s should use single dashes for 1-digit boolean alias usage                                                      
+error:                     | ✔ %s should use 2 dashes for multiple-digit alias usage                                                            
+error:                     | %s%s        when exitProcess is false                                                                              
+error:                     | ✔ %s should not validate arguments (required argument)                                                             
+error:                     | ✔ %s should not validate arguments (nargs)                                                                         
+error:                     | %s%s      version option                                                                                           
+error:                     | ✔ %s should display version                                                                                        
+error:                     | ✔ %s accepts version option as first argument, and version number as second argument                               
+error:                     | ✔ %s should default to 'version' as version option                                                                 
+error:                     | %s%s        when an option or alias "version" is set                                                               
+error:                     | ✔ %s emits warning if version is not disabled                                                                      
+error:                     | ✔ %s does not emit warning if version is disabled                                                                  
+error:                     | %s%s        when exitProcess is false                                                                              
+error:                     | ✔ %s should not validate arguments (required argument)                                                             
+error:                     | ✔ %s should not validate arguments (nargs)                                                                         
+error:                     | %s%s      showHelpOnFail                                                                                           
+error:                     | ✔ %s should display user supplied message                                                                          
+error:                     | %s%s        should handle being chained both globally and on a command                                             
+error:                     | ✔ %s chained on to command                                                                                         
+error:                     | ✔ %s chained on globally                                                                                           
+error:                     | ✔ %s chained on command and globally (priority given to command message)                                           
+error:                     | %s%s      exitProcess                                                                                              
+error:                     | ✔ %s should not call process.exit on error if disabled                                                             
+error:                     | %s%s      scriptName                                                                                               
+error:                     | ✔ %s should display user supplied scriptName                                                                       
+error:                     | ✔ %s should not alter the user supplied scriptName                                                                 
+error:                     | %s%s      wrap                                                                                                     
+error:                     | ✔ %s should wrap argument descriptions onto multiple lines                                                         
+error:                     | - %s should wrap based on window-size if no wrap is provided                                                       
+error:                     | ✔ %s should not wrap when YARGS_DISABLED_WRAP is provided                                                          
+error:                     | ✔ %s should not raise an exception when long default and description are provided                                  
+error:                     | ✔ %s should wrap the left-hand-column if it takes up more than 50% of the screen                                   
+error:                     | ✔ %s should not wrap left-hand-column if no description is provided                                                
+error:                     | ✔ %s should wrap the usage string                                                                                  
+error:                     | ✔ %s should align span columns when ansi colors are not used in a description                                      
+error:                     | ✔ %s should align span columns when ansi colors are used in a description                                          
+error:                     | ✔ %s should not indent usage when no wrap is specified                                                             
+error:                     | %s%s      commands                                                                                                 
+error:                     | ✔ %s should output a list of available commands                                                                    
+error: error:              | ✔ %s should not show hidden commands                                                                        
+error:                     | ✔ %s allows completion command to be hidden                                                                 
+error:                     | ✔ %s preserves global wrap() for commands that do not override it                                           
+error:                     | ✔ %s allows a command to override global wrap()                                                             
+error:                     | ✔ %s resets groups for a command handler, respecting order                                                  
+error:                     | ✔ %s allows global option to be disabled                                                                    
+error:                     | ✔ %s can add to preserved groups                                                                            
+error:                     | ✔ %s can bump up preserved groups                                                                           
+error:                     | ✔ %s should display global non empty groups for commands                                                    
+error:                     | ✔ %s should display global non empty groups for subcommands                                                 
+error:                     | ✔ %s should list a module command only once                                                                 
+error:                     | ✔ %s allows a builder function to override default usage() string                                           
+error:                     | ✔ %s allows a builder function to disable default usage() with null                                         
+error:                     | ✔ %s displays given command chain with positional args in default usage for subcommand with builder object  
+error:                     | ✔ %s displays given command chain with positional args in default usage for subcommand with builder function
+error:                     | ✔ %s displays aliases for commands that have them (no wrap)                                                 
+error:                     | ✔ %s displays aliases for commands that have them (with wrap)                                               
+error:                     | ✔ %s allows a builder to add more than one usage with multiple usage calls                                  
+error:                     | ✔ %s allows a builder to disable usage with null after multiple usage calls                                 
+error:                     | ✔ %s does not display $0 twice when default commands are enabled                                            
+error:                     | %s%s      epilogue                                                                                          
+error:                     | ✔ %s should display an epilog message at the end of the usage instructions                                  
+error:                     | ✔ %s supports multiple epilogs                                                                              
+error:                     | ✔ %s replaces $0 in epilog string                                                                           
+error:                     | %s%s      default                                                                                           
+error:                     | ✔ %s should indicate that the default is a generated-value, if function is provided                         
+error:                     | ✔ %s if a named function is provided, should use name rather than (generated-value)                         
+error:                     | ✔ %s default-description take precedence if one is provided                                                 
+error:                     | ✔ %s serializes object and array defaults                                                                   
+error:                     | %s%s      defaultDescription                                                                                
+error:                     | %s%s        using option() without default()                                                                
+error:                     | ✔ %s should output given desc with default value                                                            
+error:                     | ✔ %s should output given desc without default value                                                         
+error:                     | ✔ %s should prefer given desc over function desc                                                            
+error:                     | %s%s        using option() with default()                                                                   
+error:                     | ✔ %s should prefer default() desc when given last                                                           
+error:                     | ✔ %s should prefer option() desc when given last                                                            
+error:                     | ✔ %s should prefer option() desc over default() function                                                    
+error:                     | %s%s        using positional() without default()                                                            
+error:                     | ✔ %s should output given desc with default value                                                            
+error:                     | ✔ %s should output given desc without default value                                                         
+error:                     | ✔ %s should prefer given desc over function desc                                                            
+error:                     | %s%s        using positional() with default()                                                               
+error:                     | ✔ %s should prefer default() desc when given last                                                           
+error:                     | ✔ %s should prefer positional() desc when given last                                                        
+error:                     | ✔ %s should prefer positional() desc over default() function                                                
+error:                     | %s%s      normalizeAliases                                                                                  
+error:                     | ✔ %s should display 'description' string in help message if set for alias                                   
+error:                     | ✔ %s should display 'required' string in help message if set for alias                                      
+error:                     | ✔ %s should display 'type' string in help message if set for alias                                          
+error:                     | ✔ %s should display 'type' number in help message if set for alias                                          
+error:                     | %s%s      showHelp                                                                                          
+error:                     | ✔ %s should show help regardless of whether argv has been called                                            
+error:                     | ✔ %s should print the help using console.error when no arguments were specified                             
+error:                     | ✔ %s should call the correct console.log method when specified                                              
+error:                     | ✔ %s should call the callback to print when specified                                                       
+error:                     | ✔ %s should not run handler or middleware                                                                   
+error:                     | ✔ %s should not run default command                                                                         
+error:                     | %s%s      showVersion                                                                                       
+error:                     | ✔ %s should show version regardless of whether argv has been called                                         
+error:                     | ✔ %s should call the correct console.log method when specified                                              
+error:                     | ✔ %s should call the callback to print when specified                                                       
+error:                     | %s%s      $0                                                                                                
+error:                     | ✔ %s is detected correctly for a basic script                                                               
+error:                     | ✔ %s is detected correctly when argv contains "node"                                                        
+error:                     | ✔ %s is detected correctly when dirname contains "node"                                                     
+error:                     | ✔ %s is detected correctly when dirname and argv contain "node"                                             
+error:                     | ✔ %s is detected correctly when argv contains "iojs"                                                        
+error:                     | ✔ %s is detected correctly when dirname contains "iojs"                                                     
+error:                     | ✔ %s is detected correctly when dirname and argv contain "iojs"                                             
+error:                     | ✔ %s is detected correctly when argv contains "node.exe"                                                    
+error:                     | ✔ %s is detected correctly when argv contains "iojs.exe"                                                    
+error:                     | ✔ %s is resolved to the relative path if it is shorter                                                      
+error:                     | ✔ %s is not resolved to the relative path if it is larger                                                   
+error:                     | %s%s      choices                                                                                           
+error:                     | ✔ %s should output choices when defined for non-hidden options                                              
+error:                     | ✔ %s should not output choices when defined for hidden options                                              
+error:                     | %s%s      count                                                                                             
+error:                     | ✔ %s should indicate when an option is a count                                                              
+error:                     | %s%s      array                                                                                             
+error:                     | ✔ %s should indicate when an option is an array                                                             
+error:                     | %s%s      group                                                                                             
+error:                     | ✔ %s allows an an option to be placed in an alternative group                                               
+error:                     | ✔ %s does not print the 'Options:' group if no keys are in it                                               
+error:                     | ✔ %s displays alias keys appropriately within a grouping                                                    
+error:                     | ✔ %s allows a group to be provided as the only information about an option                                  
+error:                     | ✔ %s allows multiple options to be grouped at the same time                                                 
+error:                     | ✔ %s allows group to be provided in the options object                                                      
+error:                     | ✔ %s only displays a duplicated option once per group                                                       
+error:                     | %s%s      cjk                                                                                               
+error:                     | ✔ %s should calculate width of cjk text correctly                                                           
+error:                     | %s%s      default command                                                                                   
+error:                     | ✔ %s should display top-level help with no command given                                                    
+error:                     | ✔ %s should display top-level help with sorting with no command given if sorting enabled                    
+error:                     | ✔ %s should display default command as ./$0 if it has no aliases                                            
+error:                     | ✔ %s should display positionals that have been configured                                                   
+error:                     | ✔ %s should display options that have been configured                                                       
+error:                     | ✔ %s should display options (with descriptions) on failed default command                                   
+error:                     | ✔ %s should display help output for nested default command on failure                                       
+error:                     | %s%s      positional                                                                                        
+error:                     | ✔ %s should display help section for positionals                                                            
+error:                     | ✔ %s shows that variadic positional arguments are arrays                                                    
+error:                     | ✔ %s indicates that <foo> positional arguments are required                                                 
+error:                     | ✔ %s displays aliases appropriately                                                                         
+error:                     | ✔ %s displays type information                                                                              
+error:                     | ✔ %s displays choices array                                                                                 
+error:                     | %s%s      hidden options                                                                                    
+error:                     | ✔ %s --help should display all options except for hidden ones                                               
+error:                     | ✔ %s --help should display all options except for hidden ones even with a default                           
+error:                     | ✔ %s --help should display all options except for hidden ones even in a group                               
+error:                     | ✔ %s --help should display all groups except for ones with only hidden options                              
+error:                     | ✔ %s --help should display all options (including hidden ones) with --show-hidden                           
+error:                     | ✔ %s --help should display all groups (including ones with only hidden options) with --show-hidden          
+error:                     | ✔ %s --help should display --custom-show-hidden                                                             
+error:                     | ✔ %s --help should display all options with --custom-show-hidden                                            
+error:                     | %s%s      help message caching                                                                              
+error:                     | ✔ %s (%dms) should display proper usage when an async handler fails 104                                     
+error:                     | ✔ %s (%dms) should not display a cached help message for the next parsing 105                               
+error:                     | %s%s      usage for default command                                                                         
+error:                     | %s%s        default only                                                                                    
+error:                     | ✔ %s should contain the expected output for --help                                                          
+error:                     | ✔ %s should contain the expected output for showhelp                                                        
+error:                     | ✔ %s should contain the expected output for getHelp                                                         
+error:                     | ✔ %s should contain the expected output for getHelp when called from within handler                         
+error:                     | ✔ %s should contain the expected output for showHelp when called from within handler                        
+error:                     | ✔ %s should contain the expected output for showHelp, when exception occurs                                 
+error:                     | %s%s        multiple                                                                                        
+error:                     | ✔ %s should contain the expected output for --help                                                          
+error:                     | ✔ %s should contain the expected output for showHelp                                                        
+error:                     | ✔ %s should contain the expected output for showHelp when called from within handler                        
+error:                     | ✔ %s should contain the expected output for getHelp                                                         
+error:                     | ✔ %s should contain the expected output for getHelp when called from within handler                         
+error:                     | %s%s        positional                                                                                      
+error:                     | ✔ %s should contain the expected output for --help                                                          
+error:                     | ✔ %s should contain the expected output for showHelp                                                        
+error:                     | %s%s      async builder                                                                                     
+error:                     | ✔ %s shows appropriate usage instructions for nested command                                                
+error:                     | ✔ %s help is displayed before exit is called with async default command                                     
+error:                     | %s%s        positional                                                                                      
+error:                     | ✔ %s should contain the expected output for --help                                                          
+error:                     | ✔ %s should contain the expected output for getHelp                                                         
+error:                     | %s%s      usage configuration                                                                               
+error:                     | ✔ %s allows extras to be disabled when "hide-types" is true                                                 
+error:                     |                                                                                                             
+error:                     | %s%s    validation tests                                                                                    
+error:                     | %s%s      check                                                                                             
+error:                     | ✔ %s fails if error is thrown in check callback                                                             
+error:                     | ✔ %s does not fail if error is not thrown in check callback, and true is returned                           
+error:                     | ✔ %s callback has access to options                                                                         
+error:                     | %s%s      implies                                                                                           
+error:                     | ✔ %s fails if '_' populated, and implied argument not set                                                   
+error:                     | ✔ %s fails if key implies values in '_', but '_' is not populated                                           
+error:                     | ✔ %s fails if either implied argument is not set and displays only failed                                   
+error:                     | ✔ %s fails if --no-foo's implied argument is not set                                                        
+error:                     | ✔ %s fails if a key is set, along with a key that it implies should not be set                              
+error:                     | ✔ %s fails if implied key (with "no" in the name) is not set                                                
+error:                     | ✔ %s doesn't fail if implied key exists with value 0                                                        
+error:                     | ✔ %s doesn't fail if implied key exists with value false                                                    
+error:                     | ✔ %s doesn't fail if implied key (with "no" in the name) is set                                             
+error:                     | ✔ %s fails if implied key (with "no" in the name) is given when it should not                               
+error:                     | ✔ %s doesn't fail if implied key (with "no" in the name) that should not be given is not set                
+error:                     | ✔ %s allows key to be specified with option shorthand                                                       
+error:                     | %s%s      conflicts                                                                                         
+error:                     | ✔ %s fails if both arguments are supplied                                                                   
+error:                     | ✔ %s fails if argument is supplied along with either conflicting argument                                   
+error:                     | ✔ %s fails if conflicting arguments are provided, and strip-dashed is enabled                               
+error:                     | ✔ %s should not fail if no conflicting arguments are provided                                               
+error:                     | ✔ %s should not fail if argument with conflict is provided, but not the argument it conflicts with          
+error: error:              | ✔ %s should not fail if conflicting argument is provided, without argument with conflict                         
+error:                     | ✔ %s allows an object to be provided defining conflicting option pairs                                           
+error:                     | ✔ %s takes into account aliases when applying conflicts logic                                                    
+error:                     | ✔ %s allows key to be specified with option shorthand                                                            
+error:                     | ✔ %s should fail if alias of conflicting argument is provided                                                    
+error:                     | ✔ %s should fail if alias of argument with conflict is provided                                                  
+error:                     | ✔ %s should use appropriate translation                                                                          
+error:                     | %s%s      demand                                                                                                 
+error:                     | ✔ %s fails with standard error message if msg is not defined                                                     
+error:                     | ✔ %s fails in strict mode when no commands defined but command is passed                                         
+error:                     | ✔ %s fails because of undefined command and not because of argument after --                                     
+error:                     | ✔ %s fails in strict mode with invalid command                                                                   
+error:                     | ✔ %s fails in strict mode with extra positionals                                                                 
+error:                     | ✔ %s fails in strict mode with extra positionals for default command                                             
+error:                     | ✔ %s does not fail in strict mode when no commands configured                                                    
+error:                     | ✔ %s should recognize context variables in strict mode                                                           
+error:                     | ✔ %s should recognize context variables in strict mode, when running sub-commands                                
+error:                     | ✔ %s fails when a required argument is missing                                                                   
+error:                     | ✔ %s fails when required arguments are present, but a command is missing                                         
+error:                     | ✔ %s fails without a message if msg is null                                                                      
+error:                     | ✔ %s custom failure message should be printed for both min and max constraints                                   
+error:                     | ✔ %s interprets min relative to command                                                                          
+error:                     | ✔ %s interprets max relative to command                                                                          
+error:                     | %s%s      requiresArg                                                                                            
+error:                     | ✔ %s fails when a required argument value of type number is missing                                              
+error:                     | ✔ %s fails when a required argument value of type string is missing                                              
+error:                     | ✔ %s fails when a required argument value of type boolean is missing                                             
+error:                     | ✔ %s fails when a required argument value of type array is missing                                               
+error:                     | ✔ %s does not fail if argument with required value is not provided                                               
+error:                     | ✔ %s does not fail if argument with required value is not provided to subcommand                                 
+error:                     | %s%s      choices                                                                                                
+error:                     | ✔ %s fails with one invalid value                                                                                
+error:                     | ✔ %s fails with one valid and one invalid value                                                                  
+error:                     | ✔ %s fails with multiple invalid values for same argument                                                        
+error:                     | ✔ %s fails with case-insensitive value                                                                           
+error:                     | ✔ %s fails with multiple invalid arguments                                                                       
+error:                     | ✔ %s succeeds when demandOption is true and valid choice is provided                                             
+error:                     | ✔ %s fails when demandOption is true and choice is not provided                                                  
+error:                     | ✔ %s succeeds when demandOption is false and no choice is provided                                               
+error:                     | ✔ %s succeeds when demandOption is not provided and no choice is provided                                        
+error:                     | %s%s      config                                                                                                 
+error:                     | ✔ %s should raise an appropriate error if JSON file is not found                                                 
+error:                     | ✔ %s should not raise an exception if config file is set as default argument value                               
+error:                     | ✔ %s should be displayed in the help message                                                                     
+error:                     | ✔ %s should be displayed in the help message with its default name                                               
+error:                     | ✔ %s should allow help message to be overridden                                                                  
+error:                     | ✔ %s outputs an error returned by the parsing function                                                           
+error:                     | ✔ %s outputs an error if thrown by the parsing function                                                          
+error:                     | %s%s      defaults                                                                                               
+error:                     | ✔ %s should not fail when demanded options with defaults are missing                                             
+error:                     | %s%s      strict mode                                                                                            
+error:                     | ✔ %s does not fail when command with subcommands called                                                          
+error:                     | ✔ %s does not fail for hidden options                                                                            
+error:                     | ✔ %s does not fail for hidden options but does for unknown arguments                                             
+error:                     | ✔ %s does not fail if an alias is provided, rather than option itself                                            
+error:                     | ✔ %s does not fail when unrecognized option is passed after --                                                   
+error:                     | ✔ %s does not fail when options are defined using array/boolean/count/number/string                              
+error:                     | %s%s      demandOption                                                                                           
+error:                     | ✔ %s allows an array of options to be demanded                                                                   
+error:                     | ✔ %s allows demandOption in option shorthand                                                                     
+error:                     | %s%s      demandCommand                                                                                          
+error:                     | ✔ %s should return a custom failure message when too many non-hyphenated arguments are found after a demand count
+error:                     | ✔ %s allows a custom min message to be provided                                                                  
+error:                     | ✔ %s allows a custom min and max message to be provided                                                          
+error:                     | ✔ %s defaults to demanding 1 command                                                                             
+error:                     | ✔ %s treats positionals in "--" towards count requirement                                                        
+error:                     | %s%s      strictCommands                                                                                         
+error:                     | ✔ %s succeeds in parse if command is known                                                                       
+error:                     | ✔ %s succeeds in parse if top level and inner command are known                                                  
+error:                     | ✔ %s fails with error if command is unknown                                                                      
+error:                     | ✔ %s fails with error if inner command is unknown                                                                
+error:                     | ✔ %s does not apply implicit strictCommands to inner commands                                                    
+error:                     | ✔ %s allows strictCommands to be applied to inner commands                                                       
+error:                     | %s%s      strictOptions                                                                                          
+error:                     | ✔ %s succeeds if option is known and command is unknown                                                          
+error:                     | ✔ %s fails if option is unknown                                                                                  
+error:                     | ✔ %s applies strict options when commands are invoked                                                            
+error:                     | ✔ %s allows strict options to be turned off                                                                      
+error:                     |                                                                                                                  
+error:                     | %s%s    yargs dsl tests                                                                                          
+error:                     | ✔ %s should use bin name for $0, eliminating path                                                                
+error:                     | ✔ %s should not remove the 1st argument of bundled electron apps                                                 
+error:                     | ✔ %s should remove the 1st argument of unbundled electron apps                                                   
+error:                     | ✔ %s accepts an object for aliases                                                                               
+error:                     | ✔ %s does not populate argv with placeholder keys for unset options                                              
+error:                     | ✔ %s accepts an object for implies                                                                               
+error:                     | ✔ %s accepts an object for describes                                                                             
+error:                     | ✔ %s a function can be provided, to execute when a parsing failure occurs                                        
+error:                     | ✔ %s should set alias to string if option is string                                                              
+error:                     | ✔ %s should allow a valid choice                                                                                 
+error:                     | ✔ %s should ignore a missing array choice with an empty default                                                  
+error:                     | ✔ %s should allow defaultDescription to be set with .option()                                                    
+error:                     | ✔ %s should not require config object for an option                                                              
+error:                     | ✔ %s should not fail if command handler freezes object                                                           
+error:                     | ✔ %s should allow array and requires arg to be used in conjunction                                               
+error:                     | %s%s      hide                                                                                                   
+error:                     | ✔ %s should add the key to hiddenOptions                                                                         
+error:                     | %s%s      showHidden                                                                                             
+error:                     | ✔ %s should have a default show-hidden private option pre-configured                                             
+error:                     | ✔ %s should not have show-hidden as an actual option described by default                                        
+error:                     | ✔ %s should set show-hidden option                                                                               
+error:                     | ✔ %s should set custom-show-hidden option                                                                        
+error:                     | %s%s      showHelpOnFail                                                                                         
+error:                     | ✔ %s should display custom failure message, if string is provided as first argument                              
+error:                     | ✔ %s calling with no arguments should default to displaying help                                                 
+error:                     | %s%s      exitProcess                                                                                            
+error:                     | ✔ %s should set exit process to true, if no argument provided                                                    
+error:                     | %s%s        when exitProcess is set to false and a failure occurs                                                
+error:                     | ✔ %s should throw an exception                                                                                   
+error:                     | ✔ %s should output the errors to stderr once                                                                     
+error:                     | %s%s      reset                                                                                                  
+error:                     | ✔ %s should put yargs back into its initial state                                                                
+error:                     | ✔ %s does not invoke parse with an error if reset has been called and option is not global                       
+error:                     | %s%s      command                                                                                                
+error:                     | ✔ %s executes command handler with parsed argv                                                                   
+error:                     | ✔ %s runs all middleware before reaching the handler                                                             
+error:                     | ✔ %s recommends a similar command if no command handler is found                                                 
+error:                     | ✔ %s does not recommend a similar command if no similar command exists                                           
+error:                     | ✔ %s recommends the longest match first                                                                          
+error:                     | ✔ %s counts tranposition as one mistake                                                                          
+error:                     | ✔ %s does not print command recommendation if help message will be shown                                         
+error:                     | ✔ %s skips executing root-level command if builder's help is executed                                            
+error:                     | ✔ %s executes top-level help if no handled command is provided                                                   
+error:                     | ✔ %s accepts an object for describing a command's options                                                        
+error:                     | ✔ %s accepts a module with a 'builder' and 'handler' key                                                         
+error:                     | ✔ %s accepts a module with a keys 'command', 'describe', 'builder', and 'handler'                                
+error:                     | ✔ %s throws error for non-module command object missing 'command' string                                         
+error:                     | %s%s      terminalWidth                                                                                          
+error:                     | ✔ %s returns the maximum width of the terminal                                                                   
+error:                     | %s%s      number                                                                                                 
+error:                     | ✔ %s accepts number arguments when a number type is specified                                                    
+error:                     | ✔ %s should expose an options short-hand for numbers                                                             
+error:                     | %s%s      choices                                                                                                
+error:                     | ✔ %s accepts an object                                                                                           
+error:                     | ✔ %s accepts a string and array                                                                                  
+error:                     | ✔ %s accepts a string and single value                                                                           
+error:                     | %s%s      locale                                                                                                 
+error:                     | ✔ %s uses english as a default locale                                                                            
+error:                     | ✔ %s detects the operating system's locale                                                                       
+error:                     | ✔ %s should not detect the OS locale if detectLocale is 'false'                                                  
+error:                     | ✔ %s allows a locale other than the default 'en' to be specified                                                 
+error:                     | ✔ %s handles a missing locale                                                                                    
+error:                     | ✔ %s properly translates a region-specific locale file                                                           
+error:                     | ✔ %s uses locale string for help option default desc on .locale().help()                                         
+error:                     | ✔ %s uses locale string for help option default desc on .help().locale()                                         
+error:                     | ✔ %s does not enter infinite loop when locale is invalid                                                         
+error:                     | %s%s        updateLocale                                                                                         
+error:                     | ✔ %s allows you to use updateStrings() as an alias for updateLocale()                                            
+error:                     | %s%s      env                                                                                                    
+error:                     | ✔ %s translates no arg as empty prefix (parser applies all env vars)                                             
+error:                     | ✔ %s accepts true as a valid prefix (parser applies all env vars)                                                
+error:                     | ✔ %s accepts empty string as a valid prefix (parser applies all env vars)                                        
+error:                     | ✔ %s accepts a string prefix                                                                                     
+error:                     | ✔ %s translates false as undefined prefix (disables parsing of env vars)                                         
+error:                     | %s%s      parse                                                                                                  
+error:                     | ✔ %s parses a simple string                                                                                      
+error:                     | ✔ %s parses a quoted string                                                                                      
+error:                     | ✔ %s parses an array                                                                                             
+error:                     | ✔ %s ignores implicit help command (with short-circuit)                                                          
+error:                     | ✔ %s allows an optional context object to be provided                                                            
+error:                     | ✔ %s overrides parsed value of argv with context object                                                          
+error:                     | ✔ %s parses process.parse() if no arguments are provided                                                         
+error:                     | ✔ %s can be called multiple times with the same behavior                                                         
+error:                     | %s%s      parsed                                                                                                 
+error:                     | ✔ %s should be false before parsing                                                                              
+error:                     | ✔ %s should not be false after parsing                                                                           
+error:                     | %s%s      function passed as second argument to parse                                                            
+error:                     | ✔ %s does not print to stdout                                                                                    
+error:                     | ✔ %s gets passed error as first argument                                                                         
+error:                     | ✔ %s gets passed argv as second argument                                                                         
+error:                     | ✔ %s gets passed output as third argument                                                                        
+error:                     | ✔ %s reinstates original exitProcess setting after invocation                                                    
+error:                     | ✔ %s does not call callback if subsequently called without callback                                              
+error:                     | ✔ %s resets error state between calls to parse                                                                   
+error:                     | %s%s        commands                                                                                             
+error:                     | ✔ %s does not invoke command handler if output is populated                                                      
+error:                     | ✔ %s invokes command handler normally if no output is populated                                                  
+error:                     | ✔ %s allows context object to be passed to parse                                                                 
+error:                     | ✔ %s does not fail if context object has cyclical reference                                                      
+error: error:              | ✔ %s overwrites the prior context object, when parse is called multiple times                                             
+error:                     | ✔ %s populates argv appropriately when parse is called multiple times                                                     
+error:                     | ✔ %s populates output appropriately when parse is called multiple times                                                   
+error:                     | ✔ %s resets errors when parse is called multiple times                                                                    
+error:                     | ✔ %s preserves top-level config when parse is called multiple times                                                       
+error:                     | %s%s      config                                                                                                          
+error:                     | ✔ %s allows a parsing function to be provided as a second argument                                                        
+error:                     | ✔ %s allows key to be specified with option shorthand                                                                     
+error:                     | ✔ %s can be disabled with option shorthand                                                                                
+error:                     | ✔ %s allows to pass a configuration object                                                                                
+error:                     | %s%s        extends                                                                                                       
+error:                     | ✔ %s applies default configurations when given config object                                                              
+error:                     | ✔ %s protects against circular extended configurations                                                                    
+error:                     | ✔ %s handles absolute paths                                                                                               
+error:                     | ✔ %s tolerates null prototype config objects                                                                              
+error:                     | ✔ %s allows a module to be extended, rather than a JSON file                                                              
+error:                     | ✔ %s ignores an extends key that does not look like a path or module                                                      
+error:                     | ✔ %s allows files with .*rc extension to be extended                                                                      
+error:                     | ✔ %s deep merges configs when extending when deep-merge-config=true                                                       
+error:                     | ✔ %s deep merges multiple configs when extending when deep-merge-config=true                                              
+error:                     | ✔ %s does not deep merge objects by default                                                                               
+error:                     | %s%s      normalize                                                                                                       
+error:                     | ✔ %s normalizes paths passed as arguments                                                                                 
+error:                     | ✔ %s normalizes path when when it is updated                                                                              
+error:                     | ✔ %s allows key to be specified with option shorthand                                                                     
+error:                     | ✔ %s can be disabled with option shorthand                                                                                
+error:                     | %s%s      narg                                                                                                            
+error:                     | ✔ %s accepts a key as the first argument and a count as the second                                                        
+error:                     | ✔ %s accepts a hash of keys and counts                                                                                    
+error:                     | ✔ %s allows key to be specified with option shorthand                                                                     
+error:                     | %s%s      global                                                                                                          
+error:                     | ✔ %s does not reset a global options when reset is called                                                                 
+error:                     | ✔ %s does not reset alias of global option                                                                                
+error:                     | ✔ %s should set help to global option by default                                                                          
+error:                     | ✔ %s should set version to global option by default                                                                       
+error:                     | ✔ %s should not reset usage descriptions of global options                                                                
+error:                     | ✔ %s should not reset implications of global options                                                                      
+error:                     | ✔ %s should expose an options short-hand for declaring global options                                                     
+error:                     | %s%s      pkgConf                                                                                                         
+error:                     | ✔ %s uses values from package.json                                                                                        
+error:                     | ✔ %s combines yargs defaults with package.json values                                                                     
+error:                     | ✔ %s should use value from package.json, if argv value is using default value                                             
+error:                     | ✔ %s should apply value from config object to all aliases                                                                 
+error:                     | ✔ %s is cool with a key not existing                                                                                      
+error:                     | ✔ %s allows an alternative cwd to be specified                                                                            
+error:                     | ✔ %s doesn't mess up other pkg lookups when cwd is specified                                                              
+error:                     | ✔ %s handles an invalid package.json                                                                                      
+error:                     | ✔ %s should apply default configurations from extended packages                                                           
+error:                     | ✔ %s should apply extended configurations from cwd when no path is given                                                  
+error:                     | ✔ %s allows a full path with file to be provided for cwd                                                                  
+error:                     | ✔ %s gracefully handles a missing package.json                                                                            
+error:                     | %s%s      parserConfiguration                                                                                             
+error:                     | ✔ %s overrides the default parser configuration                                                                           
+error:                     | ✔ %s supports --unknown-options-as-args                                                                                   
+error:                     | %s%s      skipValidation                                                                                                  
+error:                     | ✔ %s skips validation if an option with skipValidation is present                                                         
+error:                     | ✔ %s does not skip validation if no option with skipValidation is present                                                 
+error:                     | ✔ %s allows key to be specified with option shorthand                                                                     
+error:                     | ✔ %s allows having an option that skips validation but not skipping validation if that option is not used                 
+error:                     | %s%s      .help()                                                                                                         
+error:                     | ✔ %s enables `--help` option and `help` command without arguments                                                         
+error:                     | ✔ %s enables `--help` option and `help` command with `true` argument                                                      
+error:                     | ✔ %s enables given string as help option and command with string argument                                                 
+error:                     | ✔ %s enables given string as help option and command with custom description with two string arguments                    
+error:                     | ✔ %s enables given string as help option and command with custom description with two string arguments and `true` argument
+error:                     | %s%s      .help() with .alias()                                                                                           
+error:                     | ✔ %s uses multi-char (but not single-char) help alias as command                                                          
+error:                     | %s%s      .coerce()                                                                                                       
+error:                     | ✔ %s supports string and function args (as option key and coerce function)                                                
+error:                     | ✔ %s supports object arg (as map of multiple options)                                                                     
+error:                     | ✔ %s supports array and function args (as option keys and coerce function)                                                
+error:                     | ✔ %s allows an error to be handled by fail() handler                                                                      
+error:                     | ✔ %s supports an option alias                                                                                             
+error:                     | ✔ %s supports a global option within command                                                                              
+error:                     | ✔ %s is supported by .option()                                                                                            
+error:                     | ✔ %s supports positional and variadic args for a command                                                                  
+error:                     | ✔ %s returns camelcase args for a command                                                                                 
+error:                     | ✔ %s allows an error from positional arg to be handled by fail() handler                                                  
+error:                     | ✔ %s throws error if coerce callback is missing                                                                           
+error:                     | ✔ %s shows coerced option in help                                                                                         
+error:                     | ✔ %s argv includes coerced aliases                                                                                        
+error:                     | ✔ %s argv includes coerced camelCase                                                                                      
+error:                     | ✔ %s coerce still works when key used for coerce is not explicitly present in argv                                        
+error:                     | ✔ %s argv does not include stripped aliases                                                                               
+error:                     | ✔ %s argv does not include stripped dashes                                                                                
+error:                     | ✔ %s argv does not include disabled camel-case-expansion                                                                  
+error:                     | %s%s      stop parsing                                                                                                    
+error:                     | ✔ %s populates argv._ with unparsed arguments after "--"                                                                  
+error:                     | %s%s      yargs context                                                                                                   
+error:                     | ✔ %s should track commands being executed                                                                                 
+error:                     | %s%s      positional                                                                                                      
+error:                     | ✔ %s defaults array with no arguments to []                                                                               
+error:                     | ✔ %s populates array with appropriate arguments                                                                           
+error:                     | ✔ %s allows a conflicting argument to be specified                                                                        
+error:                     | ✔ %s allows a default to be set                                                                                           
+error:                     | ✔ %s allows a defaultDescription to be set                                                                                
+error:                     | ✔ %s allows an implied argument to be specified                                                                           
+error:                     | ✔ %s allows an alias to be provided                                                                                       
+error:                     | ✔ %s allows normalize to be specified                                                                                     
+error:                     | ✔ %s allows a choices array to be specified                                                                               
+error:                     | ✔ %s allows a coerce method to be provided                                                                                
+error:                     | ✔ %s allows a boolean type to be specified                                                                                
+error:                     | ✔ %s allows a number type to be specified                                                                                 
+error:                     | ✔ %s allows a string type to be specified                                                                                 
+error:                     | ✔ %s allows positional arguments for subcommands to be configured                                                         
+error:                     | ✔ %s allows positionals to be defined for default command                                                                 
+error:                     | ✔ %s does not parse large scientific notation values, when type string                                                    
+error:                     | %s%s      "nargs" with "array"                                                                                            
+error:                     | ✔ %s should not consume more than nargs items                                                                             
+error:                     | ✔ %s should apply nargs with higher precedence than requiresArg: true                                                     
+error:                     | ✔ %s should apply nargs with higher precedence than requiresArg()                                                         
+error:                     | ✔ %s should raise error if not enough values follow nargs key                                                             
+error:                     | %s%s      should not pollute the prototype                                                                                
+error:                     | ✔ %s does not pollute, when .parse() is called                                                                            
+error:                     | ✔ %s does not pollute, when .argv is called                                                                               
+error:                     | ✔ %s does not pollute, when options are set                                                                               
+error:                     | %s%s      parsing --value as a value in -f=--value and --bar=--value                                                      
+error:                     | ✔ %s should work in the general case                                                                                      
+error:                     | ✔ %s should work with array                                                                                               
+error:                     | ✔ %s should work with nargs                                                                                               
+error:                     | ✔ %s should work with both array and nargs                                                                                
+error:                     | %s%s      bug #1758                                                                                                       
+error:                     | ✔ %s does not drop .0 if flag is configured as string                                                                     
+error:                     | ✔ %s does not drop .0 if positional is configured as string                                                               
+error:                     | ✔ %s continues to parse values in _ as numbers, when they look like numbers                                               
+error:                     | %s%s      async                                                                                                           
+error:                     | %s%s        parse                                                                                                         
+error:                     | ✔ %s calls parse callback once async handler has resolved                                                                 
+error:                     | ✔ %s calls parse callback once deeply nested promise has resolved                                                         
+error:                     | ✔ %s populates err with async rejection                                                                                   
+error:                     | ✔ %s caches nested help output, so that it can be output by showHelp()                                                    
+error:                     | ✔ %s caches deeply nested help output, so that it can be output by showHelp()                                             
+error:                     | %s%s        argv                                                                                                          
+error:                     | ✔ %s returns promise that resolves argv on success                                                                        
+error:                     | ✔ %s returns deeply nested promise that resolves argv on success                                                          
+error:                     | ✔ %s returns promise that can be caught if rejected                                                                       
+error:                     | ✔ %s caches nested help output, so that it can be output by showHelp()                                                    
+error:                     | ✔ %s caches deeply nested help output, so that it can be output by showHelp()                                             
+error:                     | %s%s      getHelp                                                                                                         
+error:                     | ✔ %s should run parse() and return help, if parse() not yet called                                                        
+error:                     | ✔ %s should display top-level help with no command given                                                                  
+error:                     | ✔ %s should allow help to be output for failed command                                                                    
+error:                     | ✔ %s should allow help to be output for successful command                                                                
+error:                     | ✔ %s should not run handler or middleware                                                                                 
+error:                     | ✔ %s should use cached help message for nested synchronous commands                                                       
+error:                     | ✔ %s should return appropriate help message when async builder used                                                       
+error:                     | %s%s      getters                                                                                                         
+error:                     | ✔ %s has getter for strict commands                                                                                       
+error:                     | ✔ %s has getter for strict options                                                                                        
+error:                     | %s%s      parseAsync                                                                                                      
+error:                     | ✔ %s returns promise when parse is synchronous                                                                            
+error:                     | ✔ %s returns promise when parse is asynchronous                                                                           
+error:                     | %s%s      parseSync                                                                                                       
+error:                     | ✔ %s succeeds if no async functions used during parsing                                                                   
+error:                     | ✔ %s throws if any async method is used                                                                                   
+error:                     |                                                                                                                           
+error:                     |                                                                                                                           
+error:                     | %d passing (%s) 827 10s                                                                                                   
+error:                     | %d pending 1                                                                                                              
+error:                     |                                                                                                                           
+error:                     | ----------|---------|----------|---------|---------|-------------------                                                   
+error:                     | File      | % Stmts | % Branch | % Funcs | % Lines | Uncovered Line #s                                                    
+error:                     | ----------|---------|----------|---------|---------|-------------------                                                   
+error:                     | All files |       0 |        0 |       0 |       0 |                                                                      
+error:                     | ----------|---------|----------|---------|---------|-------------------                                                   
+error:                     | version: 22                                                                                                               
+error: done                | The smoke test has failed.
+info: duration            | test duration: 787085ms
+info: yargs npm:          | Test timeout.finish called more then once

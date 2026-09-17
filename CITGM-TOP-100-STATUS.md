@@ -114,7 +114,7 @@ not being reclassified as newly rerun here.
 | 86 | lodash | PASS | none observed | Exact Node 22.23.2 CITGM passes `lodash@4.18.1`; Chromium (`citgm-1789508647838`) and Firefox (`citgm-1789508647644`) also pass the published install and smoke-test contract with no browser-only failure. |
 | 87 | universalify | PASS | ours fixed | Exact Node 22.23.2 CITGM passes `universalify@2.0.1`; Chromium (`citgm-1789509679549`) and Firefox (`citgm-1789509682041`) also pass the published install and smoke-test contract. The initial browser crash was an ours-side stream compatibility defect: legacy `colortape` uses `_buffer` for private state, while the harness had used that name for its readable queue. |
 | 88 | form-data | GATE-BLOCKED | ours-side virtual HTTP child lifecycle; published posttest remains unsupported | Exact Node 22.23.2 CITGM for `form-data@4.0.6` at gitHead `64190db548c0179e37206858e39f27cf513e9435` (`native-citgm-node22-current-rerun.log`) reaches all 29 test files (`0 errors in 29 files`) and then fails the package posttest because `npx npm@'>=10.2' audit --production` resolves to `npm@`/`npm@>=10.2: command not found`. Current Chromium (`citgm-1789629587979`, retry `citgm-1789630113179`) and Firefox (`citgm-1789629765878`) deterministically hang in the first inner HTTP fixture before the package test summary; the child remains pending with `TimeoutError` after 5000 ms. Earlier fixed-reallyexit browser artifacts pass all 29 files and reach the same posttest, but the current source still has an ours-side virtual HTTP child regression to fix before promotion. Threshold-8 lifecycle experiment `citgm-1789629960145` did not change the failure. |
-| 89 | jiti | BLOCKED | upstream repository/toolchain (native-reproduced) | Exact Node 22.23.2 CITGM installs `jiti@2.7.0` from gitHead `fd3bb289b75ed207edfb686d671ed50144f7e90f`, then its published lint lifecycle fails Prettier check for `src/plugins/babel-plugin-transform-typescript-metadata/serialize-type.ts`. Chromium (`citgm-1789519209249`) and Firefox (`citgm-1789519301768`) reproduce the same failure after successful install; no browser-only runtime failure is present. |
+| 89 | jiti | BLOCKED | upstream repository/toolchain (native-reproduced install/lint contract) | Current Node 22.23.2 native CITGM for `jiti@2.7.0` at gitHead `fd3bb289b75ed207edfb686d671ed50144f7e90f` now fails fresh npm install with `Cannot read properties of null (reading 'edgesOut')`. Current Chromium (`citgm-1789630289894`) and Firefox (`citgm-1789630384166`) install successfully and reproduce the published `pnpm lint` Prettier failure on `src/plugins/babel-plugin-transform-typescript-metadata/serialize-type.ts`; no browser-only runtime failure is present. |
 | 90 | @radix-ui/react-primitive | BLOCKED | upstream published workspace dependency (native-reproduced) | Exact Node 22.23.2 CITGM downloads `@radix-ui/react-primitive@2.1.10` but cannot install its published `@repo/*@0.0.0` workspace dependencies: native and Chromium report `@repo/builder` HTTP 404, while Firefox reports `@repo/typescript-config` HTTP 404. Both browser runs stop at install, matching the native package-layout blocker; no browser-only runtime failure is present. |
 | 91 | onetime | PASS | none observed | Exact Node 22.23.2 native CITGM passes `onetime@8.0.0` at lookup revision `481ec583f8303e98c4d1d16bb316ef8e6b04d72c`; Chromium (`citgm-1789523060434`) and Firefox (`citgm-1789523175419`) also pass the complete install and `xo` lifecycle. No runtime, nested-dependency, or upstream failure was observed. |
 | 92 | node-releases | BLOCKED | package contract has no test script (native-reproduced) | Exact Node 22.23.2 native CITGM installs `node-releases@2.0.55` and records `Module does not support npm-test!`. Chromium (`citgm-1789523416450`) and Firefox (`citgm-1789523448892`) install the same candidate and reproduce the same CITGM result; no browser-only runtime failure is present. |
@@ -2291,6 +2291,8 @@ browser attempts are preserved under `artifacts/citgm-top-100/rank-089-jiti/`.
 | --- | --- | --- |
 | `native-citgm-node-v22-rerun-final.log` | Installation succeeds; the published `pnpm lint` lifecycle reaches `prettier -c src lib test stubs` and fails on `src/plugins/babel-plugin-transform-typescript-metadata/serialize-type.ts`. | Native-reproduced upstream repository/toolchain blocker. |
 | `browser-chromium/citgm-1789519209249` / `browser-firefox/citgm-1789519301768` | Both engines install the exact candidate and reach the same Prettier check, reporting the same file and exit code; neither exposes a browser-only package or runtime failure. | Rank 89 is recorded `BLOCKED` on the native-reproduced published lint contract; no package-specific shim or source change was added. |
+| `native-citgm-node22-current-rerun.log` | The current native run fails earlier during fresh npm install with `Cannot read properties of null (reading 'edgesOut')`. | Current native resolver/toolchain failure; no package source or harness workaround was added. |
+| `citgm-chromium-node22-current/citgm-1789630289894` / `citgm-firefox-node22-current/citgm-1789630384166` | Both browser engines install successfully, run `eslint`, then fail `pnpm lint` at Prettier for the same checked-in TypeScript file. | Browser-native package lifecycle evidence remains the authoritative published lint blocker; no browser-only runtime failure is present. |
 
 Because the rank-89 CITGM result was not a clean pass, the required full gates
 were run before advancing the cursor:
@@ -2302,6 +2304,11 @@ full-playwright-firefox-final.log       PASS — 328/328
 ```
 
 The ordered cursor now advances to rank 90.
+
+The current rerun supersedes the earlier native Prettier-only observation: the
+native resolver now fails during install, while both browser engines reach and
+reproduce the same checked-in formatting failure. No source or test changes
+were made.
 
 ## Rank 90 continuation record
 

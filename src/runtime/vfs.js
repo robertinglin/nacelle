@@ -3981,7 +3981,7 @@ export function createVfs(options = {}) {
   function readdir(pathValue, optionsValue, callback) {
     const done = typeof optionsValue === 'function' ? optionsValue : callback;
     resolve(pathValue);
-    asyncFsOperation(done, () => fs.readdirSync(pathValue, optionsValue), true);
+    asyncFsOperation(done, () => fs.readdirSync(pathValue, optionsValue), true, true);
   }
 
   function unlink(pathValue, callback) {

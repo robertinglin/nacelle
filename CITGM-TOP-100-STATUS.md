@@ -56,7 +56,7 @@ not being reclassified as newly rerun here.
 | 28 | json-schema-traverse | PASS | none observed | Published `json-schema-traverse@1.0.0` at gitHead `6b45983cd76270042cc79527da5c8972f13599ec` passes exact CITGM unchanged in Chromium (`citgm-1789300059787`) and Firefox (`citgm-1789300122014`); install, ESLint, Mocha, and NYC phases all exited 0. No runtime, nested-dependency, or upstream package/repository failure was observed. Repository-wide gates were skipped under the unchanged double-CITGM rule. |
 | 29 | string-width | PASS | none observed | Published `string-width@8.2.2` at gitHead `64dc20cddd374df0ff43ba3469491ae98cf0cdfc` passes exact CITGM unchanged in Chromium (`citgm-1789300238587`) and Firefox (`citgm-1789300334846`); install, XO, AVA, and tsd phases all exited 0. No runtime, nested-dependency, or upstream package/repository failure was observed. Repository-wide gates were skipped under the unchanged double-CITGM rule. |
 | 30 | escape-string-regexp | BLOCKED | upstream package/repository (obsolete tsd toolchain) | Published `escape-string-regexp@5.0.0` at gitHead `ba9a4473850cb367936417e97f1f2191b7cc67dd` passes install, XO, and AVA (3 tests) but its pinned `tsd@^0.14.0` fails with 2,791 current declaration errors from `@types/node`, `undici-types`, `@types/readable-stream`, and tsd's bundled TypeScript. Chromium CITGM `citgm-1789300473401` and Firefox CITGM `citgm-1789300587441` both fail at tsd; Firefox also reports `this.isNative is not a function` while formatting the dependency diagnostics. This is an upstream/package-layout/toolchain problem, not a Nacelle compatibility failure; no fake shim or package-specific workaround was added. Complete artifacts are preserved under `artifacts/citgm-top-100/rank-030-escape-string-regexp/`. |
-| 31 | globals | BLOCKED | nested dependency interaction (native Node also fails) | Exact browser CITGM passes in Firefox after the independent util.inspect fix, but Chromium installs ESLint 9.39.5 at the root and ESLint 8.57.1 under XO; ESLint 9 meta.defaultOptions is then invoked through ESLint 8 Linter and fails. The same root-9/nested-8 layout fails native Node with the same XO error; proof is preserved in native-node/duplicate-eslint-layout.log. Initial browser runtime failures were ours and are fixed in the working runtime; this remaining cross-major dependency interaction is not browser-only. |
+| 31 | globals | BLOCKED | upstream/nested dependency interaction (native Node 22 reproduction) | The exact Node 22 CITGM passes on the normal deduped tree (`native-citgm-node-v22-fixed.log`). The fixed Chromium (`citgm-1789606904698`) and Firefox (`citgm-1789606909257`) runs both fail only when XO's nested ESLint 8.57.1 loads a rule from root ESLint 9.39.5; the same split tree fails native Node 22 in `native-node-v22-duplicate-eslint-layout.log`. The earlier browser-only util.inspect and generated-data `globalThis` failures were ours and are fixed by the runtime change and focused Chromium/Firefox regression. |
 | 32 | is-fullwidth-code-point | PASS | none observed | Published `is-fullwidth-code-point@5.1.0` at gitHead `2696d873463fde9f6b09b49c98380bd49c67b00a` passes exact CITGM unchanged in Chromium (`citgm-1789307869379`) and Firefox (`citgm-1789307953202`); install, XO, AVA, and tsd phases all exited 0. No runtime, nested-dependency, or upstream package/repository failure was observed. Repository-wide gates were skipped under the unchanged double-CITGM rule. |
 | 33 | argparse | PASS | ours | Published `argparse@3.0.2` at gitHead `b24ea1892b4b7e7a268cd4554cdd654ec47c148f` passes exact CITGM in Chromium (`citgm-1789315178421`) and Firefox (`citgm-1789315226994`). The VFS now rejects writes to chmod 0400 files, and the loader accepts Firefox's Node-equivalent class-call TypeError wording; native Node passes the targeted `TestTypeClassicClass` suite. Required final gates passed after rebuilding: `npm test` and full Chromium/Firefox Playwright; complete artifacts and native comparison logs are preserved under `artifacts/citgm-top-100/rank-033-argparse/`. |
 | 34 | ignore | PASS | ours | Published `ignore@7.0.9` at gitHead `821765efdf7752b186a03ed0450d9ee013cee099` passes exact CITGM in Chromium (`citgm-1789317691280`) and Firefox (`citgm-1789317740056`); both the `7.0.6` and `7.0.9` compatibility worktrees pass, including `--win32`. Native Node v26 also passes the exact package (1368 assertions plus both compatibility modes), proving the initial browser failure was ours: the browser materialized a GitHub source archive without Git history, and the runtime lacked the Git/worktree surface and synchronous shebang launcher behavior required by the package. Required final gates passed: build; `npm test` 340/340; Chromium Playwright 289/289; Firefox Playwright 289/289. Complete attempts and native proof are preserved under `artifacts/citgm-top-100/rank-034-ignore/`. |
@@ -1162,26 +1162,33 @@ Complete artifacts for every browser attempt are preserved under
 
 | Run / log | Observed failure | Classification and resolution |
 | --- | --- | --- |
-| `citgm-1789300757218` | Chromium failed during XO in ESLint no-warning-comments with Cannot read properties of undefined (reading decoration). | Ours initially. The trace led to the browser runtime missing util.inspect.defaultOptions; that compatibility fix is retained and covered by a browser regression oracle. |
-| `citgm-1789300880970` | Firefox ran five AVA tests but left globals.json unresolved; the diagnostic path reported missing util.inspect.defaultOptions. | Ours. Added Node-compatible inspect defaults; Firefox rerun `citgm-1789303621324` passes all 6 AVA tests. |
-| `citgm-1789305191353` / `citgm-1789305524059` | Chromium reaches the published root ESLint 9.39.5 rule through eslint-plugin-unicorn, while XO runs the nested ESLint 8.57.1 Linter. ESLint 9's rule expects meta.defaultOptions, but ESLint 8 does not apply it; XO exits before linting the candidate. | Nested dependency interaction. Native Node passes the normal deduped tree, but the same root-9/nested-8 tree reproduced under native Node also exits at XO with the identical error; this is recorded in native-node/duplicate-eslint-layout.log. No fake shim or package-specific success path was added. |
+| `citgm-1789605905751` / `citgm-1789606016399` | Before the final runtime fix, Chromium failed in XO with the util.inspect/no-warning-comments path; Firefox reached AVA but the generated `globals` data contained the rewritten `__bnhGuestGlobalThis` key and failed its identifier/alphabetical assertions. | Ours. The existing util.inspect compatibility fix was retained; the ESM rewriter now redirects only bare `globalThis` references, preserving object-literal keys. The focused regression passes in both Chromium and Firefox. |
+| `citgm-1789606904698` / `citgm-1789606909257` | After the runtime fix, both browsers install root `eslint@9.39.5` for the modern plugins while XO invokes nested `eslint@8.57.1`; `unicorn/expiring-todo-comments` calls the ESLint 9 rule through the ESLint 8 Linter and fails on `context.options`. | External nested dependency/version interaction. The normal native Node 22 tree passes (`native-citgm-node-v22-fixed.log`), while the forced root-9/nested-8 layout fails the same XO path under native Node 22 (`native-node-v22-duplicate-eslint-layout.log`). No fake shim or package-specific success path was added. |
 
 ## Rank 31 gate evidence
 
-The package did receive a runtime change, so the repository-wide build, unit,
-and Playwright gates are required before committing the status record. The
-remaining browser failure is a nested dependency interaction already proven
-to fail under native Node with the same installed layout.
+The package received a runtime and permanent regression-test change, so the
+repository-wide build, unit, WASM, and full Playwright gates are required before
+committing the status record. The remaining browser failure is a nested
+dependency interaction already proven to fail under native Node 22 with the
+same installed layout.
 
 ```text
-NACELLE_CITGM_ARTIFACT_DIR=artifacts/citgm-top-100/rank-031-globals npm run citgm:browser:chromium -- globals  BLOCKED — citgm-1789305524059 (root ESLint 9 / XO ESLint 8 interaction)
-NACELLE_CITGM_ARTIFACT_DIR=artifacts/citgm-top-100/rank-031-globals npm run citgm:browser:firefox -- globals   PASS — citgm-1789303621324
-native Node exact deduped globals tree                                      PASS — native-node/summary.log
-native Node duplicate ESLint layout                                        FAIL — native-node/duplicate-eslint-layout.log
+NACELLE_CITGM_ARTIFACT_DIR=artifacts/citgm-top-100/rank-031-globals/citgm-chromium-fixed npm run citgm:browser:chromium -- globals  BLOCKED — citgm-1789606904698 (root ESLint 9 / XO ESLint 8 interaction)
+NACELLE_CITGM_ARTIFACT_DIR=artifacts/citgm-top-100/rank-031-globals/citgm-firefox-fixed npm run citgm:browser:firefox -- globals   BLOCKED — citgm-1789606909257 (root ESLint 9 / XO ESLint 8 interaction)
+native Node 22 exact deduped globals tree                                      PASS — native-citgm-node-v22-fixed.log
+native Node 22 duplicate ESLint layout                                        FAIL — native-node-v22-duplicate-eslint-layout.log
+npm run build:v22                                                             PASS — 5 WASM artifacts, Node v22.23.2
+npm run check:wasm                                                            PASS — 5 exports validated
+npm test                                                                      PASS — 354/354
+npm run test:browser:chromium                                                PASS — 365/365
+npm run test:browser:firefox                                                 PASS — 365/365
 ```
 
 Rank 31 is recorded as `BLOCKED` only after the same failing dependency layout
-was reproduced under native Node, and the ordered cursor advances to rank 32.
+was reproduced under native Node 22. All required post-change repository-wide
+gates are green, and the status/artifact record is committed before the ordered
+cursor advances to the next blocked candidate.
 
 ## Rank 32 failure record
 

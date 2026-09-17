@@ -582,6 +582,36 @@ test.describe('browser runtime bridge and core primitives', () => {
     expect(result.stdout).toContain('inspect and vm compatibility completed');
   });
 
+  test('does not expose ESM global overlay bindings', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      (async () => {
+        const { observed } = await import('/node/esm-global-surface.mjs');
+        assert.equal(observed.hasInternalAlias, false);
+        assert.equal(observed.globalThisIsGuest, true);
+        assert.equal(observed.globalThisKeyPreserved, true);
+        process.stdout.write('esm global overlay surface completed');
+      })().catch(error => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/esm-global-surface.mjs': `
+          const data = {globalThis: false};
+          export const observed = {
+            hasInternalAlias: Object.keys(globalThis).includes('__bnhGuestGlobalThis'),
+            globalThisIsGuest: globalThis === global,
+            globalThisKeyPreserved: Object.hasOwn(data, 'globalThis'),
+          };
+        `,
+      },
+    });
+
+    await expectPass(expect, result);
+    expect(result.stdout).toContain('esm global overlay surface completed');
+  });
+
   test('provides V8 caller file names to synchronous Node resolver callers', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       (async () => {

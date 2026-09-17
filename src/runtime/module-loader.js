@@ -1815,6 +1815,23 @@ export function createModuleLoader({
       || new RegExp(`(?:^|[;\\n])\\s*import\\s+[^;\\n]*\\b${escaped}\\b`, 'm').test(masked);
   };
 
+  const replaceGlobalThisReferences = (source, replacement) => {
+    const masked = maskJavaScriptLiterals(source);
+    const matches = [...masked.matchAll(/\bglobalThis\b/g)];
+    for (let index = matches.length - 1; index >= 0; index -= 1) {
+      const match = matches[index];
+      const previous = source[match.index - 1];
+      if (previous === '.' || previous === '$' || /[\w$]/u.test(previous || '')) continue;
+      let next = match.index + match[0].length;
+      while (/\s/u.test(source[next] || '')) next += 1;
+      // Keep object-literal keys and labels in the guest source. Only bare
+      // globalThis references should be redirected to the process overlay.
+      if (source[next] === ':') continue;
+      source = `${source.slice(0, match.index)}${replacement}${source.slice(match.index + match[0].length)}`;
+    }
+    return source;
+  };
+
   const bindProcess = (source, processOverride) => {
     if (!processOverride) return source;
     // A package can intentionally replace the global process object while it
@@ -1846,12 +1863,7 @@ export function createModuleLoader({
     if (!hasTopLevelGlobalThisBinding(source)) {
       const globalToken = register(() => processOverride?._bnhGlobal || globalObject);
       const globalAlias = '__bnhGuestGlobalThis';
-      const executable = maskJavaScriptLiterals(bound);
-      const matches = [...executable.matchAll(/\bglobalThis\b/g)];
-      for (let index = matches.length - 1; index >= 0; index -= 1) {
-        const match = matches[index];
-        bound = `${bound.slice(0, match.index)}${globalAlias}${bound.slice(match.index + match[0].length)}`;
-      }
+      bound = replaceGlobalThisReferences(bound, globalAlias);
       // Native browser ESM callbacks can run after the synchronous scope
       // overlay has been restored. Bind the Node-global console and timer
       // functions lexically so deferred module code keeps using its owning

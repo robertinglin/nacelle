@@ -1700,9 +1700,9 @@ browser, focused-regression, and repository-gate artifacts are preserved under
 
 | Run / log | Observed failure | Classification and resolution |
 | --- | --- | --- |
-| `native-citgm-node-v26.log` | Native Node installs the package successfully, then CITGM reports `Module does not support npm-test!`; the package manifest has no `scripts.test` or scripts section. | Native proof that the failure is not browser-specific. This is a published package/test-contract mismatch: the package tarball contains its built library but no test command for CITGM to invoke. No test shim or synthetic success path was added. |
-| `citgm-1789364215058` / `citgm-chromium-run.log` | Chromium installs the package successfully, then reaches the same `Module does not support npm-test!` result. | Confirms the native-reproduced package-level failure in Chromium; no browser runtime defect was inferred. |
-| `citgm-1789364237954` / `citgm-firefox-run.log` | Firefox installs the package successfully, then reaches the same `Module does not support npm-test!` result. | Confirms the native-reproduced package-level failure in Firefox; no browser runtime defect was inferred. |
+| `native-citgm-node-v22-rerun.log` | Node 22.23.2 installs the package successfully, then CITGM reports `Module does not support npm-test!`; the package manifest has no `scripts.test` or scripts section. | Current native proof that the failure is not browser-specific. This is a published package/test-contract mismatch: the package tarball contains its built library but no test command for CITGM to invoke. No test shim or synthetic success path was added. |
+| `citgm-1789611991987` / `browser-chromium-node22-rerun.log` | Chromium installs the package successfully, then reaches the same `Module does not support npm-test!` result. | Current confirmation of the native-reproduced package-level failure in Chromium; no browser runtime defect was inferred. |
+| `citgm-1789612012844` / `browser-firefox-node22-rerun.log` | Firefox installs the package successfully, then reaches the same `Module does not support npm-test!` result. | Current confirmation of the native-reproduced package-level failure in Firefox; no browser runtime defect was inferred. |
 | `published-package.json` | The exact published manifest for `@babel/helper-validator-identifier@8.0.4` has `main`, `exports`, and `devDependencies`, but no `scripts` field. | Direct evidence for the upstream package/repository publication/test-layout contract. A package-side test script or a CITGM policy change is required upstream; this runtime cannot repair an absent published test command. |
 | `playwright-chromium-gate.log` | The first full Chromium repository gate had one unrelated timeout in test 61, with one pending `entry-settle` task; 309 other tests passed. | Ours-side transient repository-test scheduling failure, not a rank-48 package failure. The focused test passed, the isolated bridge-runtime suite passed 108/108, and the complete Chromium gate was rerun successfully. The original failure log is retained. |
 | `focused-chromium-unresolved-promise-rerun.log`, `bridge-runtime-chromium-isolated-rerun.log`, `playwright-chromium-gate-rerun-1.log` | The focused lifecycle test passed, the isolated bridge-runtime suite passed 108/108, and the full Chromium rerun passed 310/310. | Green reproduction/rerun evidence; no source change was required for the transient gate failure. |
@@ -1718,9 +1718,9 @@ The package remained non-green, so the repository-wide gates were run before
 committing the blocked record:
 
 ```text
-npm exec --yes --package=citgm@10.0.2 -- citgm @babel/helper-validator-identifier  FAIL — native-citgm-node-v26.log; no npm test script
-npm run citgm:browser:chromium -- @babel/helper-validator-identifier             FAIL — citgm-1789364215058; same package-level failure
-npm run citgm:browser:firefox -- @babel/helper-validator-identifier              FAIL — citgm-1789364237954; same package-level failure
+npm exec --yes --package=citgm@10.0.2 -- citgm @babel/helper-validator-identifier  FAIL — native-citgm-node-v22-rerun.log; no npm test script
+npm run citgm:browser:chromium -- @babel/helper-validator-identifier             FAIL — citgm-1789611991987; same package-level failure
+npm run citgm:browser:firefox -- @babel/helper-validator-identifier              FAIL — citgm-1789612012844; same package-level failure
 npm test                                                                          PASS — npm-test-gate.log; 345/345
 npm run test:browser:chromium                                                     PASS — playwright-chromium-gate-rerun-1.log; 310/310
 npm run test:browser:firefox                                                       PASS — playwright-firefox-gate.log; 310/310

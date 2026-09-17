@@ -117,7 +117,7 @@ not being reclassified as newly rerun here.
 | 89 | jiti | BLOCKED | upstream repository/toolchain (native-reproduced install/lint contract) | Current Node 22.23.2 native CITGM for `jiti@2.7.0` at gitHead `fd3bb289b75ed207edfb686d671ed50144f7e90f` now fails fresh npm install with `Cannot read properties of null (reading 'edgesOut')`. Current Chromium (`citgm-1789630289894`) and Firefox (`citgm-1789630384166`) install successfully and reproduce the published `pnpm lint` Prettier failure on `src/plugins/babel-plugin-transform-typescript-metadata/serialize-type.ts`; no browser-only runtime failure is present. |
 | 90 | @radix-ui/react-primitive | BLOCKED | upstream published workspace dependency (native-reproduced) | Current Node 22.23.2 CITGM downloads `@radix-ui/react-primitive@2.1.10` but cannot install its published `@repo/*@0.0.0` workspace dependencies: native reports `@repo/builder` HTTP 404, Chromium reports `@repo/typescript-config` HTTP 404, and Firefox reports `@repo/builder` HTTP 404. All runs stop at install, matching the published package-layout blocker; no browser-only runtime failure is present. |
 | 91 | onetime | PASS | none observed | Exact Node 22.23.2 native CITGM passes `onetime@8.0.0` at lookup revision `481ec583f8303e98c4d1d16bb316ef8e6b04d72c`; Chromium (`citgm-1789523060434`) and Firefox (`citgm-1789523175419`) also pass the complete install and `xo` lifecycle. No runtime, nested-dependency, or upstream failure was observed. |
-| 92 | node-releases | BLOCKED | package contract has no test script (native-reproduced) | Exact Node 22.23.2 native CITGM installs `node-releases@2.0.55` and records `Module does not support npm-test!`. Chromium (`citgm-1789523416450`) and Firefox (`citgm-1789523448892`) install the same candidate and reproduce the same CITGM result; no browser-only runtime failure is present. |
+| 92 | node-releases | BLOCKED | package contract has no test script (native-reproduced) | Historical Node 22.23.2 evidence recorded `node-releases@2.0.55` with `Module does not support npm-test!`. The current lookup now resolves `node-releases@2.0.56` at gitHead `8f447097b2b4dcdd4d10f7f8e6feff7da41b4516`; fresh native, Chromium, and Firefox reruns reproduce the same `Module does not support npm-test!` result, with no browser-only runtime failure. |
 | 93 | ajv | BLOCKED | upstream repository fixture/submodule (native-reproduced) | Exact Node 22.23.2 native CITGM installs `ajv@8.20.0` but its `json-tests` phase cannot find `spec/JSON-Schema-Test-Suite/tests/draft6/` and instructs `git submodule update --init`. Current Chromium (`citgm-1789630823395`) and Firefox (`citgm-1789630913557`) reproduce the missing-folder failure plus the `Reduce of empty array with no initial value` from the absent fixtures; no browser-only runtime failure is present. |
 | 94 | is-glob | PASS | none observed | Exact Node 22.23.2 native CITGM passes `is-glob@4.0.3` at lookup revision `627ca7e552c69e8d62d620b4715a2658267b3d17`; Chromium (`citgm-1789525870612`) and Firefox (`citgm-1789525907821`) also pass the complete upstream lifecycle. No runtime, nested-dependency, or upstream failure was observed. |
 | 95 | escalade | BLOCKED | native package/toolchain (native-reproduced); browser/runtime fixed | Exact native CITGM fails with `SyntaxError: Cannot use import statement outside a module` from nested `uvu/bin.js` (`native-citgm-node22-current-rerun.log`). Fresh Chromium (`citgm-1789631161174`) and Firefox (`citgm-1789631192371`) pass with no failure excerpts; the earlier browser-only extensionless `src/async` import failure was ours-side and is fixed in the scoped legacy `esm` resolver. Required gates pass: build, WASM, native `npm test` 353/353, Chromium Playwright 329/329, Firefox Playwright 329/329. |
@@ -2363,8 +2363,10 @@ advances to rank 92.
 
 ## Rank 92 continuation record
 
-The exact candidate is `node-releases@2.0.55` at lookup revision
-`e3cb9ed5270fa086bd4e7492903c5aada8e49397`. Native Node 22.23.2 and both
+The historical candidate was `node-releases@2.0.55` at lookup revision
+`e3cb9ed5270fa086bd4e7492903c5aada8e49397`; the current lookup now resolves
+`node-releases@2.0.56` at gitHead
+`8f447097b2b4dcdd4d10f7f8e6feff7da41b4516`. Native Node 22.23.2 and both
 browser attempts are preserved under
 `artifacts/citgm-top-100/rank-092-node-releases/`.
 
@@ -2374,6 +2376,7 @@ browser attempts are preserved under
 | `browser-chromium/citgm-1789523416450` | Installation succeeds and the browser CITGM lifecycle reports the same `Module does not support npm-test!` result. | Native-reproduced package contract; no browser-only runtime failure. |
 | `browser-firefox/citgm-1789523448892` | Installation succeeds and the browser CITGM lifecycle reports the same `Module does not support npm-test!` result. | Native-reproduced package contract; no browser-only runtime failure. |
 | `native-citgm-node22-current-rerun.log` / `citgm-chromium-node22-current/citgm-1789630710259` / `citgm-firefox-node22-current/citgm-1789630734780` | Current Node 22.23.2, Chromium, and Firefox runs all install `node-releases@2.0.55` and fail the same CITGM `Module does not support npm-test!` contract. | Fresh three-oracle confirmation; no browser-only failure and no source or test changes. |
+| `native-citgm-node22-cursor-rerun.log` / `cursor-chromium/citgm-1789634576219` / `cursor-firefox/citgm-1789634581681` | Fresh current lookup resolves `node-releases@2.0.56` at gitHead `8f447097b2b4dcdd4d10f7f8e6feff7da41b4516`; native, Chromium, and Firefox all install it and fail the same `Module does not support npm-test!` contract. | Confirms the current package revision remains blocked by its missing test script; no source or test changes were made. |
 
 Because rank 92 is not a clean CITGM pass, the full Node 22 test suite and
 both full Playwright suites are required before the cursor can advance to

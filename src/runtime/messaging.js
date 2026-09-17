@@ -211,6 +211,8 @@ function detachedPortError() {
 const synchronousMailboxHeaderWords = 4;
 const synchronousMailboxSlots = 16;
 const synchronousMailboxPayloadOffset = synchronousMailboxHeaderWords * Int32Array.BYTES_PER_ELEMENT;
+const synchronousMailboxMoreFlag = 0x80000000;
+const synchronousMailboxLengthMask = 0x7fffffff;
 
 function synchronousMailboxCodec(value, scope, encode) {
   const replacer = (_key, nested) => {
@@ -280,13 +282,27 @@ function synchronousMailboxRecord(mailbox) {
 function writeSynchronousMailbox(mailbox, value, scope) {
   const record = synchronousMailboxRecord(mailbox);
   const encoded = synchronousMailboxCodec(value, scope, true);
-  if (!record || !encoded || encoded.byteLength + 4 > record.slotSize) return false;
+  const payloadSize = record ? record.slotSize - 4 : 0;
+  if (!record || !encoded || payloadSize <= 0) return false;
+  const fragmentCount = Math.ceil(encoded.byteLength / payloadSize);
+  if (fragmentCount > synchronousMailboxSlots) return false;
   const sequence = Atomics.load(record.header, 0) + 1;
-  if (sequence - Atomics.load(record.header, 1) > synchronousMailboxSlots) return false;
-  const slot = new Uint8Array(record.payload.buffer, record.payload.byteOffset + ((sequence - 1) % synchronousMailboxSlots) * record.slotSize, record.slotSize);
-  new DataView(slot.buffer, slot.byteOffset, 4).setUint32(0, encoded.byteLength, true);
-  slot.set(encoded, 4);
-  Atomics.store(record.header, 0, sequence);
+  const finalSequence = sequence + fragmentCount - 1;
+  if (finalSequence - Atomics.load(record.header, 1) > synchronousMailboxSlots) return false;
+  for (let fragment = 0; fragment < fragmentCount; fragment += 1) {
+    const start = fragment * payloadSize;
+    const length = Math.min(payloadSize, encoded.byteLength - start);
+    const slot = new Uint8Array(
+      record.payload.buffer,
+      record.payload.byteOffset + ((sequence + fragment - 1) % synchronousMailboxSlots) * record.slotSize,
+      record.slotSize,
+    );
+    const header = length | (fragment + 1 < fragmentCount ? synchronousMailboxMoreFlag : 0);
+    new DataView(slot.buffer, slot.byteOffset, 4).setUint32(0, header >>> 0, true);
+    slot.set(encoded.subarray(start, start + length), 4);
+  }
+  // Publish only the final fragment so readers never decode a partial message.
+  Atomics.store(record.header, 0, finalSequence);
   return true;
 }
 
@@ -294,13 +310,42 @@ function readSynchronousMailbox(mailbox, scope) {
   const record = synchronousMailboxRecord(mailbox);
   if (!record) return { available: false, value: undefined };
   const sequence = Atomics.load(record.header, 1) + 1;
-  if (sequence > Atomics.load(record.header, 0)) return { available: false, value: undefined };
-  const slot = new Uint8Array(record.payload.buffer, record.payload.byteOffset + ((sequence - 1) % synchronousMailboxSlots) * record.slotSize, record.slotSize);
-  const length = new DataView(slot.buffer, slot.byteOffset, 4).getUint32(0, true);
-  const bytes = new Uint8Array(length);
-  bytes.set(slot.subarray(4, 4 + length));
+  const writtenSequence = Atomics.load(record.header, 0);
+  if (sequence > writtenSequence) return { available: false, value: undefined };
+  const payloadSize = record.slotSize - 4;
+  const fragments = [];
+  let totalLength = 0;
+  let finalSequence = sequence;
+  let complete = false;
+  for (let current = sequence; current <= writtenSequence
+    && current < sequence + synchronousMailboxSlots; current += 1) {
+    const slot = new Uint8Array(
+      record.payload.buffer,
+      record.payload.byteOffset + ((current - 1) % synchronousMailboxSlots) * record.slotSize,
+      record.slotSize,
+    );
+    const header = new DataView(slot.buffer, slot.byteOffset, 4).getUint32(0, true);
+    const length = header & synchronousMailboxLengthMask;
+    if (length > payloadSize || totalLength > record.payload.byteLength - length) {
+      return { available: false, value: undefined };
+    }
+    fragments.push({ slot, length });
+    totalLength += length;
+    finalSequence = current;
+    if ((header & synchronousMailboxMoreFlag) === 0) {
+      complete = true;
+      break;
+    }
+  }
+  if (!complete) return { available: false, value: undefined };
+  const bytes = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const { slot, length } of fragments) {
+    bytes.set(slot.subarray(4, 4 + length), offset);
+    offset += length;
+  }
   const value = synchronousMailboxCodec(bytes, scope, false);
-  Atomics.store(record.header, 1, sequence);
+  Atomics.store(record.header, 1, finalSequence);
   return { available: true, value };
 }
 

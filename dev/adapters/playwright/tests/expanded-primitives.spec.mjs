@@ -122,7 +122,7 @@ test('file worker with unref can satisfy a synchronous Atomics waiter', async ({
   await expectPass(expect, result);
 });
 
-test('preserves transferred workerData ports through an ESM child', async ({ harnessPage }) => {
+test('preserves large synchronous workerData port replies through an ESM child', async ({ harnessPage }) => {
   const result = await harnessPage.run(`
     import assert from 'node:assert/strict';
     import { MessageChannel, Worker, receiveMessageOnPort } from 'node:worker_threads';
@@ -137,7 +137,7 @@ test('preserves transferred workerData ports through an ESM child', async ({ har
     worker.postMessage({ id: 7 });
     assert.strictEqual(Atomics.wait(cells, 0, 0, 5000), 'ok');
     assert.deepStrictEqual(receiveMessageOnPort(port1), {
-      message: { id: 7, value: 'worker-data' },
+      message: { id: 7, value: 'x'.repeat(100_000) },
     });
     await worker.terminate();
   `, {
@@ -147,7 +147,7 @@ test('preserves transferred workerData ports through an ESM child', async ({ har
       '/node/worker-data-port.cjs': [
         "const { parentPort, workerData } = require('node:worker_threads');",
         "parentPort.on('message', ({ id }) => {",
-        "  workerData.port.postMessage({ id, value: 'worker-data' });",
+        "  workerData.port.postMessage({ id, value: 'x'.repeat(100000) });",
         "  Atomics.store(new Int32Array(workerData.syncBuffer), 0, 1);",
         "  Atomics.notify(new Int32Array(workerData.syncBuffer), 0);",
         '});',

@@ -119,6 +119,62 @@ test.describe('browser-native http compatibility', () => {
     `);
   });
 
+  test('routes streamed local HTTP requests through the virtual server before proxy env', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'local-http-before-proxy', `
+      const assert = require('node:assert');
+      const http = require('node:http');
+      const { Readable } = require('node:stream');
+
+      const previousProxy = process.env.HTTP_PROXY;
+      const previousNoProxy = process.env.NO_PROXY;
+      process.env.HTTP_PROXY = 'http://proxy.invalid:3128';
+      process.env.NO_PROXY = '';
+      const server = http.createServer((request, response) => {
+        let body = '';
+        request.setEncoding('utf8');
+        request.on('data', (chunk) => { body += chunk; });
+        request.once('end', () => {
+          assert.match(body, /name="first"/);
+          assert.match(body, /name="second"/);
+          response.end('local-ok');
+        });
+      });
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+
+      try {
+        const result = await new Promise((resolve, reject) => {
+          const request = http.request({
+            hostname: 'localhost',
+            port: server.address().port,
+            method: 'POST',
+            path: '/',
+          }, (response) => {
+            let output = '';
+            response.setEncoding('utf8');
+            response.on('data', (chunk) => { output += chunk; });
+            response.once('end', () => resolve(output));
+            response.once('error', reject);
+          });
+          request.once('error', reject);
+          Readable.from([
+            '--bnh-boundary\\r\\nContent-Disposition: form-data; name="first"\\r\\n\\r\\none\\r\\n',
+            '--bnh-boundary\\r\\nContent-Disposition: form-data; name="second"\\r\\n\\r\\ntwo\\r\\n--bnh-boundary--\\r\\n',
+          ]).pipe(request);
+        });
+        assert.strictEqual(result, 'local-ok');
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+        if (previousProxy === undefined) delete process.env.HTTP_PROXY;
+        else process.env.HTTP_PROXY = previousProxy;
+        if (previousNoProxy === undefined) delete process.env.NO_PROXY;
+        else process.env.NO_PROXY = previousNoProxy;
+      }
+    `);
+  });
+
   test('flushes implicit headers before a final body on raw net sockets', async ({ harnessPage }) => {
     await runContract(expect, harnessPage, 'raw-net-http-end', `
       const assert = require('node:assert');

@@ -3491,6 +3491,10 @@ function connectionListener(socket) {
 class BrowserAgent extends EventEmitter {
   constructor(options = {}, protocol = DEFAULT_HTTP_PROTOCOL, connectionFactory) {
     super();
+    // Built-in modules can be materialized more than once across virtual
+    // child module graphs. Keep a stable brand so local HTTP dispatch does not
+    // depend on cross-graph instanceof identity.
+    this._bnhBrowserAgent = true;
     validateProxyEnvironment(options.proxyEnv);
     this.options = { ...options };
     // A number of Node-compatible agent implementations subclass
@@ -4925,8 +4929,9 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       // socket first also bypasses the in-memory HTTP dispatch path. Custom
       // agents and configured proxies retain their normal connection path;
       // the shared BrowserAgent is the compatibility layer's default agent.
-      if (!this._proxy && !environmentProxyConfig
-        && this._agent instanceof BrowserAgent && this._virtualNetwork?.dispatch) {
+      if (!this._proxy
+        && (this._agent instanceof BrowserAgent || this._agent?._bnhBrowserAgent)
+        && this._virtualNetwork?.dispatch) {
         let virtualInit;
         try {
           virtualInit = this._fetchInit();

@@ -1,9 +1,43 @@
+function win32Root(value) {
+  const source = String(value).replaceAll('/', '\\');
+  if (/^[A-Za-z]:\\/.test(source)) return source.slice(0, 3);
+  if (/^[A-Za-z]:/.test(source)) return source.slice(0, 2);
+  if (source.startsWith('\\\\')) {
+    const parts = source.slice(2).split('\\');
+    if (parts[0] === '?' || parts[0] === '.') {
+      if (/^[A-Za-z]:$/.test(parts[1] || '')) return `\\\\${parts[0]}\\${parts[1]}\\`;
+      if (parts[0] === '?' && parts[1] === 'UNC' && parts[2] && parts[3]) return '\\\\?\\UNC\\';
+    }
+    if (parts[0] && parts[1]) return `\\\\${parts[0]}\\${parts[1]}\\`;
+    return '\\';
+  }
+  if (source.startsWith('\\')) return '\\';
+  return '';
+}
+
+function normalizeWin32(value) {
+  const separator = '\\';
+  const source = String(value).replaceAll('/', separator);
+  const root = win32Root(source);
+  const parts = source.slice(root.length).split(separator);
+  const output = [];
+  for (const part of parts) {
+    if (!part || part === '.') continue;
+    if (part === '..' && output.length && output.at(-1) !== '..') output.pop();
+    else if (part !== '..' || (root === '' || /^[A-Za-z]:$/.test(root))) output.push(part);
+  }
+  const result = output.join(separator);
+  const trailingSeparator = source.endsWith(separator) && result !== '';
+  if (root) return `${root}${result}${trailingSeparator ? separator : ''}`;
+  return `${result || '.'}${trailingSeparator ? separator : ''}`;
+}
+
 function normalizePath(value, platform = 'posix') {
-  const separator = platform === 'win32' ? '\\' : '/';
-  const source = String(value).replaceAll(platform === 'win32' ? '/' : '\\', separator);
-  const absolute = source.startsWith(separator) || (platform === 'win32' && /^[A-Za-z]:[\\/]/.test(source));
-  const drive = platform === 'win32' && /^[A-Za-z]:/.test(source) ? source.slice(0, 2) : '';
-  const parts = source.slice(drive.length).split(separator);
+  if (platform === 'win32') return normalizeWin32(value);
+  const separator = '/';
+  const source = String(value).replaceAll('\\', separator);
+  const absolute = source.startsWith(separator);
+  const parts = source.split(separator);
   const output = [];
   for (const part of parts) {
     if (!part || part === '.') continue;
@@ -12,7 +46,7 @@ function normalizePath(value, platform = 'posix') {
   }
   const result = output.join(separator);
   const trailingSeparator = source.endsWith(separator) && result !== '';
-  if (absolute) return `${drive}${separator}${result}${trailingSeparator ? separator : ''}`;
+  if (absolute) return `${separator}${result}${trailingSeparator ? separator : ''}`;
   return `${result || '.'}${trailingSeparator ? separator : ''}`;
 }
 
@@ -39,6 +73,30 @@ function relativePath(from, to, platform) {
 }
 
 function resolvePath(parts, platform) {
+  if (platform === 'win32') {
+    const values = parts.map((part, index) => validateString(part, `paths[${index}]`).replaceAll('/', '\\'));
+    const tail = [];
+    let root = '';
+    for (let index = values.length - 1; index >= 0; index -= 1) {
+      const value = values[index];
+      if (!value) continue;
+      if (value.startsWith('\\')) {
+        if (value.startsWith('\\\\') || /^[A-Za-z]:\\/.test(value)) root = value;
+        else {
+          const drive = values.slice(0, index).find((item) => /^[A-Za-z]:/.test(item))?.slice(0, 2) || 'C:';
+          root = `${drive}\\${value.slice(1)}`;
+        }
+        break;
+      }
+      if (/^[A-Za-z]:\\/.test(value)) {
+        root = value;
+        break;
+      }
+      tail.unshift(value);
+    }
+    if (!root) root = 'C:\\';
+    return normalizeWin32(`${root}${tail.length ? `\\${tail.join('\\')}` : ''}`);
+  }
   const separator = platform === 'win32' ? '\\' : '/';
   const isAbsolute = (value) => {
     validateString(value, 'path');
@@ -55,7 +113,7 @@ function resolvePath(parts, platform) {
       break;
     }
   }
-  if (!absolute) resolved.unshift(platform === 'win32' ? 'C:\\' : '/node');
+  if (!absolute) resolved.unshift('/node');
   return normalizePath(resolved.join(separator), platform);
 }
 
@@ -209,7 +267,9 @@ function matchesGlob(value, pattern, platform) {
 function createPath(platform) {
   const separator = platform === 'win32' ? '\\' : '/';
   const delimiter = platform === 'win32' ? ';' : ':';
-  const isAbsolute = (value) => platform === 'win32' ? /^[A-Za-z]:[\\/]/.test(String(value)) || /^\\\\/.test(String(value)) : String(value).startsWith('/');
+  const isAbsolute = (value) => platform === 'win32'
+    ? String(value).startsWith('\\') || String(value).startsWith('/') || /^[A-Za-z]:[\\/]/.test(String(value))
+    : String(value).startsWith('/');
   const namespacedPath = (value) => toNamespacedPath(value, platform);
   const globMatcher = (value, pattern) => matchesGlob(value, pattern, platform);
   return {
@@ -248,7 +308,9 @@ function createPath(platform) {
     parse(value) {
       validateString(value, 'path');
       const normalized = normalizePath(value, platform);
-      const root = isAbsolute(value) ? separator : '';
+      const root = platform === 'win32'
+        ? win32Root(value)
+        : isAbsolute(value) ? separator : '';
       const base = normalized.split(separator).at(-1) || '';
       const extensionIndex = base.lastIndexOf('.');
       const ext = extensionIndex <= 0 ? '' : base.slice(extensionIndex);

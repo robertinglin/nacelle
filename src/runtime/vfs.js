@@ -504,7 +504,7 @@ class Stats {
       this.ctimeNs = statNanoseconds(ctimeMs);
       this.birthtimeNs = statNanoseconds(birthtimeMs);
     }
-    this._kind = kind;
+    Object.defineProperty(this, '_kind', { configurable: true, value: kind });
   }
 
   _checkModeProperty(property) {
@@ -1089,7 +1089,16 @@ export function createVfs(options = {}) {
     // final symlink here turns a symlink update into a directory/file update
     // at the link path, which loses package-manager links across a worker
     // boundary (tap's generated test-built/node_modules link is one example).
-    const path = resolvePath(pathValue, false);
+    let path;
+    try {
+      path = resolvePath(pathValue, false);
+    } catch (error) {
+      // A child can replace a directory with a file before a coalesced worker
+      // update describes an older descendant path. That descendant is gone;
+      // it must not abort the bridge flush with ENOTDIR.
+      if (error?.code === 'ENOTDIR' || error?.code === 'ENOENT') return null;
+      throw error;
+    }
     if (files.has(path)) {
       return {
         path,
@@ -1163,16 +1172,25 @@ export function createVfs(options = {}) {
       // A remove mutation must preserve a final symlink just like a symlink
       // mutation. Otherwise a worker removing a package self-link can remove
       // the linked package tree from the parent VFS.
-      const path = resolvePath(
-        change.path,
-        change.type !== 'symlink' && change.type !== 'remove',
-      );
+      let path;
+      try {
+        path = resolvePath(
+          change.path,
+          change.type !== 'symlink' && change.type !== 'remove',
+        );
+      } catch (error) {
+        // A coalesced worker delta can contain a descendant after its parent
+        // was replaced by a file. The descendant is already absent locally.
+        if (error?.code === 'ENOTDIR' || error?.code === 'ENOENT') continue;
+        throw error;
+      }
       if (change.type === 'remove') {
         if (path !== '/') {
           try { removeTree(path, true, true); } catch { /* already absent */ }
         }
       } else if (change.type === 'directory') {
         try {
+          if (files.has(path) || symlinks.has(path)) removeTree(path, true, true);
           makeDirectory(path, true, 'sync');
           if (change.mode !== undefined) metadataFor(path).mode = modeValue(change.mode);
         } catch { /* already present */ }
@@ -1185,6 +1203,7 @@ export function createVfs(options = {}) {
         } catch { /* a concurrent local update may have won the race */ }
       } else if (change.type === 'file') {
         try {
+          if (directories.has(path)) removeTree(path, true, true);
           if (symlinks.has(path)) symlinks.delete(path);
           if (!directories.has(parentOf(path))) makeDirectory(parentOf(path), true, 'sync');
           setFile(path, change.bytes, false, 'sync');
@@ -3962,9 +3981,6 @@ export function createVfs(options = {}) {
   function readdir(pathValue, optionsValue, callback) {
     const done = typeof optionsValue === 'function' ? optionsValue : callback;
     resolve(pathValue);
-    // Directory reads are real I/O in Node. Use the host timer queue here so
-    // an async lstat issued before a recursive walk can settle first, matching
-    // the ordering observable by path-scurry's includeChildMatches logic.
     asyncFsOperation(done, () => fs.readdirSync(pathValue, optionsValue), true);
   }
 

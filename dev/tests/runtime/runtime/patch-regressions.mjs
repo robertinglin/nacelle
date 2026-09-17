@@ -29,6 +29,21 @@ async function run(source, files = {}) {
 
 const valueFiles = { '/node/value.cjs': 'module.exports = 42;' };
 
+test('win32 path parsing preserves drive-qualified roots', async () => {
+  const { stdout } = await run(`
+    const path = require('node:path');
+    const slash = String.fromCharCode(92);
+    const value = 'C:' + slash + 'some' + slash + 'path';
+    console.log(JSON.stringify({
+      root: path.win32.parse(value).root,
+      resolved: path.win32.resolve(value),
+    }));
+  `);
+  const parsed = JSON.parse(stdout);
+  assert.equal(parsed.root, 'C:' + String.fromCharCode(92));
+  assert.equal(parsed.resolved, 'C:' + String.fromCharCode(92) + 'some' + String.fromCharCode(92) + 'path');
+});
+
 test('child Module._load resolves package subpaths and a nested package main', async () => {
   const { stdout } = await run(`
     const { spawnSync } = require('child_process');
@@ -254,6 +269,75 @@ test('async ESM child filesystem mutations return to the parent VFS', async () =
     '/node/work/placeholder': '',
   });
   assert.equal(stdout, 'child-ok\n');
+});
+
+test('worker VFS mutation batches tolerate directory replacement', async () => {
+  const { stdout } = await run(`
+    const fs = require('fs');
+    const child = require('child_process').spawn(process.execPath, ['/node/replace.mjs'], { cwd: '/node' });
+    child.on('error', (error) => { throw error; });
+    child.on('close', (code) => {
+      if (code !== 0) throw new Error('ESM replacement child failed: ' + code);
+      process.stdout.write(fs.readFileSync('/node/work/a', 'utf8'));
+    });
+  `, {
+    '/node/replace.mjs': `
+      import { rmSync, writeFileSync } from 'node:fs'
+      rmSync('/node/work/a', { recursive: true, force: true })
+      writeFileSync('/node/work/a', 'replacement-ok')
+    `,
+    '/node/work/a/b': 'stale child',
+  });
+  assert.equal(stdout, 'replacement-ok');
+});
+
+test('virtual Stats hide internal entry kinds from enumerable Node fields', async () => {
+  const { stdout } = await run(`
+    const fs = require('node:fs');
+    fs.writeFileSync('/node/file.txt', 'ok');
+    const stats = fs.lstatSync('/node/file.txt');
+    process.stdout.write(JSON.stringify({
+      isFile: stats.isFile(),
+      hasInternalKind: Object.keys(stats).includes('_kind'),
+    }));
+  `);
+  assert.deepEqual(JSON.parse(stdout), { isFile: true, hasInternalKind: false });
+});
+
+test('synchronous ESM children strip multi-line TypeScript imports', async () => {
+  const { stdout } = await run(`
+    const child = require('child_process').spawn(process.execPath, ['/node/entry.ts'], {
+      cwd: '/node',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child.stdout.on('data', (chunk) => process.stdout.write(chunk));
+    let errorOutput = '';
+    child.stderr.on('data', (chunk) => {
+      errorOutput += chunk.toString();
+      process.stderr.write(chunk);
+    });
+    child.on('error', (error) => { throw error; });
+    child.on('close', (code) => {
+      if (code !== 0) throw new Error('TypeScript ESM child failed: ' + code + '\\n' + errorOutput);
+    });
+  `, {
+    '/node/package.json': JSON.stringify({ type: 'module' }),
+    '/node/tap.mjs': `export default { name: 'tap' }; export const Test = 'test';`,
+    '/node/entry.ts': `
+      import * as fs from 'node:fs'
+      import { readFileSync, Stats } from 'node:fs'
+      import tap, { Test } from './tap.mjs'
+
+      const marker: string = readFileSync('/node/marker.txt', 'utf8')
+      const unused: Stats | undefined = undefined
+      if (fs.readFileSync !== readFileSync || tap.name !== 'tap' || Test !== 'test' || unused !== undefined) {
+        throw new Error('TypeScript ESM import mismatch')
+      }
+      console.log(marker)
+    `,
+    '/node/marker.txt': 'typescript imports passed',
+  });
+  assert.equal(stdout, 'typescript imports passed\n');
 });
 
 test('ESM children settle concurrent fs.promises probes during top-level await', async () => {

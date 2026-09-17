@@ -3689,6 +3689,75 @@ function blankTypeScriptText(value) {
 function stripTypeScriptSource(source) {
   let result = String(source);
 
+  // `as` is also part of static import/export syntax (`import * as ns` and
+  // `import { value as alias }`). Protect those clauses while removing
+  // TypeScript assertions below; otherwise the stripper turns valid ESM into
+  // `import * from ...` before the module loader gets to parse it.
+  const protectedImportAliases = [];
+  const protectStaticAliases = (declaration) => declaration.replace(
+    /\s+as\s+(?=[A-Za-z_$])/g,
+    (alias) => {
+      const token = `\u0000bnh-import-as-${protectedImportAliases.length}\u0000`;
+      protectedImportAliases.push(alias);
+      return token;
+    },
+  );
+  const staticImportStarts = [...result.matchAll(/(?:^|\n)[ \t]*import\b/gm)];
+  for (let index = staticImportStarts.length - 1; index >= 0; index -= 1) {
+    const start = staticImportStarts[index].index + staticImportStarts[index][0].length;
+    const first = result.slice(start).match(/\S/u)?.[0];
+    if (!first) continue;
+    let end = start;
+    if (first === "'" || first === '"') {
+      const quote = first;
+      let cursor = start + 1;
+      while (cursor < result.length) {
+        if (result[cursor] === '\\') cursor += 2;
+        else if (result[cursor] === quote) {
+          end = cursor + 1;
+          break;
+        } else cursor += 1;
+      }
+    } else {
+      const from = /\bfrom\s*(['"])/g;
+      from.lastIndex = start;
+      const match = from.exec(result);
+      if (!match) continue;
+      const quote = match[1];
+      let cursor = from.lastIndex;
+      while (cursor < result.length) {
+        if (result[cursor] === '\\') cursor += 2;
+        else if (result[cursor] === quote) {
+          end = cursor + 1;
+          break;
+        } else cursor += 1;
+      }
+    }
+    if (end > start) {
+      result = `${result.slice(0, start)}${protectStaticAliases(result.slice(start, end))}${result.slice(end)}`;
+    }
+  }
+  const staticExportStarts = [...result.matchAll(/(?:^|\n)[ \t]*export\s*\{/gm)];
+  for (let index = staticExportStarts.length - 1; index >= 0; index -= 1) {
+    const start = staticExportStarts[index].index + staticExportStarts[index][0].length;
+    let depth = 1;
+    let quote = null;
+    let cursor = start;
+    while (cursor < result.length && depth > 0) {
+      const character = result[cursor];
+      if (quote) {
+        if (character === '\\') cursor += 2;
+        else if (character === quote) quote = null;
+      } else if (character === "'" || character === '"') quote = character;
+      else if (character === '{') depth += 1;
+      else if (character === '}') depth -= 1;
+      cursor += 1;
+    }
+    if (depth === 0) {
+      result = `${result.slice(0, start)}${protectStaticAliases(result.slice(start, cursor))}${result.slice(cursor)}`;
+    }
+  }
+
   // Declarations which have no JavaScript representation are blanked rather
   // than removed so that generated stack locations remain stable.
   result = result.replace(
@@ -3711,19 +3780,77 @@ function stripTypeScriptSource(source) {
 
   // Type annotations are recognized at JavaScript delimiters so ordinary
   // object-literal properties and strings are left untouched.
-  const typeName = '[A-Za-z_$][\\w$]*(?:\\s*<[^<>\\n]*(?:<[^<>\\n]*>[^<>\\n]*)?>)?(?:\\s*\\[\\s*\\])?';
+  const objectType = '\\{\\s*\\[[^{}\\n]*\\][\\s\\S]*?\\}';
+  const typeAtom = '(?:(?:(?:keyof|typeof)\\s+)*(?:' + objectType
+    + '|[A-Za-z_$][\\w$]*)(?:\\s*<[^<>\\n]*(?:<[^<>\\n]*>[^<>\\n]*)?>)?(?:\\s*\\[\\s*\\])?)';
+  const typeName = typeAtom + '(?:\\s*(?:\\||&)\\s*' + typeAtom + ')*';
+  const isObjectLiteralProperty = (text, offset) => {
+    const before = text.slice(0, offset);
+    const codeBefore = before
+      .replace(/\/\*[\s\S]*?\*\//g, (comment) => comment.replace(/[^\r\n]/g, ' '))
+      .replace(/\/\/[^\r\n]*/g, (comment) => comment.replace(/[^\r\n]/g, ' '));
+    const brace = codeBefore.lastIndexOf('{');
+    const paren = codeBefore.lastIndexOf('(');
+    const bracket = codeBefore.lastIndexOf('[');
+    if (brace < 0 || brace < paren || brace < bracket) return false;
+    const bracePrefix = codeBefore.slice(0, brace).trimEnd();
+    const previous = bracePrefix.at(-1);
+    const word = bracePrefix.match(/[A-Za-z_$][\w$]*$/)?.[0];
+    const objectBrace = previous === '=' || previous === '(' || previous === '['
+      || previous === ',' || previous === ':' || word === 'return' || word === 'yield';
+    if (!objectBrace) return false;
+    const propertyStart = Math.max(brace, codeBefore.lastIndexOf(',')) + 1;
+    const propertyPrefix = codeBefore.slice(propertyStart);
+    return /^\s*(?:\.\.\.)?(?:[A-Za-z_$][\w$]*|['"][^'"]+['"])\s*$/u.test(propertyPrefix);
+  };
   result = result.replace(
-    new RegExp(`[!?]?\\s*:\\s*(?:readonly\\s+)?${typeName}(?:\\s*\\|\\s*(?:readonly\\s+)?${typeName})*(?=\\s*(?:[,)=;{=]|\\r?\\n|$))`, 'g'),
-    (annotation) => blankTypeScriptText(annotation),
+    new RegExp(`[!?]?\\s*:\\s*(?:readonly\\s+)?${typeName}(?:\\s*\\|\\s*(?:readonly\\s+)?${typeName})*(?=\\s*(?:[,);{]|=(?!=)|\\r?\\n|$))`, 'g'),
+    (annotation, offset, text) => /^\s*(?:case\b|default\b)/u.test(text.slice(text.lastIndexOf('\n', offset) + 1, offset))
+      || isObjectLiteralProperty(text, offset)
+      ? annotation
+      : blankTypeScriptText(annotation),
   );
+  const assertionType = '(?:const\\b|(?:(?:keyof|typeof)\\s+)*(?:' + objectType
+    + '|\\([^()\\n]*\\)|[A-Za-z_$][\\w$]*)(?:\\s*<[^>\\n]*>)?(?:\\s*\\[\\s*\\])?)';
   result = result.replace(
-    /\s+as\s+(?:const\b|[A-Za-z_$][\w$]*(?:\s*<[^>\n]*>)?(?:\s*\[\s*\])?)/g,
+    new RegExp('\\s+as\\s+' + assertionType, 'g'),
     (assertion) => blankTypeScriptText(assertion),
   );
-  result = result.replace(
-    /([A-Za-z_$][\w$]*)!\s*(?=[,.;)=])/g,
-    '$1 ',
-  );
+  result = result.replace(/\u0000bnh-import-as-(\d+)\u0000/g, (_, index) => protectedImportAliases[Number(index)]);
+  // Avoid a backtracking regex here. Large TypeScript sources can contain
+  // enough identifiers for Firefox's regex engine to overflow its stack while
+  // looking for non-null assertions; the equivalent linear scan is stable in
+  // both browser engines and preserves the old replacement shape.
+  const isIdentifierStart = (code) => code === 36 || code === 95
+    || code >= 65 && code <= 90 || code >= 97 && code <= 122;
+  const isIdentifierPart = (code) => isIdentifierStart(code) || code >= 48 && code <= 57;
+  const nonNullParts = [];
+  let nonNullCursor = 0;
+  while (nonNullCursor < result.length) {
+    const startCode = result.charCodeAt(nonNullCursor);
+    if (!isIdentifierStart(startCode)) {
+      nonNullParts.push(result[nonNullCursor]);
+      nonNullCursor += 1;
+      continue;
+    }
+    let identifierEnd = nonNullCursor + 1;
+    while (identifierEnd < result.length && isIdentifierPart(result.charCodeAt(identifierEnd))) identifierEnd += 1;
+    if (result[identifierEnd] !== '!') {
+      nonNullParts.push(result.slice(nonNullCursor, identifierEnd));
+      nonNullCursor = identifierEnd;
+      continue;
+    }
+    let afterAssertion = identifierEnd + 1;
+    while (afterAssertion < result.length && /\s/u.test(result[afterAssertion])) afterAssertion += 1;
+    if (!',.;)='.includes(result[afterAssertion])) {
+      nonNullParts.push(result.slice(nonNullCursor, identifierEnd + 1));
+      nonNullCursor = identifierEnd + 1;
+      continue;
+    }
+    nonNullParts.push(result.slice(nonNullCursor, identifierEnd), ' ');
+    nonNullCursor = afterAssertion;
+  }
+  result = nonNullParts.join('');
   return result;
 }
 
@@ -17384,9 +17511,11 @@ export function createRuntime({
         // resume an unawaited import chain on the following host turn, so one
         // empty observation is not yet a quiescent process. Requiring two
         // consecutive empty turns preserves that ordering without inventing a
-        // package-specific keepalive.
+        // package-specific keepalive. Keep the grace period to two host turns
+        // so a short-lived child still exits within the bridge's normal
+        // sub-second timeout window in Firefox.
         idleLifecycleTurns += 1;
-        if (idleLifecycleTurns < 8) continue;
+        if (idleLifecycleTurns < 2) continue;
         if (!processObject._emitBeforeExit?.()) break;
       }
       if (options.isCancelled?.() || options.signal?.aborted) return null;

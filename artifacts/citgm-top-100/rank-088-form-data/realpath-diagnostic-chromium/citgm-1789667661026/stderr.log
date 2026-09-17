@@ -1,0 +1,3 @@
+[bnh-temp-realpath] 1 /node/node_modules/.bin/npm
+[bnh-temp-realpath] 1 /node/node_modules/.bin/npm
+[DEP0005] DeprecationWarning: Buffer() is deprecated due to security and usability issues. Please use the Buffer.alloc(), Buffer.allocUnsafe(), or Buffer.from() methods instead.

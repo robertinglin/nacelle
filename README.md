@@ -306,6 +306,11 @@ runs. Follow these rules exactly:
    ```bash
    npm run build:v22
    npm run check:wasm
+   node --test --test-concurrency=1 \
+     dev/tests/runtime/runtime/patch-regressions.mjs \
+     dev/tests/runtime/runtime/patch-source-regressions.mjs \
+     dev/tests/runtime/runtime/patch-messaging-regressions.mjs \
+     dev/tests/runtime/runtime/patch-crypto-regressions.mjs
    npm test
    npm run test:browser:chromium
    npm run test:browser:firefox
@@ -313,7 +318,13 @@ runs. Follow these rules exactly:
 
    Only after every gate passes may the next CITGM candidate start. Commit the
    fix, permanent regression tests, gate logs, and CITGM artifacts before
-   advancing.
+   advancing. The artifact corpus is ignored by default, so force-add the
+   authoritative run directory explicitly, for example:
+
+   ```bash
+   git add -f artifacts/citgm-top-100/rank-<rank>-<package>/<run-dir>
+   git commit -m "record <package> CITGM run"
+   ```
 
 Treat a browser-only failure as an ours-side runtime or harness failure until
 the same package, git revision, and failing path have been reproduced under

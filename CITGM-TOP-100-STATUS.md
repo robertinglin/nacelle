@@ -303,6 +303,24 @@ Chromium yargs CITGM attempts still have the unresolved real `gts` → `eslint`
 filesystem-walk lifecycle, and this checkpoint does not claim an exact browser
 yargs pass.
 
+## Post-CITGM workflow documentation gate record
+
+After the permanent nested filesystem-walk regression and the README CITGM
+workflow update, the complete repository gate set was rerun with Node 22.23.2:
+
+```text
+node --version                              v22.23.2
+serialized patch regressions                PASS — 4/4
+npm run build:v22                           PASS — 5 WASM artifacts
+npm run check:wasm                          PASS — 5 artifacts passed export validation
+npm test                                    PASS — 359/359
+npm run test:browser:chromium               PASS — 371/371
+npm run test:browser:firefox                PASS — 371/371
+```
+
+This checkpoint validates the README workflow change and the current retained
+runtime/regression-test changes before the next blocked CITGM candidate.
+
 The ordered cursor remains at rank 63 because rank 64 is still formally
 retained as an ours-side gate blocker. Rank 65's exact native and browser
 results, along with the post-source-change repository gates above, are green,

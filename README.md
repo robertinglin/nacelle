@@ -267,9 +267,12 @@ npm run citgm:browser:firefox -- express
 #### CITGM agent workflow and gates
 
 Use Node 22.23.2 for every native CITGM, browser CITGM, build, and test
-command. Find the first table row marked `BLOCKED` or `GATE-BLOCKED` in
-[`CITGM-TOP-100-STATUS.md`](CITGM-TOP-100-STATUS.md), and work forward in rank
-order. The current first blocked rank is rank 13, `tslib`.
+command. Find the first unprocessed table row marked `BLOCKED` or
+`GATE-BLOCKED` in [`CITGM-TOP-100-STATUS.md`](CITGM-TOP-100-STATUS.md), and
+work forward in rank order. This sweep has committed through rank 31
+(`globals`); ranks 32–35 are already recorded as green, so the next
+unprocessed blocked candidate is rank 36 (`esbuild`). Re-check the status file
+before each run because the cursor changes after every committed CITGM result.
 
 Prepare a Node 22 shell first. The temporary npm link matters for native CITGM:
 CITGM launches package-manager scripts as `node <npm-path>`, so a shell-wrapper

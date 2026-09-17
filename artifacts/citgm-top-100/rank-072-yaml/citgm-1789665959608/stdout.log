@@ -1,0 +1,116 @@
+info: starting            | yaml                
+info: lookup              | yaml                
+info: lookup-notfound     | yaml                
+info: lookup-githead      | https://github.com/eemeli/yaml/archive/1440ecd3d1bff41e4ac399f8f6839e810328bd16.tar.gz
+info: yaml npm:           | Downloading project: https://github.com/eemeli/yaml/archive/1440ecd3d1bff41e4ac399f8f6839e810328bd16.tar.gz
+info: yaml npm:           | Project downloaded 1440ecd3d1bff41e4ac399f8f6839e810328bd16.tar.gz
+info: yaml npm:           | npm install started 
+info: yaml npm:           | npm install successfully completed
+info: yaml npm:           | test suite started  
+error: failure             | The canary is dead: 
+error: failing module(s)   |                     
+error: module name:        | yaml                
+error: version:            | 2.9.1               
+error: error:              | The canary is dead: 
+error: error:              | undefined                                                                                                                          
+error:                     | findGlobalPaths@/tmp/39cc1304/yaml/node_modules/jest-resolve/build/nodeModulesPaths.js:124:40                                      
+error:                     | anonymous/<@/tmp/39cc1304/yaml/node_modules/jest-resolve/build/nodeModulesPaths.js:132:21                                          
+error:                     | runCommonJSWrapper@http://127.0.0.1:37167/runtime.js:2678:22                                                                       
+error:                     | compile@http://127.0.0.1:37167/runtime.js:6955:18                                                                                  
+error:                     | createRuntime/makeBuiltins/createModuleApi/moduleExtensions[".js"]@http://127.0.0.1:37167/runtime.js:7088:16                       
+error:                     | loadModuleSync@http://127.0.0.1:37167/runtime.js:10608:31                                                                          
+error:                     | createRuntime/makeBuiltins/runPreparedSync/childProc.processObject.__bnhSyncModuleLoader@http://127.0.0.1:37167/runtime.js:11219:22
+error:                     | _load@http://127.0.0.1:37167/runtime.js:7353:33                                                                                    
+error:                     | require@http://127.0.0.1:37167/runtime.js:6924:35                                                                                  
+error:                     | anonymous/<@/tmp/39cc1304/yaml/node_modules/jest-resolve/build/resolver.js:43:49                                                   
+error:                     | runCommonJSWrapper@http://127.0.0.1:37167/runtime.js:2678:22                                                                       
+error:                     | compile@http://127.0.0.1:37167/runtime.js:6955:18                                                                                  
+error:                     | createRuntime/makeBuiltins/createModuleApi/moduleExtensions[".js"]@http://127.0.0.1:37167/runtime.js:7088:16                       
+error:                     | loadModuleSync@http://127.0.0.1:37167/runtime.js:10608:31                                                                          
+error:                     | createRuntime/makeBuiltins/runPreparedSync/childProc.processObject.__bnhSyncModuleLoader@http://127.0.0.1:37167/runtime.js:11219:22
+error:                     | _load@http://127.0.0.1:37167/runtime.js:7353:33                                                                                    
+error:                     | require@http://127.0.0.1:37167/runtime.js:6924:35                                                                                  
+error:                     | anonymous/<@/tmp/39cc1304/yaml/node_modules/jest-resolve/build/index.js:10:40                                                      
+error:                     | runCommonJSWrapper@http://127.0.0.1:37167/runtime.js:2678:22                                                                       
+error:                     | compile@http://127.0.0.1:37167/runtime.js:6955:18                                                                                  
+error:                     | createRuntime/makeBuiltins/createModuleApi/moduleExtensions[".js"]@http://127.0.0.1:37167/runtime.js:7088:16                       
+error:                     | loadModuleSync@http://127.0.0.1:37167/runtime.js:10608:31                                                                          
+error:                     | createRuntime/makeBuiltins/runPreparedSync/childProc.processObject.__bnhSyncModuleLoader@http://127.0.0.1:37167/runtime.js:11219:22
+error:                     | _load@http://127.0.0.1:37167/runtime.js:7353:33                                                                                    
+error:                     | require@http://127.0.0.1:37167/runtime.js:6924:35                                                                                  
+error:                     | _jestResolve@/tmp/39cc1304/yaml/node_modules/jest-config/build/normalize.js:73:40                                                  
+error:                     | normalize/<@/tmp/39cc1304/yaml/node_modules/jest-config/build/normalize.js:561:33                                                  
+error:                     | advance@http://127.0.0.1:37167/runtime/async-hooks.js:266:26                                                                       
+error:                     | runAsyncGenerator/asyncResult<@http://127.0.0.1:37167/runtime/async-hooks.js:295:12                                                
+error:                     | create@http://127.0.0.1:37167/runtime.js:2988:15                                                                                   
+error:                     | Promise@http://127.0.0.1:37167/runtime.js:2996:12                                                                                  
+error:                     | runAsyncGenerator@http://127.0.0.1:37167/runtime/async-hooks.js:252:17                                                             
+error:                     | runCommonJSWrapper/asyncRunner<@http://127.0.0.1:37167/runtime.js:2617:62                                                          
+error:                     | normalize@/tmp/39cc1304/yaml/node_modules/jest-config/build/normalize.js:530:12                                                    
+error:                     | readConfig/<@/tmp/39cc1304/yaml/node_modules/jest-config/build/index.js:162:76                                                     
+error:                     | advance@http://127.0.0.1:37167/runtime/async-hooks.js:266:26                                                                       
+error:                     | runAsyncGenerator/asyncResult</advance/<@http://127.0.0.1:37167/runtime/async-hooks.js:286:18                                      
+error:                     | runInScope/<@http://127.0.0.1:37167/runtime/async-hooks.js:655:24                                                                  
+error:                     | withResourceProcess@http://127.0.0.1:37167/runtime/async-hooks.js:535:12                                                           
+error:                     | runInScope@http://127.0.0.1:37167/runtime/async-hooks.js:652:12                                                                    
+error:                     | fulfill@http://127.0.0.1:37167/runtime/async-hooks.js:873:11                                                                       
+error:                     | promise callback*patchedThen@http://127.0.0.1:37167/runtime/async-hooks.js:882:27                                                  
+error:                     | observablePromise/get/<@http://127.0.0.1:37167/runtime/async-hooks.js:437:34                                                       
+error:                     | advance@http://127.0.0.1:37167/runtime/async-hooks.js:284:32                                                                       
+error:                     | runAsyncGenerator/asyncResult<@http://127.0.0.1:37167/runtime/async-hooks.js:295:12                                                
+error:                     | create@http://127.0.0.1:37167/runtime.js:2988:15                                                                                   
+error:                     | Promise@http://127.0.0.1:37167/runtime.js:2996:12                                                                                  
+error:                     | runAsyncGenerator@http://127.0.0.1:37167/runtime/async-hooks.js:252:17                                                             
+error:                     | runCommonJSWrapper/asyncRunner<@http://127.0.0.1:37167/runtime.js:2617:62                                                          
+error:                     | readConfig@/tmp/39cc1304/yaml/node_modules/jest-config/build/index.js:148:12                                                       
+error:                     | readConfigs/<@/tmp/39cc1304/yaml/node_modules/jest-config/build/index.js:426:34                                                    
+error:                     | advance@http://127.0.0.1:37167/runtime/async-hooks.js:266:26                                                                       
+error:                     | runAsyncGenerator/asyncResult<@http://127.0.0.1:37167/runtime/async-hooks.js:295:12                                                
+error:                     | create@http://127.0.0.1:37167/runtime.js:2988:15                                                                                   
+error:                     | Promise@http://127.0.0.1:37167/runtime.js:2996:12                                                                                  
+error:                     | runAsyncGenerator@http://127.0.0.1:37167/runtime/async-hooks.js:252:17                                                             
+error:                     | runCommonJSWrapper/asyncRunner<@http://127.0.0.1:37167/runtime.js:2617:62                                                          
+error:                     | readConfigs@/tmp/39cc1304/yaml/node_modules/jest-config/build/index.js:419:52                                                      
+error:                     | runCLI/<@/tmp/39cc1304/yaml/node_modules/@jest/core/build/cli/index.js:154:29                                                      
+error:                     | advance@http://127.0.0.1:37167/runtime/async-hooks.js:266:26                                                                       
+error:                     | runAsyncGenerator/asyncResult<@http://127.0.0.1:37167/runtime/async-hooks.js:295:12                                                
+error:                     | create@http://127.0.0.1:37167/runtime.js:2988:15                                                                                   
+error:                     | Promise@http://127.0.0.1:37167/runtime.js:2996:12                                                                                  
+error:                     | runAsyncGenerator@http://127.0.0.1:37167/runtime/async-hooks.js:252:17                                                             
+error:                     | runCommonJSWrapper/asyncRunner<@http://127.0.0.1:37167/runtime.js:2617:62                                                          
+error:                     | runCLI@/tmp/39cc1304/yaml/node_modules/@jest/core/build/cli/index.js:145:43                                                        
+error:                     | run/<@/tmp/39cc1304/yaml/node_modules/jest-cli/build/run.js:132:64                                                                 
+error:                     | advance@http://127.0.0.1:37167/runtime/async-hooks.js:266:26                                                                       
+error:                     | runAsyncGenerator/asyncResult</advance/<@http://127.0.0.1:37167/runtime/async-hooks.js:286:18                                      
+error:                     | runInScope/<@http://127.0.0.1:37167/runtime/async-hooks.js:655:24                                                                  
+error:                     | withResourceProcess@http://127.0.0.1:37167/runtime/async-hooks.js:535:12                                                           
+error:                     | runInScope@http://127.0.0.1:37167/runtime/async-hooks.js:652:12                                                                    
+error:                     | fulfill@http://127.0.0.1:37167/runtime/async-hooks.js:873:11                                                                       
+error:                     | promise callback*patchedThen@http://127.0.0.1:37167/runtime/async-hooks.js:882:27                                                  
+error:                     | observablePromise/get/<@http://127.0.0.1:37167/runtime/async-hooks.js:437:34                                                       
+error:                     | advance@http://127.0.0.1:37167/runtime/async-hooks.js:284:32                                                                       
+error:                     | runAsyncGenerator/asyncResult<@http://127.0.0.1:37167/runtime/async-hooks.js:295:12                                                
+error:                     | create@http://127.0.0.1:37167/runtime.js:2988:15                                                                                   
+error:                     | Promise@http://127.0.0.1:37167/runtime.js:2996:12                                                                                  
+error:                     | runAsyncGenerator@http://127.0.0.1:37167/runtime/async-hooks.js:252:17                                                             
+error:                     | runCommonJSWrapper/asyncRunner<@http://127.0.0.1:37167/runtime.js:2617:62                                                          
+error:                     | run@/tmp/39cc1304/yaml/node_modules/jest-cli/build/run.js:124:44                                                                   
+error:                     | anonymous/<@/tmp/39cc1304/yaml/node_modules/jest-cli/bin/jest.js:18:17                                                             
+error:                     | runCommonJSWrapper@http://127.0.0.1:37167/runtime.js:2678:22                                                                       
+error:                     | compile@http://127.0.0.1:37167/runtime.js:6955:18                                                                                  
+error:                     | createRuntime/makeBuiltins/createModuleApi/moduleExtensions[".js"]@http://127.0.0.1:37167/runtime.js:7088:16                       
+error:                     | loadModuleSync@http://127.0.0.1:37167/runtime.js:10608:31                                                                          
+error:                     | createRuntime/makeBuiltins/runPreparedSync/<@http://127.0.0.1:37167/runtime.js:12104:60                                            
+error:                     | runInScope/<@http://127.0.0.1:37167/runtime/async-hooks.js:655:24                                                                  
+error:                     | withResourceProcess@http://127.0.0.1:37167/runtime/async-hooks.js:535:12                                                           
+error:                     | runInScope@http://127.0.0.1:37167/runtime/async-hooks.js:652:12                                                                    
+error:                     | runInAsyncScope@http://127.0.0.1:37167/runtime/async-hooks.js:1189:12                                                              
+error:                     | runInChildAsyncContext@http://127.0.0.1:37167/runtime.js:11446:43                                                                  
+error:                     | runPreparedSync@http://127.0.0.1:37167/runtime.js:12104:39                                                                         
+error:                     | runVirtualCommandInternal@http://127.0.0.1:37167/runtime.js:13099:45                                                               
+error:                     | runVirtualCommand@http://127.0.0.1:37167/runtime.js:13519:24                                                                       
+error:                     | runCommand@http://127.0.0.1:37167/runtime.js:13671:64                                                                              
+error:                     | runProgram@http://127.0.0.1:37167/runtime/shell.js:943:18                                                                          
+error:                     | async*executeSimple@http://127.0.0.1:37167/runtime/shell.js:1007:23                                                                
+error: done                | The smoke test has failed.
+info: duration            | test duration: 25330ms

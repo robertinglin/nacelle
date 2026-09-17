@@ -1,0 +1,28 @@
+info: starting            | yaml                
+info: lookup              | yaml                
+info: lookup-notfound     | yaml                
+info: lookup-githead      | https://github.com/eemeli/yaml/archive/1440ecd3d1bff41e4ac399f8f6839e810328bd16.tar.gz
+info: yaml npm:           | Downloading project: https://github.com/eemeli/yaml/archive/1440ecd3d1bff41e4ac399f8f6839e810328bd16.tar.gz
+info: yaml npm:           | Project downloaded 1440ecd3d1bff41e4ac399f8f6839e810328bd16.tar.gz
+info: yaml npm:           | npm install started 
+info: yaml npm:           | npm install successfully completed
+info: yaml npm:           | test suite started  
+error: failure             | The canary is dead: 
+error: failing module(s)   |                     
+error: module name:        | yaml                
+error: version:            | 2.9.1               
+error: error:              | The canary is dead: 
+error: error:              | undefined                                                                                         
+error:                     | TypeError: require.resolve.paths is not a function                                                
+error:                     | at findGlobalPaths (/tmp/c4a775bb/yaml/node_modules/jest-resolve/build/nodeModulesPaths.js:124:40)
+error:                     | at Object.eval (/tmp/c4a775bb/yaml/node_modules/jest-resolve/build/nodeModulesPaths.js:132:21)    
+error:                     | at runCommonJSWrapper (http://127.0.0.1:34195/runtime.js:2678:22)                                 
+error:                     | at Module.compile [as _compile] (http://127.0.0.1:34195/runtime.js:6955:18)                       
+error:                     | at moduleExtensions..js (http://127.0.0.1:34195/runtime.js:7088:16)                               
+error:                     | at loadModuleSync (http://127.0.0.1:34195/runtime.js:10608:15)                                    
+error:                     | at childProc.processObject.__bnhSyncModuleLoader (http://127.0.0.1:34195/runtime.js:11219:22)     
+error:                     | at Module._load (http://127.0.0.1:34195/runtime.js:7353:33)                                       
+error:                     | at require (http://127.0.0.1:34195/runtime.js:6924:35)                                            
+error:                     | at Object.eval (/tmp/c4a775bb/yaml/node_modules/jest-resolve/build/resolver.js:43:49)             
+error: done                | The smoke test has failed.
+info: duration            | test duration: 26028ms

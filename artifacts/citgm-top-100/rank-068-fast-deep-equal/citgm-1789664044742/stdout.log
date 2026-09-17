@@ -1,0 +1,14 @@
+info: starting            | fast-deep-equal     
+info: lookup              | fast-deep-equal     
+info: lookup-notfound     | fast-deep-equal     
+info: lookup-githead      | https://github.com/epoberezkin/fast-deep-equal/archive/d807ffc5013e710deb1c63d463a03f729bcd144d.tar.gz
+info: fast-deep-equal npm:| Downloading project: https://github.com/epoberezkin/fast-deep-equal/archive/d807ffc5013e710deb1c63d463a03f729bcd144d.tar.gz
+info: fast-deep-equal npm:| Project downloaded d807ffc5013e710deb1c63d463a03f729bcd144d.tar.gz
+info: fast-deep-equal npm:| npm install started 
+info: fast-deep-equal npm:| npm install successfully completed
+info: fast-deep-equal npm:| test suite started  
+info: passing module(s)   |                     
+info: module name:        | fast-deep-equal     
+info: version:            | 3.1.3               
+info: done                | The smoke test has passed.
+info: duration            | test duration: 67221ms

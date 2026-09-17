@@ -286,8 +286,10 @@ export NATIVE_PATH="$NATIVE_NPM_DIR:$PATH"
 node --version # v22.23.2
 PATH="$NATIVE_PATH" node "$NODE22_HOME/lib/node_modules/npm/bin/npm-cli.js" \
   exec --yes --package=citgm@10.0.2 -- citgm <package>
-npm run citgm:browser:chromium -- <package>
-npm run citgm:browser:firefox -- <package>
+# Keep the candidate checkout under the POSIX /tmp root, matching native CITGM.
+# This prevents legacy tools from resolving unrelated /node ancestor packages.
+npm run citgm:browser:chromium -- <package> --tmpDir /tmp
+npm run citgm:browser:firefox -- <package> --tmpDir /tmp
 ```
 
 The full repository Playwright suites are separate from the two browser CITGM

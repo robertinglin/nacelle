@@ -276,6 +276,7 @@ runtime diagnostics were removed before this checkpoint.
 | Rank 64 `citgm-1789658267351` | Chromium reaches the same `gts` → `eslint` `sync-child` with two pending lifecycle tasks and no state change for more than a minute; the run was interrupted after native yargs had already completed in about 22 seconds. | This is a retained failed attempt, not a pass. The runtime change under test routes asynchronous CommonJS children through the existing process boundary; the exact package still needs further work and rank 64 remains `GATE-BLOCKED`. |
 | Rank 64 `citgm-1789658573925` | Routing nested async CommonJS children through the ESM boundary removes the `sync-child` state and advances through later c8/mocha phases, but the exact yargs run still remains pending in the real `gts` → `eslint` worker after repeated progress snapshots; it was interrupted without a terminal result. | This is a failed runtime-fix attempt, not a pass. The boundary change is retained for further validation, but rank 64 remains `GATE-BLOCKED`. |
 | Rank 64 `citgm-1789658829394` | Forcing the nested async CommonJS child into a separate worker changes the phase to `esm-child`, but the real `gts` → `eslint` workload remains pending after about three minutes with no output or lifecycle transition; the run was interrupted. | This is a failed runtime-fix attempt, not a pass. The exact package still needs a general large-VFS/ESM child completion fix and rank 64 remains `GATE-BLOCKED`. |
+| Rank 64 `citgm-1789659551258` | After the VFS string-read view optimization, Chromium again reaches the real nested `gts` → `eslint` child. Its `esm-child` remains pending with one lifecycle task and no output or state transition for several minutes; the run was interrupted. | The read-path optimization did not unblock the package and is not accepted as the solution by itself. This is a retained failed attempt; rank 64 remains `GATE-BLOCKED`. |
 | Rank 65 `native-citgm-node-rerun.log` / `citgm-1789485014051` / `citgm-1789487666474` | `cross-spawn@7.0.6` passes native Node, Chromium, and Firefox CITGM, including nested Jest and coverage. | The browser-only failures were ours. VM-safe process event inspection now closes over the owning process, allowing graceful-fs's queue and the package's real concurrency path to complete. The post-source-change repository gates below are green; rank 65 is `PASS`. |
 
 ## Post-cleanup repository gate record
@@ -292,10 +293,11 @@ npm run test:browser:chromium               PASS — 367/367
 npm run test:browser:firefox                PASS — 367/367
 ```
 
-These gates validate the current source after the retained glob and ESM-global
-fixes. Rank 64 remains `GATE-BLOCKED`: its current Chromium and Firefox yargs
-CITGM attempts still have the unresolved `gts` posttest lifecycle, and this
-checkpoint does not claim an exact browser yargs pass.
+These gates validate the current source after the retained glob, ESM-global,
+and nested-child changes. Rank 64 remains `GATE-BLOCKED`: its current
+Chromium yargs CITGM attempts still have the unresolved real `gts` → `eslint`
+filesystem-walk lifecycle, and this checkpoint does not claim an exact browser
+yargs pass.
 
 The ordered cursor remains at rank 63 because rank 64 is still formally
 retained as an ours-side gate blocker. Rank 65's exact native and browser

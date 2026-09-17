@@ -17,7 +17,9 @@ dev/adapters/playwright/.cache/
 .tshy/
 test-results/
 
-# Preserve local CITGM evidence without staging run artifacts.
+# Keep the large local CITGM corpus out of ordinary status; each authoritative
+# per-run artifact directory is force-added when its CITGM result is committed.
+artifacts/citgm-top-100/
 artifacts/citgm-top-100/rank-012-lru-cache/
 artifacts/citgm-top-100/rank-013-tslib/
 artifacts/citgm-top-100/rank-014-picomatch/

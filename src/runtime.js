@@ -41,6 +41,7 @@ import {
   isPromiseRejectionReported,
   markPromiseHandled,
   observablePromise,
+  promiseProcess,
   registerAsyncCompletion,
   runAsyncGenerator,
   setPromiseRejectionHandledObserver,
@@ -10009,7 +10010,7 @@ export function createRuntime({
                 // service after synchronous launcher bootstrap.
                 || /\/node_modules\/esbuild(?:-wasm)?\/bin\/esbuild$/.test(prepared.entryPath);
               let asyncCommonJsChild = false;
-              if (!useEsm && childOptions.asyncLifecycle) {
+              if (!useEsm && childOptions.asyncLifecycle && ownerProcess?.__bnhEsmNested !== true) {
                 // `node -e` is a complete process boundary even when its
                 // source is synthetic. Keep it out of the caller's realm so
                 // syntax errors (and the child exitCode they produce) cannot
@@ -10041,6 +10042,8 @@ export function createRuntime({
                 setActivityPhase('esm-child');
                 const processHandle = runPreparedESM(prepared, {
                   ...childOptions,
+                  ownerProcess,
+                  nestedSameRealm: ownerProcess?.__bnhEsmNested === true,
                   stdinSource,
                 }, (value) => {
                   stdout += normalizeOutputChunk(value);
@@ -12277,16 +12280,22 @@ export function createRuntime({
           // collide with the still-running parent; prepareWorkerVfs retains a
           // shared backing buffer for nested workers so this does not clone
           // the complete application snapshot on every test file.
-          // An async child launched from an already isolated process still
-          // needs a distinct runtime/module cache, but recursively creating
-          // another browser worker would replay the complete package VFS for
-          // every lifecycle tool (yargs's gts -> eslint chain is about
-          // 195MB). Keep this non-IPC child as an in-memory process boundary;
-          // IPC and synchronous-worker callers still require a native worker
-          // because their transport must remain independently schedulable.
-          const nestedSameRealm = processObject.__bnhEsmNested === true
-            && !options.ipc
-            && !options.syncBuffer;
+          const workerBoundaryAvailable = Boolean(
+            workerBrokerPort || browserWorkerBoundaryAvailable(),
+          );
+          const nestedOwnerProcess = options.ownerProcess || processObject;
+          const browserWorkerRealm = typeof WorkerGlobalScope === 'function'
+            && scope instanceof WorkerGlobalScope;
+          // A nested ESM child can use the page-owned broker even when its
+          // owner is already a browser worker. Keeping every async child in
+          // that brokered boundary avoids sharing the parent's native module
+          // evaluator while still allowing arbitrarily deep tool chains such
+          // as gts -> eslint to make progress.
+          const nestedSameRealm = !workerBoundaryAvailable && (
+            options.nestedSameRealm === true
+            || nestedOwnerProcess?.__bnhEsmNested === true
+            || (browserWorkerRealm && !options.ipc && !options.syncBuffer)
+          );
           const workerIsolation = !nestedSameRealm && Boolean(
             options.workerIsolation === true
             || options.ipc
@@ -12294,20 +12303,25 @@ export function createRuntime({
             || options.syncBuffer
             || esmExecutionDepth > 0
           );
-          const workerBoundaryAvailable = Boolean(
-            workerBrokerPort || browserWorkerBoundaryAvailable(),
-          );
+          // Same-realm nested workers can retain the parent's VFS backend,
+          // but a browser worker must use the packed file transport below.
+          // Sending a Map of every file through structured clone defeats the
+          // transferable VFS path and makes tools such as gts spend minutes
+          // bootstrapping before their child process starts.
+          const sharedBackendWorker = processObject.__bnhEsmNested === true
+            && workerIsolation
+            && !workerBoundaryAvailable;
           const snapshot = vfs.snapshot({
             copy: false,
             includeAllFiles: true,
-            includeBackend: nestedSameRealm,
+            includeBackend: nestedSameRealm || sharedBackendWorker,
           });
           // The child process boundary owns the transferred/shared bytes. A
           // copied snapshot here needlessly duplicates the complete virtual
           // filesystem before prepareWorkerVfs can share it with the child
           // realm. Keep the snapshot as a view of the current VFS, matching
           // runtime.spawn() and worker_threads.Worker().
-          const files = nestedSameRealm
+          const files = nestedSameRealm || sharedBackendWorker
             ? {}
             : Object.fromEntries(
               snapshot.artifacts.map(({ path, bytes }) => [path, bytes]),
@@ -12382,8 +12396,8 @@ export function createRuntime({
             vfsBackend: snapshot.backend,
             nodeVersion: resolvedProfile.id,
             files,
-            directories: nestedSameRealm ? [] : snapshot.directories,
-            symlinks: nestedSameRealm ? [] : snapshot.symlinks,
+            directories: nestedSameRealm || sharedBackendWorker ? [] : snapshot.directories,
+            symlinks: nestedSameRealm || sharedBackendWorker ? [] : snapshot.symlinks,
             gitProjects: scope.__BNH_GIT_PROJECT_ARCHIVES__ || [],
             syncBuffer: options.syncBuffer,
             entry: esmPrepared.entryPath,
@@ -12400,12 +12414,6 @@ export function createRuntime({
           // leaving generated files stranded in the child snapshot.
           const vfsUpdateBridge = options.syncBuffer ? null : createVfsUpdateBridge();
           const run = async (context) => {
-            // A nested same-realm child is entered while its parent is
-            // awaiting the child's completion. Waiting on the shared ESM
-            // execution tail here would make that parent/child pair wait on
-            // itself forever. Keep the tail for independent worker-backed
-            // entries, but allow this explicitly re-entrant process boundary
-            // to run under the normal per-process context hooks.
             let release;
             if (!nestedSameRealm) {
               const previous = esmExecutionTail;
@@ -12431,7 +12439,7 @@ export function createRuntime({
                       globalObject: scope,
                       nodeProfile: resolvedProfile,
                       workerBrokerPort,
-                      vfsBackend: nestedSameRealm ? snapshot.backend : undefined,
+                      vfsBackend: nestedSameRealm || sharedBackendWorker ? snapshot.backend : undefined,
                     }),
               });
               return result;
@@ -13048,6 +13056,7 @@ export function createRuntime({
                   signal,
                   timeout,
                   ownerProcess,
+                  nestedSameRealm: ownerProcess?.__bnhEsmNested === true,
                   // A shell-launched ESM script is an asynchronous child
                   // process even when its launcher has no explicit IPC. Keep
                   // its module cache, event loop, and terminal frame in the
@@ -13267,6 +13276,7 @@ export function createRuntime({
                   signal,
                   timeout,
                   ownerProcess,
+                  nestedSameRealm: ownerProcess?.__bnhEsmNested === true,
                   asyncLifecycle: true,
                 }, (value) => {
                   const chunk = normalizeOutputChunk(value);
@@ -13568,6 +13578,7 @@ export function createRuntime({
               signal: nodeOptions.signal,
               timeout: nodeOptions.timeout,
               ownerProcess,
+              nestedSameRealm: ownerProcess?.__bnhEsmNested === true,
               asyncLifecycle: true,
             }, (value) => {
               const chunk = normalizeOutputChunk(value);
@@ -17219,14 +17230,19 @@ export function createRuntime({
       if (typeof runWithPromiseScope === 'function') runWithPromiseScope(promise, dispatch);
       else dispatch();
     };
-    const restorePromiseRejectionObserver = setPromiseRejectionObserver((promise, reason) => {
-      // Node gives promise consumers the rest of the current microtask turn
-      // to attach a rejection handler. A native microtask is too early for
-      // Firefox's guest Promise adoption path, where Promise.all may attach
-      // its handler through one additional thenable job.
-      nativeSetTimeout(() => dispatchUnhandledRejection(promise, reason), 0);
-    });
+      const restorePromiseRejectionObserver = setPromiseRejectionObserver((promise, reason) => {
+        // Node gives promise consumers the rest of the current microtask turn
+        // to attach a rejection handler. A native microtask is too early for
+        // Firefox's guest Promise adoption path, where Promise.all may attach
+        // its handler through one additional thenable job.
+        nativeSetTimeout(() => dispatchUnhandledRejection(promise, reason), 0);
+      });
     const onUnhandledRejection = (event) => {
+      const promiseOwner = promiseProcess(event.promise);
+      if (promiseOwner && promiseOwner !== processObject) {
+        event.preventDefault?.();
+        return;
+      }
       const dynamicImport = dynamicImportRejections.get(event.reason);
       // Firefox may surface the original resolver rejection after a caught
       // dynamic import has already completed its fallback path. The caller's

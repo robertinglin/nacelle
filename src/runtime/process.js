@@ -204,7 +204,9 @@ export function prepareWorkerVfs(vfs, scope, { eager = false, nested = false } =
     ? null
     : mixedShared
       ? new scope.SharedArrayBuffer(mixedBytes)
-      : chunked ? null : isolated ? new scope.SharedArrayBuffer(totalBytes) : new ArrayBuffer(totalBytes);
+      : chunked ? null : isolated
+        ? new scope.SharedArrayBuffer(totalBytes)
+        : new ArrayBuffer(totalBytes);
   const chunks = chunked
     ? Array.from({ length: Math.ceil(totalBytes / chunkSize) }, (_, index) => new ArrayBuffer(Math.min(chunkSize, totalBytes - index * chunkSize)))
     : null;
@@ -330,6 +332,11 @@ export function prepareWorkerVfs(vfs, scope, { eager = false, nested = false } =
       vfsFileCount: Object.keys(vfs.files).length,
     } : {}),
   };
+  // Packed nested workers already receive every file through the compact
+  // backing/offset transport. Do not structured-clone the backend Map as a
+  // second copy of the entire dependency tree; the backend is only needed by
+  // same-realm consumers that retain object identity with their owner.
+  if (packedWire && nestedWorker) delete wire.vfsBackend;
   Object.defineProperty(prepared, workerVfsWire, {
     configurable: true,
     value: wire,

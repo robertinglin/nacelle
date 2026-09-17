@@ -165,6 +165,13 @@ export function isPromiseHandled(promise) {
   return handledPromises.has(promise) || handledPromises.has(promiseTarget(promise));
 }
 
+export function promiseProcess(promise) {
+  if (!promise) return undefined;
+  const target = promiseTarget(promise);
+  const asyncId = promiseIds.get(promise) ?? promiseIds.get(target);
+  return asyncId === undefined ? undefined : resources.get(asyncId)?.process;
+}
+
 export function markPromiseHandled(promise) {
   if (!promise) return;
   const target = promiseTarget(promise);

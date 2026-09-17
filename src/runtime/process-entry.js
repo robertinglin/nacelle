@@ -57,8 +57,19 @@ function expandPackedVfs(descriptor) {
   return expanded;
 }
 
-function runtimeFor(nodeVersion, workerBrokerPort) {
+function runtimeFor(nodeVersion, workerBrokerPort, vfsBackend) {
   const profile = resolveNodeVersionProfile(nodeVersion || 'lts');
+  if (vfsBackend) {
+    return {
+      profile,
+      runtime: createRuntime({
+        globalObject: globalThis,
+        nodeProfile: profile,
+        workerBrokerPort,
+        vfsBackend,
+      }),
+    };
+  }
   let runtime = runtimes.get(profile.id);
   if (!runtime) {
     runtime = createRuntime({ globalObject: globalThis, nodeProfile: profile, workerBrokerPort });
@@ -162,7 +173,8 @@ export async function runProcessEntry(context) {
     : [];
   const profile = resolveNodeVersionProfile(descriptor.nodeVersion || 'lts');
   if (context.workerBrokerPort) globalThis.__BNH_WORKER_BROKER_PORT__ = context.workerBrokerPort;
-  const runtime = context.runtimeInstance || runtimeFor(profile.id, context.workerBrokerPort).runtime;
+  const runtime = context.runtimeInstance
+    || runtimeFor(profile.id, context.workerBrokerPort, descriptor.vfsBackend).runtime;
   setRuntimePhase('install-process');
   installProcessContract(context.process, { nodeProfile: profile });
   if (descriptor.esmNested) context.process.__bnhEsmNested = true;

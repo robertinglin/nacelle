@@ -2328,6 +2328,7 @@ The exact candidate is `@radix-ui/react-primitive@2.1.10`. Native Node
 | `browser-firefox/citgm-1789521964100` | BrowserNpm installs the candidate graph until `@repo/typescript-config` metadata returns HTTP 404; no candidate test executes. | Same `@repo/*@0.0.0` published workspace-layout blocker; no package-specific shim or source change was added. |
 | `native-citgm-node22-current-rerun.log` | Current native Node 22.23.2 install fails with HTTP 404 for `@repo/builder@0.0.0`. | Confirms the published workspace dependency is unavailable under the native oracle. |
 | `citgm-chromium-node22-current/citgm-1789630577256` / `citgm-firefox-node22-current/citgm-1789630603252` | Current Chromium fails on `@repo/typescript-config@0.0.0` HTTP 404; current Firefox fails on `@repo/builder@0.0.0` HTTP 404. | Both browser engines independently reproduce the published workspace-layout blocker; no source or test changes were made. |
+| `native-citgm-node22-cursor-rerun.log` / `cursor-chromium/citgm-1789634494923` / `cursor-firefox/citgm-1789634498383` | Fresh native, Chromium, and Firefox reruns again fail during installation on published `@repo/*@0.0.0` metadata: native reports `@repo/builder` 404, Chromium reports `@repo/typescript-config` 404, and Firefox reports `@repo/typescript-config` 404. | Confirms the rank-90 blocker remains external and reproducible; no runtime or harness fix is indicated. |
 
 Because rank 90 is not a clean CITGM pass, the full Node 22 test suite and
 both full Playwright suites are required before the cursor can advance to

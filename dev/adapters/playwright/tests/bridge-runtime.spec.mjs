@@ -605,6 +605,7 @@ test.describe('browser runtime bridge and core primitives', () => {
         '/node/node_modules/.bin/eslint': [
           '#!/usr/bin/env node',
           'async function run() {',
+          '  await new Promise(resolve => setTimeout(resolve, 1));',
           "  process.stdout.write('bin target tool\\n');",
           '}',
           'run();',
@@ -625,6 +626,80 @@ test.describe('browser runtime bridge and core primitives', () => {
           "  process.stdout.write('bin target before\\n');",
           "  await execa('eslint', [], { stdio: 'inherit' });",
           "  process.stdout.write('bin target after\\n');",
+          '}',
+          'run().catch(error => { console.error(error); process.exitCode = 1; });',
+        ].join('\n'),
+      },
+    });
+    await expectPass(expect, result);
+  });
+
+  test('completes a CommonJS .bin chain owned by a nested ESM process', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert/strict');
+      const { spawn } = require('node:child_process');
+      const child = spawn(process.execPath, ['/node/outer.mjs'], {
+        cwd: '/node',
+        stdio: 'pipe',
+      });
+      let output = '';
+      let errorOutput = '';
+      child.stdout.on('data', chunk => { output += chunk; });
+      child.stderr.on('data', chunk => { errorOutput += chunk; });
+      child.once('error', error => { console.error(error); process.exitCode = 1; });
+      child.once('close', code => {
+        try {
+          assert.strictEqual(code, 0, errorOutput);
+          assert.strictEqual(output, 'nested gts before\\nnested eslint\\nnested gts after\\nnested ESM owner\\n');
+          process.stdout.write('nested ESM CommonJS chain completed');
+        } catch (error) {
+          console.error(error);
+          process.exitCode = 1;
+        }
+      });
+    `, {
+      env: { PATH: '/node/node_modules/.bin:/node' },
+      files: {
+        '/node/outer.mjs': [
+          "import { spawn } from 'node:child_process';",
+          "const child = spawn(process.execPath, ['/node/gts.cjs'], { cwd: '/node', stdio: 'inherit' });",
+          'const code = await new Promise((resolve, reject) => {',
+          "  child.once('error', reject);",
+          "  child.once('close', resolve);",
+          '});',
+          'if (code !== 0) process.exitCode = code;',
+          "else process.stdout.write('nested ESM owner\\n');",
+        ].join('\n'),
+        '/node/node_modules/.bin/eslint': [
+          '#!/usr/bin/env node',
+          "const fs = require('node:fs');",
+          'async function run() {',
+          "  const entries = await fs.promises.readdir('/node/tree');",
+          "  await Promise.all(entries.map(entry => fs.promises.stat('/node/tree/' + entry)));",
+          "  await new Promise(resolve => setTimeout(resolve, 1));",
+          "  process.stdout.write('nested eslint\\n');",
+          '}',
+          'run();',
+        ].join('\n'),
+        ...Object.fromEntries(Array.from({ length: 5000 }, (_, index) => [
+          `/node/tree/file-${index}.js`,
+          `module.exports = ${index};`,
+        ])),
+        '/node/node_modules/execa/package.json': JSON.stringify({ main: 'index.js' }),
+        '/node/node_modules/execa/index.js': [
+          "const { spawn } = require('node:child_process');",
+          'module.exports = (file, args, options) => new Promise((resolve, reject) => {',
+          '  const child = spawn(file, args, options);',
+          '  child.once(\'error\', reject);',
+          '  child.once(\'close\', code => code === 0 ? resolve() : reject(new Error(`exit ${code}`)));',
+          '});',
+        ].join('\n'),
+        '/node/gts.cjs': [
+          "const execa = require('execa');",
+          'async function run() {',
+          "  process.stdout.write('nested gts before\\n');",
+          "  await execa('eslint', ['**/*.ts'], { stdio: 'inherit' });",
+          "  process.stdout.write('nested gts after\\n');",
           '}',
           'run().catch(error => { console.error(error); process.exitCode = 1; });',
         ].join('\n'),

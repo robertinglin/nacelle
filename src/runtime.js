@@ -10010,7 +10010,7 @@ export function createRuntime({
                 // service after synchronous launcher bootstrap.
                 || /\/node_modules\/esbuild(?:-wasm)?\/bin\/esbuild$/.test(prepared.entryPath);
               let asyncCommonJsChild = false;
-              if (!useEsm && childOptions.asyncLifecycle && ownerProcess?.__bnhEsmNested !== true) {
+              if (!useEsm && childOptions.asyncLifecycle) {
                 // `node -e` is a complete process boundary even when its
                 // source is synthetic. Keep it out of the caller's realm so
                 // syntax errors (and the child exitCode they produce) cannot

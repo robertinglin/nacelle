@@ -68,7 +68,7 @@ not being reclassified as newly rerun here.
 | 40 | mime-types | PASS | none observed | Exact native, Chromium, and Firefox CITGM pass unchanged; repository-wide gates were skipped under the double-CITGM rule. |
 | 41 | nanoid | PASS | ours | Exact native Node CITGM passed before browser diagnosis; final Chromium `citgm-1789352834860` and Firefox `citgm-1789352865027` pass after shared runtime fixes and browser regressions. Required post-change gates pass at 345/345, 307/307, and 307/307. |
 | 42 | yargs-parser | PASS | none observed | Exact native, Chromium, and Firefox CITGM pass unchanged; repository-wide gates were skipped under the double-CITGM rule. |
-| 43 | source-map | BLOCKED | upstream package/repository (native-reproduced archive/submodule failure) | Exact native Node, Chromium, and Firefox CITGM all fail because the source archive lacks the `source-map-tests` submodule data required by the package test script; see the rank 43 record below. |
+| 43 | source-map | BLOCKED | upstream package/repository (native-reproduced archive/submodule failure) | Current Node 22.23.2 native, Chromium, and Firefox CITGM all fail because the source archive lacks the `source-map-tests` submodule data required by the package test script; see the rank 43 record below. |
 | 44 | string_decoder | BLOCKED | upstream package/repository (native-reproduced stale global validation), with ours-side Firefox intrinsic fix | Exact native Node, Chromium, and Firefox CITGM reach the same stale `test/common/index.js` global-leak assertion after the Firefox typed-array intrinsic defect was fixed; see the rank 44 record below. |
 | 45 | color-convert | PASS | none observed | Published `color-convert@3.1.3` at gitHead `5c106a633b5cd2de554d9c287ad31f9eeca7a271` passes exact CITGM unchanged in native Node v26, Chromium (`citgm-1789360293028`), and Firefox (`citgm-1789360434124`). No runtime, nested dependency, or upstream package/repository failure was observed. Repository-wide gates were skipped under the unchanged double-CITGM rule. Complete artifacts are preserved under `artifacts/citgm-top-100/rank-045-color-convert/`. |
 | 46 | estraverse | PASS | ours | Published `estraverse@5.3.0` at gitHead `ec3f900528eac270a51f7b079edeae086e7ebce4` passes exact CITGM in Chromium (`citgm-1789361477311`) and Firefox (`citgm-1789361533463`) after general runtime fixes for the legacy `process.binding('natives')` registry and prototype-based Node CallSites. Native Node passed before browser diagnosis. Required final gates passed: build; `npm test` 345/345; Chromium Playwright 310/310; Firefox Playwright 310/310. Complete artifacts are preserved under `artifacts/citgm-top-100/rank-046-estraverse/`. |
@@ -1521,9 +1521,9 @@ preserved under `artifacts/citgm-top-100/rank-043-source-map/`.
 
 | Run / log | Observed failure | Classification and resolution |
 | --- | --- | --- |
-| `native-citgm-node-v26.log` | The package's test script runs `git submodule update --init --recursive` and then fails to load `./source-map-tests/source-map-spec-tests.json`; the archive checkout has no Git repository or submodule contents. | Native proof: exact Node v26 CITGM fails before any browser runtime is involved. This is an upstream package/repository archive/submodule contract failure. No fake Git executable, submodule shim, or package-specific workaround was added. |
-| `citgm-1789357265377` / `citgm-chromium-run.log` | Chromium reports the same missing `source-map-tests/source-map-spec-tests.json` after the archive checkout's `git` command is unavailable. | Same failure as native Node; not classified as browser-only or ours. |
-| `citgm-1789357302275` / `citgm-firefox-run.log` | Firefox reports the same missing `source-map-tests/source-map-spec-tests.json` after the archive checkout's `git` command is unavailable. | Same failure as native Node; not classified as browser-only or ours. |
+| `native-citgm-node-v22-current.log` | Node 22.23.2 runs the package test script, whose `git submodule update --init --recursive` cannot populate the archive checkout; `./source-map-tests/source-map-spec-tests.json` is missing. | Native proof: the required Node 22 CITGM fails before any browser runtime is involved. This is an upstream package/repository archive/submodule contract failure. No fake Git executable, submodule shim, or package-specific workaround was added. |
+| `citgm-1789609476395` / `browser-chromium-node22.log` | Chromium reports `git: command not found` and the same missing `source-map-tests/source-map-spec-tests.json`. | Same failure as native Node 22; not classified as browser-only or ours. |
+| `citgm-1789609479490` / `browser-firefox-node22.log` | Firefox reports `git: command not found` and the same missing `source-map-tests/source-map-spec-tests.json`. | Same failure as native Node 22; not classified as browser-only or ours. |
 
 Rank 43 is therefore recorded as `BLOCKED` only after the exact native Node run
 reproduced the package failure. The browser runs confirm the same package
@@ -1535,9 +1535,9 @@ The package remained non-green, so the repository-wide gates were run before
 committing the blocked record:
 
 ```text
-npm exec --yes --package=citgm@10.0.2 -- citgm source-map  FAIL — native-citgm-node-v26.log; missing source-map-tests submodule data
-npm run citgm:browser:chromium -- source-map  FAIL — citgm-1789357265377; same missing submodule data
-npm run citgm:browser:firefox -- source-map   FAIL — citgm-1789357302275; same missing submodule data
+npm exec --yes --package=citgm@10.0.2 -- citgm source-map  FAIL — native-citgm-node-v22-current.log; missing source-map-tests submodule data
+npm run citgm:browser:chromium -- source-map  FAIL — citgm-1789609476395; same missing submodule data
+npm run citgm:browser:firefox -- source-map   FAIL — citgm-1789609479490; same missing submodule data
 npm test                                         PASS — npm-test-gate.log; 345/345
 npm run test:browser:chromium                    PASS — playwright-chromium-gate.log; 307/307
 npm run test:browser:firefox                      PASS — playwright-firefox-gate.log; 307/307
@@ -1546,6 +1546,10 @@ npm run test:browser:firefox                      PASS — playwright-firefox-ga
 No repository source changes were made for rank 43. The rank-43 blocker
 record and all failure/gate logs are committed, and the ordered cursor advances
 to rank 44.
+
+The current Node 22.23.2 rerun also made no repository changes, so no new
+repository-wide or full Playwright gates were required; the exact native and
+browser CITGM failures above are the candidate gate for this unchanged result.
 
 ## Rank 44 failure record
 

@@ -819,6 +819,19 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         return true;
       },
       kill: (signal = 'SIGTERM') => { sendControl('child-signal-request', { signal }); return true; },
+      // signal-exit and foreground-child inspect the real Node process
+      // contract before installing their handlers.  The browser worker
+      // boundary already has the corresponding event methods and pid; expose
+      // reallyExit too so those packages do not take their non-Node no-op
+      // branch and lose APIs such as signalExit.signals().
+      reallyExit(code = process.exitCode || 0) {
+        if (terminalSent) return;
+        exitRequested = true;
+        exitCode = Number(code) || 0;
+        process.exitCode = exitCode;
+        if (deferExitUntilCleanup) return;
+        finish('exit', exitCode);
+      },
       exit(code = 0) {
         if (exitRequested) throw processExitSignal;
         exitRequested = true;

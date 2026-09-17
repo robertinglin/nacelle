@@ -184,7 +184,8 @@ export function prepareWorkerVfs(vfs, scope, { eager = false, nested = false } =
   // more than one SharedArrayBuffer backing store. Do not allocate a chunk
   // array merely to repack those immutable shared files; that path is what
   // exhausts Chromium's ArrayBuffer budget during large test suites.
-  const directNested = nestedWorker && allShared && sharedBackings.size === 1;
+  const directNested = nestedWorker && allShared;
+  const directNestedPacked = directNested && sharedBackings.size === 1;
   const mixedShared = nestedWorker
     && !allShared
     && !directNested
@@ -199,7 +200,7 @@ export function prepareWorkerVfs(vfs, scope, { eager = false, nested = false } =
     && scope.crossOriginIsolated === true
     && typeof scope.SharedArrayBuffer === 'function';
   const chunkSize = 1 * 1024 * 1024;
-  const backing = directShared || directNested
+  const backing = directShared || directNestedPacked || directNested
     ? null
     : mixedShared
       ? new scope.SharedArrayBuffer(mixedBytes)
@@ -241,7 +242,7 @@ export function prepareWorkerVfs(vfs, scope, { eager = false, nested = false } =
   // single backing buffer. The chunks are only the transport representation
   // of that backing buffer; sending the original per-file map as well would
   // clone the complete package a second time and make the chunk path moot.
-  const packedWire = (Boolean(backing) || directShared || directNested || chunked)
+  const packedWire = (Boolean(backing) || directShared || directNestedPacked || chunked)
     && !mixedShared;
   const markerFor = (record) => ({
     [packedVfsFile]: true,

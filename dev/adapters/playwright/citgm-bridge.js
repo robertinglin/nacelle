@@ -786,9 +786,13 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     // ordinary fixtures look like hidden files.
     HOME: '/node/citgm/home',
     USERPROFILE: '/node/citgm/home',
-    TEMP: '/node/citgm/tmp',
-    TMP: '/node/citgm/tmp',
-    TMPDIR: '/node/citgm/tmp',
+    // Keep candidate checkouts under the virtual POSIX temp root, matching
+    // native CITGM.  Placing them below /node makes ancestor packages from
+    // the CITGM runner visible to package-local tools (for example an
+    // incompatible root @types/node reaches an old TypeScript test).
+    TEMP: '/tmp',
+    TMP: '/tmp',
+    TMPDIR: '/tmp',
     npm_config_registry: registry,
     npm_config_loglevel: 'error',
     // Chromium does not expose V8 precise-coverage data. Keep tap's

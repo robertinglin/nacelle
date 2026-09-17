@@ -219,6 +219,10 @@ test('process-bound fs preserves symbol accessor overlays across require copies'
     if (fs[queueKey] !== queue || sameFs[queueKey] !== queue) {
       throw new Error('symbol accessor overlay was not shared');
     }
+    const queueDescriptor = Object.getOwnPropertyDescriptor(fs, queueKey);
+    if (!queueDescriptor || typeof queueDescriptor.get !== 'function') {
+      throw new Error('non-configurable queue descriptor was not preserved');
+    }
     const clone = { __proto__: Object.getPrototypeOf(fs) };
     Object.getOwnPropertyNames(fs).forEach((name) => {
       Object.defineProperty(clone, name, Object.getOwnPropertyDescriptor(fs, name));

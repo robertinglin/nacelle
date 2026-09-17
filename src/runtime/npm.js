@@ -1450,7 +1450,11 @@ export class BrowserNpm {
     // Mount all unpacked files into VFS
     if (this.vfs && typeof this.vfs.mount === 'function') {
       onProgress?.({ phase: 'mounting', name: 'node_modules', count: Object.keys(filesToMount).length });
-      await this.vfs.mount(filesToMount);
+      // Package installs may target any granted absolute prefix (CITGM uses
+      // the POSIX temp root for candidate checkouts, while the runner itself
+      // lives under /node). Mount the files at the install's own node_modules
+      // root instead of assuming every install belongs under /node.
+      await this.vfs.mount(filesToMount, { path: targetNodeModules });
       onProgress?.({ phase: 'mounted', name: 'node_modules', count: Object.keys(filesToMount).length });
     }
 

@@ -8,6 +8,63 @@ async function openRuntime(page) {
 }
 
 test.describe('browser-native worker process boundary', () => {
+  test('exposes the Node process contract required by signal-exit in worker globals', async ({ page }) => {
+    await openRuntime(page);
+    const result = await page.evaluate(async () => {
+      const { createRuntime } = await import('/runtime.js');
+      const encode = (source) => new TextEncoder().encode(source);
+      const capabilities = {
+        vfs: { mounts: [{ path: '/node', mode: 'read-write' }] },
+        workers: { entryModules: ['*'], maxChildren: 2 },
+        ipc: { enabled: true },
+        signals: { allowed: ['SIGTERM', 'SIGINT', 'SIGKILL'] },
+        output: { maxBytes: 1024 * 1024, stdoutBytes: 1024 * 1024, stderrBytes: 1024 * 1024 },
+        envVars: { allowed: [] },
+      };
+      const runtime = createRuntime({ globalObject: globalThis });
+      await runtime.reset({ runId: 'signal-exit-process-contract', capabilities, isolation: 'worker' });
+      await runtime.mount({
+        '/node/main.js': encode(`
+          const signalExit = require('signal-exit');
+          if (typeof signalExit.signals !== 'function') throw new Error('signal-exit API was disabled');
+          process.stdout.write(JSON.stringify({ signals: signalExit.signals() }));
+        `),
+        '/node/node_modules/signal-exit/package.json': encode(JSON.stringify({ main: 'index.js' })),
+        '/node/node_modules/signal-exit/index.js': encode(`
+          var process = global.process;
+          var processOk = process && typeof process === 'object'
+            && typeof process.removeListener === 'function'
+            && typeof process.emit === 'function'
+            && typeof process.reallyExit === 'function'
+            && typeof process.listeners === 'function'
+            && typeof process.kill === 'function'
+            && typeof process.pid === 'number'
+            && typeof process.on === 'function';
+          if (!processOk) module.exports = function () {};
+          else {
+            module.exports = function () {};
+            module.exports.signals = function () { return ['SIGINT']; };
+          }
+        `),
+      });
+      const stdout = [];
+      const stderr = [];
+      const decode = (value) => typeof value === 'string' ? value : new TextDecoder().decode(value);
+      const code = await runtime.executeEntry('/node/main.js', {
+        cwd: '/node',
+        env: {},
+        processArgv: ['node', '/node/main.js'],
+      }, (value) => stdout.push(decode(value)), (value) => stderr.push(decode(value)));
+      return { code, stdout: stdout.join(''), stderr: stderr.join('') };
+    });
+
+    expect(result).toEqual({
+      code: 0,
+      stdout: '{"signals":["SIGINT"]}',
+      stderr: '',
+    });
+  });
+
   test('routes isolated proxy requests without structured-cloning AbortSignal', async ({ page }) => {
     await openRuntime(page);
     const result = await page.evaluate(async () => {

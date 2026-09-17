@@ -6354,6 +6354,12 @@ export function createRuntime({
           // operations fall back to the ambient same-realm process.
           getOwnPropertyDescriptor(target, name) {
             const descriptor = Reflect.getOwnPropertyDescriptor(target, name);
+            // Proxy invariants require an existing non-configurable property
+            // to be reported exactly as it exists on the target. graceful-fs
+            // publishes its queue as a non-configurable symbol accessor, so
+            // returning the process overlay here would throw before consumers
+            // such as nyc can clone fs.
+            if (descriptor && descriptor.configurable === false) return descriptor;
             const overlay = propertyOverlays.get(target);
             const entry = overlay?.get(name);
             if (entry === deletedProperty) return undefined;

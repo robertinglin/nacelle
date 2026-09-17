@@ -89,7 +89,7 @@ not being reclassified as newly rerun here.
 | 61 | path-exists | PASS | none observed; initial Node 26 comparison was invalid for the Node 22 baseline | Exact native Node 22.23.2 CITGM (`native-citgm-node-v22-corrected.log`) passes `path-exists@5.0.0`; Chromium (`citgm-1789419587466`) and Firefox (`citgm-1789419713966`) also pass the package smoke test. The earlier `util.isDate` result came from the default Node 26.7.0 shell, not the required Node 22 baseline, and is retained only as an invalid comparison artifact. |
 | 62 | graceful-fs | PASS | ours | `graceful-fs@4.2.11` at gitHead `514861c…` passes the exact native package suite (49,434/49,434), native CITGM, Chromium CITGM, and Firefox CITGM after general VFS/runtime fixes. All required repository gates pass; complete evidence is in `artifacts/citgm-top-100/rank-062-graceful-fs/`. |
 | 63 | eslint-scope | BLOCKED | upstream/package test-layout failure (native-reproduced) | Exact Node 22 native CITGM (`native-citgm-node-rerun.log`) fails in the published workspace after `espree` builds because `eslint-visitor-keys/dist/eslint-visitor-keys.cjs` is missing. Current Chromium (`citgm-1789613552046`) reaches the same monorepo test child and ends with `ERR_BROWSER_RUNTIME: Target crashed`; current Firefox (`citgm-1789613855951`) reaches the same pending child and was interrupted after no progress. Neither changes the native classification; complete current artifacts are preserved under `artifacts/citgm-top-100/rank-063-eslint-scope/`. |
-| 64 | yargs | GATE-BLOCKED | ours-side nested worker/runtime lifecycle (browser failure remains) | Exact native CITGM (`native-citgm-node-rerun.log`) passes `yargs@18.1.0`. Chromium (`citgm-1789573258851`) now runs all 827 package tests plus c8 successfully; the remaining failure is the required `gts` posttest, whose nested `eslint` worker remains pending until the bounded run terminates. The nested large-VFS transport now uses the packed path/offset wire with chunked byte delivery, and focused worker regressions pass, but the full lifecycle is not yet green. The rank is not advanced. |
+| 64 | yargs | GATE-BLOCKED | ours-side nested worker/runtime lifecycle (browser failure remains) | Exact native CITGM (`native-citgm-node-rerun.log`) passes `yargs@18.1.0`. After the general VFS glob traversal and child-global regressions, Chromium (`citgm-1789614763497`) and Firefox (`citgm-1789615259984`) complete the 827 package tests plus c8, then leave `gts`'s nested `eslint` worker pending until the bounded runs are interrupted. The retained source/test changes and full Node 22 gates are green, but the exact browser CITGM lifecycle is not; the rank is not advanced. |
 | 65 | cross-spawn | PASS | ours-side runtime | Exact native CITGM (`native-citgm-node-rerun.log`) passes `cross-spawn@7.0.6`. Final Chromium CITGM (`citgm-1789485014051`) and Firefox CITGM (`citgm-1789487666474`) pass the nested Jest/coverage lifecycle; earlier runs exposed VM-wrapped process listener maps and graceful-fs queue failures. The post-source-change Node 22 build, WASM, native, Chromium, and Firefox repository gates now pass; rank 65 is promoted to `PASS`. |
 | 66 | statuses | PASS | none observed | Exact native Node CITGM passes; current-source Chromium (`citgm-1789488684637`) and Firefox (`citgm-1789488760839`) CITGM both pass. Complete artifacts are preserved under `artifacts/citgm-top-100/rank-066-statuses/`. |
 | 67 | whatwg-url | BLOCKED | nested dependency/native addon (browser-reproduced) | Exact native Node CITGM passes, but current-source Chromium (`citgm-1789488862234`) and Firefox (`citgm-1789488922828`) both fail during `pretest` in nested `oxfmt`: `Error: Cannot find native binding` from `oxfmt/dist/bindings-BpewvGlT.js`. This is a browser-native-addon dependency boundary; no fake binding was added. Complete artifacts are preserved under `artifacts/citgm-top-100/rank-067-whatwg-url/`. |
@@ -257,39 +257,39 @@ this record.
 
 ## Ranks 63–65 continuation record
 
-The exact native and browser attempts for ranks 63 and 65 are preserved under
-`artifacts/citgm-top-100/rank-063-eslint-scope/` and
-`artifacts/citgm-top-100/rank-065-cross-spawn/`. The temporary rank-64 yargs
-diagnostic bundle was intentionally removed after its temporary runtime
-snapshots and tracing were extracted; the run IDs and observed outcomes below
-remain as the status record, but no local rank-64 artifact directory is claimed.
+The exact native and browser attempts for ranks 63–65 are preserved under
+`artifacts/citgm-top-100/rank-063-eslint-scope/`,
+`artifacts/citgm-top-100/rank-064-yargs/`, and
+`artifacts/citgm-top-100/rank-065-cross-spawn/`. Rank 64 retains only the
+candidate artifacts, gate logs, and permanent regression evidence; temporary
+runtime diagnostics were removed before this checkpoint.
 
 | Run / log | Observed failure or behavior | Classification and resolution |
 | --- | --- | --- |
 | Rank 63 `native-citgm-node-rerun.log` | `eslint-scope` installs, but the workspace test fails after building `espree`: `eslint-visitor-keys/dist/eslint-visitor-keys.cjs` is absent from the exact published workspace. | Native-reproduced package/workspace layout failure. The package remains `BLOCKED`; no browser workaround or candidate shim was added. |
 | Rank 63 `citgm-1789613552046` / `citgm-1789613855951` | Chromium reaches the monorepo test child and ends with `ERR_BROWSER_RUNTIME: Target crashed`; Firefox reaches the same pending child and was interrupted after no progress. | Current browser attempts confirm the archive does not provide a green candidate path, but neither overrides the native-reproduced classification. Complete current telemetry is preserved under the rank-63 artifact directory. |
-| Rank 64 `native-citgm-node-rerun.log` | `yargs@18.1.0` passes its exact native CITGM suite. | Native proof that the Chromium failure is ours-side until the browser path is fixed. |
-| Rank 64 `citgm-1789466996660` / `citgm-1789487524931` | The package reaches `gts`, but the latest post-fix Chromium run still reports both a literal `/**/*.ts` import-path failure and `ReferenceError: describe is not defined` in `test/argsert.mjs`. | Ours-side shell/loader and child-global handling remain unresolved. The rank stays `GATE-BLOCKED`; no package-specific shim was added. |
+| Rank 64 `native-citgm-node-rerun.log` | `yargs@18.1.0` passes its exact native CITGM suite. | Native proof that the browser failure is ours-side until the browser path is fixed. |
+| Rank 64 `citgm-1789614763497` / `citgm-1789615259984` | After the general glob traversal fix, both Chromium and Firefox complete the package test/c8 phase, then remain pending in `gts` while its nested `eslint` child is active. Both bounded attempts were interrupted with no terminal result; the progress evidence ends at `gts` → `eslint` with `pending: true`. | The literal `/**/*.ts` traversal defect was fixed generally and covered by a permanent VFS glob regression; the CommonJS-installed-global ESM path is also covered by a permanent browser regression. The remaining nested worker/runtime lifecycle is still ours-side, so rank 64 stays `GATE-BLOCKED`; no package-specific shim was added. |
 | Rank 65 `native-citgm-node-rerun.log` / `citgm-1789485014051` / `citgm-1789487666474` | `cross-spawn@7.0.6` passes native Node, Chromium, and Firefox CITGM, including nested Jest and coverage. | The browser-only failures were ours. VM-safe process event inspection now closes over the owning process, allowing graceful-fs's queue and the package's real concurrency path to complete. The post-source-change repository gates below are green; rank 65 is `PASS`. |
 
 ## Post-cleanup repository gate record
 
-After removing the yargs investigation diagnostics, the retained runtime fixes
-and permanent regression tests were rebuilt and verified with Node 22.23.2:
+After the yargs general fix and permanent regressions were added, the retained
+runtime changes were rebuilt and verified with Node 22.23.2:
 
 ```text
 node --version                              v22.23.2
-patch-regressions.mjs                       PASS
 npm run build:v22                           PASS — 5 WASM artifacts
 npm run check:wasm                          PASS — 5 artifacts passed export validation
-npm test                                    PASS — 354/354
-npm run test:browser:chromium               PASS — 364/364
-npm run test:browser:firefox                PASS — 364/364
+npm test                                    PASS — 355/355
+npm run test:browser:chromium               PASS — 367/367
+npm run test:browser:firefox                PASS — 367/367
 ```
 
-These gates validate the current source after cleanup. Rank 64 remains
-`GATE-BLOCKED`: its recorded yargs CITGM still has the unresolved `gts`
-posttest lifecycle, and this cleanup did not claim a new exact yargs CITGM pass.
+These gates validate the current source after the retained glob and ESM-global
+fixes. Rank 64 remains `GATE-BLOCKED`: its current Chromium and Firefox yargs
+CITGM attempts still have the unresolved `gts` posttest lifecycle, and this
+checkpoint does not claim an exact browser yargs pass.
 
 The ordered cursor remains at rank 63 because rank 64 is still formally
 retained as an ours-side gate blocker. Rank 65's exact native and browser

@@ -276,7 +276,8 @@ export function createGlob({
   }
 
   function patternMatchesWithParent(pattern, cwd) {
-    const parts = pattern.split('/').filter((part, index) => part || index === 0);
+    const absolute = absolutePattern(pattern);
+    const parts = pattern.split('/').filter(Boolean);
     const matches = new Set();
     const seen = new Set();
     const parentOf = (path) => path.slice(0, path.lastIndexOf('/')) || '/';
@@ -328,8 +329,7 @@ export function createGlob({
         visit(child, index + 1, symlinkDepth);
       }
     };
-    if (absolutePattern(pattern)) return matches;
-    visit(cwd, 0, 0);
+    visit(absolute ? '/' : cwd, 0, 0);
     return matches;
   }
 
@@ -348,14 +348,15 @@ export function createGlob({
 
   function collect(patternValue, optionsValue) {
     const config = prepare(patternValue, optionsValue);
-    const candidates = allCandidates(config.cwd, config.patterns, config.excludePatterns);
     const matches = new Map();
     for (const pattern of config.patterns) {
       const isAbsolute = absolutePattern(pattern);
       const trailingSlash = pattern.endsWith('/');
-      const patternCandidates = pattern.includes('..')
-        ? patternMatchesWithParent(pattern, config.cwd)
-        : candidates;
+      // Match the pattern while traversing only the branches it can reach.
+      // The old candidate walk recursively visited the complete VFS for every
+      // shell glob, so a shallow `*.js` in a package also crawled all of
+      // node_modules before filtering its direct children.
+      const patternCandidates = patternMatchesWithParent(pattern, config.cwd);
       for (const candidate of patternCandidates) {
         const output = outputPath(config.cwd, candidate, isAbsolute);
         if (trailingSlash) {

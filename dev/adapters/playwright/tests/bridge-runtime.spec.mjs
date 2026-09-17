@@ -4052,6 +4052,50 @@ test.describe('browser runtime bridge and core primitives', () => {
     await expectPass(expect, result);
   });
 
+  test('propagates CommonJS-installed globals into imported ESM child files', async ({ harnessPage }) => {
+    const result = await harnessPage.run(`
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      (async () => {
+        const child = spawn(process.execPath, ['/node/runner.mjs'], { stdio: ['ignore', 'pipe', 'pipe'] });
+        let output = '';
+        let errorOutput = '';
+        child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+        child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+        const code = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', resolve);
+        });
+        assert.strictEqual(code, 0, errorOutput);
+        assert.match(output, /esm globals passed/);
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `, {
+      files: {
+        '/node/runner.mjs': [
+          "import { createRequire } from 'node:module';",
+          "const require = createRequire(import.meta.url);",
+          "require('/node/install-globals.cjs');",
+          "await import('/node/suite.mjs');",
+          "process.stdout.write('esm globals passed\\n');",
+        ].join('\n'),
+        '/node/install-globals.cjs': [
+          "global.describe = (name, callback) => callback();",
+          "global.it = (name, callback) => callback();",
+        ].join('\n'),
+        '/node/suite.mjs': [
+          "describe('suite', () => {});",
+          "it('test', () => {});",
+        ].join('\n'),
+      },
+    });
+
+    await expectPass(expect, result);
+  });
+
   test('discovers the package root test file when node:test has no script argument', async ({ harnessPage }) => {
     const result = await harnessPage.run(`
       const assert = require('node:assert');

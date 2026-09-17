@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, readdirSync, rmSync, statSync as nativeStatSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { createGlob } from '../../../../src/runtime/fs-glob.js';
 import { createVfs } from '../../../../src/runtime/vfs.js';
 
 test('existsSync returns false when a path component is a file', () => {
@@ -104,4 +105,39 @@ test('glob excludes prune ignored directory trees', () => {
     vfs.fs.globSync('**/*.js', { cwd: '/node/project', exclude: ['node_modules'] }),
     ['index.js'],
   );
+});
+
+test('glob traversal does not visit unrelated subtrees', () => {
+  const tree = new Map([
+    ['/node/project', ['index.js', 'node_modules', 'src']],
+    ['/node/project/src', ['nested.js']],
+    ['/node/project/node_modules', ['dependency']],
+    ['/node/project/node_modules/dependency', ['index.js']],
+  ]);
+  const files = new Set(['/node/project/index.js', '/node/project/src/nested.js', '/node/project/node_modules/dependency/index.js']);
+  let listCalls = 0;
+  const entries = (path) => {
+    listCalls += 1;
+    return (tree.get(path) || []).map((name) => ({ name }));
+  };
+  const stats = (path) => ({
+    isFile: () => files.has(path),
+    isDirectory: () => tree.has(path),
+    isSymbolicLink: () => false,
+  });
+  const glob = createGlob({
+    resolvePath: (path) => String(path),
+    listEntries: entries,
+    statPath: (path) => {
+      if (!files.has(path) && !tree.has(path)) throw new Error('ENOENT');
+      return stats(path);
+    },
+    lstatPath: (path) => stats(path),
+    roots: () => ['/node'],
+    makeDirent: () => null,
+    invalidType: (name, value, expected) => new TypeError(`${name} must be ${expected}: ${value}`),
+  });
+
+  assert.deepEqual(glob.globSync('*.js', { cwd: '/node/project' }), ['index.js']);
+  assert.equal(listCalls, 1, 'a direct glob must not crawl nested or ignored directories');
 });

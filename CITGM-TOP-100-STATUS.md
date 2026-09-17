@@ -1661,9 +1661,9 @@ manifest-inspection, and repository-gate artifacts are preserved under
 
 | Run / log | Observed failure | Classification and resolution |
 | --- | --- | --- |
-| `native-citgm-node-v26.log` | Native Node fails during npm install with `ETARGET: No matching version found for tsconfig@0.0.0`; package tests never start. | Native proof of the package-install failure before browser involvement. The exact published manifest inspection shows `devDependencies.tsconfig` is literally `0.0.0`, while the published package contains only runtime `dist` files. This is an upstream package-publication/manifest defect, not a browser-runtime failure. No shim, dependency substitution, or package-specific bypass was added. |
-| `citgm-1789362861097` / `citgm-chromium-run.log` | Chromium independently fails at the same install step with `No matching version found for tsconfig@0.0.0`. | Confirms the native-reproduced package metadata failure in Chromium; no additional browser defect was inferred. |
-| `citgm-1789362890438` / `citgm-firefox-run.log` | Firefox independently fails at the same install step with `No matching version found for tsconfig@0.0.0`. | Confirms the native-reproduced package metadata failure in Firefox; no additional browser defect was inferred. |
+| `native-citgm-node-v22-rerun.log` | Node 22.23.2 fails during npm install with `ETARGET: No matching version found for tsconfig@0.0.0`; package tests never start. | Current native proof of the package-install failure before browser involvement. The exact published manifest inspection shows `devDependencies.tsconfig` is literally `0.0.0`, while the published package contains only runtime `dist` files. This is an upstream package-publication/manifest defect, not a browser-runtime failure. No shim, dependency substitution, or package-specific bypass was added. |
+| `citgm-1789611895211` / `browser-chromium-node22-rerun.log` | Chromium independently fails at the same install step with `No matching version found for tsconfig@0.0.0`. | Current confirmation of the native-reproduced package metadata failure in Chromium; no additional browser defect was inferred. |
+| `citgm-1789611918869` / `browser-firefox-node22-rerun.log` | Firefox independently fails at the same install step with `No matching version found for tsconfig@0.0.0`. | Current confirmation of the native-reproduced package metadata failure in Firefox; no additional browser defect was inferred. |
 | `npm pack https-proxy-agent@9.1.0` manifest inspection | The exact published `package.json` declares `tsconfig: 0.0.0` under `devDependencies`; the tarball has no tests or source files that could provide a valid alternative install contract. | Direct package evidence for the upstream publication defect. The fix belongs in the upstream package/repository publication, not in this runtime. |
 
 Rank 47 is recorded as `BLOCKED` only after the exact native Node run reproduced
@@ -1677,9 +1677,9 @@ The package remained non-green, so the repository-wide gates were run before
 committing the blocked record:
 
 ```text
-npm exec --yes --package=citgm@10.0.2 -- citgm https-proxy-agent  FAIL — native-citgm-node-v26.log; invalid published tsconfig@0.0.0 devDependency
-npm run citgm:browser:chromium -- https-proxy-agent             FAIL — citgm-1789362861097; same native-reproduced install failure
-npm run citgm:browser:firefox -- https-proxy-agent              FAIL — citgm-1789362890438; same native-reproduced install failure
+npm exec --yes --package=citgm@10.0.2 -- citgm https-proxy-agent  FAIL — native-citgm-node-v22-rerun.log; invalid published tsconfig@0.0.0 devDependency
+npm run citgm:browser:chromium -- https-proxy-agent             FAIL — citgm-1789611895211; same native-reproduced install failure
+npm run citgm:browser:firefox -- https-proxy-agent              FAIL — citgm-1789611918869; same native-reproduced install failure
 npm test                                                        PASS — npm-test-gate.log; native unit suite green
 npm run test:browser:chromium                                  PASS — playwright-chromium-gate-rerun-1.log; 310/310
 npm run test:browser:firefox                                    PASS — playwright-firefox-gate.log; 310/310

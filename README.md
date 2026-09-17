@@ -271,16 +271,21 @@ command. Find the first table row marked `BLOCKED` or `GATE-BLOCKED` in
 [`CITGM-TOP-100-STATUS.md`](CITGM-TOP-100-STATUS.md), and work forward in rank
 order. The current first blocked rank is rank 13, `tslib`.
 
-Each CITGM candidate must be checked against the same published package and
-git revision in all three environments:
+Prepare a Node 22 shell first. The temporary npm link matters for native CITGM:
+CITGM launches package-manager scripts as `node <npm-path>`, so a shell-wrapper
+`npm` can otherwise produce a false native failure before the package test runs.
 
 ```bash
-PATH=/home/bee/.local/share/mise/installs/node/22.23.2/bin:$PATH \
-  npm exec --yes --package=citgm@10.0.2 -- citgm <package>
-PATH=/home/bee/.local/share/mise/installs/node/22.23.2/bin:$PATH \
-  npm run citgm:browser:chromium -- <package>
-PATH=/home/bee/.local/share/mise/installs/node/22.23.2/bin:$PATH \
-  npm run citgm:browser:firefox -- <package>
+export NODE22_HOME="$(mise where node@22.23.2)"
+export PATH="$NODE22_HOME/bin:$PATH"
+export NATIVE_NPM_DIR="$(mktemp -d)"
+ln -s "$NODE22_HOME/lib/node_modules/npm/bin/npm-cli.js" "$NATIVE_NPM_DIR/npm"
+export NATIVE_PATH="$NATIVE_NPM_DIR:$PATH"
+node --version # v22.23.2
+PATH="$NATIVE_PATH" node "$NODE22_HOME/lib/node_modules/npm/bin/npm-cli.js" \
+  exec --yes --package=citgm@10.0.2 -- citgm <package>
+npm run citgm:browser:chromium -- <package>
+npm run citgm:browser:firefox -- <package>
 ```
 
 The full repository Playwright suites are separate from the two browser CITGM

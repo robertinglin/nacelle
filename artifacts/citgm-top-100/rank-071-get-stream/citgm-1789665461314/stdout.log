@@ -1,0 +1,9 @@
+info: starting            | get-stream          
+info: lookup              | get-stream          
+info: lookup-notfound     | get-stream          
+info: lookup-githead      | https://github.com/sindresorhus/get-stream/archive/83a78c0e4ff54e9b92ab73fc7008e99237a3e9d5.tar.gz
+info: get-stream npm:     | Downloading project: https://github.com/sindresorhus/get-stream/archive/83a78c0e4ff54e9b92ab73fc7008e99237a3e9d5.tar.gz
+info: get-stream npm:     | Project downloaded 83a78c0e4ff54e9b92ab73fc7008e99237a3e9d5.tar.gz
+info: get-stream npm:     | npm install started 
+info: get-stream npm:     | npm install successfully completed
+info: get-stream npm:     | test suite started  

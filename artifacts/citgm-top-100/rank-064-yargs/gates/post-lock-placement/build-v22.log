@@ -1,0 +1,7 @@
+
+> nacelle@1.0.5 build:v22
+> node scripts/build.mjs --node-version=v22
+
+  ✓ v22: 5 WASM artifacts, Node 22.23.2
+  ✓ default: v22
+  ✓ output: dist/

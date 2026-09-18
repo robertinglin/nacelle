@@ -1,0 +1,18 @@
+info: starting            | whatwg-url          
+info: lookup              | whatwg-url          
+info: lookup-notfound     | whatwg-url          
+info: lookup-githead      | https://github.com/jsdom/whatwg-url/archive/37df073c59cb06676f2663d65dc565a5b2b0eb57.tar.gz
+info: whatwg-url npm:     | Downloading project: https://github.com/jsdom/whatwg-url/archive/37df073c59cb06676f2663d65dc565a5b2b0eb57.tar.gz
+info: whatwg-url npm:     | Project downloaded 37df073c59cb06676f2663d65dc565a5b2b0eb57.tar.gz
+info: whatwg-url npm:     | npm install started 
+info: whatwg-url npm:     | npm install successfully completed
+info: whatwg-url npm:     | test suite started  
+error: failure             | The canary is dead: 
+error: failing module(s)   |                     
+error: module name:        | whatwg-url          
+error: version:            | 17.1.1              
+error: error:              | The canary is dead: 
+error: error:              | undefined                                                                    
+error:                     | @/tmp/f480552e/whatwg-url/node_modules/oxfmt/dist/bindings-BpewvGlT.js:564:33
+error: done                | The smoke test has failed.
+info: duration            | test duration: 10908ms

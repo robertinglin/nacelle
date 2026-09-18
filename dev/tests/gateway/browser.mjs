@@ -39,7 +39,7 @@ const server = http.createServer((req, res) => {
   if (url.pathname === '/classic.js') { res.setHeader('content-type','text/javascript');res.end('window.classicLoaded=true;'); return; }
   if (url.pathname === '/module.js') { res.setHeader('content-type','text/javascript');res.end('import { value } from "./dep.js"; window.moduleLoaded=value; window.moduleURL=import.meta.url; import("./dynamic.js").then(m=>window.dynamicLoaded=m.value);'); return; }
   if (url.pathname === '/dep.js' || url.pathname === '/dynamic.js') { res.setHeader('content-type','text/javascript');res.end('export const value=42;'); return; }
-  if (url.pathname === '/pixel.png') { res.setHeader('content-type','image/png');res.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64')); return; }
+  if (url.pathname === '/pixel.png') { res.setHeader('content-type','image/png');res.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=', 'base64')); return; }
   if (url.pathname === '/empty') { res.writeHead(204); res.end(); return; }
   if (url.pathname === '/api' || url.pathname === '/form') {
     let body='';req.on('data',part=>body+=part);req.on('end',()=>{

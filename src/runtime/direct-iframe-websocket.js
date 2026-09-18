@@ -1,6 +1,15 @@
 import { openGatewaySocket } from './gateway-websocket-bridge.js';
 import { gatewayError } from './gateway-selection.js';
 
+const messageBytes = value => {
+  if (value instanceof Uint8Array) return value;
+  if (ArrayBuffer.isView(value) && Object.prototype.toString.call(value) === '[object Uint8Array]') {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  if (Object.prototype.toString.call(value) === '[object ArrayBuffer]') return new Uint8Array(value);
+  throw gatewayError('ERR_GATEWAY_PROTOCOL', 'Invalid WebSocket message');
+};
+
 export function validateWebSocketProtocols(protocols = []) {
   if (typeof protocols === 'string') protocols = [protocols];
   if (!Array.isArray(protocols) || protocols.length > 32 || new Set(protocols).size !== protocols.length
@@ -143,7 +152,8 @@ export function openDirectWebSocket({ net, port, path, protocols = [], scope = g
   return {
     send(bytes, binary) {
       if (state !== 'open') throw gatewayError('ERR_GATEWAY_PROTOCOL', 'WebSocket is not open');
-      if (!(bytes instanceof Uint8Array) || typeof binary !== 'boolean') throw gatewayError('ERR_GATEWAY_PROTOCOL', 'Invalid WebSocket message');
+      bytes = messageBytes(bytes);
+      if (typeof binary !== 'boolean') throw gatewayError('ERR_GATEWAY_PROTOCOL', 'Invalid WebSocket message');
       if (!binary) decoder.decode(bytes);
       frame(binary ? 2 : 1, bytes);
     },

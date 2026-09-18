@@ -77,8 +77,10 @@ export function normalizeRequest(payload, context, maxBodyBytes) {
   let body = payload.body;
   if (body == null) body = new Uint8Array();
   else if (typeof body === 'string') body = new TextEncoder().encode(body);
-  else if (body instanceof ArrayBuffer) body = new Uint8Array(body);
-  else if (!(body instanceof Uint8Array)) throw gatewayError('ERR_GATEWAY_PROTOCOL', 'Body must be bytes');
+  else if (Object.prototype.toString.call(body) === '[object ArrayBuffer]') body = new Uint8Array(body);
+  else if (ArrayBuffer.isView(body) && Object.prototype.toString.call(body) === '[object Uint8Array]') {
+    body = new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+  } else if (!(body instanceof Uint8Array)) throw gatewayError('ERR_GATEWAY_PROTOCOL', 'Body must be bytes');
   if (body.byteLength > maxBodyBytes) throw gatewayError('ERR_GATEWAY_BODY_LIMIT', 'Request body exceeds maxBodyBytes');
   if (['GET', 'HEAD'].includes(method.toUpperCase()) && body.byteLength) {
     throw gatewayError('ERR_GATEWAY_PROTOCOL', 'GET and HEAD cannot have request bodies');

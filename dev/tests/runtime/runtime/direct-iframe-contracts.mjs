@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
+import vm from 'node:vm';
 import { Nacelle } from '../../../../src/index.js';
 import { normalizeGatewayOptions, selectGateway, DIRECT_GATEWAY_POLICY } from '../../../../src/runtime/gateway-selection.js';
 import { normalizeVirtualUrl, normalizeRequestHeaders, normalizeRequest, createEnvelopePeer } from '../../../../src/runtime/direct-iframe-protocol.js';
@@ -101,6 +102,8 @@ test('request normalization rejects unsafe methods, credentials, bodies and opti
   assert.equal(normalizeRequest({ url: '/', method: 'post', body: 'hello' }, context, 32).body.length, 5);
   assert.equal(normalizeRequest({ url: '/', method: 'POST', body: new ArrayBuffer(2), mode: 'cors', credentials: 'omit', redirect: 'manual' }, context, 32).body.length, 2);
   assert.equal(normalizeRequest({ path: '/', method: 'POST', body: new Uint8Array(2) }, context, 32).path, '/');
+  const foreignBytes = vm.runInNewContext('new Uint8Array([1, 2, 3])');
+  assert.deepEqual([...normalizeRequest({ url: '/', method: 'POST', body: foreignBytes }, context, 32).body], [1, 2, 3]);
   for (const payload of [null, { url: '/', method: 3 }, { url: '/', method: 'CONNECT' }, { url: '/', method: 'BAD METHOD' },
     { url: '/', credentials: 'include' }, { url: '/', mode: 'bad' }, { url: '/', redirect: 'bad' }, { url: '/', body: {} }, { url: '/', body: 'not-allowed' }]) {
     assert.throws(() => normalizeRequest(payload, context, 32), code('ERR_GATEWAY_PROTOCOL'));

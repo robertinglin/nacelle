@@ -6,6 +6,15 @@ export function directIframeBootstrap() {
   const NativeResponse = globalThis.Response;
   const NativeHeaders = globalThis.Headers;
   const NativeURL = globalThis.URL;
+  const error = (code, message) => Object.assign(new Error(message), { name: 'GatewayError', code });
+  const messageBytes = value => {
+    if (value instanceof Uint8Array) return value;
+    if (ArrayBuffer.isView(value) && Object.prototype.toString.call(value) === '[object Uint8Array]') {
+      return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    }
+    if (Object.prototype.toString.call(value) === '[object ArrayBuffer]') return new Uint8Array(value);
+    throw error('ERR_GATEWAY_PROTOCOL', 'Gateway message bytes must be Uint8Array');
+  };
   const resourceUrls = new Set();
   const pending = new Map();
   const sockets = new Map();
@@ -24,7 +33,6 @@ export function directIframeBootstrap() {
   let readyReject;
   const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
   ready.catch(() => {});
-  const error = (code, message) => Object.assign(new Error(message), { name: 'GatewayError', code });
   const send = (type, payload = {}, transfer = []) => {
     if (closed || !port) return;
     port.postMessage({ protocol: PROTOCOL, version: 1, ...identity, sequence: ++outgoing, type, payload }, transfer);
@@ -79,7 +87,9 @@ export function directIframeBootstrap() {
       } : {}), ...init, credentials: init.credentials ?? 'omit',
     });
     if (request.signal.aborted) throw request.signal.reason;
-    const body = request.body ? new Uint8Array(await request.arrayBuffer()) : new Uint8Array();
+    const body = input instanceof NativeRequest
+      ? new Uint8Array(await input.clone().arrayBuffer())
+      : init.body == null ? new Uint8Array() : new Uint8Array(await new NativeResponse(init.body).arrayBuffer());
     if (body.length > maxBodyBytes) throw error('ERR_GATEWAY_BODY_LIMIT', 'Request exceeds maxBodyBytes');
     if (request.signal.aborted) throw request.signal.reason;
     const requestId = `http-${++serial}`;
@@ -93,7 +103,7 @@ export function directIframeBootstrap() {
       request.signal.addEventListener('abort', abort, { once: true });
       send('http-request', { requestId, method: request.method, url: requestAddress(address),
         headers: [...request.headers], body, mode: request.mode, credentials: request.credentials,
-        redirect: request.redirect }, body.length ? [body.buffer] : []);
+        redirect: request.redirect });
     });
   }
   globalThis.fetch = gatewayFetch;
@@ -222,7 +232,7 @@ export function directIframeBootstrap() {
       const snapshot = data instanceof Blob ? data : data.slice();
       this._queue = this._queue.then(async () => {
         const bytes = snapshot instanceof Blob ? new Uint8Array(await snapshot.arrayBuffer()) : snapshot;
-        if (this._state !== 3) send('ws-send', { socketId: this._id, bytes, binary }, [bytes.buffer]);
+        if (this._state !== 3) send('ws-send', { socketId: this._id, bytes, binary });
         this._buffered -= size;
       }).catch(() => { this._emit(new Event('error')); this._finish(1006, '', false); });
     }
@@ -266,8 +276,8 @@ export function directIframeBootstrap() {
         const body = encoding === 'multipart/form-data' ? data : encoding === 'text/plain'
           ? [...params].map(([key, value]) => `${key}=${value}\r\n`).join('') : params;
         const request = new NativeRequest(virtualURL(action), { method, body });
-        const bytes = new Uint8Array(await request.arrayBuffer());
-        send('navigation', { url: requestAddress(action), method, headers: [...request.headers], body: bytes }, [bytes.buffer]);
+        const bytes = new Uint8Array(await new NativeResponse(body).arrayBuffer());
+        send('navigation', { url: requestAddress(action), method, headers: [...request.headers], body: bytes });
       } else throw unsupported(`Unsupported form method: ${method}`);
     } catch (failure) { send('error', diagnostic(failure.code || 'ERR_GATEWAY_NAVIGATION', failure.message)); }
   };
@@ -325,7 +335,7 @@ export function directIframeBootstrap() {
         Object.defineProperties(response, { url: { value: `http://localhost:${virtualPort}${data.finalUrl}` }, redirected: { value: data.redirected } });
         item.resolve(response);
       } catch (failure) { send('cancel', { requestId: data.requestId }); terminateRequest(data.requestId, failure); }
-    } else if (message.type === 'http-response-chunk' && item) item.controller?.enqueue(data.bytes);
+    } else if (message.type === 'http-response-chunk' && item) item.controller?.enqueue(messageBytes(data.bytes));
     else if (message.type === 'http-response-end') terminateRequest(data.requestId);
     else if (message.type === 'http-response-error') terminateRequest(data.requestId, error(data.code, data.message));
     else if (message.type === 'history') {
@@ -338,7 +348,8 @@ export function directIframeBootstrap() {
       if (!socket) return;
       if (message.type === 'ws-opened') { socket._protocol = data.protocol; socket._state = 1; socket._emit(new Event('open')); }
       else if (message.type === 'ws-message') {
-        const value = data.binary ? socket.binaryType === 'blob' ? new Blob([data.bytes]) : data.bytes.buffer : new TextDecoder().decode(data.bytes);
+        const bytes = messageBytes(data.bytes);
+        const value = data.binary ? socket.binaryType === 'blob' ? new Blob([bytes]) : bytes.buffer : new TextDecoder().decode(bytes);
         socket._emit(new MessageEvent('message', { data: value, origin: `http://localhost:${virtualPort}` }));
       } else if (message.type === 'ws-error') { socket._emit(new Event('error')); socket._finish(1006, '', false); }
       else if (message.type === 'ws-closed') socket._finish(data.code, data.reason, data.wasClean);

@@ -14,8 +14,8 @@ function commonjsSource(label, body) {
   `;
 }
 
-async function runContract(expectObject, harnessPage, label, body) {
-  const result = await harnessPage.run(commonjsSource(label, body));
+async function runContract(expectObject, harnessPage, label, body, options = undefined) {
+  const result = await harnessPage.run(commonjsSource(label, body), options);
   await expectPass(expectObject, result);
   return result;
 }
@@ -74,6 +74,108 @@ test.describe('browser-native http compatibility', () => {
     `);
   });
 
+  test('delivers binary HTTP responses through raw virtual sockets', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'binary-http-response', `
+      const assert = require('node:assert');
+      const http = require('node:http');
+
+      const payload = Buffer.from([0x00, 0xff, 0x10, 0x80, 0xc3, 0x28, 0x7f, 0x01]);
+      const server = http.createServer((_request, response) => {
+        response.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': String(payload.length),
+        });
+        response.end(payload);
+      });
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+      try {
+        const received = await new Promise((resolve, reject) => {
+          http.get({ hostname: 'localhost', port: server.address().port, path: '/' }, (response) => {
+            const chunks = [];
+            response.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+            response.once('end', () => resolve(Buffer.concat(chunks)));
+            response.once('error', reject);
+          }).once('error', reject);
+        });
+        assert.deepStrictEqual([...received], [...payload]);
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    `);
+  });
+
+  test('delivers VFS-streamed bodies with an explicit content length', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'vfs-streamed-http-response', `
+      const assert = require('node:assert');
+      const fs = require('node:fs');
+      const http = require('node:http');
+
+      const size = fs.statSync('/node/fixture.bin').size;
+      const server = http.createServer((_request, response) => {
+        response.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': String(size),
+        });
+        fs.createReadStream('/node/fixture.bin').pipe(response);
+      });
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+      try {
+        const received = await new Promise((resolve, reject) => {
+          http.get({ hostname: 'localhost', port: server.address().port, path: '/' }, (response) => {
+            const chunks = [];
+            response.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+            response.once('end', () => resolve(Buffer.concat(chunks)));
+            response.once('error', reject);
+          }).once('error', reject);
+        });
+        assert.strictEqual(received.length, size);
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    `, {
+      files: { '/node/fixture.bin': 'x'.repeat(19806) },
+    });
+  });
+
+  test('preserves the legacy Stream inheritance contract for userland Readables', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'stream-inheritance', `
+      const assert = require('node:assert');
+      const { Readable, Stream, Writable } = require('node:stream');
+      const { inherits } = require('node:util');
+
+      function CustomReadable() {
+        Readable.call(this);
+      }
+      inherits(CustomReadable, Readable);
+
+      const custom = new CustomReadable();
+      assert.ok(custom instanceof Readable);
+      assert.ok(custom instanceof Stream);
+      assert.ok(new Readable({ read() {} }) instanceof Stream);
+      assert.ok(new Writable({ write(_chunk, _encoding, callback) { callback(); } }) instanceof Stream);
+      const legacy = Object.create(Stream.prototype);
+      assert.throws(() => legacy.emit('error', new Error('legacy stream error')), /legacy stream error/);
+      custom.destroy();
+    `);
+  });
+
+  test('exposes the origin-form path on requests created from absolute URLs', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'absolute-url-request-path', `
+      const assert = require('node:assert');
+      const http = require('node:http');
+      const request = http.request('http://localhost/path?mode=browser');
+      assert.strictEqual(request.path, '/path?mode=browser');
+      request.once('error', () => {});
+      request.abort();
+    `);
+  });
+
   test('drains concurrent streamed request bodies and resumable responses', async ({ harnessPage }) => {
     await runContract(expect, harnessPage, 'concurrent-streamed-http', `
       const assert = require('node:assert');
@@ -113,6 +215,51 @@ test.describe('browser-native http compatibility', () => {
           })
         )));
         assert.deepStrictEqual(lengths, [11, 11, 11, 11, 11, 11, 11, 11, 11, 11]);
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    `);
+  });
+
+  test('frames buffered streamed request bodies for server parsers', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'streamed-request-framing', `
+      const assert = require('node:assert');
+      const http = require('node:http');
+      const { Readable } = require('node:stream');
+
+      const server = http.createServer((request, response) => {
+        let body = '';
+        request.setEncoding('utf8');
+        request.on('data', (chunk) => { body += chunk; });
+        request.once('end', () => {
+          assert.strictEqual(request.headers['content-length'], String(Buffer.byteLength(body)));
+          assert.strictEqual(request.headers['transfer-encoding'], undefined);
+          response.end('framed');
+        });
+      });
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+
+      try {
+        const result = await new Promise((resolve, reject) => {
+          const request = http.request({
+            hostname: 'localhost',
+            port: server.address().port,
+            method: 'POST',
+            path: '/',
+          }, (response) => {
+            let output = '';
+            response.setEncoding('utf8');
+            response.on('data', (chunk) => { output += chunk; });
+            response.once('end', () => resolve(output));
+            response.once('error', reject);
+          });
+          request.once('error', reject);
+          Readable.from(['frame-', 'me']).pipe(request);
+        });
+        assert.strictEqual(result, 'framed');
       } finally {
         await new Promise((resolve) => server.close(resolve));
       }
@@ -175,6 +322,324 @@ test.describe('browser-native http compatibility', () => {
     `);
   });
 
+  test('preserves multipart part boundaries across buffered and VFS-streamed writes', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'multipart-stream-order', `
+      const assert = require('node:assert');
+      const fs = require('node:fs');
+      const http = require('node:http');
+
+      const boundary = 'bnh-multipart-boundary';
+      const parts = [
+        { name: 'no_type', value: 'my_value' },
+        { name: 'custom_type', value: 'my_value', type: 'image/png' },
+        { name: 'default_type', value: Buffer.from([1, 2, 3]), type: 'application/octet-stream' },
+        { name: 'implicit_type', value: fs.createReadStream('/node/stream-fixture.txt'), type: 'text/plain' },
+        { name: 'overridden_type', value: fs.createReadStream('/node/stream-fixture.txt'), type: 'image/png' },
+      ];
+      const server = http.createServer((request, response) => {
+        const chunks = [];
+        request.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+        request.once('end', () => {
+          const body = Buffer.concat(chunks).toString('utf8');
+          const fields = body.split(boundary).slice(1, -1);
+          assert.strictEqual(fields.length, parts.length, body);
+          for (let index = 0; index < parts.length; index += 1) {
+            assert.match(fields[index], new RegExp('name="' + parts[index].name + '"'));
+            if (parts[index].type) assert.match(fields[index], new RegExp('Content-Type: ' + parts[index].type));
+            else assert.strictEqual(fields[index].includes('Content-Type'), false);
+          }
+          response.end('multipart-ok');
+        });
+      });
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+      try {
+        const result = await new Promise((resolve, reject) => {
+          const request = http.request({
+            hostname: 'localhost',
+            port: server.address().port,
+            method: 'POST',
+            path: '/',
+            headers: { 'content-type': 'multipart/form-data; boundary=' + boundary },
+          }, (response) => {
+            let body = '';
+            response.setEncoding('utf8');
+            response.on('data', (chunk) => { body += chunk; });
+            response.once('end', () => resolve(body));
+            response.once('error', reject);
+          });
+          request.once('error', reject);
+          (async () => {
+            for (const part of parts) {
+              request.write('--' + boundary + '\\r\\n');
+              request.write('Content-Disposition: form-data; name="' + part.name + '"\\r\\n');
+              if (part.type) request.write('Content-Type: ' + part.type + '\\r\\n');
+              request.write('\\r\\n');
+              if (typeof part.value?.pipe === 'function') {
+                await new Promise((resolvePart, rejectPart) => {
+                  part.value.once('error', rejectPart);
+                  part.value.once('end', resolvePart);
+                  part.value.pipe(request, { end: false });
+                });
+              } else {
+                request.write(part.value);
+              }
+              request.write('\\r\\n');
+            }
+            request.end('--' + boundary + '--\\r\\n');
+          })().catch(reject);
+        });
+        assert.strictEqual(result, 'multipart-ok');
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    `, {
+      files: { '/node/stream-fixture.txt': 'streamed-multipart-file\\n' },
+    });
+  });
+
+  test('supports legacy Stream aggregation used by multipart package dependencies', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'legacy-multipart-stream', `
+      const assert = require('node:assert');
+      const fs = require('node:fs');
+      const http = require('node:http');
+      const { Stream } = require('node:stream');
+
+      function delayed(source) {
+        const target = new Stream();
+        let released = false;
+        const buffered = [];
+        const emit = source.emit;
+        source.emit = function delayedEmit(name, ...args) {
+          if (released) target.emit(name, ...args);
+          else {
+            if (name === 'data') target.dataSize = (target.dataSize || 0) + args[0].length;
+            buffered.push([name, ...args]);
+          }
+          return emit.call(source, name, ...args);
+        };
+        source.on('error', () => {});
+        source.pause();
+        source.on('data', () => {});
+        assert.strictEqual(source.isPaused(), true);
+        target.pipe = function delayedPipe(destination, options) {
+          const result = Stream.prototype.pipe.call(this, destination, options);
+          this.resume();
+          return result;
+        };
+        target.resume = () => {
+          if (!released) {
+            released = true;
+            for (const event of buffered.splice(0)) target.emit(...event);
+          }
+          source.resume();
+        };
+        target.pause = () => source.pause();
+        return target;
+      }
+
+      const boundary = 'bnh-legacy-multipart-boundary';
+      const server = http.createServer((request, response) => {
+        const chunks = [];
+        request.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+        request.once('end', () => {
+          const body = Buffer.concat(chunks).toString('utf8');
+          const fields = body.split(boundary).slice(1, -1);
+          assert.strictEqual(fields.length, 2, body);
+          assert.match(fields[0], /name="first"/);
+          assert.match(fields[1], /name="file"/);
+          assert.match(fields[1], new RegExp('Content-Type: text' + String.fromCharCode(47) + 'plain'));
+          response.end('legacy-multipart-ok');
+        });
+      });
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+      try {
+        const result = await new Promise((resolve, reject) => {
+          const request = http.request({
+            hostname: 'localhost',
+            port: server.address().port,
+            method: 'POST',
+            path: '/',
+            headers: { 'content-type': 'multipart/form-data; boundary=' + boundary },
+          }, (response) => {
+            let body = '';
+            response.setEncoding('utf8');
+            response.on('data', (chunk) => { body += chunk; });
+            response.once('end', () => resolve(body));
+            response.once('error', reject);
+          });
+          request.once('error', reject);
+
+          const combined = new Stream();
+          combined._released = false;
+          combined._insideLoop = false;
+          combined._streams = [
+            '--' + boundary + '\\r\\nContent-Disposition: form-data; name="first"\\r\\n\\r\\none\\r\\n',
+            '--' + boundary + '\\r\\nContent-Disposition: form-data; name="file"\\r\\nContent-Type: text/plain\\r\\n\\r\\n',
+            delayed(fs.createReadStream('/node/stream-fixture.txt')),
+            '\\r\\n--' + boundary + '--\\r\\n',
+          ];
+          combined.pipe = function combinedPipe(destination, options) {
+            Stream.prototype.pipe.call(this, destination, options);
+            this.resume();
+            return destination;
+          };
+          combined.write = (chunk) => combined.emit('data', chunk);
+          combined.end = () => combined.emit('end');
+          combined._getNext = () => {
+            if (combined._insideLoop) {
+              combined._pendingNext = true;
+              return;
+            }
+            combined._insideLoop = true;
+            do {
+              combined._pendingNext = false;
+              const value = combined._streams.shift();
+              if (value === undefined) {
+                combined.end();
+                break;
+              }
+              combined._currentStream = value;
+              if (typeof value !== 'string') {
+                value.once('end', combined._getNext);
+                value.pipe(combined, { end: false });
+              } else {
+                combined.write(value);
+                combined._getNext();
+              }
+            } while (combined._pendingNext);
+            combined._insideLoop = false;
+          };
+          combined.resume = () => {
+            if (!combined._released) {
+              combined._released = true;
+              combined._getNext();
+            }
+          };
+          setTimeout(() => combined.pipe(request), 0);
+        });
+        assert.strictEqual(result, 'legacy-multipart-ok');
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    `, {
+      files: { '/node/stream-fixture.txt': 'legacy-stream-file\\n' },
+    });
+  });
+
+  test('streams a VFS file from a parent HTTP server to a child request', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'cross-child-http-file-response', `
+      const assert = require('node:assert');
+      const { spawn } = require('node:child_process');
+
+      const runner = spawn(process.execPath, ['/node/stream-supervisor.cjs'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      runner.stdout.on('data', (chunk) => { stdout += chunk; });
+      runner.stderr.on('data', (chunk) => { stderr += chunk; });
+      const code = await new Promise((resolve, reject) => {
+        runner.once('error', reject);
+        runner.once('close', resolve);
+      });
+      assert.strictEqual(code, 0, stderr);
+      assert.strictEqual(stdout, 'field=my_field\\nmy_value\\nremote_bytes=19807\\n');
+    `, {
+      files: {
+        '/node/stream-supervisor.cjs': [
+          "const { spawn } = require('node:child_process');",
+          "const runner = spawn(process.execPath, ['/node/stream-runner.cjs'], { stdio: ['ignore', 'pipe', 'pipe'] });",
+          'runner.stdout.pipe(process.stdout);',
+          'runner.stderr.pipe(process.stderr);',
+          "runner.once('close', (code) => { process.exitCode = code; });",
+        ].join('\n'),
+        '/node/stream-runner.cjs': [
+          "const fs = require('node:fs');",
+          "const http = require('node:http');",
+          "const { spawn } = require('node:child_process');",
+          "fs.writeFileSync('/node/stream-fixture.txt', 'x'.repeat(19806));",
+          "const server = http.createServer((request, response) => {",
+          "  if (request.method === 'POST') {",
+          "    let body = '';",
+          "    request.setEncoding('utf8');",
+          "    request.on('data', (chunk) => { body += chunk; });",
+          "    request.once('end', () => {",
+          "      const marker = 'field=remote_file\\n';",
+          "      response.end('field=my_field\\nmy_value\\nremote_bytes=' + body.slice(body.indexOf(marker) + marker.length).length + '\\n');",
+          "    });",
+          '    return;',
+          '  }',
+          "  const source = fs.createReadStream('/node/stream-fixture.txt');",
+          "  response.writeHead(200, { 'content-type': 'text/plain', 'content-length': String(fs.statSync('/node/stream-fixture.txt').size) });",
+          '  source.pipe(response);',
+          '});',
+          "server.listen(0, '127.0.0.1', () => {",
+          "  const child = spawn(process.execPath, ['/node/stream-client.cjs'], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, BNH_HTTP_PORT: String(server.address().port) } });",
+          "  child.stdout.pipe(process.stdout);",
+          "  child.stderr.pipe(process.stderr);",
+          "  child.once('close', (code) => { server.close(() => { process.exitCode = code; }); });",
+          '});',
+        ].join('\n'),
+        '/node/stream-client.cjs': [
+          "const http = require('node:http');",
+          "const Stream = require('node:stream').Stream;",
+          'function DelayedStream(source) { this.source = source; this.pauseStream = true; this._released = false; this._bufferedEvents = []; }',
+          'DelayedStream.create = (source) => {',
+          '  const delayed = new DelayedStream(source);',
+          '  const realEmit = source.emit;',
+          '  source.emit = (...args) => { delayed._handleEmit(args); return realEmit.apply(source, args); };',
+          "  source.on('error', () => {});",
+          '  source.pause();',
+          '  return delayed;',
+          '};',
+          'Object.setPrototypeOf(DelayedStream.prototype, Stream.prototype);',
+          "Object.defineProperty(DelayedStream.prototype, 'readable', { get() { return this.source.readable; } });",
+          'DelayedStream.prototype.resume = function resume() { if (!this._released) this.release(); this.source.resume(); };',
+          'DelayedStream.prototype.pause = function pause() { this.source.pause(); };',
+          'DelayedStream.prototype.release = function release() { this._released = true; this._bufferedEvents.forEach((args) => this.emit(...args)); this._bufferedEvents = []; };',
+          'DelayedStream.prototype.pipe = function pipe(destination, options) { Stream.prototype.pipe.call(this, destination, options); this.resume(); return destination; };',
+          'DelayedStream.prototype._handleEmit = function handleEmit(args) { if (this._released) this.emit(...args); else this._bufferedEvents.push(args); };',
+          'function CombinedStream() { this.readable = true; this.writable = false; this.pauseStreams = true; this._released = false; this._streams = []; this._currentStream = null; }',
+          'Object.setPrototypeOf(CombinedStream.prototype, Stream.prototype);',
+          'CombinedStream.create = () => new CombinedStream();',
+          'CombinedStream.prototype.append = function append(stream) { if (stream && typeof stream !== \'string\' && typeof stream !== \'number\') { if (!(stream instanceof DelayedStream)) { const delayed = DelayedStream.create(stream); stream.on(\'data\', () => {}); if (!stream.isPaused()) throw new Error(\'adding a data listener resumed a paused IncomingMessage\'); stream = delayed; } } this._streams.push(stream); return this; };',
+          'CombinedStream.prototype.pipe = function pipe(destination, options) { Stream.prototype.pipe.call(this, destination, options); this.resume(); return destination; };',
+          'CombinedStream.prototype._getNext = function getNext() { const stream = this._streams.shift(); if (stream === undefined) { this.writable = false; this.emit(\'end\'); return; } this._currentStream = stream; if (typeof stream === \'function\') { stream((value) => this._pipeNext(value)); } else { this._pipeNext(stream); } };',
+          'CombinedStream.prototype._pipeNext = function pipeNext(stream) { if (stream && typeof stream !== \'string\' && typeof stream !== \'number\') { stream.on(\'end\', () => this._getNext()); stream.pipe(this, { end: false }); } else { this.emit(\'data\', stream); this._getNext(); } };',
+          'CombinedStream.prototype.resume = function resume() { if (!this._released) { this._released = true; this.writable = true; this._getNext(); } if (this._currentStream?.resume) this._currentStream.resume(); };',
+          'CombinedStream.prototype.write = function write(data) { this.emit(\'data\', data); };',
+          'function Form() { CombinedStream.call(this); }',
+          'Object.setPrototypeOf(Form.prototype, CombinedStream.prototype);',
+          'Form.prototype.append = function append(field, value) { this._streams.push(\'field=\' + field + \'\\n\'); this._streams.push(value); this._streams.push((next) => next(\'\\n\')); };',
+          'Form.prototype.getLength = function getLength(callback) { process.nextTick(() => callback(null, 1)); };',
+          'Form.prototype.submit = function submit(callback) { const upload = http.request({ host: \'localhost\', port: Number(process.env.BNH_HTTP_PORT), method: \'POST\', path: \'/upload\' }, (uploadResponse) => callback(null, uploadResponse)); this.getLength((error, length) => { if (error) { callback(error); return; } upload.setHeader(\'content-length\', length); this.pipe(upload); }); };',
+          "const request = http.request({ host: 'localhost', port: Number(process.env.BNH_HTTP_PORT), path: '/stream' }, (response) => {",
+          "  if (response.client?._httpMessage?.path !== '/stream') throw new Error('IncomingMessage.client metadata missing');",
+          "  const form = new Form();",
+          "  form.append('my_field', 'my_value');",
+          "  form.append('remote_file', response);",
+          '  form.submit((error, uploadResponse) => { if (error) { console.error(error); process.exitCode = 1; return; }',
+          "    let body = '';",
+          "    uploadResponse.setEncoding('utf8');",
+          "    uploadResponse.on('data', (chunk) => { body += chunk; });",
+          "    uploadResponse.once('end', () => { process.stdout.write(body); });",
+          "    uploadResponse.once('error', (error) => { console.error(error); process.exitCode = 1; });",
+          '  });',
+          '  response.once(\'error\', (error) => { console.error(error); process.exitCode = 1; });',
+          '});',
+          "request.once('error', (error) => { console.error(error); process.exitCode = 1; });",
+          'request.end();',
+        ].join('\n'),
+      },
+    });
+  });
+
   test('flushes implicit headers before a final body on raw net sockets', async ({ harnessPage }) => {
     await runContract(expect, harnessPage, 'raw-net-http-end', `
       const assert = require('node:assert');
@@ -205,6 +670,52 @@ test.describe('browser-native http compatibility', () => {
         });
         assert.match(wire, /^HTTP\\/1\\.1 200 /);
         assert.match(wire, /\\r\\n\\r\\n8\\r\\nraw-body\\r\\n0\\r\\n\\r\\n$/);
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    `);
+  });
+
+  test('parses chunked request bodies received on raw net sockets', async ({ harnessPage }) => {
+    await runContract(expect, harnessPage, 'raw-net-http-chunked-request', `
+      const assert = require('node:assert');
+      const http = require('node:http');
+      const net = require('node:net');
+
+      const server = http.createServer((request, response) => {
+        let body = '';
+        request.setEncoding('utf8');
+        request.on('data', (chunk) => { body += chunk; });
+        request.once('end', () => {
+          assert.strictEqual(request.headers['transfer-encoding'], 'chunked');
+          assert.strictEqual(body, 'chunked multipart body');
+          response.end('chunked-ok');
+        });
+      });
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+
+      try {
+        const wire = await new Promise((resolve, reject) => {
+          const socket = net.connect(server.address().port, '127.0.0.1');
+          let output = '';
+          socket.setEncoding('utf8');
+          socket.on('data', (chunk) => { output += chunk; });
+          socket.once('connect', () => socket.end(
+            'POST /chunked HTTP/1.1\\r\\n'
+              + 'Host: localhost\\r\\n'
+              + 'Transfer-Encoding: chunked\\r\\n'
+              + 'Connection: close\\r\\n\\r\\n'
+              + '8\\r\\nchunked \\r\\n'
+              + 'e\\r\\nmultipart body\\r\\n'
+              + '0\\r\\n\\r\\n',
+          ));
+          socket.once('error', reject);
+          socket.once('close', () => resolve(output));
+        });
+        assert.match(wire, /chunked-ok/);
       } finally {
         await new Promise((resolve) => server.close(resolve));
       }

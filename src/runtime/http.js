@@ -1250,6 +1250,30 @@ function initializeVirtualPeer(socket, init = {}) {
   };
 }
 
+function createSyntheticClientSocket() {
+  const socket = new EventEmitter();
+  socket.destroyed = false;
+  socket.readable = true;
+  socket.writable = true;
+  socket.resume = () => socket;
+  socket.pause = () => socket;
+  socket.destroy = (error = undefined) => {
+    if (socket.destroyed) return socket;
+    socket.destroyed = true;
+    socket.readable = false;
+    socket.writable = false;
+    if (error && socket.listenerCount('error') > 0) socket.emit('error', error);
+    socket.emit('close');
+    return socket;
+  };
+  socket.end = (callback) => {
+    socket.destroy();
+    callback?.();
+    return socket;
+  };
+  return socket;
+}
+
 function proxyBypassesTarget(proxyEnv, target, scope) {
   const parsed = new scope.URL(target);
   return matchesNoProxy(
@@ -1355,7 +1379,7 @@ class VirtualServerRequest extends Readable {
 
   on(name, listener) {
     const result = super.on(name, listener);
-    if (name === 'data') this.resume();
+    if (name === 'data' && !this._readableState.paused) this.resume();
     return result;
   }
 
@@ -2347,15 +2371,83 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
     // Bytes after the header belong to the tunnel and are exposed as Node's
     // `head` argument instead of being parsed as another HTTP request.
     const isConnect = normalizedMethod === 'CONNECT';
-    const contentLength = isConnect ? 0 : Number(headers['content-length'] || 0);
-    if (!Number.isInteger(contentLength) || contentLength < 0) {
-      const error = new TypeError('invalid HTTP content-length');
-      error.code = 'HPE_INVALID_CONTENT_LENGTH';
-      throw error;
-    }
     const bodyStart = headerEnd + 4;
-    if (bytes.byteLength < bodyStart + contentLength) return null;
-    const body = bytes.slice(bodyStart, bodyStart + contentLength);
+    let body;
+    let consumed = bodyStart;
+    const transferEncoding = String(headers['transfer-encoding'] || '').toLowerCase();
+    const isChunked = !isConnect && transferEncoding
+      .split(',')
+      .some((value) => value.trim() === 'chunked');
+    if (isChunked) {
+      const chunks = [];
+      let cursor = bodyStart;
+      while (true) {
+        let lineEnd = -1;
+        for (let index = cursor; index + 1 < bytes.byteLength; index += 1) {
+          if (bytes[index] === 13 && bytes[index + 1] === 10) {
+            lineEnd = index;
+            break;
+          }
+        }
+        if (lineEnd < 0) return null;
+        const sizeLine = new decoder().decode(bytes.slice(cursor, lineEnd));
+        const sizeText = sizeLine.split(';', 1)[0].trim();
+        if (!/^[0-9a-f]+$/i.test(sizeText)) {
+          const error = new Error('Parse Error: invalid chunk size');
+          error.code = 'HPE_INVALID_CHUNK_SIZE';
+          throw error;
+        }
+        const size = Number.parseInt(sizeText, 16);
+        if (!Number.isSafeInteger(size)) {
+          const error = new Error('Parse Error: invalid chunk size');
+          error.code = 'HPE_INVALID_CHUNK_SIZE';
+          throw error;
+        }
+        const dataStart = lineEnd + 2;
+        if (size === 0) {
+          // A zero chunk is followed by optional trailers and a final empty
+          // line. Wait for that complete delimiter before exposing the
+          // request, so a split transport chunk cannot be mistaken for a
+          // complete body or the next pipelined request.
+          if (bytes.byteLength < dataStart + 2) return null;
+          if (bytes[dataStart] === 13 && bytes[dataStart + 1] === 10) {
+            consumed = dataStart + 2;
+            break;
+          }
+          let trailerEnd = -1;
+          for (let index = dataStart; index + 3 < bytes.byteLength; index += 1) {
+            if (bytes[index] === 13 && bytes[index + 1] === 10
+              && bytes[index + 2] === 13 && bytes[index + 3] === 10) {
+              trailerEnd = index;
+              break;
+            }
+          }
+          if (trailerEnd < 0) return null;
+          consumed = trailerEnd + 4;
+          break;
+        }
+        if (bytes.byteLength < dataStart + size + 2) return null;
+        const chunkEnd = dataStart + size;
+        if (bytes[chunkEnd] !== 13 || bytes[chunkEnd + 1] !== 10) {
+          const error = new Error('Parse Error: invalid chunk terminator');
+          error.code = 'HPE_INVALID_CHUNK_SIZE';
+          throw error;
+        }
+        chunks.push(bytes.slice(dataStart, chunkEnd));
+        cursor = chunkEnd + 2;
+      }
+      body = concatenate(chunks);
+    } else {
+      const contentLength = isConnect ? 0 : Number(headers['content-length'] || 0);
+      if (!Number.isInteger(contentLength) || contentLength < 0) {
+        const error = new TypeError('invalid HTTP content-length');
+        error.code = 'HPE_INVALID_CONTENT_LENGTH';
+        throw error;
+      }
+      if (bytes.byteLength < bodyStart + contentLength) return null;
+      body = bytes.slice(bodyStart, bodyStart + contentLength);
+      consumed = bodyStart + contentLength;
+    }
     const host = headers.host || `${binding.host}:${binding.port}`;
     const protocol = binding.protocol;
     const connection = String(headers.connection || '').toLowerCase();
@@ -2366,7 +2458,7 @@ function createVirtualHttpNetwork(scope, BufferClass, netModule, trackTask, diag
       ? `${protocol}//${path}`
       : `${protocol}//${host}${path.startsWith('/') ? path : `/${path}`}`;
     return {
-      consumed: bodyStart + contentLength,
+      consumed,
       url,
       method: normalizedMethod,
       target: path,
@@ -3557,9 +3649,16 @@ class BrowserAgent extends EventEmitter {
     this.sockets[name] ||= [];
     const freeSockets = this.freeSockets[name];
     let socket;
+    const ownerProcess = request?._ownerProcess;
     if (freeSockets) {
-      while (freeSockets.length && freeSockets[0].destroyed) freeSockets.shift();
-      socket = this.scheduling === 'fifo' ? freeSockets.shift() : freeSockets.pop();
+      for (let index = freeSockets.length - 1; index >= 0; index -= 1) {
+        if (freeSockets[index]?.destroyed) freeSockets.splice(index, 1);
+      }
+      const eligible = ownerProcess
+        ? freeSockets.filter((candidate) => candidate?._bnhOwnerProcess === ownerProcess)
+        : freeSockets;
+      socket = this.scheduling === 'fifo' ? eligible[0] : eligible.at(-1);
+      if (socket) freeSockets.splice(freeSockets.indexOf(socket), 1);
       if (!freeSockets.length) delete this.freeSockets[name];
     }
 
@@ -3600,6 +3699,10 @@ class BrowserAgent extends EventEmitter {
           request.destroy(new TypeError('Agent.createSocket() must return a socket'));
           return;
         }
+        // The global browser Agent is shared by virtual child processes, but
+        // native Node agents are process-local. Never let a free socket from
+        // one virtual child carry another child's HTTP callbacks/state.
+        socket._bnhOwnerProcess = request._ownerProcess;
         request.socket = socket;
         request.connection = socket;
         request.onSocket?.(socket);
@@ -3671,6 +3774,7 @@ class BrowserAgent extends EventEmitter {
 
   reuseSocket(socket, request) {
     request.reusedSocket = true;
+    socket._bnhOwnerProcess = request._ownerProcess;
     socket.ref?.();
   }
 
@@ -3757,6 +3861,11 @@ class IncomingMessage extends Readable {
     this._response = response;
     this.socket = response.socket || owner?.socket || null;
     this.connection = this.socket;
+    // Node's IncomingMessage exposes the client socket, whose _httpMessage
+    // points back to the originating ClientRequest. Legacy multipart clients
+    // such as form-data use that metadata when naming streamed HTTP files.
+    this.client = this.socket;
+    if (this.client && owner && this.client._httpMessage == null) this.client._httpMessage = owner;
     this._bodyReader = null;
     this._closed = false;
     this._consuming = false;
@@ -3867,9 +3976,6 @@ class IncomingMessage extends Readable {
         while (!this.destroyed) {
           const item = await this._bodyReader.read();
           if (item.done) break;
-          this._owner?._recordNetworkLifecycle?.('client-body-chunk', {
-            bodyBytes: Number(item.value?.byteLength || 0),
-          });
           this._runInAsyncScope(() => this.push(
             nodeChunk(toBytes(item.value, this._scope), this._scope, this._BufferClass),
           ));
@@ -3877,9 +3983,6 @@ class IncomingMessage extends Readable {
       } else if (body && body[Symbol.asyncIterator]) {
         for await (const chunk of body) {
           if (this.destroyed) break;
-          this._owner?._recordNetworkLifecycle?.('client-body-chunk', {
-            bodyBytes: Number(chunk?.byteLength || 0),
-          });
           this._runInAsyncScope(() => this.push(
             nodeChunk(toBytes(chunk, this._scope), this._scope, this._BufferClass),
           ));
@@ -3887,9 +3990,6 @@ class IncomingMessage extends Readable {
       } else if (body && body[Symbol.iterator] && typeof body !== 'string') {
         for (const chunk of body) {
           if (this.destroyed) break;
-          this._owner?._recordNetworkLifecycle?.('client-body-chunk', {
-            bodyBytes: Number(chunk?.byteLength || 0),
-          });
           this._runInAsyncScope(() => this.push(
             nodeChunk(toBytes(chunk, this._scope), this._scope, this._BufferClass),
           ));
@@ -3904,18 +4004,12 @@ class IncomingMessage extends Readable {
       this.complete = true;
       this.readableComplete = true;
       this.clearTimeout();
-      this._owner?._recordNetworkLifecycle?.('client-body-end', {
-        destroyed: Boolean(this.destroyed),
-      });
       this._runInAsyncScope(() => this._owner?._responseComplete());
       this._closeAfterEnd();
       this._runInAsyncScope(() => this.push(null));
     } catch (error) {
       if (this.destroyed) return;
       this.aborted = true;
-      this._owner?._recordNetworkLifecycle?.('client-body-error', {
-        error: { name: String(error?.name || 'Error'), code: error?.code || null },
-      });
       super.destroy(error);
       this._owner?._responseFailed(error);
     } finally {
@@ -4247,7 +4341,18 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       }
       validateRequestPath(options.path);
       this.method = normalizeMethod(options.method);
-      this.path = url;
+      let requestPath = options.path;
+      if (requestPath === undefined || /^[a-z][a-z\d+.-]*:/i.test(String(requestPath))) {
+        try {
+          const parsedURL = new scope.URL(requestPath === undefined ? url : requestPath);
+          requestPath = ['http:', 'https:'].includes(parsedURL.protocol)
+            ? `${parsedURL.pathname || '/'}${parsedURL.search || ''}`
+            : url;
+        } catch {
+          requestPath = url;
+        }
+      }
+      this.path = requestPath || '/';
       this.host = options.hostname || options.host || '';
       this.protocol = options.protocol;
       this.agent = options.agent;
@@ -4287,7 +4392,17 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       // created after the shared realm has restored its parent process. Use
       // the explicit module owner for virtual-child callbacks and its console
       // facade for response metadata.
-      this._ownerProcess = ownerProcess || scope.process;
+      const activeProcess = scope.__bnhActiveProcess;
+      const defaultOwner = ownerProcess || scope.process;
+      // A compatibility module can be cached by the runtime process while a
+      // later synchronous child creates the request. Capture that child at
+      // construction time, then keep the captured owner stable across the
+      // asynchronous dispatch. Rebinding here from whatever process happens
+      // to be active when the dispatch timer runs can move the request's task
+      // onto its parent and let the child exit before the response callback.
+      this._ownerProcess = typeof activeProcess?._bnhTaskTracker === 'function'
+        ? activeProcess
+        : defaultOwner;
       // Do not merge the host page/Node environment here. A virtual process
       // must honor its own NO_PROXY and proxy URLs, even when the embedding
       // process has a different proxy policy (for example, localhost in the
@@ -4859,13 +4974,20 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
     _dispatch() {
       if (this._started || this.destroyed) return;
       if (this._agentSocketAttempted && (this._agentSocket || this.destroyed)) return;
+      const activeProcess = scope.__bnhActiveProcess;
+      if (typeof this._ownerProcess?._bnhTaskTracker !== 'function'
+        && typeof activeProcess?._bnhTaskTracker === 'function') {
+        this._ownerProcess = activeProcess;
+        this._ownerConsole = activeProcess._bnhConsole || scope.console;
+      }
       this._started = true;
       this._recordNetworkLifecycle('client-dispatch', {
         agent: this._agent?.constructor?.name || null,
         virtualNetwork: Boolean(this._virtualNetwork?.dispatch),
       });
       this._performanceStart = Number(scope.performance?.now?.()) || 0;
-      this._taskRelease ||= trackTask?.() || null;
+      const taskTracker = this._ownerProcess?._bnhTaskTracker || trackTask;
+      this._taskRelease ||= taskTracker?.() || null;
       this._ensureAsyncResources();
       publishDiagnostic(diagnostics, 'http.client.request.start', { request: this });
       this._armTimeout();
@@ -5110,9 +5232,17 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
       if (BODYLESS_METHODS.has(this.method) && body.byteLength) {
         throw new TypeError(`Request with ${this.method} method cannot have a body`);
       }
+      const headers = new Map(this._headers);
+      // The browser transport receives the complete buffered body at dispatch
+      // time. Publish its framing explicitly so server middleware does not
+      // mistake a body-bearing request with no transfer metadata for an empty
+      // request (formidable, for example, selects a dummy parser in that case).
+      if (body.byteLength && !headers.has('content-length') && !headers.has('transfer-encoding')) {
+        headers.set('content-length', String(body.byteLength));
+      }
       const init = {
         method: this.method,
-        headers: fetchHeaders(this._headers, scope),
+        headers: fetchHeaders(headers, scope),
       };
       if (this._duplicateContentLength) init.__bnhDuplicateContentLength = true;
       if (this._controller) init.signal = this._controller.signal;
@@ -5215,6 +5345,16 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
             this._httpsAgent._cacheSession(this._httpsSessionKey, session, generation);
           }
         }
+        // Proxy responses are materialized from bytes and therefore do not
+        // arrive with a browser-local socket object. Node's IncomingMessage
+        // still exposes `client._httpMessage` for these responses, and
+        // streaming clients such as form-data use it to recover the original
+        // request path when naming an HTTP response upload.
+        const responseSocket = response?.socket || this.socket || createSyntheticClientSocket();
+        responseSocket._httpMessage ||= this;
+        if (response && !response.socket) response.socket = responseSocket;
+        this.socket ||= responseSocket;
+        this.connection ||= responseSocket;
         this.response = new IncomingMessage(response, this, scope, BufferClass);
         // The response event is delivered from a fetch/network promise, so
         // restore the process and console that created the request at the
@@ -5253,12 +5393,17 @@ function createRequestClass(scope, BufferClass, virtualNetwork, proxy, proxyEnv,
 
     _responseComplete() {
       this._clearTimeout();
-      if (this._agent) {
+      // Raw browser sockets are serialized with `Connection: close` in
+      // _flush(). The peer closes them after the response, so returning one
+      // to the keep-alive pool races the next virtual child/request against
+      // that terminal close (the race is browser-timing dependent).
+      if (this._agent && !this._rawRequestSent) {
         const name = this._agent.getName?.(this._options);
         if (name) {
           const freeSockets = this._agent.freeSockets[name] ||= [];
           if (!freeSockets.length) {
             const freeSocket = this.socket || new EventEmitter();
+            freeSocket._bnhOwnerProcess = this._ownerProcess;
             freeSocket.destroyed ??= false;
             freeSocket.ref ??= () => freeSocket;
             freeSocket.unref ??= () => freeSocket;
@@ -5351,7 +5496,12 @@ function createProtocolModule(protocol, ClientRequest, Server, Agent, scope, Buf
       virtualNetwork: Boolean(clientRequest._virtualNetwork?.dispatch),
     });
     if (parsed.callback) clientRequest.once('response', parsed.callback);
-    clientRequest._agent?.addRequest?.(clientRequest, requestOptions);
+    // `data:` URLs are fulfilled by browser fetch and do not represent a TCP
+    // endpoint. Do not ask the default virtual Agent for a socket first; that
+    // would invoke ClientRequest._flush() with a non-writable transport.
+    if (!/^data:/i.test(String(url))) {
+      clientRequest._agent?.addRequest?.(clientRequest, requestOptions);
+    }
     return clientRequest;
   };
   const get = (input, options, callback) => {

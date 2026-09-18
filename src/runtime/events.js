@@ -412,6 +412,13 @@ export class BrowserEventEmitter {
         this.domain._errorHandler(error);
         return true;
       }
+      if (name === 'error') {
+        const error = args[0];
+        if (error instanceof Error) throw error;
+        const unhandled = new Error(`Unhandled error.${error == null ? '' : ` (${String(error)})`}`);
+        unhandled.code = 'ERR_UNHANDLED_ERROR';
+        throw unhandled;
+      }
       return false;
     }
     const snapshot = [...listeners];

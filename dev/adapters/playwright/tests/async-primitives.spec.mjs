@@ -451,6 +451,8 @@ test.describe('browser runtime async primitives', () => {
       assert.deepStrictEqual(seen, [['on', 1], ['once', 1], ['on', 2]]);
       assert.strictEqual(emitter.listenerCount('value'), 0);
       assert.strictEqual(emitter.emit('missing'), false);
+      const unhandled = new Error('unhandled event error');
+      assert.throws(() => emitter.emit('error', unhandled), unhandled);
     `);
 
     await expectPass(expect, result);

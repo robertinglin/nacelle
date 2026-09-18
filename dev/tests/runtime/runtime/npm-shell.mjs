@@ -414,6 +414,25 @@ test('package script errors are forwarded when the shell returns them directly',
   assert.equal(await child.stderrText(), 'missing-command: command not found\n');
 });
 
+test('npx runs a versioned virtual npm package for audit commands', async () => {
+  const calls = [];
+  const outcome = await runShellScript("npx npm@'>=10.2' audit --production", {
+    cwd: '/node',
+    env: {},
+    fs: memoryShellFs(),
+    runCommand: async (options) => {
+      calls.push({ entry: options.entry, argv: options.argv });
+      return { code: 0, stdout: '', stderr: '' };
+    },
+  });
+
+  assert.equal(outcome.code, 0);
+  assert.deepEqual(calls, [{
+    entry: '/node/node_modules/.bin/npm',
+    argv: ['audit', '--production'],
+  }]);
+});
+
 test('nested npm lifecycle waits for sequential node and yarn children', async () => {
   const hostSetTimeout = globalThis.setTimeout.bind(globalThis);
   const setup = `const { spawn } = require('node:child_process');

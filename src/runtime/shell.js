@@ -847,18 +847,41 @@ async function runNpm(name, args, input, context, options) {
   if (name === 'npx') {
     const commandArgs = args.filter((arg) => !['-y', '--yes', '--'].includes(arg));
     if (!commandArgs.length) return commandError('npx', 'missing command');
+    // npx can execute a package-manager spec without first materializing a
+    // package bin. The browser runtime already owns a virtual npm client, so
+    // route npm@<range> directly to that client instead of treating the spec
+    // as an executable filename (which would produce `command not found`).
+    if (/^npm(?:@.+)?$/.test(String(commandArgs[0]))) {
+      return runNpm('npm', commandArgs.slice(1), input, context, options);
+    }
     return runProgram(commandArgs[0], commandArgs.slice(1), input, context, options);
   }
   const meaningfulArgs = args.filter((arg) => !['--silent', '--loglevel=silent'].includes(arg));
   if (meaningfulArgs[0] === '--version' || meaningfulArgs[0] === '-v') return result(0, '10.0.0-browser\n');
   const isTest = meaningfulArgs[0] === 'test';
   const isInstall = ['install', 'i', 'add'].includes(meaningfulArgs[0]);
-  if ((!['run', 'run-script'].includes(meaningfulArgs[0]) && !isTest && !isInstall)
-    || (!isTest && !isInstall && !meaningfulArgs[1])) {
+  const isAudit = meaningfulArgs[0] === 'audit';
+  if (((!['run', 'run-script'].includes(meaningfulArgs[0]) && !isTest && !isInstall && !isAudit)
+    || (!isTest && !isInstall && !isAudit && !meaningfulArgs[1]))) {
     return commandError('npm', 'only npm run is supported by the browser shell');
   }
   if (isInstall) {
     if (typeof options.runCommand !== 'function') return commandError('npm', 'npm installation is unavailable');
+    return options.runCommand({
+      entry: '/node/node_modules/.bin/npm',
+      argv: args,
+      cwd: context.cwd,
+      env: context.env,
+      stdin: input,
+      signal: context.signal,
+      timeout: context.timeout,
+      onNetwork: (event) => context.onNetwork?.(event),
+      onStdout: context.onStdout,
+      onStderr: context.onStderr,
+    });
+  }
+  if (isAudit) {
+    if (typeof options.runCommand !== 'function') return commandError('npm', 'npm audit is unavailable');
     return options.runCommand({
       entry: '/node/node_modules/.bin/npm',
       argv: args,

@@ -113,7 +113,7 @@ not being reclassified as newly rerun here.
 | 85 | path-to-regexp | PASS | ours | Exact Node 22.23.2 CITGM passes `path-to-regexp@8.4.2`; Chromium (`citgm-1789508412369`) and Firefox (`citgm-1789508414412`) pass the full install, TypeScript, Prettier, Vitest fork suite, and size-limit lifecycle. The browser runs first exposed an embedded MessagePort transfer failure and then a `new Function`-created ESM import escaping the VFS; both were fixed generally and covered by focused IPC and ESM Function-created import oracles. |
 | 86 | lodash | PASS | none observed | Exact Node 22.23.2 CITGM passes `lodash@4.18.1`; Chromium (`citgm-1789508647838`) and Firefox (`citgm-1789508647644`) also pass the published install and smoke-test contract with no browser-only failure. |
 | 87 | universalify | PASS | ours fixed | Exact Node 22.23.2 CITGM passes `universalify@2.0.1`; Chromium (`citgm-1789509679549`) and Firefox (`citgm-1789509682041`) also pass the published install and smoke-test contract. The initial browser crash was an ours-side stream compatibility defect: legacy `colortape` uses `_buffer` for private state, while the harness had used that name for its readable queue. |
-| 88 | form-data | GATE-BLOCKED | ours-side virtual HTTP/child lifecycle; published posttest remains unsupported | Exact Node 22.23.2 CITGM for `form-data@4.0.6` at gitHead `64190db548c0179e37206858e39f27cf513e9435` (`native-citgm-node22-current-rerun.log`) reaches all 29 test files (`0 errors in 29 files`) and then fails the package posttest because `npx npm@'>=10.2' audit --production` resolves to `npm@`/`npm@>=10.2: command not found`. The callback-boundary fix passes focused Chromium and Firefox regressions, but fresh Chromium (`callback-boundary-chromium2/citgm-1789668187398`) and Firefox (`callback-boundary-firefox/citgm-1789668857839`) both time out after 600 seconds while the candidate’s virtual `npm install` remains pending after mounting all 158 packages / 4,770 files; no package test executes. |
+| 88 | form-data | PASS | ours-side runtime fixes plus native CITGM wrapper correction | Exact Node 22.23.2 CITGM for `form-data@4.0.6` at gitHead `64190db548c0179e37206858e39f27cf513e9435` passes all 29 published test files and its `npx npm@'>=10.2' audit --production` posttest when the native CITGM wrapper clears inherited `npm exec` variables. Chromium (`citgm-1789749959736`) and Firefox (`citgm-1789750309447`) both pass the complete upstream CITGM. Final Node 22 build, WASM, serialized regressions, native tests (360/360), Chromium (387/387), and Firefox (387/387) gates are green; evidence is under `artifacts/citgm-top-100/rank-088-form-data/`. |
 | 89 | jiti | BLOCKED | upstream repository/toolchain (native-reproduced install/lint contract) | Current Node 22.23.2 native CITGM for `jiti@2.7.0` at gitHead `fd3bb289b75ed207edfb686d671ed50144f7e90f` now fails fresh npm install with `Cannot read properties of null (reading 'edgesOut')`. Current Chromium (`citgm-1789630289894`) and Firefox (`citgm-1789630384166`) install successfully and reproduce the published `pnpm lint` Prettier failure on `src/plugins/babel-plugin-transform-typescript-metadata/serialize-type.ts`; no browser-only runtime failure is present. |
 | 90 | @radix-ui/react-primitive | BLOCKED | upstream published workspace dependency (native-reproduced) | Current Node 22.23.2 CITGM downloads `@radix-ui/react-primitive@2.1.10` but cannot install its published `@repo/*@0.0.0` workspace dependencies: native reports `@repo/builder` HTTP 404, Chromium reports `@repo/typescript-config` HTTP 404, and Firefox reports `@repo/builder` HTTP 404. All runs stop at install, matching the published package-layout blocker; no browser-only runtime failure is present. |
 | 91 | onetime | PASS | none observed | Exact Node 22.23.2 native CITGM passes `onetime@8.0.0` at lookup revision `481ec583f8303e98c4d1d16bb316ef8e6b04d72c`; Chromium (`citgm-1789523060434`) and Firefox (`citgm-1789523175419`) also pass the complete install and `xo` lifecycle. No runtime, nested-dependency, or upstream failure was observed. |
@@ -2346,36 +2346,32 @@ browser attempts are preserved under
 | `callback-boundary-chromium/citgm-1789668139575` | The first post-fix invocation produced only bootstrap progress before its local runner session ended, with no terminal summary. | Incomplete attempt; retained for audit and superseded by the complete timeout rerun below. |
 | `callback-boundary-chromium2/citgm-1789668187398` | With the callback-boundary fix built, Chromium mounts all 158 packages / 4,770 files, but the candidate’s virtual `npm install` child remains pending with no further network or output progress until the 600-second timeout. | Authoritative timeout after the fix; this is a separate child-install/lifecycle blocker from the prior duplicate-callback failure. Firefox is required to classify its scope. |
 | `callback-boundary-firefox/citgm-1789668857839` | Firefox also mounts all 158 packages / 4,770 files, then the candidate’s virtual `npm install` child remains pending until the 600-second timeout (`SIGKILL`, 2,199 network events, no package tests). | Authoritative cross-browser timeout after the fix. The remaining child-install/lifecycle blocker is shared by Chromium and Firefox, not engine-specific. |
+| `native-citgm-node22-final.log` | With Node 22 `npm` and `npx` linked and the inherited `npm_config_package`, `npm_command`, and lifecycle variables cleared before launching CITGM, all 29 files and the published `npx npm@'>=10.2' audit --production` posttest pass; CITGM exits 0. | The earlier native `npm@` failure was the outer `npm exec` wrapper contaminating nested `npx`, not a form-data or npm-audit blocker. The clean wrapper is now documented in the README. |
+| `browser-chromium-final/artifacts/citgm-1789749959736` / `browser-firefox-final/artifacts/citgm-1789750309447` | Current-source Chromium and Firefox both complete the exact form-data CITGM with exit 0 and no timeout. | PASS after the general HTTP, stream, child-lifecycle, and browser npm/audit fixes. |
 
-The current rank-88 candidate remains `GATE-BLOCKED`: its native package
-assertions pass but the published posttest is unsupported. The callback
-error-boundary fix is green in focused Chromium and Firefox regressions; the
-fresh full Chromium and Firefox reruns now time out during virtual `npm install`,
-before the package test lifecycle. The timeout is shared across engines, so the
-callback-boundary fix is retained as a proven runtime fix while form-data
-remains blocked by the separate virtual child-install lifecycle.
+Rank 88 is promoted to `PASS`. The native package suite and posttest pass with
+the documented clean Node 22 CITGM wrapper, and the authoritative Chromium and
+Firefox CITGM runs are green. The required post-change repository gates are
+also green.
 
-## Post-form-data callback-boundary repository gate record
+## Final rank-88 repository gate record
 
-After the callback-boundary and proxy-aware local-dispatch fixes, the required
-Node 22.23.2 repository gates were rerun before advancing to another CITGM
-candidate. Complete logs are preserved under
-`artifacts/citgm-top-100/rank-088-form-data/gates-after-callback-boundary/`.
+After the form-data runtime and npm/audit fixes, the required Node 22.23.2
+repository gates were rerun. Complete final logs are preserved under
+`artifacts/citgm-top-100/rank-088-form-data/`.
 
 ```text
 npm run build:v22                    PASS — 5 WASM artifacts, Node 22.23.2
 npm run check:wasm                   PASS — 5 artifacts passed export validation
 serialized patch regressions         PASS — 4/4
-npm test                              PASS — 359/359
-full Chromium Playwright             PASS — 374/374
-full Firefox Playwright              PASS — 374/374
+npm test                              PASS — 360/360
+full Chromium Playwright             PASS — 387/387
+full Firefox Playwright              PASS — 387/387
 ```
 
-The first full Firefox attempt had one transient Next.js startup failure; an
-isolated rerun passed, and the authoritative full Firefox rerun passed all
-374 tests. The repository gates are therefore green for the retained source
-changes, while rank 88 itself remains blocked by the candidate's published
-posttest and virtual child-install lifecycle.
+The repository gates and the native, Chromium, and Firefox form-data CITGM
+runs are all green. The ordered cursor can advance to rank 89 after this run
+is committed.
 
 ## Rank 89 continuation record
 

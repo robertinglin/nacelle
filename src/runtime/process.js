@@ -1190,7 +1190,11 @@ export function createBrowserProcess(options = {}) {
     // surfacing an unhandled startup rejection in the outer test process.
     const startupFailure = !spawned && (!frame.forced || frame.kind === 'timeout');
     if (startupFailure) completionReject(error || errorWithCode('ERR_PROCESS_STARTUP', 'worker failed during startup'));
-    if (error && !frame.forced) events.emit('error', error);
+    // A terminal worker error must settle the child even when no caller has
+    // installed an `error` listener. Native ChildProcess exposes the event,
+    // but the browser boundary must not strand `wait()` behind EventEmitter's
+    // unhandled-error throw.
+    if (error && !frame.forced && events.listenerCount('error') > 0) events.emit('error', error);
     events.emit('terminal', terminalRecord);
     events.emit('exit', terminalRecord.code, terminalRecord.signal, terminalRecord);
     events.emit('close', terminalRecord.code, terminalRecord.signal, terminalRecord);

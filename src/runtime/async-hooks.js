@@ -725,6 +725,24 @@ function runWithPromiseScope(promise, callback) {
   return runInScope(asyncId, callback, undefined, [], false, promiseTarget(promise));
 }
 
+function dispatchUncaughtProcessError(processObject, error) {
+  if (typeof processObject?._bnhDispatchUncaughtException === 'function') {
+    const handled = processObject._bnhDispatchUncaughtException(error);
+    if (handled === true) return;
+    // A same-realm virtual child has already notified its parent boundary and
+    // must not rethrow into the owner's event loop. Root errors are recorded
+    // by the dispatcher and terminate through the runtime process boundary.
+    if (processObject._bnhVirtualChild === true
+      || processObject._bnhUncaughtException === error
+      || typeof processObject._bnhDispatchUncaughtException === 'function') return;
+  }
+  throw error;
+}
+
+export function dispatchUncaughtAsyncError(processObject, error) {
+  return dispatchUncaughtProcessError(processObject, error);
+}
+
 const taskHookTargets = new WeakMap();
 
 // Harness-driven queues (MessagePort delivery, stream write completion) resume
@@ -759,9 +777,12 @@ function wrapQueueMicrotask(target) {
     const resource = {};
     const triggerAsyncId = executionId;
     const asyncId = newAsyncId('Microtask', triggerAsyncId, resource);
+    const processObject = resources.get(asyncId)?.process;
     target.call(this, () => {
       try {
         return runInScope(asyncId, callback, this, []);
+      } catch (error) {
+        dispatchUncaughtProcessError(processObject, error);
       } finally {
         const record = resources.get(asyncId);
         if (record) {
@@ -819,9 +840,12 @@ function installTaskHooks(scope) {
       const resource = {};
       const triggerAsyncId = executionId;
       const asyncId = newAsyncId('Microtask', triggerAsyncId, resource);
+      const processObject = resources.get(asyncId)?.process;
       originalQueueMicrotask.call(this, () => {
         try {
           return runInScope(asyncId, callback, this, []);
+        } catch (error) {
+          dispatchUncaughtProcessError(processObject, error);
         } finally {
           const record = resources.get(asyncId);
           if (record) {
@@ -1183,6 +1207,7 @@ export class AsyncResource {
 
   asyncId() { return this._asyncId; }
   triggerAsyncId() { return this._triggerAsyncId; }
+  _bnhProcess() { return resources.get(this._asyncId)?.process; }
 
   runInAsyncScope(callback, thisArg, ...args) {
     if (typeof callback !== 'function') throw new TypeError('callback must be a function');

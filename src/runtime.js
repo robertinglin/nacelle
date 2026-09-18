@@ -47,6 +47,7 @@ import {
   setPromiseRejectionHandledObserver,
   setPromiseRejectionObserver,
   trackPromise,
+  dispatchUncaughtAsyncError,
 } from './runtime/async-hooks.js';
 import { createCommonJsSourcePreparer } from './runtime/commonjs-source.js';
 import { EventEmitter, addAbortListener, getEventListeners, getMaxListeners, once } from './runtime/events.js';
@@ -4099,6 +4100,17 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
         if (options.abortOnUncaughtException) terminateBySignal('SIGABRT');
         else {
           exitCode ||= 1;
+          processObject.__bnhUncaughtException = error;
+          if (processObject._bnhInjectedProcess) {
+            processObject._bnhInjectedProcess.__bnhUncaughtException = error;
+          }
+          exitRequested = true;
+          exiting = true;
+          // An unhandled exception terminates a native Node process even when
+          // an open server would otherwise keep its event loop referenced.
+          // Mark the process exited so same-realm children release owned
+          // servers/tasks and notify their parent ChildProcess boundary.
+          if (processObject._bnhVirtualChild === true) processObject._markExited?.();
         }
         return false;
       }
@@ -4107,8 +4119,8 @@ function createProcess(scope, options, stdout, stderr, trackTask) {
     // The timer callback has already unwound when process dispatches the error.
     // Re-enter its recorded async resource while user error handlers run.
     const runWithErrorScope = processObject._bnhRunWithErrorScope;
-    if (typeof runWithErrorScope === 'function') runWithErrorScope(error, dispatch);
-    else dispatch();
+    if (typeof runWithErrorScope === 'function') return runWithErrorScope(error, dispatch);
+    return dispatch();
   };
   const setTimer = (callback, delay, repeat = false, type = repeat ? 'Timeout' : 'Timeout') => {
     beforeExitEventEmitted = false;
@@ -9184,7 +9196,6 @@ export function createRuntime({
             stderrBytes: 0,
             stdoutExcerpt: '',
             stderrExcerpt: '',
-            phase: 'prepared',
             terminal: null,
             ipcMessageCount: 0,
             ipcMessageTypes: [],
@@ -9200,9 +9211,6 @@ export function createRuntime({
             writable: true,
             value: null,
           });
-          const setActivityPhase = (phase) => {
-            activityRecord.phase = String(phase).slice(0, 64);
-          };
           const publishChildOutput = () => {
             const outputRecord = {
               ...activityRecord,
@@ -9557,15 +9565,6 @@ export function createRuntime({
               activityRecord.stderrBytes = new TextEncoder().encode(String(stderr || '')).byteLength;
               activityRecord.stdoutExcerpt = String(stdout || '').slice(0, 512);
               activityRecord.stderrExcerpt = String(stderr || '').slice(0, 512);
-              const activeChildProcess = childProcess?.processObject || childProcess;
-              activityRecord.childState = activeChildProcess ? {
-                exited: Boolean(activeChildProcess._bnhIsExited?.()),
-                exitRequested: Boolean(activeChildProcess._exitRequested?.()),
-                timers: Number(activeChildProcess._timers?.size) || 0,
-                pendingTasks: Boolean(activeChildProcess._bnhHasPendingTasks?.()),
-                code: activeChildProcess.getCode?.() ?? null,
-                signal: activeChildProcess.getSignal?.() ?? null,
-              } : null;
               activityRecord.terminal = childTerminal ? {
                 status: childTerminal.status || null,
                 kind: childTerminal.kind || null,
@@ -9576,12 +9575,6 @@ export function createRuntime({
                   code: childTerminal.error.code || null,
                 } : null,
               } : null;
-              // Preserve the worker's already-bounded terminal diagnostics in
-              // the complete child-output artifact.  The compact progress
-              // summary still selects only bounded fields, but dropping this
-              // state makes an ESM child that exits during bootstrap
-              // indistinguishable from a silent successful child.
-              activityRecord.runtimeState = childTerminal?.runtimeState || null;
               activityRecord.error = error ? {
                 name: String(error.name || 'Error').slice(0, 64),
                 code: error.code || null,
@@ -9644,7 +9637,6 @@ export function createRuntime({
           const finish = (code, signal, error = null) => {
             if (closed || finishPending) return;
             finishPending = true;
-            setActivityPhase('waiting-stream-end');
             // A ChildProcess pipe must be put into flowing mode when the
             // caller did not attach a data consumer. Native Node still
             // delivers the pipe end and ChildProcess close in that case;
@@ -9676,7 +9668,6 @@ export function createRuntime({
             }
           }
           if (invalidCwdError) {
-            setActivityPhase('invalid-cwd');
             child.pid = undefined;
             scope.queueMicrotask(() => finish(-1, null, invalidCwdError));
             return child;
@@ -9713,7 +9704,6 @@ export function createRuntime({
           // directory root; treating that root as a script makes the
           // haste-map worker attempt to read the directory as a file.
           if (prepared.command.split('/').pop() === 'find') {
-            setActivityPhase('shell-child');
             child.spawn(spawnOptions());
             scope.queueMicrotask(() => child.emit('spawn'));
             const shellChildFs = {
@@ -9754,7 +9744,6 @@ export function createRuntime({
             return child;
           }
           if (prepared.command === 'cat') {
-            setActivityPhase('cat');
             const stdinStream = outputStream();
             child.stdin = stdioIgnored(0) || stdioInherited(0) ? null : stdinStream;
             if (stdinSource) {
@@ -9782,7 +9771,6 @@ export function createRuntime({
           }
           const commandName = prepared.command.split('/').pop();
           if (commandName === 'ps') {
-            setActivityPhase('ps');
             // pidtree (used by npm-run-all2) asks POSIX ps for the parent/child
             // table with this exact format. The browser has no host process
             // table, but every virtual child has a stable pid/ppid identity;
@@ -9819,7 +9807,6 @@ export function createRuntime({
             return child;
           }
           if (commandName === 'git') {
-            setActivityPhase('git');
             child.spawn(spawnOptions());
             scope.queueMicrotask(() => {
               if (closed) return;
@@ -9841,7 +9828,6 @@ export function createRuntime({
             && (prepared.scriptPath === prepared.entryPath
               || prepared.commandArgs[0] === prepared.entryPath);
           if (launchesNpmEntrypoint) {
-            setActivityPhase('npm-entrypoint');
             // npm's own CLI is a Node launcher.  A real `spawn('node',
             // [npmBin, ...args])` must preserve that invocation contract,
             // while the browser runtime provides npm through its virtual
@@ -9909,7 +9895,6 @@ export function createRuntime({
           scope.queueMicrotask(() => {
             if (closed) return;
             try {
-              setActivityPhase('dispatch');
               const signalCommand = file === 'kill' && args.length >= 2
                 ? String(args[0]).replace(/^-/, '').toUpperCase()
                 : null;
@@ -9933,7 +9918,6 @@ export function createRuntime({
               }
               const commandName = prepared.command.split('/').pop();
               if (commandName === 'npm' || commandName === 'yarn' || commandName === 'yarnpkg' || commandName === 'pnpm') {
-                setActivityPhase('npm-command');
                 child.spawn(spawnOptions());
                 scope.queueMicrotask(() => child.emit('spawn'));
                 runNpmChild(prepared, ownerProcess, {
@@ -9963,7 +9947,6 @@ export function createRuntime({
                 && prepared.scriptPath === prepared.entryPath
                 && prepared.commandArgs[0] === prepared.entryPath;
               if (launchesNpmEntrypoint) {
-                setActivityPhase('npm-entrypoint');
                 // npm invokes its own executable through Node when a package
                 // manager test is spawned. Route that standard entrypoint to
                 // the same virtual npm implementation used by direct npm
@@ -10039,7 +10022,6 @@ export function createRuntime({
                 }
               }
               if (useEsm || asyncCommonJsChild) {
-                setActivityPhase('esm-child');
                 const processHandle = runPreparedESM(prepared, {
                   ...childOptions,
                   ownerProcess,
@@ -10100,7 +10082,6 @@ export function createRuntime({
                 }, (error) => finish(1, null, error));
                 return;
               }
-              setActivityPhase('sync-child');
               const result = runPreparedSync(prepared, {
                 ...childOptions,
                 stdinSource,
@@ -11298,14 +11279,6 @@ export function createRuntime({
             if (prepared.reportOnSignal) childProc.processObject.report.reportOnSignal = true;
             if (prepared.reportOnUncaughtException) childProc.processObject.report.reportOnUncaughtException = true;
             const childTaskReleases = new Set();
-            const childTaskRecords = new Map();
-            let childTaskSequence = 0;
-            const publishChildLifecycle = () => {
-              childProc.processObject.__bnhRuntimeLifecycle = {
-                pending: childTaskReleases.size,
-                tasks: [...childTaskRecords.values()].slice(-8),
-              };
-            };
             const nativeQueueMicrotask = runtimeQueueMicrotask;
             // A same-realm child has to drain the current Promise/microtask
             // turn before its implicit beforeExit check. Node runs all
@@ -11352,27 +11325,16 @@ export function createRuntime({
             };
             const childTrackTask = (label = null) => {
               const release = trackTask(label);
-              const taskId = ++childTaskSequence;
               childProc.processObject._bnhMarkActive?.();
-              if (childTaskRecords.size >= 8) childTaskRecords.delete(childTaskRecords.keys().next().value);
-              childTaskRecords.set(taskId, {
-                id: taskId,
-                label: label == null ? null : String(label).slice(0, 128),
-                stack: runtimeOptions.traceTaskStacks === true
-                  ? String(new Error().stack || '').split('\n')[2]?.trim().slice(0, 160) || null : null,
-              });
               let released = false;
               const releaseChildTask = () => {
                 if (released) return;
                 released = true;
                 childTaskReleases.delete(releaseChildTask);
-                childTaskRecords.delete(taskId);
                 release();
-                publishChildLifecycle();
                 if (childTaskReleases.size === 0) tryExitChild();
               };
               childTaskReleases.add(releaseChildTask);
-              publishChildLifecycle();
               return releaseChildTask;
             };
             const childHttpCompatibility = createHttpCompatibility(scope, {
@@ -12535,25 +12497,6 @@ export function createRuntime({
             const outputOwner = options.ownerProcess || processObject;
             outputOwner.__bnhChildOutput?.(record);
           });
-          // Keep the handle visible from both sides of the process boundary:
-          // the caller needs it for shutdown diagnostics, while the child
-          // process object owns the runtime snapshot used by a nested child.
-          // Recording it only on ownerProcess made a gts -> eslint child look
-          // idle even while its ESM handle was still pending.
-          const activeEsmChildrenOwner = options.ownerProcess || processObject;
-          const activeEsmChildren = activeEsmChildrenOwner.__bnhEsmChildren ||= [];
-          const activeEsmChild = {
-            entry: esmPrepared.entryPath,
-            mode: workerIsolation ? 'worker' : 'same-realm',
-            handle: processHandle,
-            files: Object.keys(files).length,
-            bytes: Object.values(files).reduce((total, value) => total + (value?.byteLength || 0), 0),
-          };
-          activeEsmChildren.push(activeEsmChild);
-          processHandle.wait().finally(() => {
-            const index = activeEsmChildren.indexOf(activeEsmChild);
-            if (index >= 0) activeEsmChildren.splice(index, 1);
-          });
           if (workerNetworkBridge) {
             processHandle.wait().then(
               () => workerNetworkBridge.close(),
@@ -12839,15 +12782,6 @@ export function createRuntime({
             }
             return { name: '', index: -1 };
           })();
-          let npmPhase = `command:${command.name || '(empty)'}`;
-          const setNpmPhase = (phase) => {
-            npmPhase = String(phase).slice(0, 160);
-            processObject.__bnhNpmPhase = npmPhase;
-            ownerProcess.__bnhNpmPhase = npmPhase;
-            if (processObject.__bnhChildActivity) processObject.__bnhChildActivity.npmPhase = npmPhase;
-            if (ownerProcess.__bnhChildActivity) ownerProcess.__bnhChildActivity.npmPhase = npmPhase;
-          };
-          setNpmPhase(`command:${command.name || '(empty)'}`);
           // Package managers receive the environment assembled for this
           // child. Reading only the owner drops child-specific npm/TMP
           // settings from nested lifecycle commands.
@@ -12916,14 +12850,11 @@ export function createRuntime({
             last: null,
             recent: [],
           };
-          childActivity.npmPhase = npmPhase;
           childActivity.recent ||= [];
           const runVirtualCommandInternal = ({ entry, argv, cwd, commandEnv, stdin, signal, timeout, onNetwork, onStdout, onStderr }) => {
             const isNodeExecutable = (pathname) => /(?:^|\/)node(?:js)?$/.test(String(pathname));
             const commandName = String(entry).split('/').pop();
-            childActivity.npmPhase = `virtual:${commandName}`;
             if (['npm', 'yarn', 'yarnpkg', 'pnpm'].includes(commandName)) {
-              childActivity.npmPhase = `virtual-manager:${commandName}`;
               const managerPrepared = prepareChild(entry, argv || [], {
                 cwd,
                 env: commandEnv,
@@ -12976,7 +12907,6 @@ export function createRuntime({
                 && (prepared.scriptPath === prepared.entryPath
                   || prepared.commandArgs[0] === prepared.entryPath);
               if (launchesNpmEntrypoint) {
-                childActivity.npmPhase = 'virtual-node-npm-entrypoint';
                 const npmPrepared = {
                   ...prepared,
                   command: prepared.entryPath,
@@ -13420,43 +13350,6 @@ export function createRuntime({
             });
           };
 
-          const summarizeChildRuntimeState = (value) => {
-            if (!value || typeof value !== 'object') return null;
-            const nodeTest = value.nodeTest && typeof value.nodeTest === 'object'
-              ? value.nodeTest
-              : value;
-            const boundedText = (input, limit = 512) => String(input || '').slice(0, limit);
-            const listSummary = (items) => {
-              if (!Array.isArray(items)) return null;
-              return {
-                count: items.length,
-                first: items.length ? boundedText(items[0], 256) : null,
-                last: items.length > 1 ? boundedText(items.at(-1), 256) : items.length ? boundedText(items[0], 256) : null,
-              };
-            };
-            return {
-              exitCode: value.exitCode ?? null,
-              runtimeCode: value.runtimeCode ?? null,
-              nodeTest: {
-                registered: Number(nodeTest.registered) || 0,
-                completed: Number(nodeTest.completed) || 0,
-                activeTest: nodeTest.activeTest ? {
-                  name: boundedText(nodeTest.activeTest.name, 160) || null,
-                  fullName: boundedText(nodeTest.activeTest.fullName, 240) || null,
-                  file: boundedText(nodeTest.activeTest.file, 256) || null,
-                  state: boundedText(nodeTest.activeTest.state, 32) || 'running',
-                } : null,
-                requestedFiles: listSummary(nodeTest.requestedFiles),
-                files: listSummary(nodeTest.files),
-                streamEvents: listSummary(nodeTest.streamEvents),
-                streamError: nodeTest.streamError ? {
-                  name: boundedText(nodeTest.streamError.name || 'Error', 64),
-                  message: boundedText(nodeTest.streamError.message || nodeTest.streamError),
-                } : null,
-                streamTerminal: nodeTest.streamTerminal == null ? null : boundedText(nodeTest.streamTerminal, 64),
-              },
-            };
-          };
           const recordChildActivity = (options, result, error = null) => {
             childActivity.completed += 1;
             if (error || result?.code !== 0) childActivity.failed += 1;
@@ -13474,7 +13367,6 @@ export function createRuntime({
               cwd: boundedText(options.cwd, 256),
               code: result?.code ?? null,
               pending: Boolean(result?.pending),
-              phase: boundedText(childActivity.npmPhase, 64),
               stdoutBytes: outputBytes(result?.stdout || ''),
               stderrBytes: outputBytes(result?.stderr || ''),
               stdoutExcerpt: boundedText(result?.stdout),
@@ -13490,7 +13382,6 @@ export function createRuntime({
                   code: boundedText(terminal.error.code, 64) || null,
                 } : null,
               } : null,
-              runtimeState: summarizeChildRuntimeState(result?.runtimeState || terminal?.runtimeState),
               error: error ? {
                 name: boundedText(error.name, 64) || 'Error',
                 message: boundedText(error.message || error),
@@ -13694,10 +13585,8 @@ export function createRuntime({
           };
 
           const runPackageScript = async (scriptName, scriptOptions = {}) => {
-            setNpmPhase(`read-package:${scriptName}`);
             const npm = createNpm();
             const packageJson = await npm.readPackageJson(scriptOptions.cwd || prepared.cwd);
-            setNpmPhase(`package-read:${scriptName}:${packageJson ? 'found' : 'missing'}`);
             if (!packageJson?.scripts?.[scriptName]) {
               return {
                 code: 1,
@@ -13711,7 +13600,6 @@ export function createRuntime({
             const stderr = [];
             let forwarded = false;
             for (const name of lifecycle) {
-              setNpmPhase(`script:${name}`);
               let result;
               try {
                 result = await runScriptBody(name, packageJson, {
@@ -13818,6 +13706,26 @@ export function createRuntime({
           if (command.name === '--version' || command.name === '-v'
             || commandArguments.includes('--version') || commandArguments.includes('-v')) {
             return { code: 0, stdout: '10.0.0-browser\n', stderr: '' };
+          }
+
+          if (command.name === 'audit') {
+            const production = commandArguments.some((argument) => [
+              '--production', '--omit=dev', '--omit', 'dev',
+            ].includes(String(argument)));
+            try {
+              const audit = await createNpm().audit({
+                cwd: prepared.cwd,
+                production,
+              });
+              return {
+                code: audit.code,
+                stdout: audit.stdout || '',
+                stderr: audit.stderr || '',
+              };
+            } catch (error) {
+              const message = error?.stack || error?.message || String(error);
+              return { code: 1, stdout: '', stderr: `${message}\n` };
+            }
           }
 
           if (isYarn && command.name === 'link') {
@@ -14550,39 +14458,19 @@ export function createRuntime({
       for (const [key, value] of options.environmentData || []) environmentData.set(key, value);
     }
     let pending = 0;
-    const pendingTaskRecords = new Map();
     const pendingTaskReleases = new Set();
-    let nextPendingTaskId = 0;
     let wakeLifecycleWait = null;
     let markTaskActivity = () => {};
-    const traceTaskStacks = options.traceTaskStacks === true;
-    const publishLifecycleState = () => {
-      if (!injectedProcess) return;
-      injectedProcess.__bnhRuntimeLifecycle = {
-        pending,
-        tasks: [...pendingTaskRecords.values()],
-      };
-      injectedProcess.__bnhReportRuntimeState?.();
-    };
     const trackTask = (label = null) => {
       pending += 1;
       markTaskActivity();
-      const taskId = ++nextPendingTaskId;
-      pendingTaskRecords.set(taskId, {
-        id: taskId,
-        label: label == null ? null : String(label).slice(0, 128),
-        stack: traceTaskStacks ? String(new Error().stack || '').split('\n')[2]?.trim().slice(0, 160) || null : null,
-      });
-      publishLifecycleState();
       let released = false;
       const releaseTask = () => {
         if (released) return;
         released = true;
         pendingTaskReleases.delete(releaseTask);
         pending -= 1;
-        pendingTaskRecords.delete(taskId);
-        publishLifecycleState();
-        if (pendingTaskRecords.size === 0 && wakeLifecycleWait) {
+        if (pendingTaskReleases.size === 0 && wakeLifecycleWait) {
           // Let promise continuations queued by the task's consumer run before
           // the lifecycle check observes the newly idle task set.
           nativeSetTimeout(() => wakeLifecycleWait?.(), 0);
@@ -14614,12 +14502,6 @@ export function createRuntime({
         executionGlobalForRun = null;
       }
     }
-    const reportExecutePhase = (phase) => {
-      if (injectedProcess) {
-        injectedProcess.__bnhRuntimePhase = phase;
-        injectedProcess.__bnhReportRuntimeState?.();
-      }
-    };
     const timerHandles = new Set();
     const rootTimers = scope.__BNH_NATIVE_TIMERS__;
     const nativeSetTimeout = rootTimers?.setTimeout || scope.setTimeout.bind(scope);
@@ -14785,19 +14667,21 @@ export function createRuntime({
         ?.some((listener) => !listener?._bnhInternal && !listener?.__bnhInternalClusterListener));
       return Boolean(processObject?.connected && channel && channel.hasRef?.() !== false && hasUserIpcListener);
     };
+    const hasPendingProxyRequests = () => Boolean(
+      injectedProcess?._bnhHasPendingProxyRequests?.()
+      || processObject?._bnhHasPendingProxyRequests?.(),
+    );
     const hasReferencedWorkerParentPort = () => {
       if (!options.workerThread || !workerThreadParentPort) return false;
       return workerParentPortRefed
         && (workerThreadParentPort.listenerCount?.('message') > 0
           || typeof workerThreadParentPort.onmessage === 'function');
     };
-    reportExecutePhase('process-create');
     const fullProcessData = createProcess(scope, {
       ...options,
       nodeProfile: resolvedProfile,
       isPidAlive: isVirtualPidAlive,
     }, stdout, stderr, trackTask);
-    reportExecutePhase('process-created');
     const processData = injectedProcess
         ? (() => {
           const processObject = fullProcessData.processObject;
@@ -14980,9 +14864,18 @@ export function createRuntime({
           return { processObject, setTimer: fullProcessData.setTimer, clearTimer: fullProcessData.clearTimer };
         })()
       : fullProcessData;
-    reportExecutePhase('process-bound');
     const processObject = processData.processObject;
-    processObject.__bnhReportRuntimeState = injectedProcess?.__bnhReportRuntimeState;
+    processObject._bnhInjectedProcess = injectedProcess;
+    if (injectedProcess && typeof injectedProcess._bnhDispatchUncaughtException !== 'function') {
+      injectedProcess._bnhDispatchUncaughtException = (...args) => processObject._bnhDispatchUncaughtException?.(...args);
+      injectedProcess._bnhRunWithErrorScope = (...args) => processObject._bnhRunWithErrorScope?.(...args);
+    }
+    vfs.setAsyncErrorHandler?.((ownerProcess, error) => {
+      const target = typeof ownerProcess?._bnhDispatchUncaughtException === 'function'
+        ? ownerProcess
+        : processObject;
+      dispatchUncaughtAsyncError(target, error);
+    });
     // The guest process is the object passed to module loaders, while an
     // isolated browser worker supplies the transport-facing process object
     // above. Share the worker's scoped global bridge with the guest object so
@@ -15017,7 +14910,7 @@ export function createRuntime({
     Object.defineProperty(processObject, '_bnhPendingTaskCount', {
       configurable: true,
       enumerable: false,
-      value: () => pendingTaskRecords.size,
+      value: () => pendingTaskReleases.size,
     });
     const childActivity = processObject.__bnhChildActivity ||= {
       launched: 0,
@@ -15035,18 +14928,6 @@ export function createRuntime({
     }
     if (injectedProcess) {
       injectedProcess.__bnhChildActivity = childActivity;
-      for (const property of ['__bnhEsmChildren', '__bnhNpmPhase']) {
-        try {
-          Object.defineProperty(injectedProcess, property, {
-            configurable: true,
-            get: () => processObject[property],
-            set: (value) => { processObject[property] = value; },
-          });
-        } catch {
-          // The injected process may expose a non-configurable compatibility
-          // field; live diagnostics remain best-effort in that case.
-        }
-      }
     }
     if (typeof injectedProcess?.__bnhNetworkEvent === 'function') {
       processObject.__bnhNetworkEvent = injectedProcess.__bnhNetworkEvent;
@@ -15061,7 +14942,8 @@ export function createRuntime({
       value: Boolean(options.workerThread)
         || String(options.entry || '').startsWith('/node/.bnh-worker-eval-'),
     });
-    processObject._bnhShouldRunUnref = () => pendingTaskRecords.size > 0
+    processObject._bnhShouldRunUnref = () => pendingTaskReleases.size > 0
+      || hasPendingProxyRequests()
       || hasReferencedTimers(allRuntimeTimers())
       || processObject._bnhHasReferencedTimers?.() === true
       || hasLiveVirtualProcess()
@@ -15791,7 +15673,6 @@ export function createRuntime({
       // A host page may expose a sealed global. The normal DecompressionStream
       // path remains available there, so the fallback hook is best effort.
     }
-    reportExecutePhase('builtins-ready');
     if (options.workerThread || String(options.entry || '').startsWith('/node/.bnh-worker-eval-')) {
       Object.defineProperty(builtins, 'trace_events', {
         configurable: true,
@@ -15812,7 +15693,6 @@ export function createRuntime({
       const name = builtinName(id);
       return PUBLIC_BUILTIN_NAMES.includes(name) ? builtins[name] : undefined;
     };
-    reportExecutePhase('builtin-api-ready');
     builtins.module._cache = new Map();
     builtins.module._main = null;
     builtins.module._resolve = (name, parent) => {
@@ -15853,9 +15733,7 @@ export function createRuntime({
       return loadModule(name, importer, false, processObject);
     };
     const streamWebApi = builtins['stream/web'];
-    reportExecutePhase('stream-api-ready');
     installBlobStreamClass(() => streamWebApi.ReadableStream);
-    reportExecutePhase('blob-stream-ready');
     const internalBindings = builtins['internal/test/binding'].__bnhContract;
     const internalUtil = {
       customInspectSymbol: Symbol.for('nodejs.util.inspect.custom'),
@@ -17483,28 +17361,18 @@ export function createRuntime({
         },
       }),
     });
-    reportExecutePhase('before-corepack');
     vfs.mkdir('/node/deps/corepack', { recursive: true });
-    reportExecutePhase('corepack-ready');
     vfs.writeFile('/node/deps/corepack/package.json', JSON.stringify({ version: '0.34.6' }));
-    reportExecutePhase('preload');
     try {
       await importPreloads();
-      reportExecutePhase('preloaded');
-      reportExecutePhase('entry-format');
       const entryIsEsm = isRuntimeEsmModule(entry, processObject.execArgv);
-      reportExecutePhase(entryIsEsm ? 'entry-esm-load' : 'entry-cjs-load');
       if (entryIsEsm) await esmLoader.import(entry, entry, {}, undefined, processObject);
       else loadModule(entry, entry);
-      reportExecutePhase('entry-loaded');
       builtins['node:test']?.__bnhSourceLoaded?.();
-      reportExecutePhase('entry-source-notified');
       await Promise.resolve();
-      reportExecutePhase('entry-microtask');
       await new Promise((resolve) => nativeSetTimeout(resolve, 0));
       releaseEntrySettle?.();
       releaseEntrySettle = null;
-      reportExecutePhase(`lifecycle:p${pendingTaskRecords.size}:t${hasReferencedRuntimeTimers(allRuntimeTimers()) ? 1 : 0}:v${hasLiveVirtualProcess() ? 1 : 0}:i${hasReferencedIpc() ? 1 : 0}:w${hasReferencedWorkerParentPort() ? 1 : 0}`);
       let idleLifecycleTurns = 0;
       while (!options.isCancelled?.() && !options.signal?.aborted && !processObject._exitRequested?.()) {
         await new Promise((resolve) => {
@@ -17522,8 +17390,8 @@ export function createRuntime({
           }
         });
         if (options.isCancelled?.() || options.signal?.aborted || processObject._exitRequested?.()) break;
-        reportExecutePhase(`lifecycle:p${pendingTaskRecords.size}:m${pendingMicrotasks}:t${hasReferencedRuntimeTimers(allRuntimeTimers()) ? 1 : 0}:v${hasLiveVirtualProcess() ? 1 : 0}:i${hasReferencedIpc() ? 1 : 0}:w${hasReferencedWorkerParentPort() ? 1 : 0}`);
-        const lifecycleIdle = pendingTaskRecords.size === 0 && pendingMicrotasks === 0
+        const lifecycleIdle = pendingTaskReleases.size === 0 && pendingMicrotasks === 0
+          && !hasPendingProxyRequests()
           && !hasReferencedRuntimeTimers(allRuntimeTimers()) && !hasLiveVirtualProcess()
           && !hasReferencedIpc() && !hasReferencedWorkerParentPort();
         if (!lifecycleIdle) {

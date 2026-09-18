@@ -1667,11 +1667,13 @@ export function createBufferClass(scope = globalThis) {
   Buffer.prototype = NodeBuffer.prototype;
   Object.defineProperty(NodeBuffer.prototype, 'constructor', { value: Buffer, configurable: true, writable: true });
   Buffer.poolSize = NodeBuffer.poolSize;
-  Buffer.from = NodeBuffer.from;
-  Buffer.copyBytesFrom = NodeBuffer.copyBytesFrom;
-  Buffer.alloc = NodeBuffer.alloc;
-  Buffer.allocUnsafe = NodeBuffer.allocUnsafe;
-  Buffer.allocUnsafeSlow = NodeBuffer.allocUnsafeSlow;
+  // Node exposes these legacy static factories as constructible functions;
+  // older packages still use forms such as `new Buffer.alloc(0)`.
+  Buffer.from = function from(...args) { return NodeBuffer.from(...args); };
+  Buffer.copyBytesFrom = function copyBytesFrom(...args) { return NodeBuffer.copyBytesFrom(...args); };
+  Buffer.alloc = function alloc(...args) { return NodeBuffer.alloc(...args); };
+  Buffer.allocUnsafe = function allocUnsafe(...args) { return NodeBuffer.allocUnsafe(...args); };
+  Buffer.allocUnsafeSlow = function allocUnsafeSlow(...args) { return NodeBuffer.allocUnsafeSlow(...args); };
   Buffer.isBuffer = NodeBuffer.isBuffer;
   Buffer.isEncoding = NodeBuffer.isEncoding;
   Buffer.concat = NodeBuffer.concat;

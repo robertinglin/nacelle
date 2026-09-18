@@ -358,20 +358,9 @@ function createInMemoryProcess(options) {
     get terminalRecord() { return terminal; },
     get runtimeState() {
       if (terminal?.runtimeState) return terminal.runtimeState;
-      const activeEsmChildren = [...(childProcess.__bnhEsmChildren || [])].slice(-4).map((child) => ({
-        state: child.handle?.state || null,
-        entry: child.entry || null,
-        runtimePhase: child.handle?.process?.__bnhRuntimePhase || null,
-        lifecycle: child.handle?.process?.__bnhRuntimeLifecycle || null,
-        childActivity: child.handle?.process?.__bnhChildActivity || null,
-      }));
       return {
-        phase: childProcess.__bnhRuntimePhase || null,
-        npmPhase: childProcess.__bnhNpmPhase || childProcess.__bnhChildActivity?.npmPhase || null,
-        lifecycle: childProcess.__bnhRuntimeLifecycle || null,
         nodeTest: childProcess.__bnhNodeTestState || null,
         childActivity: childProcess.__bnhChildActivity || null,
-        activeEsmChildren,
       };
     },
     pid: identity.pid,

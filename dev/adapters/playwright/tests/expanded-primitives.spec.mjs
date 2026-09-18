@@ -64,6 +64,44 @@ test('forwards legacy reallyExit from a nested child runner', async ({ harnessPa
   await expectPass(expect, result);
 });
 
+test('terminates a child after an uncaught HTTP callback error', async ({ harnessPage }) => {
+  const result = await harnessPage.run(`
+    const assert = require('node:assert/strict');
+    const { spawn } = require('node:child_process');
+    (async () => {
+      const child = spawn(process.execPath, ['/node/http-uncaught-child.cjs'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stderr = '';
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      const code = await new Promise((resolve, reject) => {
+        child.once('error', reject);
+        child.once('close', resolve);
+      });
+      assert.strictEqual(code, 1, stderr);
+      assert.match(stderr, /request callback boom/);
+    })().catch((error) => { console.error(error); process.exitCode = 1; });
+  `, {
+    files: {
+      '/node/http-uncaught-child.cjs': [
+        "const http = require('node:http');",
+        "const server = http.createServer((request, response) => {",
+        "  request.on('data', () => { throw new Error('request callback boom'); });",
+        "  response.writeHead(200);",
+        "  response.end('done');",
+        '});',
+        "server.listen(8444, () => {",
+        "  const request = http.request({ host: 'localhost', port: 8444, method: 'POST' });",
+        '  request.on(\'response\', (response) => response.resume());',
+        "  request.end('body');",
+        '});',
+      ].join('\n'),
+    },
+    timeoutMs: 10_000,
+  });
+  await expectPass(expect, result);
+});
+
 test('file worker with unref can satisfy a synchronous Atomics waiter', async ({ harnessPage }) => {
   const result = await harnessPage.run(`
     const assert = require('node:assert/strict');

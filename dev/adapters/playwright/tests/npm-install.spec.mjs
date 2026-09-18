@@ -892,4 +892,117 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     await npm3.install(['dummy-pkg@1.2.3'], { cwd: '/node' });
     expect(fetchCount).toBe(4); // 2 fresh network requests!
   });
+
+  test('BrowserNpm audits the production lockfile through the npm registry contract', async () => {
+    const { BrowserNpm } = await import('../runtime/npm.js');
+    const { createVfs } = await import('../runtime/vfs.js');
+    const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
+    vfs.fs.writeFileSync('/node/package.json', JSON.stringify({
+      name: 'audit-fixture',
+      version: '1.0.0',
+      dependencies: { 'production-pkg': '^1.0.0' },
+      devDependencies: { 'development-pkg': '^2.0.0' },
+    }));
+    vfs.fs.writeFileSync('/node/package-lock.json', JSON.stringify({
+      name: 'audit-fixture',
+      version: '1.0.0',
+      lockfileVersion: 3,
+      packages: {
+        '': {
+          name: 'audit-fixture',
+          version: '1.0.0',
+          dependencies: { 'production-pkg': '^1.0.0' },
+          devDependencies: { 'development-pkg': '^2.0.0' },
+        },
+        'node_modules/production-pkg': {
+          version: '1.0.0',
+          dependencies: { 'nested-pkg': '^3.0.0' },
+        },
+        'node_modules/production-pkg/node_modules/nested-pkg': { version: '3.0.0' },
+        'node_modules/development-pkg': { version: '2.0.0' },
+      },
+    }));
+
+    const requests = [];
+    const npm = new BrowserNpm({
+      vfs,
+      registry: 'https://registry.test',
+      proxyUrl: null,
+      fetchFn: async (url, init) => {
+        requests.push({ url, init });
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ metadata: { vulnerabilities: {} }, actions: [], advisories: {} }),
+        };
+      },
+    });
+
+    const result = await npm.audit({ cwd: '/node', production: true });
+
+    expect(result.code).toBe(0);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].url).toBe('https://registry.test/-/npm/v1/security/audits/quick');
+    expect(requests[0].init.method).toBe('POST');
+    const payload = JSON.parse(requests[0].init.body);
+    expect(payload.name).toBe('audit-fixture');
+    expect(payload.dependencies['production-pkg']).toEqual({
+      version: '1.0.0',
+      requires: { 'nested-pkg': '^3.0.0' },
+      dependencies: { 'nested-pkg': { version: '3.0.0', requires: {}, dependencies: {} } },
+    });
+    expect(payload.dependencies['development-pkg']).toBeUndefined();
+  });
+
+  test('BrowserNpm audits an installed production tree without a lockfile', async () => {
+    const vfs = createVfs({ mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }] });
+    vfs.fs.writeFileSync('/node/package.json', JSON.stringify({
+      name: 'audit-tree-fixture',
+      version: '1.0.0',
+      dependencies: { 'production-pkg': '^1.0.0' },
+      devDependencies: { 'development-pkg': '^2.0.0' },
+    }));
+    vfs.fs.mkdirSync('/node/node_modules/production-pkg/node_modules/nested-pkg', { recursive: true });
+    vfs.fs.mkdirSync('/node/node_modules/development-pkg', { recursive: true });
+    vfs.fs.writeFileSync('/node/node_modules/production-pkg/package.json', JSON.stringify({
+      name: 'production-pkg',
+      version: '1.0.0',
+      dependencies: { 'nested-pkg': '^3.0.0' },
+    }));
+    vfs.fs.writeFileSync('/node/node_modules/production-pkg/node_modules/nested-pkg/package.json', JSON.stringify({
+      name: 'nested-pkg',
+      version: '3.0.0',
+    }));
+    vfs.fs.writeFileSync('/node/node_modules/development-pkg/package.json', JSON.stringify({
+      name: 'development-pkg',
+      version: '2.0.0',
+    }));
+
+    let request;
+    const npm = new BrowserNpm({
+      vfs,
+      registry: 'https://registry.test',
+      proxyUrl: null,
+      fetchFn: async (url, init) => {
+        request = { url, init };
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ metadata: { vulnerabilities: {} }, advisories: {} }),
+        };
+      },
+    });
+
+    const result = await npm.audit({ cwd: '/node', production: true });
+
+    expect(result.code).toBe(0);
+    expect(request.url).toBe('https://registry.test/-/npm/v1/security/audits/quick');
+    const payload = JSON.parse(request.init.body);
+    expect(payload.dependencies['production-pkg']).toEqual({
+      version: '1.0.0',
+      requires: { 'nested-pkg': '^3.0.0' },
+      dependencies: { 'nested-pkg': { version: '3.0.0', requires: {}, dependencies: {} } },
+    });
+    expect(payload.dependencies['development-pkg']).toBeUndefined();
+  });
 });

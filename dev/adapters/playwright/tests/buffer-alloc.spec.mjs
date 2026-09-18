@@ -22,6 +22,8 @@ test('reproduces the v22 test-buffer-alloc argument and range cases', async ({ h
       assert.strictEqual(Buffer.alloc(128).byteOffset, 0);
       assert.strictEqual(Buffer.alloc(128).offset, 0);
       assert.strictEqual(Buffer.allocUnsafeSlow(10).buffer.byteLength, 10);
+      assert.deepStrictEqual([...new Buffer.alloc(3, 7)], [7, 7, 7]);
+      assert.deepStrictEqual([...new Buffer.from('legacy')], [...Buffer.from('legacy')]);
       assert.deepStrictEqual([...Buffer.from(new Uint8Array(4).fill(42))], [42, 42, 42, 42]);
       assert.deepStrictEqual([...Buffer.from(new Uint32Array(4).fill(42))], [42, 42, 42, 42]);
       assert.deepStrictEqual([...Buffer(new Uint8Array(4).fill(42))], [42, 42, 42, 42]);

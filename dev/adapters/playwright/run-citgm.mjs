@@ -177,12 +177,13 @@ async function main() {
           body: request.body === undefined ? undefined : Uint8Array.from(request.body),
           redirect: 'follow',
         });
+        const bodyBytes = [...new Uint8Array(await response.arrayBuffer())];
         return {
           url: response.url,
           status: response.status,
           statusText: response.statusText,
           headers: Object.fromEntries(response.headers.entries()),
-          bodyBytes: [...new Uint8Array(await response.arrayBuffer())],
+          bodyBytes,
         };
       });
       page.on('crash', () => { browserDiagnostics.push({ event: 'page-crash' }); });

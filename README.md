@@ -282,10 +282,13 @@ export NODE22_HOME="$(mise where node@22.23.2)"
 export PATH="$NODE22_HOME/bin:$PATH"
 export NATIVE_NPM_DIR="$(mktemp -d)"
 ln -s "$NODE22_HOME/lib/node_modules/npm/bin/npm-cli.js" "$NATIVE_NPM_DIR/npm"
+ln -s "$NODE22_HOME/lib/node_modules/npm/bin/npx-cli.js" "$NATIVE_NPM_DIR/npx"
 export NATIVE_PATH="$NATIVE_NPM_DIR:$PATH"
 node --version # v22.23.2
 PATH="$NATIVE_PATH" node "$NODE22_HOME/lib/node_modules/npm/bin/npm-cli.js" \
-  exec --yes --package=citgm@10.0.2 -- citgm <package>
+  exec --yes --package=citgm@10.0.2 -- sh -c \
+  'unset npm_config_package npm_command npm_lifecycle_event npm_lifecycle_script; exec citgm "$@"' \
+  sh <package> --tmpDir /tmp
 # Keep the candidate checkout under the POSIX /tmp root, matching native CITGM.
 # This prevents legacy tools from resolving unrelated /node ancestor packages.
 npm run citgm:browser:chromium -- <package> --tmpDir /tmp
@@ -297,13 +300,15 @@ runs. Follow these rules exactly:
 
 1. Always commit the completed CITGM run's artifacts, logs, and truthful status
    update before moving on, whether the candidate passed, failed, or was
-   classified as blocked.
-2. If the candidate passes without any source or test changes, the native and
-   two browser CITGM results are the gate. Do not run the full Chromium and
-   Firefox Playwright suites for that candidate; commit the artifacts and
-   advance.
-3. If any source or test changes are made, stop before running a different
-   CITGM candidate. Rebuild and run the complete repository gate set first:
+   classified as blocked. Never start another CITGM with a dirty worktree from
+   the previous run.
+2. If the candidate passes without any source, runtime, harness, or regression
+   test changes, the native and two browser CITGM results are the gate. Do not
+   run the full Chromium and Firefox Playwright suites for that candidate;
+   commit the artifacts and advance.
+3. If any source, runtime, harness, or regression-test changes are made, stop
+   before running a different CITGM candidate. Rebuild and run the complete
+   repository gate set first:
 
    ```bash
    npm run build:v22
@@ -327,6 +332,11 @@ runs. Follow these rules exactly:
    git add -f artifacts/citgm-top-100/rank-<rank>-<package>/<run-dir>
    git commit -m "record <package> CITGM run"
    ```
+
+The full repository Playwright suites are never a substitute for the
+candidate CITGM: when changes are present, run them only after that candidate
+has passed the real upstream CITGM in both Chromium and Firefox, then use
+their results as the final repository gate.
 
 Treat a browser-only failure as an ours-side runtime or harness failure until
 the same package, git revision, and failing path have been reproduced under

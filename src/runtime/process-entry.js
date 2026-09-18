@@ -122,13 +122,6 @@ function createRemoteNpmCache(context) {
 }
 
 export async function runProcessEntry(context) {
-  const setRuntimePhase = (phase) => {
-    if (context.process) {
-      context.process.__bnhRuntimePhase = phase;
-      context.process.__bnhReportRuntimeState?.();
-    }
-  };
-  setRuntimePhase('bootstrap');
   const sourceDescriptor = expandPackedVfs(context.vfs);
   const proxyOperations = new Set(sourceDescriptor?.proxy?.operations || []);
   const descriptor = sourceDescriptor?.proxy?.rpc
@@ -175,7 +168,6 @@ export async function runProcessEntry(context) {
   if (context.workerBrokerPort) globalThis.__BNH_WORKER_BROKER_PORT__ = context.workerBrokerPort;
   const runtime = context.runtimeInstance
     || runtimeFor(profile.id, context.workerBrokerPort, descriptor.vfsBackend).runtime;
-  setRuntimePhase('install-process');
   installProcessContract(context.process, { nodeProfile: profile });
   if (descriptor.esmNested) context.process.__bnhEsmNested = true;
   if (descriptor.npmCache) {
@@ -236,7 +228,6 @@ export async function runProcessEntry(context) {
   // Network telemetry uses a control frame, not guest IPC. It cannot affect
   // the guest's own channel lifecycle or ordering when a process exits.
   if (descriptor.networkTelemetry !== true) delete context.process.__bnhNetworkEvent;
-  setRuntimePhase('reset');
   await runtime.reset({
     runId: context.process.runId,
     capabilities: descriptor.capabilities,
@@ -245,7 +236,6 @@ export async function runProcessEntry(context) {
       ? { shared: true, network: remoteVirtualNetwork.network }
       : descriptor.virtualNetwork,
   });
-  setRuntimePhase('mount');
   if (descriptor.vfsBackend) {
     await runtime.mount({});
     // A same-realm child normally sees the shared backend immediately. Keep
@@ -283,7 +273,6 @@ export async function runProcessEntry(context) {
   context.process.__bnhFlushVfsUpdates?.();
   let code;
   try {
-    setRuntimePhase('execute');
     code = await runtime.executeEntry(
       descriptor.entry,
       {
@@ -307,7 +296,6 @@ export async function runProcessEntry(context) {
     context.stderr(`${error?.stack || error}\n`);
     throw error;
   } finally {
-    setRuntimePhase('cleanup');
     if (vfsBridge) {
       await vfsBridge.drain();
       vfsBridge.close();
@@ -328,7 +316,6 @@ export async function runProcessEntry(context) {
   // computed by the injected runtime process so natural completion reports
   // process.exitCode instead of the bootstrap default of zero.
   if (context.process && Number.isInteger(code)) context.process.exitCode = code;
-  setRuntimePhase('terminal-state');
   const sendInternal = context.process?.__bnhSendInternal
     || (context.process?.connected ? context.process.send : null);
   if (descriptor.capabilities.ipc.enabled && typeof sendInternal === 'function') {

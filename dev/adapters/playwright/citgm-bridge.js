@@ -343,12 +343,13 @@ function createBrowserProxyAdapter(loadCachedProject) {
       // Proxy calls can cross an isolated child boundary. Do not return a
       // live Response/stream object that cannot survive structured clone;
       // materialize the normal HTTP response as its serializable wire shape.
+      const bodyBytes = await responseBytes(response);
       return {
         url: response.url || target,
         status: response.status,
         statusText: response.statusText || '',
         headers,
-        bodyBytes: await responseBytes(response),
+        bodyBytes,
       };
     },
     resolve() {
@@ -836,194 +837,6 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
     const state = child?.state || child?._worker?.state;
     return state === 'starting' || state === 'running';
   };
-  const childRuntimeState = () => {
-    const worker = child?._worker;
-    const runtimeState = worker?.runtimeState || child?.runtimeState;
-    const boundedText = (value, limit = 256) => value == null ? null : String(value).slice(0, limit);
-    const nodeTest = runtimeState?.nodeTest;
-    const activity = runtimeState?.childActivity;
-    const compactNestedState = (record) => {
-      const handle = record?.processHandle;
-      const state = handle?.runtimeState || handle?.terminalRecord?.runtimeState || handle?.__bnhRuntimeState;
-      const nestedNodeTest = state?.nodeTest || handle?.__bnhNodeTestState;
-      const lifecycle = state?.lifecycle || handle?.__bnhRuntimeLifecycle;
-      if (!handle && !state && !nestedNodeTest && !lifecycle) return null;
-      return {
-        state: boundedText(handle?.state, 32),
-        runtimePhase: boundedText(handle?.__bnhRuntimePhase || state?.phase, 64),
-        nodeTest: nestedNodeTest ? {
-          registered: Number(nestedNodeTest.registered) || 0,
-          completed: Number(nestedNodeTest.completed) || 0,
-          activeRun: Boolean(nestedNodeTest.activeRun),
-          activeTest: nestedNodeTest.activeTest ? {
-            name: boundedText(nestedNodeTest.activeTest.name, 160),
-            fullName: boundedText(nestedNodeTest.activeTest.fullName, 240),
-            file: boundedText(nestedNodeTest.activeTest.file, 256),
-            state: boundedText(nestedNodeTest.activeTest.state, 32),
-          } : null,
-          streamTerminal: boundedText(nestedNodeTest.streamTerminal, 32),
-          streamError: nestedNodeTest.streamError ? {
-            name: boundedText(nestedNodeTest.streamError.name, 64),
-            message: boundedText(nestedNodeTest.streamError.message || nestedNodeTest.streamError, 512),
-          } : null,
-        } : null,
-        lifecycle: lifecycle ? {
-          pending: Number(lifecycle.pending) || 0,
-          tasks: Array.isArray(lifecycle.tasks) ? {
-            count: lifecycle.tasks.length,
-            first: lifecycle.tasks[0] ? {
-              id: Number(lifecycle.tasks[0].id) || 0,
-              label: boundedText(lifecycle.tasks[0].label, 128),
-              stack: boundedText(lifecycle.tasks[0].stack, 160),
-            } : null,
-            last: lifecycle.tasks.at(-1) ? {
-              id: Number(lifecycle.tasks.at(-1).id) || 0,
-              label: boundedText(lifecycle.tasks.at(-1).label, 128),
-              stack: boundedText(lifecycle.tasks.at(-1).stack, 160),
-            } : null,
-          } : null,
-        } : null,
-      };
-    };
-    return {
-      state: boundedText(child?.state || worker?.state, 32),
-      lifecycle: Array.isArray(child?.stateHistory || worker?.stateHistory)
-        ? (child?.stateHistory || worker?.stateHistory).slice(-6).map((value) => boundedText(value, 32))
-        : [],
-      runtimePhase: boundedText(runtimeState?.phase, 64),
-      nodeTest: nodeTest ? {
-        registered: Number(nodeTest.registered) || 0,
-        completed: Number(nodeTest.completed) || 0,
-        activeRun: Boolean(nodeTest.activeRun),
-        activeTest: nodeTest.activeTest ? {
-          name: boundedText(nodeTest.activeTest.name, 160),
-          fullName: boundedText(nodeTest.activeTest.fullName, 240),
-          file: boundedText(nodeTest.activeTest.file, 256),
-          state: boundedText(nodeTest.activeTest.state, 32),
-        } : null,
-        streamTerminal: boundedText(nodeTest.streamTerminal, 32),
-        streamError: nodeTest.streamError ? {
-          name: boundedText(nodeTest.streamError.name, 64),
-          message: boundedText(nodeTest.streamError.message || nodeTest.streamError, 512),
-        } : null,
-      } : null,
-      childActivity: activity ? {
-        launched: Number(activity.launched) || 0,
-        completed: Number(activity.completed) || 0,
-        failed: Number(activity.failed) || 0,
-        activeEsmChildren: Array.isArray(activity.activeEsmChildren)
-          ? activity.activeEsmChildren.slice(-4).map((child) => ({
-              entry: boundedText(child.entry, 256),
-              cwd: boundedText(child.cwd, 256),
-              mode: boundedText(child.mode, 32),
-              state: boundedText(child.state, 32),
-              runtimePhase: boundedText(child.runtimePhase, 64),
-              files: Number(child.files) || 0,
-              bytes: Number(child.bytes) || 0,
-              nestedActivity: child.runtimeState?.childActivity ? {
-                launched: Number(child.runtimeState.childActivity.launched) || 0,
-                completed: Number(child.runtimeState.childActivity.completed) || 0,
-                failed: Number(child.runtimeState.childActivity.failed) || 0,
-                active: Array.isArray(child.runtimeState.childActivity.active)
-                  ? child.runtimeState.childActivity.active.slice(-4).map((record) => ({
-                    entry: boundedText(record.entry || record.command, 256),
-                    argumentCount: Number(record.argumentCount) || 0,
-                    phase: boundedText(record.phase, 64),
-                    pending: Boolean(record.pending),
-                    ipcMessageCount: Number(record.ipcMessageCount) || 0,
-                    childState: record.childState || null,
-                  }))
-                  : [],
-                recent: Array.isArray(child.runtimeState.childActivity.recent)
-                  ? child.runtimeState.childActivity.recent.slice(-4).map((record) => ({
-                    entry: boundedText(record.entry || record.command, 256),
-                    argumentCount: Number(record.argumentCount) || 0,
-                    phase: boundedText(record.phase, 64),
-                    pending: Boolean(record.pending),
-                    code: record.code ?? null,
-                    signal: record.signal ?? null,
-                    childState: record.childState || null,
-                  }))
-                  : [],
-                liveVirtualProcesses: Array.isArray(child.runtimeState.childActivity.liveVirtualProcesses)
-                  ? child.runtimeState.childActivity.liveVirtualProcesses.slice(-8).map((record) => ({
-                    pid: Number(record.pid) || 0,
-                    state: boundedText(record.state, 32),
-                    terminal: Boolean(record.terminal),
-                    ppid: Number(record.ppid) || 0,
-                    cwd: boundedText(record.cwd, 256),
-                    argv: Array.isArray(record.argv) ? record.argv.slice(0, 12).map((value) => boundedText(value, 256)) : [],
-                    runtimePhase: boundedText(record.runtimePhase, 64),
-                    lifecycle: record.lifecycle || null,
-                  }))
-                  : [],
-                liveBrowserWorkers: Array.isArray(child.runtimeState.childActivity.liveBrowserWorkers)
-                  ? child.runtimeState.childActivity.liveBrowserWorkers.slice(-8).map((record) => ({
-                    threadId: Number(record.threadId) || -1,
-                    state: boundedText(record.state, 32),
-                    refed: record.refed == null ? null : Boolean(record.refed),
-                    terminal: Boolean(record.terminal),
-                  }))
-                  : [],
-              } : null,
-              lifecycle: child.lifecycle ? {
-                pending: Number(child.lifecycle.pending) || 0,
-                tasks: Array.isArray(child.lifecycle.tasks) ? {
-                  count: child.lifecycle.tasks.length,
-                  first: child.lifecycle.tasks[0] ? {
-                    id: Number(child.lifecycle.tasks[0].id) || 0,
-                    label: boundedText(child.lifecycle.tasks[0].label, 128),
-                    stack: boundedText(child.lifecycle.tasks[0].stack, 512),
-                  } : null,
-                  last: child.lifecycle.tasks.at(-1) ? {
-                    id: Number(child.lifecycle.tasks.at(-1).id) || 0,
-                    label: boundedText(child.lifecycle.tasks.at(-1).label, 128),
-                    stack: boundedText(child.lifecycle.tasks.at(-1).stack, 512),
-                  } : null,
-                } : null,
-              } : null,
-            }))
-          : [],
-        recent: Array.isArray(activity.recent) ? activity.recent.slice(-4).map((record) => ({
-          entry: boundedText(record.entry || record.command, 256),
-          argumentCount: Number(record.argumentCount) || 0,
-          code: record.code ?? null,
-          signal: record.signal ?? null,
-          pending: Boolean(record.pending),
-          stdoutBytes: Number(record.stdoutBytes) || 0,
-          stderrBytes: Number(record.stderrBytes) || 0,
-          stdoutExcerpt: boundedText(record.stdoutExcerpt, 512) || '',
-          stderrExcerpt: boundedText(record.stderrExcerpt, 512) || '',
-          nestedState: record.nestedState || compactNestedState(record),
-        })) : [],
-        liveVirtualProcesses: Array.isArray(activity.liveVirtualProcesses)
-          ? activity.liveVirtualProcesses.slice(-8).map((record) => ({
-            pid: Number(record.pid) || 0,
-            state: boundedText(record.state, 32),
-            terminal: Boolean(record.terminal),
-            ppid: Number(record.ppid) || 0,
-            cwd: boundedText(record.cwd, 256),
-            argv: Array.isArray(record.argv) ? record.argv.slice(0, 12).map((value) => boundedText(value, 256)) : [],
-            runtimePhase: boundedText(record.runtimePhase, 64),
-            lifecycle: record.lifecycle || null,
-          }))
-          : [],
-        liveBrowserWorkers: Array.isArray(activity.liveBrowserWorkers)
-          ? activity.liveBrowserWorkers.slice(-8).map((record) => ({
-            threadId: Number(record.threadId) || -1,
-            state: boundedText(record.state, 32),
-            refed: record.refed == null ? null : Boolean(record.refed),
-            terminal: Boolean(record.terminal),
-          }))
-          : [],
-      } : null,
-      terminal: child?.terminal || worker?.terminal ? {
-        code: child?.terminal?.code ?? worker?.terminal?.code ?? null,
-        signal: child?.terminal?.signal ?? worker?.terminal?.signal ?? null,
-        kind: boundedText(child?.terminal?.kind || worker?.terminal?.kind, 32),
-      } : null,
-    };
-  };
   const counters = () => ({
     npm: {
       citgmInstallEvents: progress.bootstrap.events,
@@ -1048,8 +861,6 @@ async function runCitgm({ module, args = [], env = {}, timeoutMs = 15 * 60 * 100
       stage: currentStage,
       childActive: childActive(),
       counters: counters(),
-      ...(event === 'child-running' || event === 'child-started' || event === 'upstream-test-started'
-        ? { childState: childRuntimeState() } : {}),
       ...fields,
     });
   };

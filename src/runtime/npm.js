@@ -1002,6 +1002,187 @@ export class BrowserNpm {
     }
   }
 
+  /**
+   * Submit the installed production dependency graph to npm's quick audit
+   * endpoint. This is intentionally a registry operation rather than a
+   * successful no-op: package posttests use `npx npm@<range> audit` as an
+   * external security check, so the browser path must preserve its request
+   * and exit-code contract.
+   */
+  async audit({ cwd = '/node', production = false, onProgress = null } = {}) {
+    const lockfile = await this.readPackageLock(cwd);
+    const submitAudit = async (payload) => {
+      const directUrl = `${this.registry}/-/npm/v1/security/audits/quick`;
+      const requestUrl = this.proxyUrl ? `${this.proxyUrl}${directUrl}` : directUrl;
+      const request = {
+        method: 'POST',
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      };
+      onProgress?.({ phase: 'audit', url: directUrl, production });
+
+      let response;
+      try {
+        response = await this.fetchFn(requestUrl, request);
+      } catch (proxyError) {
+        if (!this.proxyUrl) throw proxyError;
+        response = await this.fetchFn(directUrl, request);
+      }
+      if (!response.ok && this.proxyUrl) response = await this.fetchFn(directUrl, request);
+      if (!response.ok) throw new Error(`Failed to run npm audit: HTTP ${response.status}`);
+
+      const report = await response.json();
+      const vulnerabilities = report?.metadata?.vulnerabilities || {};
+      const vulnerabilityCount = Object.values(vulnerabilities)
+        .reduce((total, value) => total + (Number.isFinite(Number(value)) ? Number(value) : 0), 0);
+      const advisoryCount = Object.keys(report?.advisories || {}).length;
+      const vulnerable = vulnerabilityCount > 0 || advisoryCount > 0;
+      return {
+        code: vulnerable ? 1 : 0,
+        report,
+        payload,
+        stdout: '',
+        stderr: vulnerable ? 'npm audit found vulnerabilities\n' : '',
+      };
+    };
+
+    if (!lockfile) {
+      const root = await this.readPackageJson(cwd);
+      if (!root) {
+        throw npmSecurityError('ENOTLOCK', 'npm audit requires a package-lock.json or npm-shrinkwrap.json');
+      }
+
+      // npm audit can operate on an installed package tree without a lockfile.
+      // Reconstruct the same dependency payload from package.json manifests so
+      // lifecycle commands such as `npx npm audit` keep their native contract.
+      const manifestCache = new Map([[cwd, root]]);
+      const readManifest = async (packagePath) => {
+        if (manifestCache.has(packagePath)) return manifestCache.get(packagePath);
+        try {
+          const bytes = await this.vfs.fs.promises.readFile(`${packagePath}/package.json`);
+          const manifest = JSON.parse(typeof bytes === 'string' ? bytes : new TextDecoder().decode(bytes));
+          manifestCache.set(packagePath, manifest);
+          return manifest;
+        } catch (error) {
+          if (error?.code === 'ENOENT') {
+            manifestCache.set(packagePath, null);
+            return null;
+          }
+          throw error;
+        }
+      };
+      const parentInstalledPath = (packagePath) => {
+        const marker = packagePath.lastIndexOf('/node_modules/');
+        return marker < 0 ? cwd : packagePath.slice(0, marker);
+      };
+      const findInstalledPath = async (scope, name) => {
+        let current = scope;
+        while (true) {
+          const candidate = `${current}/node_modules/${name}`;
+          if (await readManifest(candidate)) return candidate;
+          if (current === cwd) return null;
+          const parent = parentInstalledPath(current);
+          if (parent === current) return null;
+          current = parent;
+        }
+      };
+      const buildInstalledPackage = async (packagePath, stack = new Set()) => {
+        const manifest = await readManifest(packagePath);
+        if (!manifest?.version) return null;
+        const requires = {
+          ...(manifest.dependencies || {}),
+          ...(manifest.optionalDependencies || {}),
+        };
+        if (stack.has(packagePath)) return { version: manifest.version, requires, dependencies: {} };
+        const nextStack = new Set(stack).add(packagePath);
+        const dependencies = {};
+        for (const name of Object.keys(requires)) {
+          const dependencyPath = await findInstalledPath(packagePath, name);
+          const dependency = dependencyPath
+            ? await buildInstalledPackage(dependencyPath, nextStack)
+            : null;
+          if (dependency) dependencies[name] = dependency;
+        }
+        return { version: manifest.version, requires, dependencies };
+      };
+
+      const rootRequires = {
+        ...(root.dependencies || {}),
+        ...(root.optionalDependencies || {}),
+        ...(!production ? (root.devDependencies || {}) : {}),
+      };
+      const dependencies = {};
+      for (const name of Object.keys(rootRequires)) {
+        const packagePath = await findInstalledPath(cwd, name);
+        const dependency = packagePath ? await buildInstalledPackage(packagePath) : null;
+        if (dependency) dependencies[name] = dependency;
+      }
+      return submitAudit({
+        name: root.name || '',
+        version: root.version || '0.0.0',
+        requires: rootRequires,
+        dependencies,
+      });
+    }
+
+    const packages = lockfile.packages || {};
+    const root = packages[''] || {};
+    const rootRequires = {
+      ...(root.dependencies || {}),
+      ...(root.optionalDependencies || {}),
+      ...(!production ? (root.devDependencies || {}) : {}),
+    };
+
+    const parentPackagePath = (packagePath) => {
+      const marker = packagePath.lastIndexOf('/node_modules/');
+      return marker < 0 ? '' : packagePath.slice(0, marker);
+    };
+    const findPackagePath = (scope, name) => {
+      let current = scope;
+      while (true) {
+        const candidate = current ? `${current}/node_modules/${name}` : `node_modules/${name}`;
+        if (packages[candidate]) return candidate;
+        if (!current) return null;
+        current = parentPackagePath(current);
+      }
+    };
+    const buildPackage = (packagePath, stack = new Set()) => {
+      const entry = packages[packagePath];
+      if (!entry?.version) return null;
+      const requires = {
+        ...(entry.dependencies || {}),
+        ...(entry.optionalDependencies || {}),
+      };
+      if (stack.has(packagePath)) return { version: entry.version, requires, dependencies: {} };
+      const nextStack = new Set(stack).add(packagePath);
+      const dependencies = {};
+      for (const name of Object.keys(requires)) {
+        const dependencyPath = findPackagePath(packagePath, name);
+        const dependency = dependencyPath ? buildPackage(dependencyPath, nextStack) : null;
+        if (dependency) dependencies[name] = dependency;
+      }
+      return { version: entry.version, requires, dependencies };
+    };
+
+    const dependencies = {};
+    for (const name of Object.keys(rootRequires)) {
+      const packagePath = findPackagePath('', name);
+      const dependency = packagePath ? buildPackage(packagePath) : null;
+      if (dependency) dependencies[name] = dependency;
+    }
+
+    const payload = {
+      name: root.name || lockfile.name || '',
+      version: root.version || lockfile.version || '0.0.0',
+      requires: rootRequires,
+      dependencies,
+    };
+    return submitAudit(payload);
+  }
+
   async seedInstalledLocations(nodeModulesDir = '/node/node_modules') {
     // Inspect package roots, not every file in dist/.next/source trees. Large
     // frameworks install thousands of non-package directories; walking them

@@ -1,0 +1,14 @@
+info: starting            | form-data
+info: lookup              | form-data
+info: lookup-notfound     | form-data
+info: lookup-githead      | https://github.com/form-data/form-data/archive/64190db548c0179e37206858e39f27cf513e9435.tar.gz
+info: form-data npm:      | Downloading project: https://github.com/form-data/form-data/archive/64190db548c0179e37206858e39f27cf513e9435.tar.gz
+info: form-data npm:      | Project downloaded 64190db548c0179e37206858e39f27cf513e9435.tar.gz
+info: form-data npm:      | npm install started
+info: form-data npm:      | npm install successfully completed
+info: form-data npm:      | test suite started
+info: passing module(s)   |
+info: module name:        | form-data
+info: version:            | 4.0.6
+info: done                | The smoke test has passed.
+info: duration            | test duration: 82100ms

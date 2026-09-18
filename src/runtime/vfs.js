@@ -2,7 +2,7 @@ import { EventEmitter } from './events.js';
 import { Readable, Writable } from './streams.js';
 import { resolveEncodingOps } from './buffer.js';
 import { unsupportedNativeAddon } from './errors.js';
-import { AsyncResource } from './async-hooks.js';
+import { AsyncResource, dispatchUncaughtAsyncError } from './async-hooks.js';
 import { createGlob } from './fs-glob.js';
 import { markAsUncloneable } from './messaging.js';
 
@@ -785,6 +785,7 @@ export function createVfs(options = {}) {
   let nextSourceVersion = 0;
   let taskTracker = typeof options.trackTask === 'function' ? options.trackTask : null;
   let activeRequestTracker = null;
+  let asyncErrorHandler = typeof options.onAsyncError === 'function' ? options.onAsyncError : null;
   if (!directories.has('/')) directories.add('/');
   const mounts = new Map();
   const watchers = new Map();
@@ -1985,8 +1986,14 @@ export function createVfs(options = {}) {
   function scheduleFsCallback(callback, crossRealm = false, pollLike = false) {
     const resource = new AsyncResource('FSREQCALLBACK');
     const release = taskTracker?.();
+    const processObject = resource._bnhProcess?.() || globalThis.__bnhActiveProcess || globalThis.process;
     const run = () => {
-      try { resource.runInAsyncScope(callback); }
+      try {
+        resource.runInAsyncScope(callback);
+      } catch (error) {
+        if (asyncErrorHandler) asyncErrorHandler(processObject, error);
+        else dispatchUncaughtAsyncError(processObject, error);
+      }
       finally {
         resource.emitDestroy();
         release?.();
@@ -4456,6 +4463,9 @@ export function createVfs(options = {}) {
     },
     setActiveRequestTracker(tracker) {
       activeRequestTracker = typeof tracker === 'function' ? tracker : null;
+    },
+    setAsyncErrorHandler(handler) {
+      asyncErrorHandler = typeof handler === 'function' ? handler : null;
     },
     setWarningEmitter,
     setWatcherOwner(owner) {

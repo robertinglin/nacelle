@@ -18,7 +18,6 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
   let proxySequence = 0;
   let exitCode = 0;
   let signalCode = null;
-  let runtimeStateTimer;
   let deferredVfsResolver;
   let deferredVfsReceived = false;
   let deferredVfsChunks = [];
@@ -167,62 +166,11 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     const source = processStateSource;
     const nodeTest = source?.__bnhNodeTestState;
     const activity = source?.__bnhChildActivity;
-    const activeEsmChildren = [...(source?.__bnhEsmChildren || [])].slice(-4).map((child) => ({
-      runtimeState: child.handle?.runtimeState || null,
-      entry: String(child.entry || '').slice(0, 256),
-      cwd: typeof child.handle?.cwd === 'function' ? String(child.handle.cwd()).slice(0, 256) : null,
-      mode: child.mode == null ? null : String(child.mode).slice(0, 32),
-      state: child.handle?.state == null ? null : String(child.handle.state).slice(0, 32),
-      runtimePhase: child.handle?.runtimeState?.phase == null
-        ? null
-        : String(child.handle.runtimeState.phase).slice(0, 64),
-      files: Number(child.files) || 0,
-      bytes: Number(child.bytes) || 0,
-      lifecycle: child.handle?.runtimeState?.lifecycle
-        ? {
-            pending: Number(child.handle.runtimeState.lifecycle.pending) || 0,
-            tasks: Array.isArray(child.handle.runtimeState.lifecycle.tasks)
-              ? child.handle.runtimeState.lifecycle.tasks.slice(-4).map((task) => ({
-                  id: Number(task.id) || 0,
-                  label: task.label == null ? null : String(task.label).slice(0, 128),
-                  stack: task.stack == null ? null : String(task.stack).slice(0, 512),
-                }))
-              : [],
-          }
-        : null,
-    }));
     const uncaught = source?.__bnhUncaughtException;
     const exitRequest = source?.__bnhExitRequest;
     const boundedList = (value) => Array.isArray(value)
       ? { count: value.length, first: value[0] == null ? null : String(value[0]).slice(0, 128), last: value.at(-1) == null ? null : String(value.at(-1)).slice(0, 128) }
       : null;
-    const compactNestedState = (record) => {
-      const handle = record?.processHandle;
-      const state = handle?.runtimeState || handle?.terminalRecord?.runtimeState || handle?.__bnhRuntimeState;
-      const nodeTest = state?.nodeTest || handle?.__bnhNodeTestState;
-      if (!handle && !state && !nodeTest) return null;
-      return {
-        state: handle?.state == null ? null : String(handle.state).slice(0, 32),
-        runtimePhase: handle?.__bnhRuntimePhase == null
-          ? (state?.phase == null ? null : String(state.phase).slice(0, 64))
-          : String(handle.__bnhRuntimePhase).slice(0, 64),
-        nodeTest: nodeTest ? {
-          registered: Number(nodeTest.registered) || 0,
-          completed: Number(nodeTest.completed) || 0,
-          activeRun: Boolean(nodeTest.activeRun),
-          activeTest: nodeTest.activeTest ? {
-            name: String(nodeTest.activeTest.name || '').slice(0, 160),
-            fullName: String(nodeTest.activeTest.fullName || '').slice(0, 240),
-            file: String(nodeTest.activeTest.file || '').slice(0, 256),
-          } : null,
-          streamTerminal: nodeTest.streamTerminal == null ? null : String(nodeTest.streamTerminal).slice(0, 32),
-          streamError: nodeTest.streamError ? {
-            name: String(nodeTest.streamError.name || 'Error').slice(0, 64),
-            message: String(nodeTest.streamError.message || nodeTest.streamError).slice(0, 512),
-          } : null,
-        } : null,
-      };
-    };
     return {
       exitCode: source?.exitCode ?? exitCode,
       nodeTest: nodeTest ? {
@@ -248,21 +196,6 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         launched: Number(activity.launched) || 0,
         completed: Number(activity.completed) || 0,
         failed: Number(activity.failed) || 0,
-        npmPhase: activity.npmPhase == null ? null : String(activity.npmPhase).slice(0, 160),
-        activeEsmChildren: activeEsmChildren.length
-          ? activeEsmChildren
-          : Array.isArray(activity.activeEsmChildren)
-            ? activity.activeEsmChildren.slice(-4).map((child) => ({
-              entry: String(child.entry || '').slice(0, 256),
-              phase: child.phase == null ? null : String(child.phase).slice(0, 64),
-              mode: child.mode == null ? null : String(child.mode).slice(0, 32),
-              files: Number(child.files) || 0,
-              bytes: Number(child.bytes) || 0,
-              symlinks: Number(child.symlinks) || 0,
-              state: child.state == null ? null : String(child.state).slice(0, 32),
-              runtimePhase: child.runtimePhase == null ? null : String(child.runtimePhase).slice(0, 64),
-              }))
-            : [],
         firstCommand: (activity.first?.command || activity.first?.entry) ? String(activity.first.command || activity.first.entry).split('/').pop().slice(0, 80) : null,
         lastCommand: (activity.last?.command || activity.last?.entry) ? String(activity.last.command || activity.last.entry).split('/').pop().slice(0, 80) : null,
         recent: Array.isArray(activity.recent) ? activity.recent.slice(-4).map((record) => ({
@@ -273,7 +206,6 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
           code: record.code ?? null,
           signal: record.signal ?? record.terminal?.signal ?? null,
           pending: Boolean(record.pending),
-          phase: record.phase == null ? null : String(record.phase).slice(0, 64),
           ipcMessageCount: Number(record.ipcMessageCount) || 0,
           ipcMessageTypes: Array.isArray(record.ipcMessageTypes) ? record.ipcMessageTypes.slice(0, 8).map((value) => String(value).slice(0, 96)) : [],
           ipcError: record.ipcError ? {
@@ -285,18 +217,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
           stderrBytes: Number(record.stderrBytes) || 0,
           stdoutExcerpt: record.stdoutExcerpt == null ? '' : String(record.stdoutExcerpt).slice(0, 512),
           stderrExcerpt: record.stderrExcerpt == null ? '' : String(record.stderrExcerpt).slice(0, 512),
-          nestedState: compactNestedState(record),
         })) : [],
-      } : null,
-      lifecycle: source?.__bnhRuntimeLifecycle ? {
-        pending: Number(source.__bnhRuntimeLifecycle.pending) || 0,
-        tasks: Array.isArray(source.__bnhRuntimeLifecycle.tasks)
-          ? source.__bnhRuntimeLifecycle.tasks.slice(-4).map((task) => ({
-              id: Number(task.id) || 0,
-              label: task.label == null ? null : String(task.label).slice(0, 128),
-              stack: task.stack == null ? null : String(task.stack).slice(0, 160),
-            }))
-          : [],
       } : null,
       uncaughtException: uncaught ? {
         name: String(uncaught.name || 'Error').slice(0, 64),
@@ -307,12 +228,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
         code: Number(exitRequest.code) || 0,
         stack: String(exitRequest.stack || '').slice(0, 1024),
       } : null,
-      phase: source?.__bnhRuntimePhase ? String(source.__bnhRuntimePhase).slice(0, 64) : null,
     };
-  }
-
-  function sendRuntimeState() {
-    if (!terminalSent) sendControl('runtime-state', { runtimeState: compactRuntimeState() });
   }
 
   function requestProxy(operation, request) {
@@ -588,10 +504,6 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
     if (error && syncBuffer && typeof syncBuffer.byteLength === 'number') {
       appendSyncRecord({ type: 'error', error: errorRecord(error) });
     }
-    if (runtimeStateTimer) {
-      clearInterval(runtimeStateTimer);
-      runtimeStateTimer = undefined;
-    }
     exitCode = code;
     signalCode = signal;
     if (syncBuffer && typeof syncBuffer.byteLength === 'number') {
@@ -748,7 +660,11 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       channel,
       exitCode: 0,
       __bnhProxyRequest: requestProxy,
-      __bnhReportRuntimeState: sendRuntimeState,
+      // A proxy request is an event-loop handle in the worker even though its
+      // completion arrives over the user MessagePort. Expose it to the
+      // runtime lifecycle so a child cannot send its terminal frame between
+      // the parent response and the ClientRequest promise continuation.
+      __bnhHasPendingProxyRequests: () => proxyRequests.size > 0,
       // Nested browser children can produce complete output independently of
       // the parent process streams. Keep that payload on the ordered control
       // channel so the parent can persist it before the terminal frame.
@@ -919,10 +835,21 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
           const response = frame.payload;
           const pending = proxyRequests.get(response.requestId);
           if (!pending) return;
-          proxyRequests.delete(response.requestId);
-          pending.cleanup?.();
+          // Resolve the guest operation before releasing its worker handle.
+          // Promise reactions run after this message callback returns; deleting
+          // the handle first lets a same-realm child reach its idle check in
+          // that gap and terminate before ClientRequest can deliver the
+          // response. The microtask cleanup runs after the first continuation
+          // has been queued, while still preserving the normal settled state.
+          const releaseProxyRequest = () => {
+            queueMicrotask(() => {
+              proxyRequests.delete(response.requestId);
+              pending.cleanup?.();
+            });
+          };
           if (response.error) {
             pending.reject(Object.assign(new Error(response.error.message || 'proxy request failed'), response.error));
+            releaseProxyRequest();
           } else {
             const result = response.result;
             if (result?.__bnhTransport && frame.handle) {
@@ -934,6 +861,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
             } else {
               pending.resolve(result);
             }
+            releaseProxyRequest();
           }
         } else if (frame.payload?.__bnhWorkerStdin) {
           process.stdin.push(frame.payload.value);
@@ -959,16 +887,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       finish('bootstrap', null, null, error);
       return;
     }
-    process.__bnhRuntimePhase = 'ready';
     sendControl('ready');
-    // Runtime execution can hang before its terminal frame is available. A
-    // bounded state heartbeat keeps generic child progress and node:test
-    // registration visible to the parent without changing guest lifecycle or
-    // outcome semantics.
-    sendRuntimeState();
-    runtimeStateTimer = typeof setInterval === 'function'
-      ? setInterval(sendRuntimeState, 100)
-      : undefined;
     const initialVfs = message.vfs && (message.workerData !== undefined || message.workerDataSyncBuffers !== undefined)
       ? {
           ...message.vfs,
@@ -996,11 +915,7 @@ export const PROCESS_WORKER_SOURCE = String.raw`(() => {
       vfsUpdatePort: message.vfsUpdatePort,
       workerBrokerPort: message.workerBrokerPort,
     };
-    process.__bnhRuntimePhase = 'dispatch-queued';
-    sendRuntimeState();
     Promise.resolve().then(async () => {
-      process.__bnhRuntimePhase = 'dispatch';
-      sendRuntimeState();
       context.vfs = await vfsPromise;
       return run(context);
     }).then(() => {

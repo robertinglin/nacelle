@@ -463,7 +463,16 @@ Stream.prototype.removeAllListeners = function removeAllListeners(name) {
 };
 Stream.prototype.emit = function emit(name, ...args) {
   const listeners = legacyState(this).listeners.get(name);
-  if (!listeners) return false;
+  if (!listeners || listeners.size === 0) {
+    if (name === 'error') {
+      const error = args[0];
+      if (error instanceof Error) throw error;
+      const unhandled = new Error(`Unhandled error.${error == null ? '' : ` (${String(error)})`}`);
+      unhandled.code = 'ERR_UNHANDLED_ERROR';
+      throw unhandled;
+    }
+    return false;
+  }
   const snapshot = [...listeners];
   for (let index = 0; index < snapshot.length; index += 1) snapshot[index].apply(this, args);
   return listeners.size > 0;
@@ -507,6 +516,21 @@ Object.setPrototypeOf(Stream.prototype, EventEmitter.prototype);
 Stream.prototype._events = undefined;
 Stream.prototype._eventsCount = 0;
 Stream.prototype._maxListeners = undefined;
+
+// Readable and Writable retain their specialized EventEmitter prototype
+// paths, but Node userland still identifies them through `instanceof Stream`.
+// In particular, form-data uses that check when tracking streamed part
+// lengths. Recognize the runtime's state-bearing streams without replacing
+// their event implementation hierarchy.
+const nativeStreamHasInstance = Function.prototype[Symbol.hasInstance];
+Object.defineProperty(Stream, Symbol.hasInstance, {
+  configurable: true,
+  value(value) {
+    if (nativeStreamHasInstance.call(this, value)) return true;
+    return Boolean(value && (value._readableState || value._writableState)
+      && typeof value.on === 'function');
+  },
+});
 
 function validateCombinatorOptions(options) {
   if (options === undefined || options === null) return {};
@@ -748,7 +772,11 @@ export class Readable extends EventEmitter {
     if (name === 'data') {
       this._readableState.dataListening = true;
     }
-    if (name === 'data') this.resume();
+    // Adding a data listener starts a fresh readable stream, but it must not
+    // override an explicit pause(). DelayedStream uses exactly this pattern:
+    // pause the source, then observe data to account for buffered bytes before
+    // releasing it to the consumer.
+    if (name === 'data' && !this._readableState.paused) this.resume();
     if (name === 'readable' && !this._flowing) {
       if (!this._ended && (this.readableHighWaterMark === 0
         || this._bufferedBytes < this.readableHighWaterMark)) this._readOnce();

@@ -1,0 +1,2168 @@
+
+> nacelle@1.0.5 test
+> node --test --test-concurrency=1 dev/tests/runtime/runtime/*.mjs
+
+TAP version 13
+# Subtest: async arrows in instance and static class fields preserve parameters and this
+ok 1 - async arrows in instance and static class fields preserve parameters and this
+  ---
+  duration_ms: 3.313819
+  type: 'test'
+  ...
+# Subtest: async arrows still read their enclosing function arguments
+ok 2 - async arrows still read their enclosing function arguments
+  ---
+  duration_ms: 0.363856
+  type: 'test'
+  ...
+# Subtest: keeps awaited function expression calls syntactically valid
+ok 3 - keeps awaited function expression calls syntactically valid
+  ---
+  duration_ms: 0.440021
+  type: 'test'
+  ...
+# Subtest: keeps awaited optional calls syntactically valid
+ok 4 - keeps awaited optional calls syntactically valid
+  ---
+  duration_ms: 0.329009
+  type: 'test'
+  ...
+# Subtest: keeps async function boundaries intact across nested template literals
+ok 5 - keeps async function boundaries intact across nested template literals
+  ---
+  duration_ms: 1.105164
+  type: 'test'
+  ...
+# Subtest: preserves native async identity when no await lowering is needed
+ok 6 - preserves native async identity when no await lowering is needed
+  ---
+  duration_ms: 0.157411
+  type: 'test'
+  ...
+# Subtest: lowers for-await inside nested async functions in strict modules
+ok 7 - lowers for-await inside nested async functions in strict modules
+  ---
+  duration_ms: 3.823323
+  type: 'test'
+  ...
+# Subtest: CITGM terminal artifacts preserve complete streams and externalize verbose traces
+ok 8 - CITGM terminal artifacts preserve complete streams and externalize verbose traces
+  ---
+  duration_ms: 11.33934
+  type: 'test'
+  ...
+# Subtest: pins exactly the submitted top-100 package ranking
+ok 9 - pins exactly the submitted top-100 package ranking
+  ---
+  duration_ms: 5.955943
+  type: 'test'
+  ...
+# Subtest: selects an inclusive rank range for resumable CITGM batches
+ok 10 - selects an inclusive rank range for resumable CITGM batches
+  ---
+  duration_ms: 0.502982
+  type: 'test'
+  ...
+# Subtest: reuses prepared source across launches without caching module execution
+ok 11 - reuses prepared source across launches without caching module execution
+  ---
+  duration_ms: 2.620773
+  type: 'test'
+  ...
+# Subtest: source edits invalidate preparation even when their lengths match
+ok 12 - source edits invalidate preparation even when their lengths match
+  ---
+  duration_ms: 0.291958
+  type: 'test'
+  ...
+# Subtest: evicts oldest entries to bound retained source and handles oversized modules
+ok 13 - evicts oldest entries to bound retained source and handles oversized modules
+  ---
+  duration_ms: 0.273222
+  type: 'test'
+  ...
+# Subtest: preserves import, async, eval, shebang, and process binding preparation
+ok 14 - preserves import, async, eval, shebang, and process binding preparation
+  ---
+  duration_ms: 1.952494
+  type: 'test'
+  ...
+# Subtest: cache budget includes expanded transformed source
+ok 15 - cache budget includes expanded transformed source
+  ---
+  duration_ms: 0.325183
+  type: 'test'
+  ...
+# Subtest: prepared modules execute afresh and source edits take effect on later launches
+ok 16 - prepared modules execute afresh and source edits take effect on later launches
+  ---
+  duration_ms: 80.981552
+  type: 'test'
+  ...
+# Subtest: nested module compilation does not re-enter the guest Function constructor
+ok 17 - nested module compilation does not re-enter the guest Function constructor
+  ---
+  duration_ms: 12.869056
+  type: 'test'
+  ...
+# Subtest: many FS watchers share owner cleanup and release both lifecycle listeners
+ok 18 - many FS watchers share owner cleanup and release both lifecycle listeners
+  ---
+  duration_ms: 3.858281
+  type: 'test'
+  ...
+# Subtest: recursive FS watch stays in its subtree and reports relative paths
+ok 19 - recursive FS watch stays in its subtree and reports relative paths
+  ---
+  duration_ms: 1.169437
+  type: 'test'
+  ...
+# Subtest: direct Nacelle.fetch aborts a stalled readiness socket
+ok 20 - direct Nacelle.fetch aborts a stalled readiness socket
+  ---
+  duration_ms: 12.07646
+  type: 'test'
+  ...
+# Subtest: an empty virtual HTTP connection is not a successful readiness response
+ok 21 - an empty virtual HTTP connection is not a successful readiness response
+  ---
+  duration_ms: 5.071751
+  type: 'test'
+  ...
+# Subtest: Rollup demo consumes the manifest even when build stdout is empty
+ok 22 - Rollup demo consumes the manifest even when build stdout is empty
+  ---
+  duration_ms: 8.198742
+  type: 'test'
+  ...
+# Subtest: Rollup demo ignores duplicate clicks during installation and retries failed installs
+ok 23 - Rollup demo ignores duplicate clicks during installation and retries failed installs
+  ---
+  duration_ms: 2.353622
+  type: 'test'
+  ...
+# Subtest: Rollup script closes the bundle and returns a failing exit code on generation errors
+ok 24 - Rollup script closes the bundle and returns a failing exit code on generation errors
+  ---
+  duration_ms: 59.18006
+  type: 'test'
+  ...
+# Subtest: Next demo probes without relying on banner chunk boundaries and kills before remounting
+ok 25 - Next demo probes without relying on banner chunk boundaries and kills before remounting
+  ---
+  duration_ms: 6.607629
+  type: 'test'
+  ...
+# Subtest: Next demo cancels readiness and reports a process that exits before serving
+ok 26 - Next demo cancels readiness and reports a process that exits before serving
+  ---
+  duration_ms: 4.097618
+  type: 'test'
+  ...
+# Subtest: Next start builds first, reuses a successful build, and rebuilds edited sources
+ok 27 - Next start builds first, reuses a successful build, and rebuilds edited sources
+  ---
+  duration_ms: 6.409059
+  type: 'test'
+  ...
+# Subtest: Next build can finish without probing a server and unlocks subsequent launches
+ok 28 - Next build can finish without probing a server and unlocks subsequent launches
+  ---
+  duration_ms: 4.717293
+  type: 'test'
+  ...
+# Subtest: bootstrap validates init and parent envelopes, ignores duplicates and closes on gaps
+ok 29 - bootstrap validates init and parent envelopes, ignores duplicates and closes on gaps
+  ---
+  duration_ms: 24.131579
+  type: 'test'
+  ...
+# Subtest: bootstrap fetch streams responses, clones request options, rejects size/abort, and cancels readers
+ok 30 - bootstrap fetch streams responses, clones request options, rejects size/abort, and cancels readers
+  ---
+  duration_ms: 16.070149
+  type: 'test'
+  ...
+# Subtest: bootstrap XHR event order, response types, unsupported APIs, timeout, abort and state checks
+ok 31 - bootstrap XHR event order, response types, unsupported APIs, timeout, abort and state checks
+  ---
+  duration_ms: 11.709788
+  type: 'test'
+  ...
+# Subtest: bootstrap WebSockets implement state, ordering, binary types, events, close and unsupported inputs
+ok 32 - bootstrap WebSockets implement state, ordering, binary types, events, close and unsupported inputs
+  ---
+  duration_ms: 24.715406
+  type: 'test'
+  ...
+# Subtest: bootstrap links, forms, virtual history and unsupported resource diagnostics
+ok 33 - bootstrap links, forms, virtual history and unsupported resource diagnostics
+  ---
+  duration_ms: 54.158094
+  type: 'test'
+  ...
+# Subtest: bootstrap renders authenticated blob catalogs, stages scripts, and revokes document-local resources on close
+ok 34 - bootstrap renders authenticated blob catalogs, stages scripts, and revokes document-local resources on close
+  ---
+  duration_ms: 11.504386
+  type: 'test'
+  ...
+# Subtest: gateway options and transport selection cover explicit, CDN, unavailable, same-origin and disabled
+ok 35 - gateway options and transport selection cover explicit, CDN, unavailable, same-origin and disabled
+  ---
+  duration_ms: 1.863354
+  type: 'test'
+  ...
+# Subtest: read-only runtime diagnostics and forced worker failures are actionable
+ok 36 - read-only runtime diagnostics and forced worker failures are actionable
+  ---
+  duration_ms: 6.884709
+  type: 'test'
+  ...
+# Subtest: worker initialization times out and releases its controller listener
+ok 37 - worker initialization times out and releases its controller listener
+  ---
+  duration_ms: 44.675846
+  type: 'test'
+  ...
+# Subtest: virtual paths resolve queries, fragments, relative paths and loopback authority only
+ok 38 - virtual paths resolve queries, fragments, relative paths and loopback authority only
+  ---
+  duration_ms: 1.470142
+  type: 'test'
+  ...
+# Subtest: headers are lowercase, bounded and cannot carry ambient or hop-by-hop credentials
+ok 39 - headers are lowercase, bounded and cannot carry ambient or hop-by-hop credentials
+  ---
+  duration_ms: 14.717071
+  type: 'test'
+  ...
+# Subtest: request normalization rejects unsafe methods, credentials, bodies and options before dispatch
+ok 40 - request normalization rejects unsafe methods, credentials, bodies and options before dispatch
+  ---
+  duration_ms: 0.74216
+  type: 'test'
+  ...
+# Subtest: envelopes authenticate nonce/version/session, discard duplicates, and fail closed on sequence gaps
+ok 41 - envelopes authenticate nonce/version/session, discard duplicates, and fail closed on sequence gaps
+  ---
+  duration_ms: 0.59042
+  type: 'test'
+  ...
+# Subtest: HTTP parser streams fixed length and chunked responses across every possible byte split
+ok 42 - HTTP parser streams fixed length and chunked responses across every possible byte split
+  ---
+  duration_ms: 5.485072
+  type: 'test'
+  ...
+# Subtest: HTTP EOF, HEAD and bodyless statuses complete without waiting for nonexistent bodies
+ok 43 - HTTP EOF, HEAD and bodyless statuses complete without waiting for nonexistent bodies
+  ---
+  duration_ms: 0.515866
+  type: 'test'
+  ...
+# Subtest: HTTP framing rejects ambiguity, malformed/truncated data and resource exhaustion
+ok 44 - HTTP framing rejects ambiguity, malformed/truncated data and resource exhaustion
+  ---
+  duration_ms: 31.021188
+  type: 'test'
+  ...
+# Subtest: virtual HTTP socket cleanup covers success, errors, cancellation and synchronous connect failures
+ok 45 - virtual HTTP socket cleanup covers success, errors, cancellation and synchronous connect failures
+  ---
+  duration_ms: 1.010824
+  type: 'test'
+  ...
+# Subtest: virtual-only gateway sockets cannot fall through to an egress proxy
+ok 46 - virtual-only gateway sockets cannot fall through to an egress proxy
+  ---
+  duration_ms: 0.334089
+  type: 'test'
+  ...
+# Subtest: Blob owners revoke exactly once and cannot create resources after close
+ok 47 - Blob owners revoke exactly once and cannot create resources after close
+  ---
+  duration_ms: 0.315563
+  type: 'test'
+  ...
+# Subtest: CSS URLs, imports and fragments are rewritten recursively without touching comments
+ok 48 - CSS URLs, imports and fragments are rewritten recursively without touching comments
+  ---
+  duration_ms: 0.67951
+  type: 'test'
+  ...
+# Subtest: module specifiers and import.meta.url rewrite without changing comments or strings
+ok 49 - module specifiers and import.meta.url rewrite without changing comments or strings
+  ---
+  duration_ms: 0.830408
+  type: 'test'
+  ...
+# Subtest: Service Worker and direct adapters share HTTP framing without changing worker response messages
+ok 50 - Service Worker and direct adapters share HTTP framing without changing worker response messages
+  ---
+  duration_ms: 6.631014
+  type: 'test'
+  ...
+# Subtest: resource loader rewrites all supported tags, module/CSS dependencies, query strings, fragments and navigation attributes
+ok 51 - resource loader rewrites all supported tags, module/CSS dependencies, query strings, fragments and navigation attributes
+  ---
+  duration_ms: 4.798058
+  type: 'test'
+  ...
+# Subtest: unsupported active elements, attributes, encodings, script imports and CSS fail visibly without requesting external URLs
+ok 52 - unsupported active elements, attributes, encodings, script imports and CSS fail visibly without requesting external URLs
+  ---
+  duration_ms: 1.490471
+  type: 'test'
+  ...
+# Subtest: resource cache rejects cycles and enforces aggregate body and resource count limits
+ok 53 - resource cache rejects cycles and enforces aggregate body and resource count limits
+  ---
+  duration_ms: 29.563158
+  type: 'test'
+  ...
+# Subtest: session handshake, clean navigation/history and idempotent teardown
+ok 54 - session handshake, clean navigation/history and idempotent teardown
+  ---
+  duration_ms: 38.830014
+  type: 'test'
+  ...
+# Subtest: session authenticates window source, port, nonce, version, payload and sequences before dispatch
+ok 55 - session authenticates window source, port, nonce, version, payload and sequences before dispatch
+  ---
+  duration_ms: 21.083279
+  type: 'test'
+  ...
+# Subtest: HTTP messages stream in order, reject duplicate IDs, cancel sockets and time out deterministically
+ok 56 - HTTP messages stream in order, reject duplicate IDs, cancel sockets and time out deterministically
+  ---
+  duration_ms: 109.568725
+  type: 'test'
+  ...
+# Subtest: HTTP validation and oversized responses never escape to host networking
+ok 57 - HTTP validation and oversized responses never escape to host networking
+  ---
+  duration_ms: 17.318486
+  type: 'test'
+  ...
+# Subtest: redirect method changes, manual redirects, errors, loop cap, and failed navigation preserves committed path
+ok 58 - redirect method changes, manual redirects, errors, loop cap, and failed navigation preserves committed path
+  ---
+  duration_ms: 16.984298
+  type: 'test'
+  ...
+# Subtest: navigation replacement cancels old work and does not deliver errors into the new document channel
+ok 59 - navigation replacement cancels old work and does not deliver errors into the new document channel
+  ---
+  duration_ms: 6.669126
+  type: 'test'
+  ...
+# Subtest: pre-ready requests, handshake timeouts, transfer failures, removal and sandbox tampering close safely
+ok 60 - pre-ready requests, handshake timeouts, transfer failures, removal and sandbox tampering close safely
+  ---
+  duration_ms: 39.147883
+  type: 'test'
+  ...
+# Subtest: initial navigation queues, unsupported content errors, client close and navigation timeout
+ok 61 - initial navigation queues, unsupported content errors, client close and navigation timeout
+  ---
+  duration_ms: 43.096656
+  type: 'test'
+  ...
+# Subtest: session construction rejects missing DOM and secure primitives
+ok 62 - session construction rejects missing DOM and secure primitives
+  ---
+  duration_ms: 0.218628
+  type: 'test'
+  ...
+# Subtest: WebSocket protocols are bounded, unique tokens
+ok 63 - WebSocket protocols are bounded, unique tokens
+  ---
+  duration_ms: 2.430699
+  type: 'test'
+  ...
+# Subtest: WebSocket upgrade, masking, text/binary, fragmentation, ping/pong and clean close
+ok 64 - WebSocket upgrade, masking, text/binary, fragmentation, ping/pong and clean close
+  ---
+  duration_ms: 31.162759
+  type: 'test'
+  ...
+# Subtest: WebSocket invalid sends, close inputs, early close and abort have one terminal event
+ok 65 - WebSocket invalid sends, close inputs, early close and abort have one terminal event
+  ---
+  duration_ms: 1.957655
+  type: 'test'
+  ...
+# Subtest: WebSocket invalid upgrades and response headers fail closed
+ok 66 - WebSocket invalid upgrades and response headers fail closed
+  ---
+  duration_ms: 2.889306
+  type: 'test'
+  ...
+# Subtest: WebSocket rejects invalid frames, control payloads, UTF-8 and continuation sequences
+ok 67 - WebSocket rejects invalid frames, control payloads, UTF-8 and continuation sequences
+  ---
+  duration_ms: 62.127588
+  type: 'test'
+  ...
+# Subtest: WebSocket response size, aggregate fragment and buffer limits are enforced
+ok 68 - WebSocket response size, aggregate fragment and buffer limits are enforced
+  ---
+  duration_ms: 27.804535
+  type: 'test'
+  ...
+# Subtest: unsupported boundaries report the same reason in errors and capability contracts
+ok 69 - unsupported boundaries report the same reason in errors and capability contracts
+  ---
+  duration_ms: 1.18161
+  type: 'test'
+  ...
+# Subtest: native addon errors distinguish unavailable support from explicitly disabled loading
+ok 70 - native addon errors distinguish unavailable support from explicitly disabled loading
+  ---
+  duration_ms: 0.363736
+  type: 'test'
+  ...
+# Subtest: missing browser capabilities retain their reason in formatted errors
+ok 71 - missing browser capabilities retain their reason in formatted errors
+  ---
+  duration_ms: 0.835979
+  type: 'test'
+  ...
+# Subtest: retains error names and messages when browser stacks contain only frames
+ok 72 - retains error names and messages when browser stacks contain only frames
+  ---
+  duration_ms: 0.627239
+  type: 'test'
+  ...
+# Subtest: preserves stacks that already contain the message without duplicating it
+ok 73 - preserves stacks that already contain the message without duplicating it
+  ---
+  duration_ms: 0.108538
+  type: 'test'
+  ...
+# Subtest: formats thrown values and errors without stacks
+ok 74 - formats thrown values and errors without stacks
+  ---
+  duration_ms: 0.103177
+  type: 'test'
+  ...
+# Subtest: does not replace a captureStackTrace implementation with structured output
+ok 75 - does not replace a captureStackTrace implementation with structured output
+  ---
+  duration_ms: 0.937463
+  type: 'test'
+  ...
+# Subtest: retries a structured capture when the constructor filter produces no frames
+ok 76 - retries a structured capture when the constructor filter produces no frames
+  ---
+  duration_ms: 1.267234
+  type: 'test'
+  ...
+# Subtest: normalizes a structured capture when the browser materializes no stack
+ok 77 - normalizes a structured capture when the browser materializes no stack
+  ---
+  duration_ms: 0.152421
+  type: 'test'
+  ...
+# Subtest: adds V8 CallSite output when captureStackTrace ignores prepareStackTrace
+ok 78 - adds V8 CallSite output when captureStackTrace ignores prepareStackTrace
+  ---
+  duration_ms: 1.513505
+  type: 'test'
+  ...
+# Subtest: marks Firefox CommonJS export frames for caller-callsite compatibility
+ok 79 - marks Firefox CommonJS export frames for caller-callsite compatibility
+  ---
+  duration_ms: 0.190554
+  type: 'test'
+  ...
+# Subtest: formats a captured stack when no custom formatter is installed
+ok 80 - formats a captured stack when no custom formatter is installed
+  ---
+  duration_ms: 0.265228
+  type: 'test'
+  ...
+# Subtest: structured call sites accept consumer metadata
+ok 81 - structured call sites accept consumer metadata
+  ---
+  duration_ms: 0.234288
+  type: 'test'
+  ...
+# Subtest: structured call sites remain extensible when the browser freezes them
+ok 82 - structured call sites remain extensible when the browser freezes them
+  ---
+  duration_ms: 0.210863
+  type: 'test'
+  ...
+# Subtest: leaves constructors without captureStackTrace untouched
+ok 83 - leaves constructors without captureStackTrace untouched
+  ---
+  duration_ms: 0.233236
+  type: 'test'
+  ...
+# Subtest: worker dependency /runtime.js does not wait for its initializing client
+ok 84 - worker dependency /runtime.js does not wait for its initializing client
+  ---
+  duration_ms: 1.655196
+  type: 'test'
+  ...
+# Subtest: worker dependency /index.js does not wait for its initializing client
+ok 85 - worker dependency /index.js does not wait for its initializing client
+  ---
+  duration_ms: 1.127767
+  type: 'test'
+  ...
+# Subtest: worker dependency /versions/index.js does not wait for its initializing client
+ok 86 - worker dependency /versions/index.js does not wait for its initializing client
+  ---
+  duration_ms: 0.488214
+  type: 'test'
+  ...
+# Subtest: worker dependency /versions/v22/profile.js does not wait for its initializing client
+ok 87 - worker dependency /versions/v22/profile.js does not wait for its initializing client
+  ---
+  duration_ms: 0.441715
+  type: 'test'
+  ...
+# Subtest: WebSocket bootstrap bypasses virtual HTTP routing for /gateway-sw.js
+ok 88 - WebSocket bootstrap bypasses virtual HTTP routing for /gateway-sw.js
+  ---
+  duration_ms: 16.247849
+  type: 'test'
+  ...
+# Subtest: WebSocket bootstrap bypasses virtual HTTP routing for /runtime/gateway-sw.js
+ok 89 - WebSocket bootstrap bypasses virtual HTTP routing for /runtime/gateway-sw.js
+  ---
+  duration_ms: 0.793257
+  type: 'test'
+  ...
+# Subtest: gateway WebSockets relay duplex bytes and release sockets on close or disposal
+ok 90 - gateway WebSockets relay duplex bytes and release sockets on close or disposal
+  ---
+  duration_ms: 1.565334
+  type: 'test'
+  ...
+# Subtest: gateway rejects non-virtual sources and reports connection setup failures
+ok 91 - gateway rejects non-virtual sources and reports connection setup failures
+  ---
+  duration_ms: 0.299843
+  type: 'test'
+  ...
+# Subtest: virtual WebSockets preserve protocols, ordered text and binary messages, and clean close
+ok 92 - virtual WebSockets preserve protocols, ordered text and binary messages, and clean close
+  ---
+  duration_ms: 25.725378
+  type: 'test'
+  ...
+# Subtest: fragmented messages survive interleaved ping frames and default binary messages are Blobs
+ok 93 - fragmented messages survive interleaved ping frames and default binary messages are Blobs
+  ---
+  duration_ms: 2.627476
+  type: 'test'
+  ...
+# Subtest: invalid URLs and protocols fail synchronously while external hosts retain native WebSockets
+ok 94 - invalid URLs and protocols fail synchronously while external hosts retain native WebSockets
+  ---
+  duration_ms: 1.208932
+  type: 'test'
+  ...
+# Subtest: failed handshakes and invalid server frames report error and abnormal close
+ok 95 - failed handshakes and invalid server frames report error and abnormal close
+  ---
+  duration_ms: 7.730347
+  type: 'test'
+  ...
+# Subtest: Profiler.takePreciseCoverage returns a coverage result array
+ok 96 - Profiler.takePreciseCoverage returns a coverage result array
+  ---
+  duration_ms: 1.58433
+  type: 'test'
+  ...
+# Subtest: canonicalizes bare and node: builtin names without VFS fallback
+ok 97 - canonicalizes bare and node: builtin names without VFS fallback
+  ---
+  duration_ms: 4.347576
+  type: 'test'
+  ...
+# Subtest: resolves VFS-relative imports when the browser reports a generated Blob importer
+ok 98 - resolves VFS-relative imports when the browser reports a generated Blob importer
+  ---
+  duration_ms: 4.090704
+  type: 'test'
+  ...
+# Subtest: aggregates async node:test suites, hooks, and subtests
+ok 99 - aggregates async node:test suites, hooks, and subtests
+  ---
+  duration_ms: 6.496737
+  type: 'test'
+  ...
+# Subtest: Demo 1: HTTP client follows redirects and decompresses chunked brotli/zstd response
+ok 100 - Demo 1: HTTP client follows redirects and decompresses chunked brotli/zstd response
+  ---
+  duration_ms: 81.311073
+  type: 'test'
+  ...
+# Subtest: Demo 2: Real bcrypt password hashing and verification from npm (bcryptjs)
+ok 101 - Demo 2: Real bcrypt password hashing and verification from npm (bcryptjs)
+  ---
+  duration_ms: 465.717869
+  type: 'test'
+  ...
+# Subtest: Demo 3: Real Drizzle ORM queries with schema over node:sqlite DatabaseSync
+ok 102 - Demo 3: Real Drizzle ORM queries with schema over node:sqlite DatabaseSync
+  ---
+  duration_ms: 436.554887
+  type: 'test'
+  ...
+# Subtest: Demo 4: Real TypeScript compiler (typescript on npm) transpiling interfaces and types
+ok 103 - Demo 4: Real TypeScript compiler (typescript on npm) transpiling interfaces and types
+  ---
+  duration_ms: 3335.691842
+  type: 'test'
+  ...
+# Subtest: Demo 5: Real uvu test runner from npm executing assertions
+ok 104 - Demo 5: Real uvu test runner from npm executing assertions
+  ---
+  duration_ms: 516.564499
+  type: 'test'
+  ...
+# Subtest: Demo 6: Real rollup module bundler from npm generating production bundle with hash
+ok 105 - Demo 6: Real rollup module bundler from npm generating production bundle with hash
+  ---
+  duration_ms: 866.404627
+  type: 'test'
+  ...
+# Subtest: Demo 7: Real ws package from npm running WebSocket Server and frame processing
+ok 106 - Demo 7: Real ws package from npm running WebSocket Server and frame processing
+  ---
+  duration_ms: 140.044739
+  type: 'test'
+  ...
+# Subtest: Demo 8: Real pg package from npm loaded and instantiated
+ok 107 - Demo 8: Real pg package from npm loaded and instantiated
+  ---
+  duration_ms: 748.489628
+  type: 'test'
+  ...
+# Subtest: Demo 9: User-code instantiated WebAssembly transformer
+ok 108 - Demo 9: User-code instantiated WebAssembly transformer
+  ---
+  duration_ms: 15.661808
+  type: 'test'
+  ...
+# Subtest: Demo 10: Real React SSR application from npm with ReactDOMServer.renderToString()
+ok 109 - Demo 10: Real React SSR application from npm with ReactDOMServer.renderToString()
+  ---
+  duration_ms: 2321.424993
+  type: 'test'
+  ...
+# Subtest: Demo 11: npm install with package postinstall lifecycle script
+ok 110 - Demo 11: npm install with package postinstall lifecycle script
+  ---
+  duration_ms: 13.362219
+  type: 'test'
+  ...
+# Subtest: load hooks receive a UTF-8 Buffer from string VFS source
+ok 111 - load hooks receive a UTF-8 Buffer from string VFS source
+  ---
+  duration_ms: 5.640199
+  type: 'test'
+  ...
+# Subtest: load hooks receive a UTF-8 Buffer from object VFS source
+ok 112 - load hooks receive a UTF-8 Buffer from object VFS source
+  ---
+  duration_ms: 1.440175
+  type: 'test'
+  ...
+# Subtest: async loader hooks decode SharedArrayBuffer-backed source
+ok 113 - async loader hooks decode SharedArrayBuffer-backed source
+  ---
+  duration_ms: 1.048626
+  type: 'test'
+  ...
+# Subtest: async loader hooks decode cross-realm source
+ok 114 - async loader hooks decode cross-realm source
+  ---
+  duration_ms: 1.281331
+  type: 'test'
+  ...
+# Subtest: async tap mock loaders await generated module source
+ok 115 - async tap mock loaders await generated module source
+  ---
+  duration_ms: 1.415538
+  type: 'test'
+  ...
+# Subtest: rewrites export-from specifiers when an exported name contains from
+ok 116 - rewrites export-from specifiers when an exported name contains from
+  ---
+  duration_ms: 1.378216
+  type: 'test'
+  ...
+# Subtest: preserves the default binding when re-exporting JSON
+ok 117 - preserves the default binding when re-exporting JSON
+  ---
+  duration_ms: 1.557449
+  type: 'test'
+  ...
+# Subtest: Nacelle+ policy rejects hostile URLs, headers, and private targets by default
+ok 118 - Nacelle+ policy rejects hostile URLs, headers, and private targets by default
+  ---
+  duration_ms: 2.032808
+  type: 'test'
+  ...
+# Subtest: Nacelle+ strips authorization and rechecks every redirect destination
+ok 119 - Nacelle+ strips authorization and rechecks every redirect destination
+  ---
+  duration_ms: 14.473144
+  type: 'test'
+  ...
+# Subtest: hostile redirect cannot escape the stored origin grant
+ok 120 - hostile redirect cannot escape the stored origin grant
+  ---
+  duration_ms: 6.353493
+  type: 'test'
+  ...
+# Subtest: hostile frames are rejected before Nacelle+ performs a request
+ok 121 - hostile frames are rejected before Nacelle+ performs a request
+  ---
+  duration_ms: 0.675072
+  type: 'test'
+  ...
+# Subtest: Nacelle+ streams response chunks through the port with acknowledgements
+ok 122 - Nacelle+ streams response chunks through the port with acknowledgements
+  ---
+  duration_ms: 2.299118
+  type: 'test'
+  ...
+# Subtest: Nacelle+ cancellation reaches the extension fetch signal
+ok 123 - Nacelle+ cancellation reaches the extension fetch signal
+  ---
+  duration_ms: 1.736491
+  type: 'test'
+  ...
+# Subtest: Nacelle+ revocation aborts an active request and external permission removal invalidates grants
+ok 124 - Nacelle+ revocation aborts an active request and external permission removal invalidates grants
+  ---
+  duration_ms: 4.639254
+  type: 'test'
+  ...
+# Subtest: Nacelle+ disables private browsing sessions
+ok 125 - Nacelle+ disables private browsing sessions
+  ---
+  duration_ms: 0.673518
+  type: 'test'
+  ...
+# Subtest: Nacelle+ stops reading when a page does not acknowledge a chunk
+ok 126 - Nacelle+ stops reading when a page does not acknowledge a chunk
+  ---
+  duration_ms: 1.493867
+  type: 'test'
+  ...
+# Subtest: Nacelle+ content bridge waits for the page before acknowledging chunks
+ok 127 - Nacelle+ content bridge waits for the page before acknowledging chunks
+  ---
+  duration_ms: 0.995785
+  type: 'test'
+  ...
+# Subtest: Nacelle+ enforces a per-page concurrency budget
+ok 128 - Nacelle+ enforces a per-page concurrency budget
+  ---
+  duration_ms: 2.172125
+  type: 'test'
+  ...
+# Subtest: Nacelle+ enforces a global concurrency budget across pages
+ok 129 - Nacelle+ enforces a global concurrency budget across pages
+  ---
+  duration_ms: 6.355547
+  type: 'test'
+  ...
+# Subtest: Nacelle+ grants are inspectable and revocable
+ok 130 - Nacelle+ grants are inspectable and revocable
+  ---
+  duration_ms: 0.937393
+  type: 'test'
+  ...
+# Subtest: Nacelle+ rejects an oversized response before reading its body
+ok 131 - Nacelle+ rejects an oversized response before reading its body
+  ---
+  duration_ms: 0.829146
+  type: 'test'
+  ...
+# Subtest: Nacelle+ bounds response metadata before exposing it to the page
+ok 132 - Nacelle+ bounds response metadata before exposing it to the page
+  ---
+  duration_ms: 1.896448
+  type: 'test'
+  ...
+# Subtest: Nacelle+ page adapter round-trips a request over the message bridge
+ok 133 - Nacelle+ page adapter round-trips a request over the message bridge
+  ---
+  duration_ms: 15.453299
+  type: 'test'
+  ...
+# Subtest: Nacelle+ diagnostics are opt-in, structured, and secret-free
+ok 134 - Nacelle+ diagnostics are opt-in, structured, and secret-free
+  ---
+  duration_ms: 1.101788
+  type: 'test'
+  ...
+# Subtest: Nacelle+ reports a deterministic error when the extension bridge is lost
+ok 135 - Nacelle+ reports a deterministic error when the extension bridge is lost
+  ---
+  duration_ms: 0.544081
+  type: 'test'
+  ...
+# Subtest: Nacelle+ propagates aborts across the page bridge
+ok 136 - Nacelle+ propagates aborts across the page bridge
+  ---
+  duration_ms: 0.444641
+  type: 'test'
+  ...
+# Subtest: negotiated transport uses native fetch before privileged fallback
+ok 137 - negotiated transport uses native fetch before privileged fallback
+  ---
+  duration_ms: 0.68521
+  type: 'test'
+  ...
+# Subtest: negotiated transport falls back only for browser network failures
+ok 138 - negotiated transport falls back only for browser network failures
+  ---
+  duration_ms: 0.688046
+  type: 'test'
+  ...
+# Subtest: Nacelle installs Nacelle+ as the existing HTTP proxy capability
+ok 139 - Nacelle installs Nacelle+ as the existing HTTP proxy capability
+  ---
+  duration_ms: 52.101199
+  type: 'test'
+  ...
+# Subtest: Nacelle+ transport stays outside the runtime without an explicit grant
+ok 140 - Nacelle+ transport stays outside the runtime without an explicit grant
+  ---
+  duration_ms: 19.606854
+  type: 'test'
+  ...
+# Subtest: unsafe negotiated requests use the privileged transport before native fetch
+ok 141 - unsafe negotiated requests use the privileged transport before native fetch
+  ---
+  duration_ms: 15.258917
+  type: 'test'
+  ...
+# Subtest: Nacelle+ can fail closed when a browser worker boundary is unavailable
+ok 142 - Nacelle+ can fail closed when a browser worker boundary is unavailable
+  ---
+  duration_ms: 0.950037
+  type: 'test'
+  ...
+# Subtest: nested synchronous children restore host scheduling globals before the next run
+ok 143 - nested synchronous children restore host scheduling globals before the next run
+  ---
+  duration_ms: 52.066383
+  type: 'test'
+  ...
+# Subtest: internal process ownership markers stay out of the enumerable global surface
+ok 144 - internal process ownership markers stay out of the enumerable global surface
+  ---
+  duration_ms: 15.492605
+  type: 'test'
+  ...
+# Subtest: gateway initialization waits until the service worker controls the page
+ok 145 - gateway initialization waits until the service worker controls the page
+  ---
+  duration_ms: 1.152395
+  type: 'test'
+  ...
+# Subtest: gateway initialization resolves immediately when the page is already controlled
+ok 146 - gateway initialization resolves immediately when the page is already controlled
+  ---
+  duration_ms: 0.284073
+  type: 'test'
+  ...
+# Subtest: tar extraction rejects traversal, absolute paths, symlinks, and resource exhaustion
+ok 147 - tar extraction rejects traversal, absolute paths, symlinks, and resource exhaustion
+  ---
+  duration_ms: 8.272092
+  type: 'test'
+  ...
+# Subtest: VFS existence checks preserve symlink resolution while fast-pathing ordinary files
+ok 148 - VFS existence checks preserve symlink resolution while fast-pathing ordinary files
+  ---
+  duration_ms: 0.593365
+  type: 'test'
+  ...
+# Subtest: VFS resolves parent paths from a non-root process cwd
+ok 149 - VFS resolves parent paths from a non-root process cwd
+  ---
+  duration_ms: 13.946838
+  type: 'test'
+  ...
+# Subtest: CommonJS resolution uses main and stops package type lookup at node_modules
+ok 150 - CommonJS resolution uses main and stops package type lookup at node_modules
+  ---
+  duration_ms: 17.927592
+  type: 'test'
+  ...
+# Subtest: node -e resolves packages relative to its child cwd
+ok 151 - node -e resolves packages relative to its child cwd
+  ---
+  duration_ms: 19.97109
+  type: 'test'
+  ...
+# Subtest: path/posix resolves relative paths against the child cwd
+ok 152 - path/posix resolves relative paths against the child cwd
+  ---
+  duration_ms: 14.914198
+  type: 'test'
+  ...
+# Subtest: CommonJS resolution honors exports, directory main, and extension boundaries
+ok 153 - CommonJS resolution honors exports, directory main, and extension boundaries
+  ---
+  duration_ms: 18.541417
+  type: 'test'
+  ...
+# Subtest: CommonJS cache hits return before running the load hook again
+ok 154 - CommonJS cache hits return before running the load hook again
+  ---
+  duration_ms: 15.987802
+  type: 'test'
+  ...
+# Subtest: deleting require.cache invalidates the CommonJS request cache
+ok 155 - deleting require.cache invalidates the CommonJS request cache
+  ---
+  duration_ms: 14.370658
+  type: 'test'
+  ...
+# Subtest: CommonJS package imports use the normal resolve and cache path
+ok 156 - CommonJS package imports use the normal resolve and cache path
+  ---
+  duration_ms: 13.05934
+  type: 'test'
+  ...
+# Subtest: output capture is bounded and reports dropped bytes without retaining the full stream
+ok 157 - output capture is bounded and reports dropped bytes without retaining the full stream
+  ---
+  duration_ms: 1.49017
+  type: 'test'
+  ...
+# Subtest: gateway routes are session-scoped and expire when their lease is not renewed
+ok 158 - gateway routes are session-scoped and expire when their lease is not renewed
+  ---
+  duration_ms: 0.312718
+  type: 'test'
+  ...
+# Subtest: run cache keys invalidate all module data when the workspace revision changes
+ok 159 - run cache keys invalidate all module data when the workspace revision changes
+  ---
+  duration_ms: 0.165036
+  type: 'test'
+  ...
+# Subtest: capability policy exposes inspectable grants and reports only deltas
+ok 160 - capability policy exposes inspectable grants and reports only deltas
+  ---
+  duration_ms: 0.702674
+  type: 'test'
+  ...
+# Subtest: checkpoints rollback and diff workspace changes using content-addressed snapshots
+ok 161 - checkpoints rollback and diff workspace changes using content-addressed snapshots
+  ---
+  duration_ms: 2.711076
+  type: 'test'
+  ...
+# Subtest: trace recorder emits stable failure taxonomy with one trace id
+ok 162 - trace recorder emits stable failure taxonomy with one trace id
+  ---
+  duration_ms: 0.374376
+  type: 'test'
+  ...
+# Subtest: secret broker only signs named, origin-bound requests and never returns raw secrets
+ok 163 - secret broker only signs named, origin-bound requests and never returns raw secrets
+  ---
+  duration_ms: 2.380723
+  type: 'test'
+  ...
+# Subtest: compatibility lab compares observable bytes against an independent oracle
+ok 164 - compatibility lab compares observable bytes against an independent oracle
+  ---
+  duration_ms: 0.47038
+  type: 'test'
+  ...
+# Subtest: npm verifies tarball integrity and refuses lifecycle scripts by default
+ok 165 - npm verifies tarball integrity and refuses lifecycle scripts by default
+  ---
+  duration_ms: 5.348931
+  type: 'test'
+  ...
+# Subtest: VFS watcher quotas and owner exit close resources
+ok 166 - VFS watcher quotas and owner exit close resources
+  ---
+  duration_ms: 0.916633
+  type: 'test'
+  ...
+# Subtest: high-level process handles abort and bound output capture
+ok 167 - high-level process handles abort and bound output capture
+  ---
+  duration_ms: 37.999956
+  type: 'test'
+  ...
+# Subtest: published exports are backed by built artifacts
+ok 168 - published exports are backed by built artifacts
+  ---
+  duration_ms: 0.890584
+  type: 'test'
+  ...
+# Subtest: Next.js can query npm registry synchronously without a config script
+ok 169 - Next.js can query npm registry synchronously without a config script
+  ---
+  duration_ms: 73.310288
+  type: 'test'
+  ...
+# Subtest: shell parser preserves conditional pipelines and redirections
+ok 170 - shell parser preserves conditional pipelines and redirections
+  ---
+  duration_ms: 1.792188
+  type: 'test'
+  ...
+# Subtest: shell parser treats physical newlines as command separators
+ok 171 - shell parser treats physical newlines as command separators
+  ---
+  duration_ms: 0.228437
+  type: 'test'
+  ...
+# Subtest: shell executes POSIX build scripts with parameters, loops, and subshells
+ok 172 - shell executes POSIX build scripts with parameters, loops, and subshells
+  ---
+  duration_ms: 16.093504
+  type: 'test'
+  ...
+# Subtest: shell dot and source builtins execute in the current shell state
+ok 173 - shell dot and source builtins execute in the current shell state
+  ---
+  duration_ms: 0.769993
+  type: 'test'
+  ...
+# Subtest: semver comparator ranges support wildcard bounds
+ok 174 - semver comparator ranges support wildcard bounds
+  ---
+  duration_ms: 0.745055
+  type: 'test'
+  ...
+# Subtest: shell executor handles environment, lookup, pipes, globs, and redirects
+ok 175 - shell executor handles environment, lookup, pipes, globs, and redirects
+  ---
+  duration_ms: 0.923296
+  type: 'test'
+  ...
+# Subtest: shell forwards nested output and honors redirected command errors
+ok 176 - shell forwards nested output and honors redirected command errors
+  ---
+  duration_ms: 0.661094
+  type: 'test'
+  ...
+# Subtest: bash exposes common file, process, and text commands
+ok 177 - bash exposes common file, process, and text commands
+  ---
+  duration_ms: 7.59605
+  type: 'test'
+  ...
+# Subtest: find supports case-insensitive file predicates used by Jest crawlers
+ok 178 - find supports case-insensitive file predicates used by Jest crawlers
+  ---
+  duration_ms: 3.180734
+  type: 'test'
+  ...
+# Subtest: spawned find keeps directory roots out of crawler output
+ok 179 - spawned find keeps directory roots out of crawler output
+  ---
+  duration_ms: 61.403864
+  type: 'test'
+  ...
+# Subtest: child processes can realpath their configured temporary directory
+ok 180 - child processes can realpath their configured temporary directory
+  ---
+  duration_ms: 43.068221
+  type: 'test'
+  ...
+# Subtest: dynamic imports survive platform and OS release overrides
+ok 181 - dynamic imports survive platform and OS release overrides
+  ---
+  duration_ms: 97.999935
+  type: 'test'
+  ...
+# Subtest: rm accepts bundled force and recursive options
+ok 182 - rm accepts bundled force and recursive options
+  ---
+  duration_ms: 2.934583
+  type: 'test'
+  ...
+# Subtest: synchronous pnpm installs an already-mounted compatible package
+ok 183 - synchronous pnpm installs an already-mounted compatible package
+  ---
+  duration_ms: 21.326404
+  type: 'test'
+  ...
+# Subtest: synchronous pnpm reports the configured registry
+ok 184 - synchronous pnpm reports the configured registry
+  ---
+  duration_ms: 18.724667
+  type: 'test'
+  ...
+# Subtest: pnpm exec runs a workspace binary
+ok 185 - pnpm exec runs a workspace binary
+  ---
+  duration_ms: 21.874602
+  type: 'test'
+  ...
+# Subtest: npm scripts run through the shell compatibility layer
+ok 186 - npm scripts run through the shell compatibility layer
+  ---
+  duration_ms: 37.090858
+  type: 'test'
+  ...
+# Subtest: npm scripts expose the project prefix npm uses for local tools
+ok 187 - npm scripts expose the project prefix npm uses for local tools
+  ---
+  duration_ms: 15.880236
+  type: 'test'
+  ...
+# Subtest: package script errors are forwarded when the shell returns them directly
+ok 188 - package script errors are forwarded when the shell returns them directly
+  ---
+  duration_ms: 2.252929
+  type: 'test'
+  ...
+# Subtest: nested npm lifecycle waits for sequential node and yarn children
+ok 189 - nested npm lifecycle waits for sequential node and yarn children
+  ---
+  duration_ms: 30.816947
+  type: 'test'
+  ...
+# Subtest: host timers created during a guest run do not become guest handles
+ok 190 - host timers created during a guest run do not become guest handles
+  ---
+  duration_ms: 30.977123
+  type: 'test'
+  ...
+# Subtest: shell process kill waits for the running command to finish
+ok 191 - shell process kill waits for the running command to finish
+  ---
+  duration_ms: 0.614435
+  type: 'test'
+  ...
+# Subtest: inline bash can orchestrate a TypeScript strip-and-run build
+ok 192 - inline bash can orchestrate a TypeScript strip-and-run build
+  ---
+  duration_ms: 28.67016
+  type: 'test'
+  ...
+# Subtest: inline bash can orchestrate TypeScript conversion through Vite transform
+ok 193 - inline bash can orchestrate TypeScript conversion through Vite transform
+  ---
+  duration_ms: 24.594946
+  type: 'test'
+  ...
+# Subtest: inline bash can orchestrate TypeScript conversion through actual TypeScript compiler from npm
+ok 194 - inline bash can orchestrate TypeScript conversion through actual TypeScript compiler from npm
+  ---
+  duration_ms: 4985.961922
+  type: 'test'
+  ...
+# Subtest: inline bash can orchestrate full-stack React SSR server from npm
+ok 195 - inline bash can orchestrate full-stack React SSR server from npm
+  ---
+  duration_ms: 971.033792
+  type: 'test'
+  ...
+# Subtest: npm scripts stream stdout chunks in real time before command exit
+ok 196 - npm scripts stream stdout chunks in real time before command exit
+  ---
+  duration_ms: 11.167701
+  type: 'test'
+  ...
+# Subtest: browser os constants expose errno values used by npm filesystem packages
+ok 197 - browser os constants expose errno values used by npm filesystem packages
+  ---
+  duration_ms: 0.932574
+  type: 'test'
+  ...
+# Subtest: browser os exposes the configured worker parallelism to Node tooling
+ok 198 - browser os exposes the configured worker parallelism to Node tooling
+  ---
+  duration_ms: 0.251852
+  type: 'test'
+  ...
+# Subtest: synchronous RSA exports retain odd-length integers and interoperate with native Node
+ok 199 - synchronous RSA exports retain odd-length integers and interoperate with native Node
+  ---
+  duration_ms: 47.429954
+  type: 'test'
+  ...
+# Subtest: asynchronously generated RSA KeyObjects use RSA rather than ECDSA signing
+ok 200 - asynchronously generated RSA KeyObjects use RSA rather than ECDSA signing
+  ---
+  duration_ms: 10.113135
+  type: 'test'
+  ...
+# Subtest: derived public JWKs do not retain private key fields
+ok 201 - derived public JWKs do not retain private key fields
+  ---
+  duration_ms: 0.861798
+  type: 'test'
+  ...
+# Subtest: a failed message clone does not leave a phantom pending message on close
+ok 202 - a failed message clone does not leave a phantom pending message on close
+  ---
+  duration_ms: 2.585135
+  type: 'test'
+  ...
+# Subtest: once listeners do not discard additional messages from the deferred queue
+ok 203 - once listeners do not discard additional messages from the deferred queue
+  ---
+  duration_ms: 17.605185
+  type: 'test'
+  ...
+# Subtest: synchronous message consumption does not redeliver asynchronously
+ok 204 - synchronous message consumption does not redeliver asynchronously
+  ---
+  duration_ms: 1.434143
+  type: 'test'
+  ...
+# Subtest: win32 path parsing preserves drive-qualified roots
+ok 205 - win32 path parsing preserves drive-qualified roots
+  ---
+  duration_ms: 62.299738
+  type: 'test'
+  ...
+# Subtest: child Module._load resolves package subpaths and a nested package main
+ok 206 - child Module._load resolves package subpaths and a nested package main
+  ---
+  duration_ms: 28.733992
+  type: 'test'
+  ...
+# Subtest: CommonJS require honors an overridden public Module._resolveFilename
+ok 207 - CommonJS require honors an overridden public Module._resolveFilename
+  ---
+  duration_ms: 14.922704
+  type: 'test'
+  ...
+# Subtest: failed CommonJS and JSON modules do not leave usable cache entries
+ok 208 - failed CommonJS and JSON modules do not leave usable cache entries
+  ---
+  duration_ms: 14.609805
+  type: 'test'
+  ...
+# Subtest: Function-created dynamic imports use the virtual module loader
+ok 209 - Function-created dynamic imports use the virtual module loader
+  ---
+  duration_ms: 19.770698
+  type: 'test'
+  ...
+# Subtest: nested guest Function constructors do not duplicate the import parameter
+ok 210 - nested guest Function constructors do not duplicate the import parameter
+  ---
+  duration_ms: 14.681062
+  type: 'test'
+  ...
+# Subtest: EventEmitter listener bookkeeping bypasses subclass emit overrides
+ok 211 - EventEmitter listener bookkeeping bypasses subclass emit overrides
+  ---
+  duration_ms: 14.137783
+  type: 'test'
+  ...
+# Subtest: EventEmitter prototype constructors remain callable for legacy process clones
+ok 212 - EventEmitter prototype constructors remain callable for legacy process clones
+  ---
+  duration_ms: 11.739265
+  type: 'test'
+  ...
+# Subtest: async filesystem callbacks retain the owning child working directory
+ok 213 - async filesystem callbacks retain the owning child working directory
+  ---
+  duration_ms: 15.496792
+  type: 'test'
+  ...
+# Subtest: process-bound fs resolves WASM-style relative paths after child bootstrap
+ok 214 - process-bound fs resolves WASM-style relative paths after child bootstrap
+  ---
+  duration_ms: 12.401883
+  type: 'test'
+  ...
+# Subtest: high-volume unobserved timers do not pay destroy grace per callback
+ok 215 - high-volume unobserved timers do not pay destroy grace per callback
+  ---
+  duration_ms: 363.284483
+  type: 'test'
+  ...
+# Subtest: unref timers still run while a process-owned refed timer keeps the loop alive
+ok 216 - unref timers still run while a process-owned refed timer keeps the loop alive
+  ---
+  duration_ms: 29.925242
+  type: 'test'
+  ...
+# Subtest: process-bound fs preserves stream and promisifier behavior
+ok 217 - process-bound fs preserves stream and promisifier behavior
+  ---
+  duration_ms: 23.561569
+  type: 'test'
+  ...
+# Subtest: util.format preserves error stacks across the guest boundary
+ok 218 - util.format preserves error stacks across the guest boundary
+  ---
+  duration_ms: 12.584722
+  type: 'test'
+  ...
+# Subtest: process-bound fs preserves symbol accessor overlays across require copies
+ok 219 - process-bound fs preserves symbol accessor overlays across require copies
+  ---
+  duration_ms: 10.058981
+  type: 'test'
+  ...
+# Subtest: WebAssembly promise callbacks retain the owning child process
+ok 220 - WebAssembly promise callbacks retain the owning child process
+  ---
+  duration_ms: 11.393624
+  type: 'test'
+  ...
+# Subtest: nested virtual children receive process-bound fs modules
+ok 221 - nested virtual children receive process-bound fs modules
+  ---
+  duration_ms: 13.319848
+  type: 'test'
+  ...
+# Subtest: async ESM child filesystem mutations return to the parent VFS
+ok 222 - async ESM child filesystem mutations return to the parent VFS
+  ---
+  duration_ms: 44.776609
+  type: 'test'
+  ...
+# Subtest: worker VFS mutation batches tolerate directory replacement
+ok 223 - worker VFS mutation batches tolerate directory replacement
+  ---
+  duration_ms: 34.473401
+  type: 'test'
+  ...
+# Subtest: virtual Stats hide internal entry kinds from enumerable Node fields
+ok 224 - virtual Stats hide internal entry kinds from enumerable Node fields
+  ---
+  duration_ms: 11.932334
+  type: 'test'
+  ...
+# Subtest: synchronous ESM children strip multi-line TypeScript imports
+ok 225 - synchronous ESM children strip multi-line TypeScript imports
+  ---
+  duration_ms: 47.565884
+  type: 'test'
+  ...
+# Subtest: ESM children settle concurrent fs.promises probes during top-level await
+ok 226 - ESM children settle concurrent fs.promises probes during top-level await
+  ---
+  duration_ms: 25.630236
+  type: 'test'
+  ...
+# Subtest: ordinary ESM children do not expose the internal runtime channel as process.send
+ok 227 - ordinary ESM children do not expose the internal runtime channel as process.send
+  ---
+  duration_ms: 24.143021
+  type: 'test'
+  ...
+# Subtest: child process close follows consumed stdout end
+ok 228 - child process close follows consumed stdout end
+  ---
+  duration_ms: 16.010415
+  type: 'test'
+  ...
+# Subtest: guest WebAssembly contracts allow standard loader child overrides
+ok 229 - guest WebAssembly contracts allow standard loader child overrides
+  ---
+  duration_ms: 10.324679
+  type: 'test'
+  ...
+# Subtest: HTTP agents tolerate subclasses with post-super protocol accessors
+ok 230 - HTTP agents tolerate subclasses with post-super protocol accessors
+  ---
+  duration_ms: 11.771837
+  type: 'test'
+  ...
+# Subtest: HTTP requests normalize omitted URL ports before custom agents connect
+ok 231 - HTTP requests normalize omitted URL ports before custom agents connect
+  ---
+  duration_ms: 15.438612
+  type: 'test'
+  ...
+# Subtest: HTTP responses do not double-decompress already decoded gzip bodies
+ok 232 - HTTP responses do not double-decompress already decoded gzip bodies
+  ---
+  duration_ms: 13.056144
+  type: 'test'
+  ...
+# Subtest: child process wrappers can observe virtual spawn contracts
+ok 233 - child process wrappers can observe virtual spawn contracts
+  ---
+  duration_ms: 17.28924
+  type: 'test'
+  ...
+# Subtest: nested CommonJS modules inherit the active virtual process binding
+ok 234 - nested CommonJS modules inherit the active virtual process binding
+  ---
+  duration_ms: 17.363484
+  type: 'test'
+  ...
+# Subtest: same-realm children that call process.exit close promptly
+ok 235 - same-realm children that call process.exit close promptly
+  ---
+  duration_ms: 13.415602
+  type: 'test'
+  ...
+# Subtest: ESM children with Node flags and IPC close promptly
+ok 236 - ESM children with Node flags and IPC close promptly
+  ---
+  duration_ms: 21.146118
+  type: 'test'
+  ...
+# Subtest: IPC ESM children can finish after a synchronous nested spawn
+ok 237 - IPC ESM children can finish after a synchronous nested spawn
+  ---
+  duration_ms: 31.40412
+  type: 'test'
+  ...
+# Subtest: ESM children with foreground-child stdio inherit and close
+ok 238 - ESM children with foreground-child stdio inherit and close
+  ---
+  duration_ms: 44.193644
+  type: 'test'
+  ...
+# Subtest: ESM export-star cycles do not deadlock module graph preparation
+ok 239 - ESM export-star cycles do not deadlock module graph preparation
+  ---
+  duration_ms: 46.036349
+  type: 'test'
+  ...
+# Subtest: dynamic ESM import settles when its graph contains a static back-edge
+ok 240 - dynamic ESM import settles when its graph contains a static back-edge
+  ---
+  duration_ms: 97.101105
+  type: 'test'
+  ...
+# Subtest: nested ESM createRequire plus concurrent file URL imports settle
+ok 241 - nested ESM createRequire plus concurrent file URL imports settle
+  ---
+  duration_ms: 98.094125
+  type: 'test'
+  ...
+# Subtest: dual package ESM imports can follow CJS preloads through a cyclic graph
+ok 242 - dual package ESM imports can follow CJS preloads through a cyclic graph
+  ---
+  duration_ms: 200.764104
+  type: 'test'
+  ...
+# Subtest: conditional ESM plugin packages retain their named plugin export
+ok 243 - conditional ESM plugin packages retain their named plugin export
+  ---
+  duration_ms: 101.658483
+  type: 'test'
+  ...
+# Subtest: package self-references prefer the owning package exports over nested dependencies
+ok 244 - package self-references prefer the owning package exports over nested dependencies
+  ---
+  duration_ms: 31.447002
+  type: 'test'
+  ...
+# Subtest: package self-reference lookup stops at a nested dependency package scope
+ok 245 - package self-reference lookup stops at a nested dependency package scope
+  ---
+  duration_ms: 13.81734
+  type: 'test'
+  ...
+# Subtest: killing a referenced async child does not race its close event
+ok 246 - killing a referenced async child does not race its close event
+  ---
+  duration_ms: 16.509639
+  type: 'test'
+  ...
+# Subtest: child exit cleanup can kill a sibling without preceding its close event
+ok 247 - child exit cleanup can kill a sibling without preceding its close event
+  ---
+  duration_ms: 16.416562
+  type: 'test'
+  ...
+# Subtest: worker-backed ESM child cleanup preserves watched close before watchdog close
+ok 248 - worker-backed ESM child cleanup preserves watched close before watchdog close
+  ---
+  duration_ms: 27.825976
+  type: 'test'
+  ...
+# Subtest: foreground-child watchdog keeps its exact worker child alive until watched exit
+ok 249 - foreground-child watchdog keeps its exact worker child alive until watched exit
+  ---
+  duration_ms: 17.022952
+  type: 'test'
+  ...
+# Subtest: watchdog-style ignored stdio children stay alive until killed
+ok 250 - watchdog-style ignored stdio children stay alive until killed
+  ---
+  duration_ms: 18.886176
+  type: 'test'
+  ...
+# Subtest: beforeExit follows the complete microtask queue and pending filesystem work
+ok 251 - beforeExit follows the complete microtask queue and pending filesystem work
+  ---
+  duration_ms: 12.450325
+  type: 'test'
+  ...
+# Subtest: beforeExit can schedule new work and is emitted again after it completes
+ok 252 - beforeExit can schedule new work and is emitted again after it completes
+  ---
+  duration_ms: 13.932801
+  type: 'test'
+  ...
+# Subtest: child lifecycle preserves child beforeExit work
+ok 253 - child lifecycle preserves child beforeExit work
+  ---
+  duration_ms: 15.84604
+  type: 'test'
+  ...
+# Subtest: child lifecycle preserves unresolved user promises
+ok 254 - child lifecycle preserves unresolved user promises
+  ---
+  duration_ms: 17.546293
+  type: 'test'
+  ...
+# Subtest: child lifecycle preserves unreferenced child timers
+ok 255 - child lifecycle preserves unreferenced child timers
+  ---
+  duration_ms: 14.642508
+  type: 'test'
+  ...
+# Subtest: unref detached children do not pin the parent lifecycle
+ok 256 - unref detached children do not pin the parent lifecycle
+  ---
+  duration_ms: 1064.893156
+  type: 'test'
+  ...
+# Subtest: parallel child filesystem requests do not leak sibling lifecycle tokens
+ok 257 - parallel child filesystem requests do not leak sibling lifecycle tokens
+  ---
+  duration_ms: 16.974279
+  type: 'test'
+  ...
+# Subtest: unused and autoClose:false file streams do not pin the event loop
+ok 258 - unused and autoClose:false file streams do not pin the event loop
+  ---
+  duration_ms: 12.849829
+  type: 'test'
+  ...
+# Subtest: finished() waits for both sides of a duplex
+ok 259 - finished() waits for both sides of a duplex
+  ---
+  duration_ms: 15.104341
+  type: 'test'
+  ...
+# Subtest: finished() observes errors without explicitly supplied options
+ok 260 - finished() observes errors without explicitly supplied options
+  ---
+  duration_ms: 14.284233
+  type: 'test'
+  ...
+# Subtest: finished() detects premature closure even when registered late
+ok 261 - finished() detects premature closure even when registered late
+  ---
+  duration_ms: 11.783469
+  type: 'test'
+  ...
+# Subtest: public VFS mounts and writes retain their own bytes
+ok 262 - public VFS mounts and writes retain their own bytes
+  ---
+  duration_ms: 0.531497
+  type: 'test'
+  ...
+# Subtest: VFS preserves Linux stat behavior for WASM Windows-platform probes
+ok 263 - VFS preserves Linux stat behavior for WASM Windows-platform probes
+  ---
+  duration_ms: 0.783359
+  type: 'test'
+  ...
+# Subtest: VFS source versions change on mutation and large appends preserve bytes
+ok 264 - VFS source versions change on mutation and large appends preserve bytes
+  ---
+  duration_ms: 0.729646
+  type: 'test'
+  ...
+# Subtest: VFS rename replaces an existing file like Node fs.rename
+ok 265 - VFS rename replaces an existing file like Node fs.rename
+  ---
+  duration_ms: 0.392681
+  type: 'test'
+  ...
+# Subtest: npm seeds installed packages without descending into package payloads
+ok 266 - npm seeds installed packages without descending into package payloads
+  ---
+  duration_ms: 0.778619
+  type: 'test'
+  ...
+# Subtest: npm install honors a package-lock dependency graph
+ok 267 - npm install honors a package-lock dependency graph
+  ---
+  duration_ms: 12.440787
+  type: 'test'
+  ...
+# Subtest: browser npm uses an official WASM alternative for esbuild
+ok 268 - browser npm uses an official WASM alternative for esbuild
+  ---
+  duration_ms: 4.303101
+  type: 'test'
+  ...
+# Subtest: browser npm uses the official Rollup WASM alternative at the native package path
+ok 269 - browser npm uses the official Rollup WASM alternative at the native package path
+  ---
+  duration_ms: 3.912463
+  type: 'test'
+  ...
+# Subtest: browser npm keeps legacy Rollup ranges on the native package
+ok 270 - browser npm keeps legacy Rollup ranges on the native package
+  ---
+  duration_ms: 2.40468
+  type: 'test'
+  ...
+# Subtest: browser npm exposes the unofficial tsgo-wasm launcher at the native compiler path
+ok 271 - browser npm exposes the unofficial tsgo-wasm launcher at the native compiler path
+  ---
+  duration_ms: 3.163431
+  type: 'test'
+  ...
+# Subtest: wildcard caret and tilde ranges keep their respective upper bounds
+ok 272 - wildcard caret and tilde ranges keep their respective upper bounds
+  ---
+  duration_ms: 0.232344
+  type: 'test'
+  ...
+# Subtest: npm script streaming one output channel preserves returned output on the other
+ok 273 - npm script streaming one output channel preserves returned output on the other
+  ---
+  duration_ms: 1.669663
+  type: 'test'
+  ...
+# Subtest: command substitution handles escaped and nested quoted parentheses
+ok 274 - command substitution handles escaped and nested quoted parentheses
+  ---
+  duration_ms: 1.54221
+  type: 'test'
+  ...
+# Subtest: direct virtual fetch accepts a bodyless GET 204 response
+ok 275 - direct virtual fetch accepts a bodyless GET 204 response
+  ---
+  duration_ms: 6.682101
+  type: 'test'
+  ...
+# Subtest: direct virtual fetch accepts a bodyless GET 205 response
+ok 276 - direct virtual fetch accepts a bodyless GET 205 response
+  ---
+  duration_ms: 3.384715
+  type: 'test'
+  ...
+# Subtest: direct virtual fetch accepts a bodyless GET 304 response
+ok 277 - direct virtual fetch accepts a bodyless GET 304 response
+  ---
+  duration_ms: 2.978196
+  type: 'test'
+  ...
+# Subtest: direct virtual fetch accepts a bodyless HEAD 200 response
+ok 278 - direct virtual fetch accepts a bodyless HEAD 200 response
+  ---
+  duration_ms: 2.745943
+  type: 'test'
+  ...
+# Subtest: node:test run reports skipped and todo tests without synthetic failures
+ok 279 - node:test run reports skipped and todo tests without synthetic failures
+  ---
+  duration_ms: 19.943357
+  type: 'test'
+  ...
+# Subtest: filesystem streams honor emitClose:false without leaking active work
+ok 280 - filesystem streams honor emitClose:false without leaking active work
+  ---
+  duration_ms: 12.220826
+  type: 'test'
+  ...
+# Subtest: source-map lookup and internal test binding use their owning process
+ok 281 - source-map lookup and internal test binding use their owning process
+  ---
+  duration_ms: 9.863006
+  type: 'test'
+  ...
+# Subtest: an exception from beforeExit propagates a nonzero shell status
+ok 282 - an exception from beforeExit propagates a nonzero shell status
+  ---
+  duration_ms: 10.423038
+  type: 'test'
+  ...
+# Subtest: Function imports accept comments between the keyword and opening parenthesis
+ok 283 - Function imports accept comments between the keyword and opening parenthesis
+  ---
+  duration_ms: 15.209883
+  type: 'test'
+  ...
+# Subtest: guest fetch constructs a valid bodyless response from the virtual HTTP client
+ok 284 - guest fetch constructs a valid bodyless response from the virtual HTTP client
+  ---
+  duration_ms: 15.627041
+  type: 'test'
+  ...
+# Subtest: fetch response bodies do not retain a token when the caller only reads headers
+ok 285 - fetch response bodies do not retain a token when the caller only reads headers
+  ---
+  duration_ms: 10.692874
+  type: 'test'
+  ...
+# Subtest: fetch text consumption retains pending body I/O until completion
+ok 286 - fetch text consumption retains pending body I/O until completion
+  ---
+  duration_ms: 25.514435
+  type: 'test'
+  ...
+# Subtest: fetch reader consumption retains pending body I/O until completion
+ok 287 - fetch reader consumption retains pending body I/O until completion
+  ---
+  duration_ms: 23.943019
+  type: 'test'
+  ...
+# Subtest: fetch iterator consumption retains pending body I/O until completion
+ok 288 - fetch iterator consumption retains pending body I/O until completion
+  ---
+  duration_ms: 24.238254
+  type: 'test'
+  ...
+# Subtest: fetch clone consumption retains pending body I/O until completion
+ok 289 - fetch clone consumption retains pending body I/O until completion
+  ---
+  duration_ms: 25.230271
+  type: 'test'
+  ...
+# Subtest: import rewriting preserves non-import source: const pattern = /import(foo)/; pattern.source;
+ok 290 - import rewriting preserves non-import source: const pattern = /import(foo)/; pattern.source;
+  ---
+  duration_ms: 1.325826
+  type: 'test'
+  ...
+# Subtest: import rewriting preserves non-import source: const pattern = /[}](import)(foo)/; pattern.source;
+ok 291 - import rewriting preserves non-import source: const pattern = /[}](import)(foo)/; pattern.source;
+  ---
+  duration_ms: 0.177189
+  type: 'test'
+  ...
+# Subtest: import rewriting preserves non-import source: if (true) /import(foo)/.test('importfoo');
+ok 292 - import rewriting preserves non-import source: if (true) /import(foo)/.test('importfoo');
+  ---
+  duration_ms: 0.136751
+  type: 'test'
+  ...
+# Subtest: import rewriting preserves non-import source: const value = 10 / 2; const text = 'import(foo)';
+ok 293 - import rewriting preserves non-import source: const value = 10 / 2; const text = 'import(foo)';
+  ---
+  duration_ms: 0.152071
+  type: 'test'
+  ...
+# Subtest: import rewriting preserves non-import source: const pattern = `raw import(foo) ${/import(foo)/.source}`;
+ok 294 - import rewriting preserves non-import source: const pattern = `raw import(foo) ${/import(foo)/.source}`;
+  ---
+  duration_ms: 0.196466
+  type: 'test'
+  ...
+# Subtest: import rewriting preserves non-import source: object.import('x'); object.eval('import("x")');
+ok 295 - import rewriting preserves non-import source: object.import('x'); object.eval('import("x")');
+  ---
+  duration_ms: 0.086816
+  type: 'test'
+  ...
+# Subtest: actual imports survive comments, division and nested template expressions
+ok 296 - actual imports survive comments, division and nested template expressions
+  ---
+  duration_ms: 0.227165
+  type: 'test'
+  ...
+# Subtest: literal eval imports are decoded before rewriting and safely re-encoded
+ok 297 - literal eval imports are decoded before rewriting and safely re-encoded
+  ---
+  duration_ms: 0.351753
+  type: 'test'
+  ...
+# Subtest: rewriting distinguishes methods, blocks and expressions: const api = { import(value) { return value; } }; api.import('x');
+ok 298 - rewriting distinguishes methods, blocks and expressions: const api = { import(value) { return value; } }; api.import('x');
+  ---
+  duration_ms: 0.314992
+  type: 'test'
+  ...
+# Subtest: rewriting distinguishes methods, blocks and expressions: class API { import(value) { return value; } }
+ok 299 - rewriting distinguishes methods, blocks and expressions: class API { import(value) { return value; } }
+  ---
+  duration_ms: 0.278923
+  type: 'test'
+  ...
+# Subtest: rewriting distinguishes methods, blocks and expressions: { /* block */ } /import(foo)/.test('importfoo');
+ok 300 - rewriting distinguishes methods, blocks and expressions: { /* block */ } /import(foo)/.test('importfoo');
+  ---
+  duration_ms: 0.127303
+  type: 'test'
+  ...
+# Subtest: rewriting distinguishes methods, blocks and expressions: const value = { x: 1 } / 2; import('x');
+ok 301 - rewriting distinguishes methods, blocks and expressions: const value = { x: 1 } / 2; import('x');
+  ---
+  duration_ms: 0.079933
+  type: 'test'
+  ...
+# Subtest: settled promises release their large results before the job ends
+ok 302 - settled promises release their large results before the job ends
+  ---
+  duration_ms: 109.924164
+  type: 'test'
+  ...
+# Subtest: promise callbacks expose the same execution resource observed by init hooks
+ok 303 - promise callbacks expose the same execution resource observed by init hooks
+  ---
+  duration_ms: 58.923679
+  type: 'test'
+  ...
+# Subtest: createProxyConfig normalizes proxy URLs and NO_PROXY values
+ok 304 - createProxyConfig normalizes proxy URLs and NO_PROXY values
+  ---
+  duration_ms: 0.931151
+  type: 'test'
+  ...
+# Subtest: createProxyConfig rejects unsupported proxy URLs before runtime startup
+ok 305 - createProxyConfig rejects unsupported proxy URLs before runtime startup
+  ---
+  duration_ms: 0.569059
+  type: 'test'
+  ...
+# Subtest: native Node HTTP APIs use createProxyConfig for a real virtual proxy server
+ok 306 - native Node HTTP APIs use createProxyConfig for a real virtual proxy server
+  ---
+  duration_ms: 72.474199
+  type: 'test'
+  ...
+# Subtest: release gate runs runtime and browser checks without Python harness tests
+ok 307 - release gate runs runtime and browser checks without Python harness tests
+  ---
+  duration_ms: 2.904876
+  type: 'test'
+  ...
+# Subtest: release gate still stops when a runtime build fails
+ok 308 - release gate still stops when a runtime build fails
+  ---
+  duration_ms: 0.765544
+  type: 'test'
+  ...
+# Subtest: node:repl exposes the core server contract without a host core-file mount
+ok 309 - node:repl exposes the core server contract without a host core-file mount
+  ---
+  duration_ms: 56.318787
+  type: 'test'
+  ...
+# Subtest: readable adapters finish without cancelling a released reader
+ok 310 - readable adapters finish without cancelling a released reader
+  ---
+  duration_ms: 4.724597
+  type: 'test'
+  ...
+# Subtest: writable adapters finish without aborting a released writer
+ok 311 - writable adapters finish without aborting a released writer
+  ---
+  duration_ms: 2.702189
+  type: 'test'
+  ...
+# Subtest: destroying unfinished adapters cancels their Web Streams with the original error
+ok 312 - destroying unfinished adapters cancels their Web Streams with the original error
+  ---
+  duration_ms: 1.13962
+  type: 'test'
+  ...
+# Subtest: empty byte and string chunks do not block flowing streams: {}
+ok 313 - empty byte and string chunks do not block flowing streams: {}
+  ---
+  duration_ms: 5.268818
+  type: 'test'
+  ...
+# Subtest: empty byte and string chunks do not block flowing streams: {"encoding":"utf8"}
+ok 314 - empty byte and string chunks do not block flowing streams: {"encoding":"utf8"}
+  ---
+  duration_ms: 0.971167
+  type: 'test'
+  ...
+# Subtest: empty byte and string chunks do not block flowing streams: {"preserveStrings":true}
+ok 315 - empty byte and string chunks do not block flowing streams: {"preserveStrings":true}
+  ---
+  duration_ms: 0.709897
+  type: 'test'
+  ...
+# Subtest: object streams retain empty strings and byte arrays as objects
+ok 316 - object streams retain empty strings and byte arrays as objects
+  ---
+  duration_ms: 0.70597
+  type: 'test'
+  ...
+# Subtest: a paused poll-loop consumer drains an ended stream and lets timers fire
+ok 317 - a paused poll-loop consumer drains an ended stream and lets timers fire
+  ---
+  duration_ms: 2.490133
+  type: 'test'
+  ...
+# Subtest: an ended stream with no data still completes the poll loop
+ok 318 - an ended stream with no data still completes the poll loop
+  ---
+  duration_ms: 0.434612
+  type: 'test'
+  ...
+# Subtest: Readable.pipe destination lifetime: default
+ok 319 - Readable.pipe destination lifetime: default
+  ---
+  duration_ms: 4.332016
+  type: 'test'
+  ...
+# Subtest: Readable.pipe destination lifetime: keep-open
+ok 320 - Readable.pipe destination lifetime: keep-open
+  ---
+  duration_ms: 0.683067
+  type: 'test'
+  ...
+# Subtest: Readable.pipe destination lifetime: stdio
+ok 321 - Readable.pipe destination lifetime: stdio
+  ---
+  duration_ms: 0.712032
+  type: 'test'
+  ...
+# Subtest: Stream.pipe destination lifetime: default
+ok 322 - Stream.pipe destination lifetime: default
+  ---
+  duration_ms: 0.693357
+  type: 'test'
+  ...
+# Subtest: Stream.pipe destination lifetime: keep-open
+ok 323 - Stream.pipe destination lifetime: keep-open
+  ---
+  duration_ms: 0.456583
+  type: 'test'
+  ...
+# Subtest: Stream.pipe destination lifetime: stdio
+ok 324 - Stream.pipe destination lifetime: stdio
+  ---
+  duration_ms: 0.512691
+  type: 'test'
+  ...
+# Subtest: piping a completed producer into process output leaves it writable
+ok 325 - piping a completed producer into process output leaves it writable
+  ---
+  duration_ms: 59.349023
+  type: 'test'
+  ...
+# Subtest: Writable supports legacy callable construction on an inherited object
+ok 326 - Writable supports legacy callable construction on an inherited object
+  ---
+  duration_ms: 2.303706
+  type: 'test'
+  ...
+# Subtest: async hooks propagate local storage and clean resource lifecycle
+ok 327 - async hooks propagate local storage and clean resource lifecycle
+  ---
+  duration_ms: 4.41729
+  type: 'test'
+  ...
+# Subtest: async resource scopes tolerate an immutable global process binding
+ok 328 - async resource scopes tolerate an immutable global process binding
+  ---
+  duration_ms: 0.27706
+  type: 'test'
+  ...
+# Subtest: diagnostics channels support subscriptions, tracing, and cleanup
+ok 329 - diagnostics channels support subscriptions, tracing, and cleanup
+  ---
+  duration_ms: 0.800752
+  type: 'test'
+  ...
+# Subtest: browser process preserves IPC, stdio, and exit ordering without host subprocesses
+ok 330 - browser process preserves IPC, stdio, and exit ordering without host subprocesses
+  ---
+  duration_ms: 6.29416
+  type: 'test'
+  ...
+# Subtest: native fetch and Nacelle+ preserve the same response contract
+ok 331 - native fetch and Nacelle+ preserve the same response contract
+  ---
+  duration_ms: 41.98556
+  type: 'test'
+  ...
+# Subtest: Nacelle+ falls back for a CORS failure and preserves the response
+ok 332 - Nacelle+ falls back for a CORS failure and preserves the response
+  ---
+  duration_ms: 0.465841
+  type: 'test'
+  ...
+# Subtest: native and Nacelle+ report aborts instead of treating them as CORS failures
+ok 333 - native and Nacelle+ report aborts instead of treating them as CORS failures
+  ---
+  duration_ms: 0.233126
+  type: 'test'
+  ...
+# Subtest: alpha support registry exposes only Node 22 and stable aliases
+ok 334 - alpha support registry exposes only Node 22 and stable aliases
+  ---
+  duration_ms: 1.030191
+  type: 'test'
+  ...
+# Subtest: Node 22 selectors normalize while unshipped versions fail deterministically
+ok 335 - Node 22 selectors normalize while unshipped versions fail deterministically
+  ---
+  duration_ms: 0.45489
+  type: 'test'
+  ...
+# Subtest: Node 22 profile matches the native 22.23.2 metadata snapshot
+ok 336 - Node 22 profile matches the native 22.23.2 metadata snapshot
+  ---
+  duration_ms: 0.216534
+  type: 'test'
+  ...
+# Subtest: runtime, process metadata, and shell agree on the selected Node 22 profile
+ok 337 - runtime, process metadata, and shell agree on the selected Node 22 profile
+  ---
+  duration_ms: 59.272758
+  type: 'test'
+  ...
+# Subtest: existsSync returns false when a path component is a file
+ok 338 - existsSync returns false when a path component is a file
+  ---
+  duration_ms: 2.209847
+  type: 'test'
+  ...
+# Subtest: stat APIs honor throwIfNoEntry:false for optional package probes
+ok 339 - stat APIs honor throwIfNoEntry:false for optional package probes
+  ---
+  duration_ms: 1.331757
+  type: 'test'
+  ...
+# Subtest: stat APIs return Node-compatible BigInt metadata when requested
+ok 340 - stat APIs return Node-compatible BigInt metadata when requested
+  ---
+  duration_ms: 0.791584
+  type: 'test'
+  ...
+# Subtest: read-only virtual root is visible above a scoped mount
+ok 341 - read-only virtual root is visible above a scoped mount
+  ---
+  duration_ms: 1.967503
+  type: 'test'
+  ...
+# Subtest: mount invalidates cached directory entries like the host filesystem
+ok 342 - mount invalidates cached directory entries like the host filesystem
+  ---
+  duration_ms: 1.224402
+  type: 'test'
+  ...
+# Subtest: glob excludes prune ignored directory trees
+ok 343 - glob excludes prune ignored directory trees
+  ---
+  duration_ms: 1.589832
+  type: 'test'
+  ...
+# Subtest: glob traversal does not visit unrelated subtrees
+ok 344 - glob traversal does not visit unrelated subtrees
+  ---
+  duration_ms: 0.349288
+  type: 'test'
+  ...
+# Subtest: long chains of successful filesystem promises allow timers to run
+ok 345 - long chains of successful filesystem promises allow timers to run
+  ---
+  duration_ms: 22.486632
+  type: 'test'
+  ...
+# Subtest: long chains of failed filesystem promises allow timers to run
+ok 346 - long chains of failed filesystem promises allow timers to run
+  ---
+  duration_ms: 27.848699
+  type: 'test'
+  ...
+# Subtest: yielding filesystem completions preserve queued mutation ordering
+ok 347 - yielding filesystem completions preserve queued mutation ordering
+  ---
+  duration_ms: 4.097267
+  type: 'test'
+  ...
+# Subtest: source reads decode shared worker snapshots using unshared bytes
+ok 348 - source reads decode shared worker snapshots using unshared bytes
+  ---
+  duration_ms: 2.79202
+  type: 'test'
+  ...
+# Subtest: symlink resolution permits bounded recursive traversal
+ok 349 - symlink resolution permits bounded recursive traversal
+  ---
+  duration_ms: 4.299003
+  type: 'test'
+  ...
+# Subtest: worker writes, directory renames, and deletions reach the parent before drain resolves
+ok 350 - worker writes, directory renames, and deletions reach the parent before drain resolves
+  ---
+  duration_ms: 20.940816
+  type: 'test'
+  ...
+# Subtest: worker symlink updates preserve the link node across the worker boundary
+ok 351 - worker symlink updates preserve the link node across the worker boundary
+  ---
+  duration_ms: 2.412625
+  type: 'test'
+  ...
+# Subtest: worker symlink removals unlink the link without removing its target
+ok 352 - worker symlink removals unlink the link without removing its target
+  ---
+  duration_ms: 1.562078
+  type: 'test'
+  ...
+# Subtest: worker snapshots preserve empty directories
+ok 353 - worker snapshots preserve empty directories
+  ---
+  duration_ms: 1.633434
+  type: 'test'
+  ...
+# Subtest: a parent relays worker changes to siblings without echoing them back
+ok 354 - a parent relays worker changes to siblings without echoing them back
+  ---
+  duration_ms: 2.15367
+  type: 'test'
+  ...
+# Subtest: closing a connection rejects pending barriers and drops queued writes
+ok 355 - closing a connection rejects pending barriers and drops queued writes
+  ---
+  duration_ms: 0.723905
+  type: 'test'
+  ...
+# Subtest: vector writes publish complete bytes once and preserve explicit and implicit positions
+ok 356 - vector writes publish complete bytes once and preserve explicit and implicit positions
+  ---
+  duration_ms: 3.636966
+  type: 'test'
+  ...
+# Subtest: asynchronous vector writes preserve callback identity and zero-fill file extension
+ok 357 - asynchronous vector writes preserve callback identity and zero-fill file extension
+  ---
+  duration_ms: 3.087205
+  type: 'test'
+  ...
+# Subtest: Web Crypto jobs keep their calling process active through fulfillment and rejection
+ok 358 - Web Crypto jobs keep their calling process active through fulfillment and rejection
+  ---
+  duration_ms: 1.444654
+  type: 'test'
+  ...
+# Subtest: host Web Crypto calls preserve their result without a virtual process
+ok 359 - host Web Crypto calls preserve their result without a virtual process
+  ---
+  duration_ms: 0.232634
+  type: 'test'
+  ...
+1..359
+# tests 359
+# suites 0
+# pass 359
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 27981.693964

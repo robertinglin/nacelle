@@ -1,0 +1,5 @@
+
+> nacelle@1.0.5 check:wasm
+> node scripts/check-wasm-manifest.mjs --node-version=v22
+
+v22: 5 WASM artifacts passed export validation

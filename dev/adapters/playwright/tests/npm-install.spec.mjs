@@ -679,6 +679,55 @@ test.describe('In-Browser TAR & NPM Package Management', () => {
     }
   });
 
+  test('prefers direct dependency constraints over broad peer ranges when hoisting', async () => {
+    const encoder = new TextEncoder();
+    const vfs = createVfs({
+      mounts: [{ path: '/node', mode: 'read-write', artifacts: [] }],
+    });
+    const packages = new Map();
+    const archives = new Map();
+    const addPackage = async (name, version, manifest = {}) => {
+      const metadata = packages.get(name) || { name, 'dist-tags': {}, versions: {} };
+      metadata['dist-tags'].latest = version;
+      metadata.versions[version] = {
+        name,
+        version,
+        ...manifest,
+        dist: { tarball: `https://registry.test/${name}/-/${name}-${version}.tgz` },
+      };
+      packages.set(name, metadata);
+      archives.set(`${name}@${version}`, await packTarGz([{
+        path: 'package/package.json',
+        data: encoder.encode(JSON.stringify({ name, version, ...manifest })),
+      }]));
+    };
+    await addPackage('peer-tool', '1.0.0', { peerDependencies: { eslint: '>=8.57.0' } });
+    await addPackage('direct-tool', '1.0.0', { dependencies: { eslint: '^8.57.0' } });
+    await addPackage('eslint', '8.57.1');
+    await addPackage('eslint', '9.39.5');
+
+    const npm = new BrowserNpm({
+      vfs,
+      registry: 'https://registry.test',
+      proxyUrl: null,
+      fetchFn: async (url) => {
+        const path = new URL(url).pathname;
+        const match = path.match(/\/([^/]+)-([0-9.]+)\.tgz$/);
+        if (match) {
+          return { ok: true, status: 200, arrayBuffer: async () => archives.get(`${match[1]}@${match[2]}`).buffer };
+        }
+        const name = path.slice(1);
+        if (packages.has(name)) return { ok: true, status: 200, json: async () => packages.get(name) };
+        return { ok: false, status: 404 };
+      },
+    });
+
+    await npm.install(['peer-tool@1.0.0', 'direct-tool@1.0.0'], { cwd: '/node', concurrency: 8 });
+
+    expect(JSON.parse(vfs.readSource('/node/node_modules/eslint/package.json')).version).toBe('8.57.1');
+    expect(vfs.files.has('/node/node_modules/direct-tool/node_modules/eslint/package.json')).toBe(false);
+  });
+
   test('honors lockfile nested dependency placement when a compatible peer is also queued', async () => {
     const encoder = new TextEncoder();
     const vfs = createVfs({

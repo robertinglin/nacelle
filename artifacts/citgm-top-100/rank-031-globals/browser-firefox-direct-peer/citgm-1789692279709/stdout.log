@@ -1,0 +1,14 @@
+info: starting            | globals             
+info: lookup              | globals             
+info: lookup-notfound     | globals             
+info: lookup-githead      | https://github.com/sindresorhus/globals/archive/98008c3200fc994ef3c074699e8ce0c9691fd071.tar.gz
+info: globals npm:        | Downloading project: https://github.com/sindresorhus/globals/archive/98008c3200fc994ef3c074699e8ce0c9691fd071.tar.gz
+info: globals npm:        | Project downloaded 98008c3200fc994ef3c074699e8ce0c9691fd071.tar.gz
+info: globals npm:        | npm install started 
+info: globals npm:        | npm install successfully completed
+info: globals npm:        | test suite started  
+info: passing module(s)   |                     
+info: module name:        | globals             
+info: version:            | 17.12.0             
+info: done                | The smoke test has passed.
+info: duration            | test duration: 112481ms

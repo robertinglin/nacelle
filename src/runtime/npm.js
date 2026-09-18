@@ -1069,7 +1069,12 @@ export class BrowserNpm {
     const packageLock = await this.readPackageLock(cwd);
     const lockPackages = packageLock?.packages || null;
     await this.seedInstalledLocations(targetNodeModules);
-    const queue = specs.map((spec) => ({ ...parsePackageSpec(spec), optional: false, nodeModulesDir: targetNodeModules }));
+    const queue = specs.map((spec) => ({
+      ...parsePackageSpec(spec),
+      optional: false,
+      dependencyKind: 'direct',
+      nodeModulesDir: targetNodeModules,
+    }));
     const results = [];
     const visited = new Set();
     const filesToMount = {};
@@ -1369,6 +1374,7 @@ export class BrowserNpm {
           name: depName,
           range: depRange,
           optional: false,
+          dependencyKind: 'dependency',
           nodeModulesDir: dependencyDir,
           parentPackageDir: pkgDir,
         });
@@ -1383,6 +1389,7 @@ export class BrowserNpm {
           name: depName,
           range: depRange,
           optional: true,
+          dependencyKind: 'dependency',
           nodeModulesDir: dependencyDir,
           parentPackageDir: pkgDir,
         });
@@ -1404,6 +1411,7 @@ export class BrowserNpm {
           name: depName,
           range: depRange,
           optional: false,
+          dependencyKind: 'peer',
           nodeModulesDir: dependencyDir,
           parentPackageDir: pkgDir,
         });
@@ -1451,6 +1459,12 @@ export class BrowserNpm {
     };
 
     while (queue.length > 0) {
+      // Resolve ordinary dependencies before peer requests. npm uses the
+      // complete dependency graph to choose a compatible hoisted package;
+      // processing a broad peer first can otherwise claim (for example)
+      // eslint@9 before a direct eslint@8 request is visible, forcing the
+      // direct consumer into an invalid nested split tree.
+      queue.sort((a, b) => Number(a.dependencyKind === 'peer') - Number(b.dependencyKind === 'peer'));
       const batch = queue.splice(0, concurrency);
       await Promise.all(batch.map(processQueueItem));
     }
